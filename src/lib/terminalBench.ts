@@ -442,7 +442,7 @@ async function soak(request: Soak) {
     case "cleanup": {
       // Deleting a session should take its terminals with it.
       const mine = () => getTerminalState().panes.filter((pane) => soakSessions.includes(pane.sessionId));
-      for (const id of soakSessions) await deleteSession(id, false).catch(() => undefined);
+      for (const id of soakSessions) await deleteSession(id).catch(() => undefined);
       await sleep(1000);
       left = { panes: mine().length, counters: terminalCounters(), sessions: getSessionStore().sessions.filter((session) => soakSessions.includes(session.id)).length };
       for (const pane of mine()) await closeTerminal(pane.id).catch(() => undefined);
@@ -580,7 +580,7 @@ async function covered(request: Extract<BenchRequest, { scenario: "covered" }>) 
   await closeTerminal(behind.id);
   await closeTerminal(front.id);
   for (const pane of getTerminalState().panes.filter((item) => item.sessionId === session.id)) await closeTerminal(pane.id);
-  await deleteSession(session.id, false).catch(() => undefined);
+  await deleteSession(session.id).catch(() => undefined);
   selectSession(null);
   return result;
 }

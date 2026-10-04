@@ -62,7 +62,7 @@ Usage:
   terminalx cloud resume CLOUD_WORKSPACE [--json]
   terminalx worktrees list [--project PROJECT] [--json]
   terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
-  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
@@ -569,10 +569,11 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "delete" => {
             let project = tokens.option("--project")?;
             let confirmed = tokens.flag("--yes")?;
+            let force = tokens.flag("--force")?;
             let worktree = tokens.required_front("worktree")?;
             rpc(
                 "worktrees.delete",
-                json!({"project": project, "worktree": worktree, "confirmed": confirmed}),
+                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force}),
                 tokens,
             )
         }

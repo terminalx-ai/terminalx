@@ -799,12 +799,22 @@ export class WorkspaceRpcClient {
   }
 
   /**
-   * Delete a session and its transcripts (`session/2`, manage only). With
-   * `removeWorktree`, its worktree goes too, with every session in it;
-   * `deleted` names them all.
+   * `session.delete`: delete one session and its transcripts (`session/2`).
+   * With `removeWorktree`, its worktree goes too when no other session runs
+   * in it; a runtime that enforces the clean-and-merged check refuses one
+   * that is not safe unless `confirmedUnsafe` says the person confirmed a
+   * second time. `deleted` names every session that went; `worktreeKept` is
+   * set when the worktree stayed because other sessions use it.
    */
-  deleteSession(sessionId: string, options: { removeWorktree?: boolean } = {}): Promise<{ sessionId: string; deleted: string[] }> {
-    return this.mutate("session.delete", { sessionId, ...(options.removeWorktree ? { removeWorktree: true } : {}) });
+  deleteSession(
+    sessionId: string,
+    options: { removeWorktree?: boolean; confirmedUnsafe?: boolean } = {},
+  ): Promise<{ sessionId: string; deleted: string[]; keptBranch?: string | null; worktreeKept?: boolean }> {
+    return this.mutate("session.delete", {
+      sessionId,
+      ...(options.removeWorktree ? { removeWorktree: true } : {}),
+      ...(options.confirmedUnsafe ? { confirmedUnsafe: true } : {}),
+    });
   }
 
   /** The agents installed on the runtime, with their models, efforts and modes (`agents/1`). */

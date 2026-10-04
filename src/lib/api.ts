@@ -19,10 +19,7 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   WorkStatus,
-  WorktreeDisposition,
-  DeleteSessionReport,
-  SettleReport,
-  WorkspaceDeleteReport,
+  WorkspaceRemoveReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -151,6 +148,21 @@ export interface WorkspaceRename {
   path: string;
   branch: string;
   sessions: SessionEntry[];
+}
+
+/** How a workspace is removed. */
+export interface WorkspaceRemoveOptions {
+  /** Settling: the conversations stay and move to the project. */
+  keepSessions: boolean;
+  deleteBranch: boolean;
+  /**
+   * The second confirmation, as the digest of the check the person saw when
+   * they gave it. Null for a single confirmation, which is enough only for a
+   * workspace found clean and merged.
+   */
+  confirmedDigest: string | null;
+  /** The sessions the person was told are in the workspace; the removal is refused if that changed. */
+  expectedSessions: string[];
 }
 
 export const api = {
@@ -321,9 +333,16 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
-  workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
-  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
+  /**
+   * What a workspace holds. With `fetch`, the default branch is fetched and
+   * the clean-and-merged check is made too (`landed`); that is for the
+   * dialog about to delete it. Without it, nothing touches the network.
+   */
+  workspaceDisposition: (projectPath: string, path: string, options: { fetch?: boolean } = {}) =>
+    invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path, fetch: options.fetch ?? false }),
+  /** Remove a workspace through the one checked path. */
+  removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
+    invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -340,12 +359,12 @@ export const api = {
     invoke<void>("set_session_archived", { sessionId, archived }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
-  deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
-  worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
-  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
-  removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
+  /** Delete one session; its workspace and every other session stay. */
+  deleteSession: (sessionId: string) => invoke<void>("delete_session", { sessionId }),
+  /** The workspace this session could take along: its worktree, when no other session runs there. */
+  soleWorkspaceOf: (sessionId: string) => invoke<string | null>("sole_workspace_of", { sessionId }),
+  /** Keep the worktree on disk but run the session in the project itself from now on. */
+  relocateSession: (sessionId: string) => invoke<SessionEntry>("relocate_session", { sessionId }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses

@@ -79,6 +79,7 @@ mod issues;
 mod installation;
 #[cfg(feature = "desktop")]
 mod keychain;
+mod landed;
 mod memory_baseline;
 mod models;
 mod names;
@@ -418,7 +419,8 @@ pub fn run() {
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,
-            commands::remove_session_worktree,
+            commands::relocate_session,
+            commands::sole_workspace_of,
             commands::snapshot_tree,
             commands::head_tree,
             commands::changes_between,
@@ -497,7 +499,6 @@ pub fn run() {
             commands::open_local_path,
             commands::search_text,
             commands::replace_text,
-            commands::settle_session,
             commands::fork_session,
             commands::dictation_available,
             commands::dictation_start,
@@ -508,7 +509,7 @@ pub fn run() {
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::workspace_disposition,
-            commands::delete_workspace,
+            commands::remove_workspace,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,
