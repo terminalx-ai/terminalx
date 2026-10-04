@@ -107,6 +107,23 @@ impl Cache {
         *reading = Some(next);
         models
     }
+
+    /// Enforce only the CLI's own answer, never the built-in stand-in. An
+    /// empty id asks the CLI to choose its default.
+    pub fn validate(&self, model: &str) -> Result<()> {
+        if model.is_empty() {
+            return Ok(());
+        }
+        self.get(true);
+        let reading = self.reading.lock().unwrap();
+        if let Some(reading) = reading.as_ref().filter(|reading| reading.listed) {
+            anyhow::ensure!(
+                reading.models.iter().any(|listed| listed.id == model),
+                "Claude model '{model}' is not available in this workspace. Choose a model listed by the workspace's Claude CLI."
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The one cache for this process. In tests it has no CLI to ask, so it
@@ -119,6 +136,37 @@ fn shared() -> &'static Cache {
 /// See `Cache::get`.
 pub fn get(refresh: bool) -> Vec<Model> {
     shared().get(refresh)
+}
+
+/// Cloud entry points accept Claude ids only when this runtime can run them.
+pub fn validate(harness: &str, model: &str) -> Result<()> {
+    if harness != "claude" {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if let Some(result) = TEST_MODELS.with(|cache| cache.borrow().as_ref().map(|cache| cache.validate(model))) {
+        return result;
+    }
+    shared().validate(model)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MODELS: std::cell::RefCell<Option<Cache>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A real CLI answer for synchronous entry-point tests, isolated to their thread.
+#[cfg(test)]
+pub(crate) fn with_test_models<T>(reply: Value, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_MODELS.with(|cache| *cache.borrow_mut() = None);
+        }
+    }
+    TEST_MODELS.with(|cache| *cache.borrow_mut() = Some(Cache::new(Box::new(move || Ok(reply.clone())))));
+    let _reset = Reset;
+    run()
 }
 
 /// Asked from the home directory: the list depends on the account, not on a
@@ -335,6 +383,28 @@ mod tests {
 
     fn opus_runs(models: &[Model]) -> Option<&str> {
         models.iter().find(|m| m.id == "opus").and_then(|m| m.resolved.as_deref())
+    }
+
+    #[test]
+    fn validation_accepts_listed_aliases_versions_and_default_but_refuses_other_ids() {
+        let (cache, _) = scripted(vec![Ok(serde_json::from_str(CAPTURE).unwrap())]);
+        for model in ["", "opus", "fable", "sonnet", "claude-opus-5-5", "claude-opus-5"] {
+            cache.validate(model).unwrap();
+        }
+        for model in ["claude-opus-9", "unknown", "gpt-5.6"] {
+            let message = cache.validate(model).unwrap_err().to_string();
+            assert!(message.contains(model) && message.contains("not available in this workspace"));
+        }
+    }
+
+    #[test]
+    fn validation_never_refuses_with_a_stand_in_but_keeps_enforcing_a_last_good_answer() {
+        let (mut cache, _) = scripted(vec![Err("offline"), Ok(reply("claude-opus-5")), Err("offline")]);
+        cache.validate("claude-opus-9").unwrap();
+        cache.retry_after = Duration::ZERO;
+        assert!(cache.validate("claude-opus-9").is_err());
+        cache.fresh_for = Duration::ZERO;
+        assert!(cache.validate("claude-opus-9").is_err());
     }
 
     #[test]

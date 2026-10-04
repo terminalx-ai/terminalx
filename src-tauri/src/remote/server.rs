@@ -1993,7 +1993,7 @@ impl WorkspaceRpc {
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
-        self.check_new_tab(&p.agent, p.mode.as_deref())?;
+        self.check_new_tab(&p.agent, &p.model, p.mode.as_deref())?;
         if p.use_worktree {
             // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
             if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
@@ -2047,8 +2047,8 @@ impl WorkspaceRpc {
         *self.offered_for_tests.lock().unwrap() = Some(offered);
     }
 
-    /// Refuse a new tab whose agent is not installed or whose mode is unknown.
-    fn check_new_tab(&self, agent: &str, mode: Option<&str>) -> Result<(), RpcError> {
+    /// Refuse a new tab whose agent, model or permission mode is unavailable.
+    fn check_new_tab(&self, agent: &str, model: &str, mode: Option<&str>) -> Result<(), RpcError> {
         if let Some(mode) = mode {
             if !PERMISSION_MODES.contains(&mode) {
                 return Err(RpcError::invalid(format!("unknown permission mode {mode}")));
@@ -2062,6 +2062,7 @@ impl WorkspaceRpc {
         if !agent.available {
             return Err(RpcError::new("unavailable", format!("{} is not installed in this workspace", agent.name)));
         }
+        crate::harness::claude::models::validate(&agent.id, model).map_err(|error| RpcError::invalid(error.to_string()))?;
         Ok(())
     }
 
@@ -2161,7 +2162,7 @@ impl WorkspaceRpc {
         let p: Params = parse(params)?;
         let session = self.visible_session(peer, &p.session_id)?;
         let mode = index::requested_mode(p.mode);
-        self.check_new_tab(&p.agent, mode.as_deref())?;
+        self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
         let tab = crate::session_ops::add_tab_entry(
             &session.id,
             &crate::session_ops::NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode },
@@ -2547,6 +2548,9 @@ impl WorkspaceRpc {
     fn session_configure(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let tab = self.visible_tab(peer, &params)?;
         let settings = crate::cloud_agents::Settings::from_json(&params).map_err(|error| RpcError::invalid(error.to_string()))?;
+        if let Some(model) = &settings.model {
+            crate::harness::claude::models::validate(&tab.harness, model).map_err(|error| RpcError::invalid(error.to_string()))?;
+        }
         let agents = self.agents()?;
         agents.ops.configure(&tab.session_id, &tab.tab_id, &settings).map_err(RpcError::internal)?;
         agents.changed(Some(&tab.tab_id), true);

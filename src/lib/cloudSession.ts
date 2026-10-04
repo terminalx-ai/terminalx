@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useRuntimeModels } from "@/lib/cloudModels";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import { collabGranted } from "@terminalx/portable/workspaceCollab";
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
@@ -487,18 +488,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     return startCollab(workspaceKey, client);
   }, [generation, client, workspaceKey]);
 
-  const [agentList, setAgentList] = useState(DEFAULT_AGENTS);
-  useEffect(() => {
-    if (!generation || !client || !client.hasCapability("agents/1")) return;
-    let cancelled = false;
-    void client.listRuntimeAgents().then(
-      (found) => !cancelled && found.length && setAgentList(found.map((agent) => ({ id: agent.id, name: agent.name }))),
-      () => undefined,
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [generation, client]);
+  const runtimeModels = useRuntimeModels(cloudAsleep(state, workspaceState) ? null : client);
+  const agentList = runtimeModels?.agents ?? DEFAULT_AGENTS;
 
   // Whether this person ever had the session: a role seen in this view, or its conversation kept on this desktop.
   const authority = connected ? state.authority : (item?.workspace.authority ?? null);
