@@ -37,6 +37,7 @@ import { bootAccount } from "@/lib/account";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootPairing } from "@/lib/pairing";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
+import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 
@@ -86,6 +87,7 @@ export function AppShell() {
     bootCloudCatalog();
     void bootPairing();
     void bootTerminalPerf();
+    void bootCloudControl();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.

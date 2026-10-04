@@ -80,6 +80,7 @@ pub fn recovery_for(code: &str) -> &'static str {
         "app_not_found" => "Run terminalx computer list-apps and retry with the bundle id or pid:<n>; website names are not desktop apps.",
         "app_not_running" => "The target quit and computer use never launches apps: start it, run terminalx computer list-apps, then retry with pid:<n>.",
         "app_blocked" => "Stop; this app is intentionally blocked from computer use.",
+        "confirmation_pending" => "Stop and wait for the person: only they can answer a TerminalX confirmation. Do not retry in a loop.",
         "window_not_found" | "window_stale" => "Run terminalx computer list-windows --app <app>, choose a current selector, then rerun get-app-state.",
         "window_not_focused" => "Retry once with --restore-window; if restore was already requested, bring the app forward manually.",
         "element_not_found" => "Run get-app-state again and use a fresh element index from the returned tree.",
@@ -248,6 +249,16 @@ impl ComputerService {
     /// parameters before they reach a provider and normalising the result so
     /// every action carries verification metadata.
     pub fn call(&self, method: &str, params: Value, request_id: &str) -> Result<Value, ComputerError> {
+        // A question of this app is waiting for the person (PRO-40). No
+        // click, key or text goes anywhere until they have answered it: a key
+        // sent "to another app" lands on whatever is in front, and that may
+        // be the question. Looking (lists, app state) is not an action.
+        if ActionMethod::from_wire(method).is_some() && crate::cloud_control::confirming() {
+            return Err(ComputerError::new(
+                "confirmation_pending",
+                "TerminalX is asking the person to confirm a request. Computer use cannot click, type or press keys until they have answered it themselves.",
+            ));
+        }
         match method {
             "permissions" => {
                 let id = params.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -482,5 +493,23 @@ mod tests {
         let candidates = helper_app_candidates(Some(resources));
         assert!(candidates.contains(&resources.join(HELPER_APP_NAME)));
         assert!(helper_executable_in(Path::new("/definitely/missing.app")).is_none());
+    }
+
+    #[test]
+    fn no_action_goes_anywhere_while_a_confirmation_of_this_app_is_open() {
+        let service = ComputerService::new(None);
+        let open = crate::cloud_control::Confirming::begin();
+        for method in ["click", "typeText", "pressKey", "hotkey", "pasteText", "setValue", "performSecondaryAction", "scroll", "drag"] {
+            let error = service.call(method, serde_json::json!({ "app": "Finder", "x": 1, "y": 1 }), "r").unwrap_err();
+            assert_eq!(error.code, "confirmation_pending", "{method}");
+            assert!(error.recovery().contains("only they can answer"), "{method}");
+        }
+        // Looking is not paused.
+        let looked = service.call("permissionsStatus", serde_json::json!({}), "r");
+        assert!(looked.as_ref().err().is_none_or(|error| error.code != "confirmation_pending"));
+        drop(open);
+        // Closed: actions are judged as before (here: refused for their own reasons, or run).
+        let after = service.call("click", serde_json::json!({ "app": "Finder" }), "r");
+        assert!(after.err().is_none_or(|error| error.code != "confirmation_pending"));
     }
 }

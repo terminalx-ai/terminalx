@@ -315,6 +315,23 @@ impl ControlService {
         }
         #[cfg(not(feature = "desktop"))]
         let _ = request_id;
+        // Cloud workspaces (PRO-40): the window decides and acts, exactly as a
+        // click there would. The headless runtime has no account and no window.
+        if let Some(action) = command.strip_prefix("cloud.") {
+            if !self.has_webview() {
+                return Err(ControlError::new(
+                    "unsupported",
+                    format!("{command} needs the TerminalX desktop app, signed in."),
+                    None::<String>,
+                ));
+            }
+            // The person's switch is checked here, in native code, before the
+            // window hears of the command. `status` still answers, to say so.
+            if action != "status" && !crate::cloud_control::enabled() {
+                return Err(crate::cloud_control::disabled_error());
+            }
+            return crate::cloud_control::call(self.sink.as_ref(), action, params);
+        }
         if command.starts_with("computer.") || command.starts_with("browser.") {
             return Err(ControlError::new(
                 "unsupported",
