@@ -270,11 +270,36 @@ nothing by itself.
 - Turning the mirror off keeps the files. Removing the local copy is a
   separate, explicit choice, and it keeps `exports/`.
 
+## When the copy is removed
+
+The mirrored copy goes with the access to the workspace (the coordinator's
+default from the security review, for the owner to confirm):
+
+- when the organization's list no longer has the workspace for this person:
+  it was deleted, or it is no longer shared with them (role `none`);
+- when the person leaves the organization;
+- at sign-out, every mirror.
+
+Removal is by the record only (`cloud_mirror_purge`): every file the mirror
+wrote, its staging, journal and record. Files the person added to the folder
+and the copies they kept when resolving a divergence stay. It connects to
+nothing. The dialog says so before the mirror is turned on.
+
+"Remove local copy…" in the dialog is different: it is the person's own
+choice, asks again, and removes the whole mirrored tree.
+
 ## In the app
 
 - **Opt-in:** the workspace menu on a cloud session's location chip has
-  "Local mirror…". The dialog says what the mirror is and is not, and has
-  "Turn on for this computer". Off is the default, per workspace, per device.
+  "Local mirror…". The dialog says what the mirror is and is not, that the
+  files should be treated like a download, that nothing in the copy can be
+  run by opening it, that the folder cannot be a project or an agent's
+  working directory, and when the copy is removed. It has "Turn on for this
+  computer". Off is the default, per workspace, per device.
+- **Not mirrored:** the dialog lists what was left out and why, from both
+  sides: secrets, tool settings that run commands, folders Git would treat
+  as a repository, names taken by another file on this disk, names too long,
+  links, files over 32 MB.
 - **State:** off, paused, waiting, copying (files so far), synced, failed
   (with the reason), local changes, or "runtime too old". The last
   successful revision stays on screen through a failure or a divergence:

@@ -721,7 +721,7 @@ fn losing_access_removes_what_the_mirror_wrote_and_nothing_else() {
     let dir = f.home.join("cloud-mirrors/org-1/workspace-1");
     assert_eq!(std::fs::read_dir(dir.join("exports")).unwrap().count(), 1);
     assert!(!dir.join("mirror.json").exists());
-    assert_eq!(f.mirror.status().unwrap().enabled, false);
+    assert!(!f.mirror.status().unwrap().enabled);
     assert!(existing(&f.home).is_empty());
     assert_eq!(f.mirror.purge().unwrap(), 0, "nothing left to remove");
 
