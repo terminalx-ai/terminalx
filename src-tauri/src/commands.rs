@@ -2109,11 +2109,14 @@ pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: St
 }
 
 #[tauri::command]
-pub fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
+pub async fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
     if !state.pairing.desktop_terminal_input_allowed(&id) {
         return Ok(());
     }
-    state.terminals.write(&id, data.as_bytes()).map_err(err)
+    // A paste can fill the PTY's input buffer while the program is busy
+    // writing output. Never wait for it on the UI thread: that also prevents
+    // the window's output acknowledgements and other panes' input arriving.
+    state.terminals.write_async(&id, data.into_bytes()).await.map_err(err)
 }
 
 /// The window shows this pane: send it the pane's output as raw bytes, the

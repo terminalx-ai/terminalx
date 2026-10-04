@@ -12,7 +12,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { cpus, homedir, totalmem } from "node:os";
+import { cpus, homedir, loadavg, release, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
@@ -222,6 +222,7 @@ function markdown(results) {
 }
 
 const options = parseArgs(process.argv.slice(2));
+const loadBefore = loadavg();
 const status = await control(options.home, "status").catch((error) => fail(`no app answers under ${options.home}: ${error.message}`));
 if (options.pid && status.pid !== options.pid) fail(`the app under ${options.home} is pid ${status.pid}, not ${options.pid}`);
 // Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
@@ -240,9 +241,20 @@ const drainWorkloads = {
 const flood = `i=0; while [ $i -lt 40 ]; do cat "${files.log}"; i=$((i+1)); done`;
 
 const results = [];
+function saveReport(terminalsAfter = null, complete = false) {
+  if (!options.out) return;
+  writeFileSync(options.out, JSON.stringify({
+    label: options.label ?? null, at: new Date().toISOString(), complete,
+    app: { version: status.appVersion, pid: status.pid },
+    host: { platform: process.platform, release: release(), arch: process.arch, cpus: cpus().length, memoryBytes: totalmem(), loadBefore, loadAfter: loadavg() },
+    terminalsAfter, results,
+  }, null, 2));
+}
 const record = async (name, bytes, request) => {
   console.error(`terminal-bench: ${name}${request.terminals ? `, ${request.terminals} terminals` : ""} ...`);
   results.push({ name, bytes, request, ...(await run(options, status.pid, request)) });
+  // Preserve completed cases if a later workload times out or the app exits.
+  saveReport();
 };
 
 /** A small repository of the benchmark's own, for the scenarios that open real sessions. */
@@ -275,6 +287,8 @@ for (const scenario of options.scenarios) {
           results.push({ name: label, bytes, how, result: { scenario: "background", error: error.message } });
           // The run may still be going in the app: nothing more can be asked of it.
           return;
+        } finally {
+          saveReport();
         }
       }
     };
@@ -340,7 +354,6 @@ for (const scenario of options.scenarios) {
 }
 
 const after = await control(options.home, "status");
-const report = { label: options.label ?? null, at: new Date().toISOString(), app: { version: status.appVersion, pid: status.pid }, host: { platform: process.platform, arch: process.arch, cpus: cpus().length, memoryBytes: totalmem() }, terminalsAfter: after.terminals, results };
-if (options.out) writeFileSync(options.out, JSON.stringify(report, null, 2));
+saveReport(after.terminals, true);
 console.log(markdown(results));
 console.error(`terminal-bench: terminals after the run: ${JSON.stringify(after.terminals)}`);

@@ -1,0 +1,2389 @@
+{
+  "label": "57f302f plus async input and bulk transport cleanup",
+  "at": "2026-10-04T17:17:44.199Z",
+  "complete": true,
+  "app": {
+    "version": "0.2.7",
+    "pid": 97572
+  },
+  "host": {
+    "platform": "darwin",
+    "release": "27.0.0",
+    "arch": "arm64",
+    "cpus": 12,
+    "memoryBytes": 25769803776,
+    "loadBefore": [
+      7.7529296875,
+      21.14892578125,
+      17.384765625
+    ],
+    "loadAfter": [
+      4.29833984375,
+      13.07373046875,
+      14.6826171875
+    ]
+  },
+  "terminalsAfter": {
+    "backend": {
+      "dataBytes": 860486000,
+      "dataEvents": 44406,
+      "panes": 0,
+      "running": 0,
+      "scrollbackBytes": 0,
+      "unackedBytes": 0,
+      "views": 0
+    },
+    "webview": {
+      "attached": 0,
+      "bufferLines": 0,
+      "data": {
+        "cloud": {
+          "bytes": 0,
+          "bytesPerSecond": 0,
+          "events": 0,
+          "eventsPerSecond": 0
+        },
+        "local": {
+          "bytes": 860267738,
+          "bytesPerSecond": 0,
+          "events": 44390,
+          "eventsPerSecond": 0
+        }
+      },
+      "dom": 0,
+      "domOnScreen": 0,
+      "evictedInstances": 0,
+      "hiddenInDocument": 0,
+      "idleInstances": 0,
+      "idleLimit": 8,
+      "instances": 0,
+      "onScreen": 0,
+      "panes": 0,
+      "queuedOutputBytes": 0,
+      "webgl": 0,
+      "webglContexts": {
+        "created": 15,
+        "failed": 0,
+        "lost": 0
+      }
+    }
+  },
+  "results": [
+    {
+      "name": "yes | head -n 2000000",
+      "bytes": 6000000,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 1,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; yes | head -n 2000000; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 0,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10046,
+        "bytes": 6000012,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6000025,
+              "bytesPerSecond": 1200005,
+              "events": 258,
+              "eventsPerSecond": 51.6
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 1,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 2044,
+        "events": 257,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10046,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6000025,
+              "bytesPerSecond": 848059.4,
+              "events": 258,
+              "eventsPerSecond": 36.4
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 1,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 125,
+          "framesPerSecond": 59.2,
+          "longTasks": 0,
+          "longestFrameMs": 25,
+          "longestMs": 26,
+          "seconds": 2.1,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 46,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 1,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 2072,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 38,
+        "size": {
+          "cols": 177,
+          "rows": 46
+        },
+        "terminals": 1
+      },
+      "memory": {
+        "before": {
+          "GPU": 158334976,
+          "WebContent": 124780544,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "peak": {
+          "GPU": 269484032,
+          "WebContent": 397410304,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 267386880,
+          "GPU": 179306496,
+          "main": 44040192,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "yes | head -n 2000000",
+      "bytes": 6000000,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 8,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; yes | head -n 2000000; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6000025,
+              "bytesPerSecond": 0,
+              "events": 258,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 1,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10040,
+        "bytes": 6210826,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 12641117,
+              "bytesPerSecond": 1304908.4,
+              "events": 1288,
+              "eventsPerSecond": 178
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 2,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 2021,
+        "events": 505,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 12641075,
+              "bytesPerSecond": 746051.2,
+              "events": 1281,
+              "eventsPerSecond": 152.6
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 2,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 123,
+          "framesPerSecond": 59.6,
+          "longTasks": 0,
+          "longestFrameMs": 26,
+          "longestMs": 8,
+          "seconds": 2.1,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6415118,
+              "bytesPerSecond": 65268,
+              "events": 755,
+              "eventsPerSecond": 78.4
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 2,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 2043,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 21,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 8
+      },
+      "memory": {
+        "before": {
+          "WebContent": 267386880,
+          "GPU": 179306496,
+          "main": 44040192,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 358612992,
+          "GPU": 263192576,
+          "main": 46137344,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 180355072,
+          "GPU": 174063616,
+          "main": 45088768,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "yes | head -n 2000000",
+      "bytes": 6000000,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 20,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; yes | head -n 2000000; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 12641117,
+              "bytesPerSecond": 0,
+              "events": 1288,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 2,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10040,
+        "bytes": 6601093,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 20476102,
+              "bytesPerSecond": 1363147,
+              "events": 3774,
+              "eventsPerSecond": 396
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 3,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 2106,
+        "events": 984,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 20469195,
+              "bytesPerSecond": 1363147,
+              "events": 3745,
+              "eventsPerSecond": 396
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 3,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 128,
+          "framesPerSecond": 59.6,
+          "longTasks": 0,
+          "longestFrameMs": 21,
+          "longestMs": 9,
+          "seconds": 2.1,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 13843247,
+              "bytesPerSecond": 233714.4,
+              "events": 2732,
+              "eventsPerSecond": 280.6
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 3,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 2134,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 14,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 20
+      },
+      "memory": {
+        "before": {
+          "WebContent": 180355072,
+          "GPU": 174063616,
+          "main": 45088768,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 337641472,
+          "GPU": 261095424,
+          "main": 49283072,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 235929600,
+          "GPU": 175112192,
+          "main": 44040192,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "cat of a 50 MB log",
+      "bytes": 52428800,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 1,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 20476102,
+              "bytesPerSecond": 0,
+              "events": 3774,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 3,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10040,
+        "bytes": 52867370,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 73343485,
+              "bytesPerSecond": 10573476.6,
+              "events": 5377,
+              "eventsPerSecond": 320.6
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 4,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 508,
+        "events": 1602,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10040,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 73343485,
+              "bytesPerSecond": 0,
+              "events": 5377,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 4,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 32,
+          "framesPerSecond": 58.4,
+          "longTasks": 0,
+          "longestFrameMs": 41,
+          "longestMs": 22,
+          "seconds": 0.5,
+          "slowFrames": 1
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 40,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 20476102,
+              "bytesPerSecond": 0,
+              "events": 3774,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 4,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 531,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 17,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 1
+      },
+      "memory": {
+        "before": {
+          "WebContent": 235929600,
+          "GPU": 175112192,
+          "main": 44040192,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 536870912,
+          "GPU": 263192576,
+          "main": 45088768,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 420478976,
+          "GPU": 181403648,
+          "main": 45088768,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "cat of a 50 MB log",
+      "bytes": 52428800,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 8,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 73343485,
+              "bytesPerSecond": 0,
+              "events": 5377,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 4,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10040,
+        "bytes": 52925644,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 126695418,
+              "bytesPerSecond": 2836144,
+              "events": 7566,
+              "eventsPerSecond": 190
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 5,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 583,
+        "events": 1672,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 126688722,
+              "bytesPerSecond": 2836144,
+              "events": 7554,
+              "eventsPerSecond": 190
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 5,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 37,
+          "framesPerSecond": 58.7,
+          "longTasks": 0,
+          "longestFrameMs": 32,
+          "longestMs": 11,
+          "seconds": 0.6,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 73755506,
+              "bytesPerSecond": 67599,
+              "events": 5871,
+              "eventsPerSecond": 81.2
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 5,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 609,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 21,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 8
+      },
+      "memory": {
+        "before": {
+          "WebContent": 420478976,
+          "GPU": 181403648,
+          "main": 45088768,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 576716800,
+          "GPU": 264241152,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 498073600,
+          "GPU": 178257920,
+          "main": 46137344,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "cat of a 50 MB log",
+      "bytes": 52428800,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 20,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 126695418,
+              "bytesPerSecond": 0,
+              "events": 7566,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 5,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 10040,
+        "bytes": 53025546,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 180937553,
+              "bytesPerSecond": 4626316.8,
+              "events": 10832,
+              "eventsPerSecond": 436.8
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 6,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 529,
+        "events": 1792,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 10496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 180923107,
+              "bytesPerSecond": 4626316.8,
+              "events": 10803,
+              "eventsPerSecond": 436.8
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 6,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 33,
+          "framesPerSecond": 58.3,
+          "longTasks": 0,
+          "longestFrameMs": 32,
+          "longestMs": 13,
+          "seconds": 0.6,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 127897548,
+              "bytesPerSecond": 196137,
+              "events": 9010,
+              "eventsPerSecond": 235.6
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 6,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 548,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 18,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 20
+      },
+      "memory": {
+        "before": {
+          "WebContent": 498073600,
+          "GPU": 178257920,
+          "main": 46137344,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 706740224,
+          "GPU": 266338304,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 679477248,
+          "GPU": 180355072,
+          "main": 47185920,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "agent-style redraws, 4000 frames",
+      "bytes": 7478092,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 1,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/tui-stream.bin\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 180937553,
+              "bytesPerSecond": 0,
+              "events": 10832,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 6,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 820,
+        "bytes": 7558987,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 188496553,
+              "bytesPerSecond": 1511800,
+              "events": 11062,
+              "eventsPerSecond": 46
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 7,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 108,
+        "events": 229,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 820,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 188496553,
+              "bytesPerSecond": 0,
+              "events": 11062,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 7,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 9,
+          "framesPerSecond": 55.9,
+          "longTasks": 0,
+          "longestFrameMs": 29,
+          "longestMs": 21,
+          "seconds": 0.2,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 40,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 180937553,
+              "bytesPerSecond": 0,
+              "events": 10832,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 7,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 143,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 18,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 1
+      },
+      "memory": {
+        "before": {
+          "WebContent": 679477248,
+          "GPU": 180355072,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 800063488,
+          "GPU": 268435456,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 676331520,
+          "GPU": 186646528,
+          "main": 47185920,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "agent-style redraws, 4000 frames",
+      "bytes": 7478092,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 8,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/tui-stream.bin\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 188496553,
+              "bytesPerSecond": 0,
+              "events": 11062,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 7,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 820,
+        "bytes": 7560272,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 196486833,
+              "bytesPerSecond": 81585,
+              "events": 11817,
+              "eventsPerSecond": 98
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 8,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 91,
+        "events": 231,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 988,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 196486791,
+              "bytesPerSecond": 81585,
+              "events": 11810,
+              "eventsPerSecond": 98
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 8,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 8,
+          "framesPerSecond": 57.6,
+          "longTasks": 0,
+          "longestFrameMs": 22,
+          "longestMs": 14,
+          "seconds": 0.1,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 188904478,
+              "bytesPerSecond": 81585,
+              "events": 11552,
+              "eventsPerSecond": 98
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 8,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 118,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 21,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 8
+      },
+      "memory": {
+        "before": {
+          "WebContent": 676331520,
+          "GPU": 186646528,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 809500672,
+          "GPU": 269484032,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 743440384,
+          "GPU": 187695104,
+          "main": 48234496,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "agent-style redraws, 4000 frames",
+      "bytes": 7478092,
+      "request": {
+        "scenario": "drain",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 20,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; cat \"/tmp/tx232-native-1004/perf/tui-stream.bin\"; printf \"\\033]7777;done\\007\"'"
+      },
+      "result": {
+        "before": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 196486833,
+              "bytesPerSecond": 0,
+              "events": 11817,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 8,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "bufferLines": 820,
+        "bytes": 7585247,
+        "closed": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 205283045,
+              "bytesPerSecond": 1759242.4,
+              "events": 13550,
+              "eventsPerSecond": 346.6
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 9,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "drainMs": 79,
+        "events": 261,
+        "loaded": {
+          "attached": 1,
+          "bufferLines": 1276,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 205278960,
+              "bytesPerSecond": 214452,
+              "events": 13528,
+              "eventsPerSecond": 257.6
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 9,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 6,
+          "framesPerSecond": 52.2,
+          "longTasks": 0,
+          "longestFrameMs": 24,
+          "longestMs": 10,
+          "seconds": 0.1,
+          "slowFrames": 0
+        },
+        "opened": {
+          "attached": 1,
+          "bufferLines": 496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 197686657,
+              "bytesPerSecond": 214452,
+              "events": 13258,
+              "eventsPerSecond": 257.6
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 9,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "paintedMs": 101,
+        "renderer": "webgl",
+        "scenario": "drain",
+        "shellStartMs": 14,
+        "size": {
+          "cols": 190,
+          "rows": 40
+        },
+        "terminals": 20
+      },
+      "memory": {
+        "before": {
+          "WebContent": 743440384,
+          "GPU": 187695104,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 849346560,
+          "GPU": 271581184,
+          "main": 49283072,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 833617920,
+          "GPU": 189792256,
+          "main": 48234496,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "typing echo",
+      "bytes": null,
+      "request": {
+        "scenario": "echo",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 1,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'stty raw -echo; printf \"\\033]7777;start\\007\"; exec cat'",
+        "producers": 0,
+        "producer": "sh -c 'i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "samples": 200,
+        "intervalMs": 50
+      },
+      "result": {
+        "counters": {
+          "attached": 1,
+          "bufferLines": 40,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 205285148,
+              "bytesPerSecond": 211.2,
+              "events": 13751,
+              "eventsPerSecond": 19.2
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 1,
+          "onScreen": 1,
+          "panes": 1,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 10,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "echoFrameMs": {
+          "count": 200,
+          "max": 23,
+          "mean": 9.9,
+          "p50": 9,
+          "p95": 18
+        },
+        "echoMs": {
+          "count": 200,
+          "max": 13,
+          "mean": 1.8,
+          "p50": 2,
+          "p95": 3
+        },
+        "load": {
+          "bytesPerSecond": 200,
+          "eventsPerSecond": 19.1
+        },
+        "lost": 0,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 625,
+          "framesPerSecond": 59.8,
+          "longTasks": 0,
+          "longestFrameMs": 26,
+          "longestMs": 17,
+          "seconds": 10.4,
+          "slowFrames": 0
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "producers": 0,
+        "renderer": "webgl",
+        "samples": 200,
+        "scenario": "echo",
+        "terminals": 1
+      },
+      "memory": {
+        "before": {
+          "WebContent": 833617920,
+          "GPU": 189792256,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 945815552,
+          "GPU": 272629760,
+          "main": 49283072,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 315621376,
+          "GPU": 177209344,
+          "main": 48234496,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "typing echo",
+      "bytes": null,
+      "request": {
+        "scenario": "echo",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 8,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'stty raw -echo; printf \"\\033]7777;start\\007\"; exec cat'",
+        "producers": 1,
+        "producer": "sh -c 'i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "samples": 200,
+        "intervalMs": 50
+      },
+      "result": {
+        "counters": {
+          "attached": 1,
+          "bufferLines": 10208,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 285370918,
+              "bytesPerSecond": 5120503.8,
+              "events": 18315,
+              "eventsPerSecond": 298.2
+            }
+          },
+          "dom": 7,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 11,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "echoFrameMs": {
+          "count": 200,
+          "max": 18,
+          "mean": 8.3,
+          "p50": 8,
+          "p95": 16
+        },
+        "echoMs": {
+          "count": 200,
+          "max": 9,
+          "mean": 0.5,
+          "p50": 0,
+          "p95": 1
+        },
+        "load": {
+          "bytesPerSecond": 5132694,
+          "eventsPerSecond": 300.2
+        },
+        "lost": 0,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 623,
+          "framesPerSecond": 59.9,
+          "longTasks": 0,
+          "longestFrameMs": 23,
+          "longestMs": 9,
+          "seconds": 10.4,
+          "slowFrames": 0
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "producers": 1,
+        "renderer": "webgl",
+        "samples": 200,
+        "scenario": "echo",
+        "terminals": 8
+      },
+      "memory": {
+        "before": {
+          "WebContent": 315621376,
+          "GPU": 177209344,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 357564416,
+          "GPU": 264241152,
+          "main": 49283072,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 263192576,
+          "GPU": 176160768,
+          "main": 46137344,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "typing echo",
+      "bytes": null,
+      "request": {
+        "scenario": "echo",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 20,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'stty raw -echo; printf \"\\033]7777;start\\007\"; exec cat'",
+        "producers": 1,
+        "producer": "sh -c 'i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "samples": 200,
+        "intervalMs": 50
+      },
+      "result": {
+        "counters": {
+          "attached": 1,
+          "bufferLines": 10496,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 368050799,
+              "bytesPerSecond": 5306299,
+              "events": 26312,
+              "eventsPerSecond": 515
+            }
+          },
+          "dom": 19,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 20,
+          "onScreen": 1,
+          "panes": 20,
+          "queuedOutputBytes": 0,
+          "webgl": 1,
+          "webglContexts": {
+            "created": 12,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "echoFrameMs": {
+          "count": 200,
+          "max": 18,
+          "mean": 8.9,
+          "p50": 9,
+          "p95": 16
+        },
+        "echoMs": {
+          "count": 200,
+          "max": 10,
+          "mean": 0.7,
+          "p50": 1,
+          "p95": 2
+        },
+        "load": {
+          "bytesPerSecond": 5297600,
+          "eventsPerSecond": 519.3
+        },
+        "lost": 0,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 622,
+          "framesPerSecond": 59.9,
+          "longTasks": 0,
+          "longestFrameMs": 19,
+          "longestMs": 8,
+          "seconds": 10.4,
+          "slowFrames": 0
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "producers": 1,
+        "renderer": "webgl",
+        "samples": 200,
+        "scenario": "echo",
+        "terminals": 20
+      },
+      "memory": {
+        "before": {
+          "WebContent": 263192576,
+          "GPU": 176160768,
+          "main": 46137344,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 362807296,
+          "GPU": 261095424,
+          "main": 48234496,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 251658240,
+          "GPU": 173015040,
+          "main": 47185920,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "Ctrl+C during a flood",
+      "bytes": null,
+      "request": {
+        "scenario": "interrupt",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 1,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "afterMs": 2000
+      },
+      "result": {
+        "bytesAfter": 363194,
+        "eventsAfter": 12,
+        "exitMs": 8,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 155,
+          "framesPerSecond": 60.1,
+          "longTasks": 0,
+          "longestFrameMs": 30,
+          "longestMs": 13,
+          "seconds": 2.6,
+          "slowFrames": 0
+        },
+        "outputStoppedMs": 11,
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "renderer": "webgl",
+        "scenario": "interrupt",
+        "terminals": 1
+      },
+      "memory": {
+        "before": {
+          "WebContent": 251658240,
+          "GPU": 173015040,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 399507456,
+          "GPU": 264241152,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 325058560,
+          "GPU": 182452224,
+          "main": 45088768,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "Ctrl+C during a flood",
+      "bytes": null,
+      "request": {
+        "scenario": "interrupt",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 8,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "afterMs": 2000
+      },
+      "result": {
+        "bytesAfter": 961336,
+        "eventsAfter": 111,
+        "exitMs": 7,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 154,
+          "framesPerSecond": 59.4,
+          "longTasks": 0,
+          "longestFrameMs": 27,
+          "longestMs": 20,
+          "seconds": 2.6,
+          "slowFrames": 0
+        },
+        "outputStoppedMs": 13,
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "renderer": "webgl",
+        "scenario": "interrupt",
+        "terminals": 8
+      },
+      "memory": {
+        "before": {
+          "WebContent": 325058560,
+          "GPU": 182452224,
+          "main": 45088768,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 419430400,
+          "GPU": 265289728,
+          "main": 46137344,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 359661568,
+          "GPU": 177209344,
+          "main": 45088768,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "Ctrl+C during a flood",
+      "bytes": null,
+      "request": {
+        "scenario": "interrupt",
+        "cwd": "/tmp/tx232-native-1004/perf",
+        "terminals": 20,
+        "background": "sh \"/tmp/tx232-native-1004/perf/agent-stream.sh\"",
+        "command": "sh -c 'printf \"\\033]7777;start\\007\"; i=0; while [ $i -lt 40 ]; do cat \"/tmp/tx232-native-1004/perf/log-50mb.txt\"; i=$((i+1)); done'",
+        "afterMs": 2000
+      },
+      "result": {
+        "bytesAfter": 366202,
+        "eventsAfter": 197,
+        "exitMs": 3,
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 154,
+          "framesPerSecond": 59.8,
+          "longTasks": 0,
+          "longestFrameMs": 29,
+          "longestMs": 22,
+          "seconds": 2.6,
+          "slowFrames": 0
+        },
+        "outputStoppedMs": 6,
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "renderer": "webgl",
+        "scenario": "interrupt",
+        "terminals": 20
+      },
+      "memory": {
+        "before": {
+          "WebContent": 359661568,
+          "GPU": 177209344,
+          "main": 45088768,
+          "Networking": 6504448
+        },
+        "peak": {
+          "WebContent": 472907776,
+          "GPU": 265289728,
+          "main": 47185920,
+          "Networking": 6504448
+        },
+        "after": {
+          "WebContent": 275775488,
+          "GPU": 176160768,
+          "main": 46137344,
+          "Networking": 6504448
+        }
+      },
+      "discarded": 0
+    }
+  ]
+}

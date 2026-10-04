@@ -507,6 +507,18 @@ impl Terminals {
         Ok(())
     }
 
+    /// Desktop input may block on a full PTY. Resolve the writer before
+    /// dispatching so queued work cannot write to a replacement process.
+    pub async fn write_async(&self, id: &str, data: Vec<u8>) -> Result<()> {
+        let writer = self.panes.lock().unwrap().get(id).context("no such terminal")?.writer.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut writer = writer.lock().unwrap();
+            writer.write_all(&data)?;
+            writer.flush()?;
+            Ok(())
+        }).await?
+    }
+
     pub fn pid(&self, id: &str) -> Option<u32> {
         self.panes.lock().unwrap().get(id)?.pid
     }
@@ -583,6 +595,9 @@ impl Terminals {
                     }
                 }
             }
+        }
+        for id in ids {
+            self.drop_slot_if_unused(id);
         }
         self.changed();
         let start = Instant::now();
@@ -1052,6 +1067,66 @@ mod tests {
         left.sort();
         assert_eq!(left, ["s10:a", "tab:s1"]);
         terminals.kill_all();
+    }
+
+    #[test]
+    fn bulk_close_releases_unused_transport_slots() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["unseen", "viewed", "other"] {
+            pane(&terminals, &sink, &dir, id, "cat");
+        }
+        let (tap, _output) = collector();
+        terminals.attach("viewed", "view", tap);
+        terminals.kill_all_and_wait(&["unseen".into(), "viewed".into()], Duration::from_secs(3));
+        let slots = terminals.taps.lock().unwrap();
+        assert!(!slots.contains_key("unseen"));
+        assert!(slots.contains_key("viewed"), "an attached view owns its slot until it detaches");
+        assert!(slots.contains_key("other"));
+        drop(slots);
+        terminals.detach("viewed", "view");
+        assert_eq!(terminals.taps.lock().unwrap().len(), 1);
+        terminals.kill_all();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_blocked_input_write_leaves_the_runtime_and_other_panes_responsive() {
+        struct BlockedWriter {
+            entered: Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(std::thread::current().id());
+                    // A regression must fail rather than hang the test runner.
+                    let _ = self.release.recv_timeout(Duration::from_secs(5));
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let terminals = Arc::new(Terminals::new());
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        pane(&terminals, &sink, &dir, "busy", "cat");
+        pane(&terminals, &sink, &dir, "other", "cat");
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        terminals.panes.lock().unwrap().get_mut("busy").unwrap().writer = Arc::new(Mutex::new(Box::new(BlockedWriter { entered: Some(entered), release: resume })));
+        let writing = terminals.clone();
+        let runtime_thread = std::thread::current().id();
+        let busy = tokio::spawn(async move { writing.write_async("busy", vec![b'x'; 1024]).await });
+        let writer_thread = started.await.unwrap();
+        // This runs on a single-thread runtime while the first writer is
+        // still blocked. Both timers and input to another pane must run.
+        let other = tokio::time::timeout(Duration::from_secs(2), terminals.write_async("other", b"hello\n".to_vec())).await;
+        let _ = release.send(());
+        busy.await.unwrap().unwrap();
+        terminals.kill_all();
+        assert_ne!(writer_thread, runtime_thread, "PTY input blocked the runtime thread");
+        other.expect("another pane waited for the blocked writer").unwrap();
     }
 
     #[test]
