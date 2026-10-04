@@ -1,22 +1,26 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
-import { getPrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 
 afterEach(cleanup);
 
-it("records an explicit browser choice only when the Website links control is used", () => {
-  render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
-  expect(getPrefs()).toMatchObject({ linkBrowser: "system", linkBrowserChosen: false });
-
-  fireEvent.click(screen.getByRole("radio", { name: "TerminalX Browser" }));
-  expect(getPrefs()).toMatchObject({ linkBrowser: "terminalx", linkBrowserChosen: true });
-  expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: "terminalx", linkBrowserChosen: true });
-
-  fireEvent.click(screen.getByRole("radio", { name: "System Browser" }));
-  expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: "system", linkBrowserChosen: true });
+describe("Website links", () => {
+  it("offers all three browser modes and can turn the chooser back on", () => {
+    setPrefs({ linkBrowser: "system", linkBrowserChosen: false });
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    expect(getPrefs().linkBrowserChosen).toBe(false);
+    const choices = within(screen.getByRole("radiogroup", { name: "Website links" })).getAllByRole("radio");
+    expect(choices.map((choice) => choice.textContent)).toEqual(["Ask every time", "System Browser", "TerminalX Browser"]);
+    for (const [index, value] of [[2, "terminalx"], [1, "system"], [0, "ask"]] as const) {
+      fireEvent.click(choices[index]);
+      expect(getPrefs()).toMatchObject({ linkBrowser: value, linkBrowserChosen: true });
+      expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: value, linkBrowserChosen: true });
+      expect(choices[index].getAttribute("aria-checked")).toBe("true");
+    }
+  });
 });
 
 describe("Settings dismissal", () => {

@@ -33,7 +33,7 @@ const info = (patch: Partial<LocalPathInfo> = {}): LocalPathInfo => ({
 const initialPrefs = getPrefs();
 beforeEach(() => {
   vi.clearAllMocks();
-  setPrefs(initialPrefs);
+  setPrefs({ ...initialPrefs, linkBrowser: "system" });
 });
 
 describe("chat link parsing", () => {
@@ -66,7 +66,14 @@ describe("chat link parsing", () => {
 });
 
 describe("chat link routing", () => {
-  it("opens web URLs only in the system browser by default", async () => {
+  it("opens nothing before a browser is chosen in ask mode", async () => {
+    setPrefs({ linkBrowser: "ask" });
+    await openChatLink(parseChatLink("https://example.test"), context);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("opens web URLs only in the selected system browser", async () => {
     const href = "https://example.test/a?q=1#x";
     await openChatLink(parseChatLink(href), context);
     expect(openUrl).toHaveBeenCalledExactlyOnceWith(href);
