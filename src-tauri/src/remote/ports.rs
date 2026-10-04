@@ -327,6 +327,11 @@ impl Ports {
                     self.end(&stream, None);
                     return;
                 }
+                // A client that stopped acknowledging holds nothing open.
+                if stream.idle_for() >= IDLE_TIMEOUT {
+                    self.end(&stream, Some((&peer, "idle")));
+                    return;
+                }
             }
             let read = loop {
                 tokio::select! {
@@ -452,7 +457,16 @@ impl Ports {
 
 /// Add `bytes` to `counter` if that keeps it within `limit`.
 fn reserve(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
-    counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| (current + bytes <= limit).then_some(current + bytes)).is_ok()
+    let mut current = counter.load(Ordering::SeqCst);
+    loop {
+        if current + bytes > limit {
+            return false;
+        }
+        match counter.compare_exchange(current, current + bytes, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 /// Take up to `bytes` off `counter`; returns how much was taken.
