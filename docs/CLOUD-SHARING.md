@@ -713,17 +713,19 @@ Who may do what (checked on every call, against the latest member list):
 - **After a stop and a wake** the app that stayed open is a new device to
   the runtime: a stop revokes every attachment, and the wake issues a new
   attachment and device. Where the runtime process survived the stop (a
-  frozen container), the terminal's controller is still the old device, so
+  frozen container), the terminal's controller is still the old device.
+  When the API sends `installationKey`, the runtime recognises the same
+  person on the same installation and gives them the terminal back without a
+  click, and their writer's `seq` continues (see "A person's own terminal
+  after a stop and a wake" below). Without a key (an older API or runtime)
   the returning person watches ("You control this terminal from another
-  window or device") until they take control, which is never done for them.
-  The runtime counts a writer's `seq` per device, so the open app's first
-  write is refused with `conflict`; the client then starts a new writer, and
-  types that write under it when it was sent only once (it was refused, so
-  it cannot have been applied) or reports it when it had been resent after a
-  drop. A runtime that restarted knows no controller: the terminal starts
-  over, as after any restart. Shells follow the same rules. Recognising the
-  same installation, so that the banner does not appear, needs a stable
-  installation key from the API (the attachment id changes at every mint).
+  window or device") until they press "Take control", which is not done for
+  them. The runtime then counts a writer's `seq` per device, so the open
+  app's first write is refused with `conflict`; the client starts a new
+  writer, and types that write under it when it was sent only once (it was
+  refused, so it cannot have been applied) or reports it when it had been
+  resent after a drop. A runtime that restarted knows no controller: the
+  terminal starts over, as after any restart. Shells follow the same rules.
 - **Revocation** is the shells': a person who lost access has their
   connection closed and their streams ended; one who may no longer drive
   loses control, announced.
@@ -757,9 +759,13 @@ All of this must hold, for shells and agent terminals alike:
   moves nothing.
 
 Nothing else moves control by itself: another person, the same person's
-other installation, a controller whose access was revoked (that clears the
-controller; sharing again does not restore it), or any link without a key
-(an older API): they watch until `pty.control`. A writer's `seq` is counted
+other installation, a controller whose access the runtime saw revoked (that
+clears the controller; sharing again does not restore it), or any link
+without a key (an older API): they watch until `pty.control`. Access that is
+removed and restored entirely while the workspace is stopped is different:
+the runtime only sees the final member list, never the revocation, so that
+person's terminal comes back to them without a click (they may type at that
+point anyway). A writer's `seq` is counted
 per person and installation key (per device without one), so the open app
 continues with the next number and a write it resends is answered, not
 typed again. Coming back is not activity and claims no lease. A runtime
@@ -801,9 +807,10 @@ point) beside the shell terminals' but apart from them, and
   controls it, it shows their size and "<Name> controls this terminal; you
   are watching." with "Take control". The tab's lease bar sits above it as it
   does above the chat. After a stop and a wake of a runtime that kept
-  running, the person's own terminal reads "You control this terminal from
-  another window or device", and "Take control" takes it (see "After a stop
-  and a wake").
+  running, the person's own terminal comes back to them when the API sends
+  `installationKey`. Only without a key (an older API or runtime) does it
+  read "You control this terminal from another window or device", and "Take
+  control" takes it (see "A person's own terminal after a stop and a wake").
 - **Read-only** for a viewer, for a driver while someone else drives the tab,
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.
