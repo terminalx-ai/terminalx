@@ -240,10 +240,20 @@ instead of from this computer.
     they typed is not offered;
   - someone who cannot send (a viewer) gets none.
 
-  The desktop asks once per session, agent and right while connected. It
-  never wakes a stopped workspace for the list: a stopped workspace shows
-  what was last listed in this run of the app, or no list. A list read with
-  the right to approve is never shown to the same person without it. A
+  The desktop keeps a list that has commands in it, per session, agent and
+  the right the runtime said it was made for (`restricted`), and does not
+  ask again. A CLI that is not installed or did not answer in time is an
+  error (`unavailable`), not an empty list; an empty or failed listing is
+  not kept, and the composer asks again when the reader next starts a
+  command. It never wakes a stopped workspace for the list: a stopped
+  workspace shows what was last listed in this run of the app, or no list.
+  A list made for someone who may approve is never shown to the same person
+  without that right.
+
+  The CLI is asked with the runtime's own environment, not the tab's grant
+  environment. Checked on 2026-10-03 with Claude Code 2.1.288 in a throwaway
+  home with no sign-in and no key: it answers (49 commands, the project's
+  own among them), so the list does not depend on the agent's credentials. A
   runtime from before `composer/1` gets no list (the message is still sent
   as typed and judged by the runtime).
 
@@ -264,6 +274,63 @@ instead of from this computer.
   Every path the list offers is inside the project, so a mention picked
   from it is one the runtime accepts from a plain driver too (PRO-88 refuses
   only mentions of files outside the project).
+
+  A file dropped onto the composer from this computer is not turned into a
+  mention for a cloud tab (it is for a local one): its path here names
+  nothing on the workspace. A dropped image is attached.
+
+- **Images** (`composer/3`). A mailbox command holds at most 64 KiB and an
+  RPC frame 1 MiB, so an image does not travel inside the message:
+  1. The desktop uploads each image to the runtime over the end-to-end
+     encrypted connection: `session.attach { sessionId, tabId, attachmentId,
+     mediaType, name?, offset, data, last, clientRequestId }`, in parts of
+     384 KiB (`data` is base64; each part decodes by itself). Parts arrive
+     in order; a part sent again after a lost answer changes nothing.
+     PNG, JPEG, GIF and WebP, at most 5 MB each (as a local tab accepts),
+     at most 8 per message. Attaching needs what sending needs (a driver or
+     a manager); it changes nothing about what the agent may do, so a plain
+     driver may.
+  2. The message then names them: `images: [{ id, mediaType, name }]` in
+     the encrypted plaintext of a mailbox `send` (or in a development
+     runtime's live `session.send`). Text is optional when there are
+     images. A `steer` never carries images.
+  3. The runtime hands them to the agent exactly as a local tab's are
+     (`SessionManager::send`), and removes the upload.
+
+  An upload waits in the runtime's private state directory
+  (`<data dir>/cloud-agent/attachments`, files 0600), never in the
+  workspace tree, so the file tree, Git and the agent's own tools do not see
+  it before it is sent. Nothing reads it back over the connection. It
+  belongs to the person who uploaded it: a message of anyone else that names
+  it is refused. A message naming an upload that is not there (never
+  completed, already sent, expired) is `rejected` with category
+  `attachment-missing` before anything about the tab changes, and the
+  desktop shows the receipt's sentence. A message queued behind a running
+  turn keeps its uploads until it is typed; if they are gone by then it is
+  not sent without them and the transcript says so. A stop, or a sender who
+  lost access, drops the queued message and its uploads. A message the
+  runtime refuses (a PRO-88 refusal, a held lease, an invalid payload) gives
+  up its sender's uploads at once. An upload nobody sent within a day is
+  removed, at start and about hourly; at most 64 wait at once. The desktop
+  uploads one attachment under one id for as long as the composer holds it,
+  so a send tried again replaces nothing and leaves nothing behind.
+
+  Uploading needs the runtime: sending images to a stopped workspace starts
+  it (the one wake a message asks for), says so, and keeps the message and
+  its attachments in the composer to send once it is running. While it is
+  only not connected (reconnecting, offline) nothing is started and the
+  composer says to send again once connected. In a cloud tab a file that is
+  not an image, or an image over 5 MB, is not attached and the composer says
+  why. A runtime
+  from before `composer/3` says it needs an update; the message is never
+  sent without its images.
+
+  In the transcript, an image sent to a cloud tab shows by name: its file
+  is on the workspace, not on this computer, so there is no thumbnail.
+  "Send again" on a message whose outcome is unknown resends its text only.
+  Nothing strips an image's metadata (EXIF, location). Once sent, the image
+  is archived on the workspace under `<store root>/attachments/<sessionId>/`,
+  as a local tab's is on this computer, until the session is deleted.
 
 Mobile is out of scope for PRO-22. It can reuse the same keys, outbox and
 checkpoint formats.
@@ -346,8 +413,26 @@ project root. The runtime then:
 - counts as work while it runs (`cloud_activity::launching`): the activity
   report carries it as a running turn, so the server's idle suspend does not
   stop a workspace whose clone is still going with nobody attached;
-- reports `repository-clone-failed` when a clone cannot be made. The agent is
-  not started and the prompt is not sent.
+- stops when the create is canceled: while Git runs, the launcher asks the
+  server every 10 s whether the intent is still claimed, and on a cancel
+  kills Git's process group and removes the staging directory. An API it
+  cannot reach is not a cancel;
+- reports why a clone could not be made, each with its own text in the
+  desktop (`FAILURES` in `src/lib/cloudCreate.ts`). The agent is not started
+  and the prompt is not sent:
+
+  | Category | When |
+  | --- | --- |
+  | `repository-access-denied` | GitHub or the credential helper refused (no access, repository not found, sign-in failed) |
+  | `repository-branch-not-found` | the base branch is not in the repository |
+  | `repository-clone-timed-out` | the transfer stalled, or the 30 minutes ran out |
+  | `repository-path-occupied` | files, or another repository's checkout, are already at the path; nothing is deleted |
+  | `repository-empty` | the repository has no commits |
+  | `workspace-disk-full` | the disk or quota ran out while cloning |
+  | `repository-clone-failed` | anything else (network, a broken transfer) |
+
+  A desktop from before these categories shows the category itself in
+  "The agent did not start (…)".
 
 **The GitHub token.** `launch.rs` never holds one. Git asks the credential
 helper `cloud_github` installs at boot (PRO-14), which gets a short-lived

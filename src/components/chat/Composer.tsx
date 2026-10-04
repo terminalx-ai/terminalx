@@ -30,18 +30,29 @@ import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib
 const commandCache = new Map<string, ComposerCommandList>();
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
 
+const commandsAsked = new Map<string, Promise<ComposerCommandList>>();
+
 /** A local tab's commands: asked of the harness once per directory. */
 function localCommands(cwd: string, harness: string): ComposerCommands {
   const key = `${cwd}|${harness}`;
   return {
     key,
     known: () => commandCache.get(key) ?? null,
-    load: async () => {
+    load: () => {
       const known = commandCache.get(key);
-      if (known) return known;
-      const list = { commands: await filesApi.slashCommands(cwd, harness), note: null };
-      commandCache.set(key, list);
-      return list;
+      if (known) return Promise.resolve(known);
+      const pending = commandsAsked.get(key);
+      if (pending) return pending;
+      const asked = filesApi
+        .slashCommands(cwd, harness)
+        .then((commands) => {
+          const list = { commands, note: null };
+          commandCache.set(key, list);
+          return list;
+        })
+        .finally(() => commandsAsked.delete(key));
+      commandsAsked.set(key, asked);
+      return asked;
     },
   };
 }
@@ -73,6 +84,7 @@ export function Composer({
   cwd,
   commands: givenCommands,
   files: givenFiles,
+  remote = false,
   busy,
   draft,
   onDraftChange,
@@ -101,6 +113,8 @@ export function Composer({
   commands?: ComposerCommands | null;
   /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
   files?: ComposerFiles | null;
+  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  remote?: boolean;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -142,6 +156,7 @@ export function Composer({
   const [caret, setCaret] = useState(0);
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
+  const firstLoad = useRef<ComposerCommands | null>(null);
   const commands: SlashCommand[] = commandList.commands;
   const fileSource = useMemo<ComposerFiles | null>(
     () => givenFiles ?? (cwd ? { key: cwd, search: (query, limit) => filesApi.search(cwd, query, limit) } : null),
@@ -155,7 +170,9 @@ export function Composer({
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange });
+  // A file dropped from this computer can be mentioned only to an agent that runs here.
+  const mentionDropped = !remote;
+  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
   const { attachments } = attach;
 
   // Grow with content, up to ~10 lines. Tabs that are not selected stay
@@ -219,12 +236,17 @@ export function Composer({
     const known = commandSource.known();
     setCommandList(known ?? NO_COMMANDS);
     let cancelled = false;
+    firstLoad.current = commandSource;
+    const settled = () => {
+      if (firstLoad.current === commandSource) firstLoad.current = null;
+    };
     commandSource
       .load()
       .then((list) => {
         if (!cancelled) setCommandList(list);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(settled);
     return () => {
       cancelled = true;
     };
@@ -236,6 +258,23 @@ export function Composer({
 
   const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
   const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  // A list that came back empty or failed (a cloud tab's CLI had not answered yet) is asked for
+  // again when the reader starts a command; a source that already has its list answers from it.
+  const startingCommand = token?.kind === "slash" && commands.length === 0;
+  useEffect(() => {
+    // Its first reading is still on its way: that answer is the one to wait for.
+    if (!startingCommand || !commandSource || firstLoad.current === commandSource) return;
+    let cancelled = false;
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled && list.commands.length) setCommandList(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [startingCommand, commandSource]);
   const recall = useComposerHistory({
     id: tab.id,
     history,
@@ -391,7 +430,7 @@ export function Composer({
             note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
-        <DropHint dragging={attach.dragging} />
+        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (
@@ -410,6 +449,11 @@ export function Composer({
           </div>
         )}
         <AttachmentThumbs attach={attach} />
+        {attach.notice && (
+          <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
+            {attach.notice}
+          </div>
+        )}
         <textarea
           ref={ref}
           data-composer

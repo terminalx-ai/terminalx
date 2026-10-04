@@ -40,6 +40,12 @@ pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
+/// Whose upload an attachment is: the person, as a mailbox command names
+/// its actor; a connection without one (a development link) its device.
+fn attachment_owner(peer: &Peer) -> String {
+    peer.user_id.clone().unwrap_or_else(|| format!("device:{}", peer.device_id))
+}
+
 /// `session.files`: how long a query may be, and how many hits it answers.
 const MAX_FILE_QUERY_BYTES: usize = 400;
 const DEFAULT_FILE_HITS: usize = 30;
@@ -294,7 +300,7 @@ pub struct WorkspaceRpc {
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
     #[cfg(test)]
-    commands_for_tests: Mutex<Option<Vec<SlashCommand>>>,
+    commands_for_tests: Mutex<Option<Option<Vec<SlashCommand>>>>,
     /// Terminal input this runtime counted as use of the workspace (the
     /// process-wide activity flag is shared by every test).
     #[cfg(test)]
@@ -859,6 +865,7 @@ impl WorkspaceRpc {
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),
+            "session.attach" => self.session_attach(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -2233,8 +2240,14 @@ impl WorkspaceRpc {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
         let tab_id = required_str(&params, "tabId")?;
         let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
-        let text = required_str(&params, "text")?;
-        if text.trim().is_empty() {
+        // Images uploaded with `session.attach` ride with the text, or alone.
+        let image_ids = crate::cloud_agents::attachments::named(&params).ok_or_else(|| RpcError::invalid("images is a list of at most 8 uploaded attachments"))?;
+        let text = match params.get("text").and_then(Value::as_str) {
+            Some(text) => text,
+            None if !image_ids.is_empty() => "",
+            None => return Err(RpcError::invalid("text is required")),
+        };
+        if text.trim().is_empty() && image_ids.is_empty() {
             return Err(RpcError::invalid("text is empty"));
         }
         // The same rule as a mailbox send (contract §21.5), for managers
@@ -2267,7 +2280,18 @@ impl WorkspaceRpc {
             None if self.authority(peer) == Authority::Participate => return Err(RpcError::forbidden("sending needs a signed-in person")),
             None => {}
         }
-        let outcome = self.manager()?.send(&session.id, &tab.id, text.to_string(), Vec::new()).map_err(RpcError::internal)?;
+        let images = if image_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.agents()?.attachments.load(&attachment_owner(peer), &image_ids).map_err(|_| {
+                RpcError::invalid("Not sent: an image of this message did not reach the workspace. Attach it and send again.").with_data(json!({ "reason": "attachment-missing" }))
+            })?
+        };
+        let sent = self.manager().and_then(|manager| manager.send(&session.id, &tab.id, text.to_string(), images).map_err(RpcError::internal));
+        if !image_ids.is_empty() {
+            self.agents()?.attachments.remove(&image_ids);
+        }
+        let outcome = sent?;
         // Only what reached the agent claims the tab.
         if let Some(user) = peer.user_id.as_deref() {
             // As busy as it was before this send: an expired lease of someone
@@ -2363,12 +2387,41 @@ impl WorkspaceRpc {
         let may_send = self.authority(peer) == Authority::Manage || access.can_drive();
         let restricted = !access.can_configure();
         let commands: Vec<SlashCommand> = if may_send {
-            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd));
+            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd))?;
             listed.into_iter().filter(|command| !restricted || slash::allows(&tab.harness, &command.name)).collect()
         } else {
             Vec::new()
         };
         Ok(json!({ "commands": commands, "restricted": restricted }))
+    }
+
+    /// One part of an image the caller attaches to the message they are
+    /// about to send to an agent tab (`composer/3`, PRO-22). The image waits
+    /// in the runtime's private state until that message names it, and only
+    /// its uploader's message can. Needs what sending needs.
+    fn session_attach(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let tab_id = required_str(&params, "tabId")?;
+        if !session.tabs.iter().any(|tab| tab.id == tab_id) {
+            return Err(RpcError::not_found("no such tab"));
+        }
+        if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
+            return Err(RpcError::forbidden("attaching an image needs driver access to the workspace"));
+        }
+        let id = required_str(&params, "attachmentId")?;
+        let media_type = required_str(&params, "mediaType")?;
+        let offset = params.get("offset").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("offset is required"))?;
+        let data = STANDARD.decode(required_str(&params, "data")?).map_err(|_| RpcError::invalid("data is not base64"))?;
+        let last = params.get("last").and_then(Value::as_bool).unwrap_or(false);
+        let name = params.get("name").and_then(Value::as_str);
+        use crate::cloud_agents::attachments::AttachError;
+        match self.agents()?.attach_part(&attachment_owner(peer), id, offset, &data, media_type, name, last) {
+            Ok(size) => Ok(json!({ "attachmentId": id, "size": size, "complete": last })),
+            Err(AttachError::Invalid(why)) => Err(RpcError::invalid(why)),
+            Err(AttachError::TooLarge) => Err(RpcError::invalid("the image is larger than 5 MB").with_data(json!({ "reason": "image-too-large" }))),
+            Err(AttachError::Full) => Err(RpcError::new("conflict", "too many images are waiting to be sent in this workspace; try again later").with_data(json!({ "reason": "attachments-full" }))),
+            Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
+        }
     }
 
     /// The files of a session's directory whose path matches `query`, best
@@ -2390,23 +2443,25 @@ impl WorkspaceRpc {
 
     /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`
     /// does for a local tab: only Claude Code is asked. A CLI that is not
-    /// installed or does not answer lists nothing.
-    fn listed_commands(&self, harness: &str, cwd: &Path) -> Vec<SlashCommand> {
+    /// installed or did not answer (a just-woken machine can be slow) is an
+    /// error, `unavailable`, never an empty list: the composer would keep
+    /// "no commands" as the answer, and it asks again instead.
+    fn listed_commands(&self, harness: &str, cwd: &Path) -> Result<Vec<SlashCommand>, RpcError> {
         #[cfg(test)]
         if let Some(commands) = self.commands_for_tests.lock().unwrap().clone() {
-            return commands;
+            return commands.ok_or_else(|| RpcError::new("unavailable", "the agent's command list could not be read"));
         }
         if harness != "claude" {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        crate::harness::claude::commands::list(cwd).unwrap_or_else(|error| {
+        crate::harness::claude::commands::list(cwd).map_err(|error| {
             log::warn!("list slash commands: {error:#}");
-            Vec::new()
+            RpcError::new("unavailable", "the agent's command list could not be read").with_data(json!({ "reason": "commands-unavailable" }))
         })
     }
 
     #[cfg(test)]
-    pub(super) fn set_commands_for_tests(&self, commands: Vec<SlashCommand>) {
+    pub(super) fn set_commands_for_tests(&self, commands: Option<Vec<SlashCommand>>) {
         *self.commands_for_tests.lock().unwrap() = Some(commands);
     }
 
