@@ -28,11 +28,13 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `composer/1` (PRO-22): `session.commands`, the slash commands an agent
  *   tab's composer offers this person;
  * - `composer/2`: `session.files`, the session's files by name, for the
- *   composer's `@` list.
+ *   composer's `@` list;
+ * - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback, for
+ *   private previews (docs/CLOUD-PREVIEWS.md). Nothing calls it yet.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "ports/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**

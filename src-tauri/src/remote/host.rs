@@ -43,6 +43,8 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
+    // Connecting to a port that does not answer takes seconds.
+    "ports.open",
     "git.push",
     "git.pull",
     "git.fetch",

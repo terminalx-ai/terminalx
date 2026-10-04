@@ -169,7 +169,9 @@ and a stopped workspace's disk is not known.
 
 - Organization teardown and the provider disconnect `archive` disposition
   have no desktop UI yet.
-- Preview routes do not exist; scoped runtime secrets are revoked by the
-  server.
+- There are no preview routes on the server. A preview is a port stream
+  inside an attached connection and ends with it
+  ([CLOUD-PREVIEWS.md](CLOUD-PREVIEWS.md)); scoped runtime secrets are
+  revoked by the server.
 - The running app has not been checked by hand (computer use is blocked on
   this Mac); the UI is verified by component tests.

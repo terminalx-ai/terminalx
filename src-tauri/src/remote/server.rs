@@ -67,7 +67,7 @@ const REPLAY_CHUNK: usize = 256 * 1024;
 const MAX_WRITERS: usize = 64;
 /// Methods a `participate` attachment could not call before PRO-30. With no
 /// member list from the API (an older API) they stay closed to it.
-const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control"];
+const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control", "ports.open", "ports.write"];
 /// Longest session title `session.update` accepts, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 /// Launch modes a tab may be given (`src/lib/models.ts` `PERMISSION_MODES`).
@@ -152,11 +152,15 @@ impl Peer {
         self.granted.lock().unwrap().as_ref().is_some_and(|granted| granted.contains(capability))
     }
 
-    fn notify(&self, event: &str, params: Value) {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(super) fn notify(&self, event: &str, params: Value) {
         self.notify_sized(event, params, 0);
     }
 
-    fn notify_sized(&self, event: &str, params: Value, size: usize) {
+    pub(super) fn notify_sized(&self, event: &str, params: Value, size: usize) {
         self.queued.fetch_add(size, Ordering::SeqCst);
         if self.outbound.send((json!({ "event": event, "params": params }), size)).is_err() {
             self.queued.fetch_sub(size, Ordering::SeqCst);
@@ -286,6 +290,8 @@ pub struct WorkspaceRpc {
     agents: OnceLock<Arc<CloudAgents>>,
     /// Connections that said hello, for workspace-wide notifications.
     peers: Mutex<HashMap<u64, Weak<Peer>>>,
+    /// Streams to the workspace's own ports (PRO-28).
+    pub(super) ports: Arc<super::ports::Ports>,
     tabs_changed: Arc<tokio::sync::Notify>,
     /// Raised when a session is created, updated or deleted; the list goes
     /// out as `session.sessions` to `session/2` connections.
@@ -332,6 +338,7 @@ impl WorkspaceRpc {
             collab: Arc::new(Collaboration::new()),
             agents: OnceLock::new(),
             peers: Mutex::new(HashMap::new()),
+            ports: Arc::new(super::ports::Ports::default()),
             tabs_changed: Arc::new(tokio::sync::Notify::new()),
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
@@ -578,6 +585,13 @@ impl WorkspaceRpc {
             }
         }
         self.revalidate_terminal_control();
+        // A participant who may no longer open a port loses their streams.
+        for peer in &self.live_peers() {
+            let access = self.access(peer);
+            if self.authority(peer) == Authority::Participate && !(access.can_drive() && access.can_configure()) {
+                self.ports.revoke(peer);
+            }
+        }
         if let Some(agents) = self.agents.get() {
             agents.revalidate_follow_ups();
             // Also after a restart, when nothing is known about the previous
@@ -726,6 +740,8 @@ impl WorkspaceRpc {
                     "maxWriteBytes": MAX_WRITE_BYTES,
                     "fsPartBytes": super::files::PART_BYTES,
                     "fsMaxFileBytes": super::files::MAX_FILE_BYTES,
+                    "portStreams": super::ports::MAX_STREAMS_PER_PEER,
+                    "portWindowBytes": super::ports::STREAM_WINDOW,
                 },
             });
             if collab {
@@ -790,6 +806,8 @@ impl WorkspaceRpc {
         }
         let needed = match method {
             "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
+            // Bytes sent to a port are input to whatever listens there.
+            "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
             _ => Role::Viewer,
         };
@@ -800,6 +818,13 @@ impl WorkspaceRpc {
         // needs (PRO-88): a manager, or a driver who may approve permissions.
         if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
             return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
+                .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
+        }
+        // A port is held to the terminal's rule (PRO-28): what listens on
+        // the workspace's loopback includes debuggers and notebooks, which
+        // run anything as the workspace's user for whoever connects.
+        if matches!(method, "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a local port can be a debugger or a notebook that runs anything"))
                 .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
         }
         if access.role >= needed {
@@ -814,6 +839,10 @@ impl WorkspaceRpc {
     }
 
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+        // Sockets, not blocking work: answered on the async runtime.
+        if method.starts_with("ports.") {
+            return self.ports.handle(peer, method, params).await;
+        }
         let rpc = self.clone();
         let peer = peer.clone();
         let method = method.to_string();
@@ -916,6 +945,7 @@ impl WorkspaceRpc {
     /// End every stream a connection opened, keeping the connection.
     fn drop_peer_subscriptions(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
+        self.ports.revoke(peer);
         let doomed: Vec<(String, Subscription)> = {
             let mut subscriptions = self.subscriptions.lock().unwrap();
             let ids: Vec<String> =
@@ -930,6 +960,7 @@ impl WorkspaceRpc {
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
+        self.ports.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {
                 agents.client_detached();
