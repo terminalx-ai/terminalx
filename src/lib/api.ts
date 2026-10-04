@@ -122,6 +122,7 @@ export interface StatsUsageState {
   generation: number;
   snapshot: StatsUsageSnapshot | null;
   activity?: AppStats | null;
+  activityError?: string | null;
   refreshing: boolean;
   error: string | null;
 }

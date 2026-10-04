@@ -19,6 +19,16 @@ const FILE: &str = "stats-activity.json";
 const BACKUP: &str = "stats-activity.backup.json";
 const MAX_EVENTS: usize = 1_000;
 const SCHEMA: u32 = 1;
+/// A valid competing owner must keep its lease; Retry can acquire it after exit.
+#[derive(Debug)]
+pub struct OwnershipConflict;
+impl std::fmt::Display for OwnershipConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Another TerminalX runtime is using activity history. Quit the other runtime, then select Retry.")
+    }
+}
+impl std::error::Error for OwnershipConflict {}
+
 static OWNER: Mutex<Option<(PathBuf, Collector)>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -70,6 +80,19 @@ impl Snapshot {
             recovery_version: 0,
             recovery_before: at,
             events: VecDeque::new(),
+        }
+    }
+
+    fn summary(&self) -> Summary {
+        Summary {
+            agents_spawned: self.agents_spawned,
+            agent_time_ms: self.agent_time_ms,
+            prs_created: self.prs.len(),
+            tracking_since: self
+                .first_activity_at
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            accounting_error: None,
         }
     }
 
@@ -141,9 +164,13 @@ impl Collector {
             options.mode(0o600);
         }
         let lease = options.open(root.join("stats-activity.lock"))?;
-        lease
-            .try_lock()
-            .context("Activity history is already owned by another app runtime")?;
+        match lease.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => bail!(OwnershipConflict),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error).context("Could not lock activity history");
+            }
+        }
         let primary = read_snapshot(&root.join(FILE));
         let backup = read_snapshot(&root.join(BACKUP));
         let mut errors = Vec::new();
@@ -208,15 +235,8 @@ impl Collector {
 
     fn summary(&self) -> Summary {
         Summary {
-            agents_spawned: self.data.agents_spawned,
-            agent_time_ms: self.data.agent_time_ms,
-            prs_created: self.data.prs.len(),
-            tracking_since: self
-                .data
-                .first_activity_at
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             accounting_error: self.error.clone(),
+            ..self.data.summary()
         }
     }
 
@@ -288,6 +308,9 @@ impl Collector {
     }
 
     fn record_pr(&mut self, url: &str, at: i64) -> Result<()> {
+        if self.stopped {
+            return Ok(());
+        }
         let key = canonical_pr(url)?;
         if self.data.prs.insert(key.clone()) {
             self.data.remember(ActivityEvent {
@@ -316,11 +339,21 @@ impl Collector {
 
 fn with_collector<T>(f: impl FnOnce(&mut Collector) -> Result<T>) -> Result<T> {
     let mut owner = OWNER.lock().unwrap_or_else(|error| error.into_inner());
-    let root = super::root()?;
+    let root = std::fs::canonicalize(super::root()?)?;
     if owner.as_ref().is_none_or(|(known, _)| *known != root) {
         *owner = Some((root.clone(), Collector::open(root, now_ms())?));
     }
     f(&mut owner.as_mut().expect("initialized activity owner").1)
+}
+
+/// Read only atomically published snapshots, without acquiring or changing the
+/// writer lease. The caller must label these counters as saved, not current.
+pub(crate) fn saved_summary(root: &Path) -> Option<Summary> {
+    [FILE, BACKUP]
+        .into_iter()
+        .filter_map(|file| read_snapshot(&root.join(file)).ok().flatten())
+        .max_by_key(|data| data.generation)
+        .map(|data| data.summary())
 }
 
 pub fn summary() -> Result<Summary> {
@@ -342,7 +375,16 @@ pub fn record_pr(url: &str) -> Result<()> {
 }
 pub fn shutdown() -> Result<()> {
     let (at, clock) = (now_ms(), std::time::Instant::now());
-    with_collector(|collector| collector.shutdown(at, clock))
+    // Shutdown must not initialize an owner (or retry a competing lease).
+    // Retain the stopped owner until process exit so late callbacks cannot
+    // reopen the store and start writing after the final flush.
+    let mut owner = OWNER.lock().unwrap_or_else(|error| error.into_inner());
+    match owner.as_mut() {
+        Some((_, collector)) if !collector.stopped || collector.dirty => {
+            collector.shutdown(at, clock)
+        }
+        _ => Ok(()),
+    }
 }
 
 pub fn report_error(message: String) {

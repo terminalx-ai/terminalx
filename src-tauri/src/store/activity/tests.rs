@@ -496,3 +496,102 @@ fn in_flight_save_cannot_overtake_shutdown() {
         data.generation
     );
 }
+
+#[test]
+fn repeated_concurrent_summary_requests_reuse_the_runtime_owner() {
+    let _home = crate::store::temp_home();
+    record_pr("https://github.com/example/synthetic/pull/1").unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..20 {
+                    assert_eq!(summary().unwrap().prs_created, 1);
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    shutdown().unwrap();
+    // Late callbacks reuse the stopped owner and cannot append new work.
+    record_pr("https://github.com/example/synthetic/pull/2").unwrap();
+    assert_eq!(summary().unwrap().prs_created, 1);
+    shutdown().unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn equivalent_root_paths_reuse_the_owner() {
+    let _home = crate::store::temp_home();
+    let root = crate::store::root().unwrap();
+    let alias_dir = tempfile::tempdir().unwrap();
+    let alias = alias_dir.path().join("alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    record_pr("https://github.com/example/synthetic/pull/1").unwrap();
+    std::env::set_var("TERMINALX_HOME", &alias);
+    let result = summary();
+    std::env::set_var("TERMINALX_HOME", &root);
+    assert_eq!(result.unwrap().prs_created, 1);
+}
+
+// Spawn this test in a separate process to exercise real runtime ownership and
+// OS lease release on abrupt exit. Only synthetic data in a temp dir is used.
+#[test]
+fn runtime_owner_child() {
+    let Some(root) = std::env::var_os("ACTIVITY_TEST_CHILD_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let mut owner = Collector::open(root.clone(), T).unwrap();
+    owner
+        .record_pr("https://github.com/example/synthetic/pull/1", T)
+        .unwrap();
+    fs::write(root.join("ready"), "ready").unwrap();
+    loop {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn competing_process_retry_recovers_after_owner_exit_and_restart() {
+    let _home = crate::store::temp_home();
+    let root = crate::store::root().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "store::activity::tests::runtime_owner_child",
+            "--nocapture",
+        ])
+        .env("ACTIVITY_TEST_CHILD_ROOT", &root)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("ready").exists() {
+        if Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child owner did not become ready");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let before = fs::read(root.join(FILE)).unwrap();
+    let attempts: Vec<_> = (0..3).map(|_| summary()).collect();
+    let saved = saved_summary(&root).unwrap();
+    let after = fs::read(root.join(FILE)).unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    for attempt in attempts {
+        assert!(attempt.unwrap_err().is::<OwnershipConflict>());
+    }
+    assert_eq!(saved.prs_created, 1);
+    assert_eq!(before, after);
+    assert_eq!(summary().unwrap().prs_created, 1);
+    shutdown().unwrap();
+    // Simulate the runtime dropping its static owner at process exit.
+    OWNER.lock().unwrap().take();
+    assert_eq!(summary().unwrap().prs_created, 1);
+}
