@@ -13,6 +13,7 @@
     "./workspace": "./src/workspace.ts",
     "./workspaceCollab": "./src/workspaceCollab.ts",
     "./workspaceFiles": "./src/workspaceFiles.ts",
-    "./workspaceGit": "./src/workspaceGit.ts"
+    "./workspaceGit": "./src/workspaceGit.ts",
+    "./workspaceMirror": "./src/workspaceMirror.ts"
   }
 }

@@ -195,6 +195,19 @@ export const api = {
   /** Check the saved key against the provider again, without entering it. */
   cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
     invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
+  // Agent logins for the organization's cloud workspaces (PRO-79). The login itself is collected in Rust
+  // (a native secure dialog, or this computer's own login) and never passes through the webview.
+  cloudAgentLogins: () => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins"),
+  cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
+    invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
+  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
+  // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
+  // The page opens in the browser; the code it shows is entered in a native dialog, never here.
+  cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
+  cloudAgentClaudeLoginOpen: (url: string) => invoke<void>("cloud_agent_claude_login_open", { url }),
+  cloudAgentClaudeLoginComplete: (attemptId: string, consent: AgentLoginConsent) =>
+    invoke<ClaudeLoginOutcome>("cloud_agent_claude_login_complete", { attemptId, consent }),
+  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string) => invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -444,6 +457,44 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+}
+
+export type AgentLoginProvider = "codex" | "claude" | "cursor";
+/** `api-key`: typed into a native secure dialog. `local-login`: the agent's own login on this computer. */
+export type AgentLoginSource = "api-key" | "local-login";
+
+/** What the service says about a stored agent login; never the login. */
+export interface AgentLogin {
+  provider: AgentLoginProvider;
+  authKind: "api-key" | "oauth-credentials-json" | (string & {});
+  fingerprint: string;
+  displayIdentity?: string;
+  version: number;
+  updatedAt: number;
+  state?: "connected" | "revoked" | "disconnected" | (string & {});
+  sharedUse?: "organization" | "managers" | (string & {});
+}
+
+export interface ClaudeLoginStarted {
+  attemptId: string;
+  authorizeUrl: string;
+  expiresInSeconds: number;
+  /** The browser was asked to open the page. */
+  opened: boolean;
+}
+
+export interface ClaudeLoginOutcome {
+  status: "complete" | "code-invalid" | "unavailable" | "pending" | "expired" | "canceled" | "failed" | (string & {});
+  credential?: AgentLogin;
+  attemptsLeft?: number;
+}
+
+export interface AgentLoginConsent {
+  contextRevision: string;
+  organizationSharing: boolean;
+  machineInstallation: boolean;
+  /** The login now stored for the agent may be replaced; required when there is one. */
+  replaceExisting: boolean;
 }
 
 export interface CloudProviderSummaryResponse {
