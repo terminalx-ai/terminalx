@@ -327,6 +327,23 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
+  // None of these takes a local path: the native side derives the mirror's
+  // directory from the two ids and only reports it back (`root`).
+  cloudMirrorStatus: (organizationId: string, workspaceId: string) => invoke<CloudMirrorStatus>("cloud_mirror_status", { organizationId, workspaceId }),
+  cloudMirrorEnable: (organizationId: string, workspaceId: string) => invoke<CloudMirrorStatus>("cloud_mirror_enable", { organizationId, workspaceId }),
+  cloudMirrorDisable: (organizationId: string, workspaceId: string, removeFiles: boolean) =>
+    invoke<CloudMirrorStatus>("cloud_mirror_disable", { organizationId, workspaceId, removeFiles }),
+  cloudMirrorCheck: (organizationId: string, workspaceId: string) =>
+    invoke<{ diverged: CloudMirrorDivergence[]; divergedTotal: number }>("cloud_mirror_check", { organizationId, workspaceId }),
+  cloudMirrorPlan: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput) =>
+    invoke<CloudMirrorPlan>("cloud_mirror_plan", { organizationId, workspaceId, manifest }),
+  cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, etag: string) =>
+    invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, etag }),
+  cloudMirrorPublish: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, etags: Record<string, string>) =>
+    invoke<CloudMirrorPublished>("cloud_mirror_publish", { organizationId, workspaceId, manifest, etags }),
+  cloudMirrorResolve: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, resolution: "discard" | "export") =>
+    invoke<{ paths: number; exportedTo: string | null }>("cloud_mirror_resolve", { organizationId, workspaceId, manifest, resolution }),
   /** The person's global Git identity; it authors their commits in cloud workspaces. */
   gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
@@ -400,6 +417,60 @@ export interface CloudCatalogFeed {
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
+export interface CloudMirrorRepository {
+  repo: string;
+  branch: string | null;
+  head: string | null;
+}
+
+/** The last sync that was published in full. */
+export interface CloudMirrorRevision {
+  manifestId: string;
+  atMs: number;
+  files: number;
+  bytes: number;
+  repositories: CloudMirrorRepository[];
+}
+
+export interface CloudMirrorStatus {
+  enabled: boolean;
+  /** Where the mirrored files are on this computer. For display and "show in folder" only. */
+  root: string;
+  revision: CloudMirrorRevision | null;
+  files: number;
+}
+
+export interface CloudMirrorDivergence {
+  path: string;
+  reason: "modified" | "deleted" | "replaced" | "in-the-way";
+}
+
+export interface CloudMirrorManifestInput {
+  manifestId: string;
+  repositories: CloudMirrorRepository[];
+  entries: { path: string; size: number; version: string; executable: boolean }[];
+  truncated: boolean;
+}
+
+export interface CloudMirrorPlan {
+  fetch: string[];
+  fetchBytes: number;
+  remove: number;
+  unchanged: number;
+  diverged: CloudMirrorDivergence[];
+  divergedTotal: number;
+  refused: number;
+  upToDate: boolean;
+}
+
+export interface CloudMirrorPublished {
+  status: CloudMirrorStatus;
+  diverged: CloudMirrorDivergence[];
+  divergedTotal: number;
+  written: number;
+  removed: number;
+}
+
 export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";

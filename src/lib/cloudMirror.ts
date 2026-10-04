@@ -1,0 +1,283 @@
+import { useSyncExternalStore } from "react";
+import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { readRemoteFile } from "@terminalx/portable/workspaceFiles";
+import { readMirrorManifest, type MirrorManifest } from "@terminalx/portable/workspaceMirror";
+import { api, type CloudMirrorDivergence, type CloudMirrorManifestInput, type CloudMirrorRevision } from "@/lib/api";
+import { connectedCloudClient, onCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
+import { cloudWorkspaceKey } from "@/types/target";
+
+/**
+ * The sync loop of a cloud workspace's local mirror (PRO-25,
+ * docs/CLOUD-MIRROR.md): a one-way copy of the workspace's files into a
+ * directory the app owns.
+ *
+ * It never opens anything. It runs on a connection that is already open for
+ * another reason (`onCloudConnected`) and stops when that connection goes
+ * away. It takes no connection lease, so it neither wakes a stopped
+ * workspace nor keeps a running one's connection open; a workspace that is
+ * not connected is `paused`.
+ *
+ * What it sends to the workspace is `mirror.manifest` (an id and a cursor)
+ * and `fs.read` (workspace-relative paths). The mirror's local directory is
+ * known only to the native side, which reports it back for the UI.
+ */
+
+export type CloudMirrorPhase =
+  /** Not turned on for this workspace on this computer. */
+  | "off"
+  /** On, but the workspace is not connected: nothing is read until it is. */
+  | "paused"
+  /** On and connected; the first scan has not started. */
+  | "queued"
+  | "syncing"
+  | "synced"
+  | "failed"
+  /** Local changes: nothing is written until the person resolves them. */
+  | "diverged"
+  /** The workspace's runtime is from before mirrors. */
+  | "unsupported";
+
+export interface CloudMirrorState {
+  phase: CloudMirrorPhase;
+  /** Where the files are on this computer, once known. */
+  root: string | null;
+  /** The last sync published in full. Kept through failures and divergence. */
+  revision: CloudMirrorRevision | null;
+  progress: { files: number; totalFiles: number; bytes: number; totalBytes: number } | null;
+  diverged: CloudMirrorDivergence[];
+  divergedTotal: number;
+  error: string | null;
+  /** Files the workspace has that the mirror leaves out, by reason. */
+  skipped: Record<string, number> | null;
+}
+
+const OFF: CloudMirrorState = { phase: "off", root: null, revision: null, progress: null, diverged: [], divergedTotal: 0, error: null, skipped: null };
+
+/** A scan when the workspace connects, then one this often while it stays connected. */
+export const MIRROR_SCAN_MS = 30_000;
+
+interface Running {
+  client: WorkspaceRpcClient;
+  timer: ReturnType<typeof setInterval>;
+  abort: AbortController;
+  scanning: Promise<void> | null;
+  /** The manifest the last plan was made for, for `resolve`. */
+  manifest: CloudMirrorManifestInput | null;
+}
+
+const states = new Map<string, CloudMirrorState>();
+const running = new Map<string, Running>();
+const listeners = new Set<() => void>();
+
+function publish(key: string, patch: Partial<CloudMirrorState>) {
+  states.set(key, { ...(states.get(key) ?? OFF), ...patch });
+  for (const listener of listeners) listener();
+}
+
+export function cloudMirrorState(key: string): CloudMirrorState {
+  return states.get(key) ?? OFF;
+}
+
+export function subscribeCloudMirrors(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function useCloudMirror(orgId: string, workspaceId: string): CloudMirrorState {
+  const key = cloudWorkspaceKey(orgId, workspaceId);
+  return useSyncExternalStore(subscribeCloudMirrors, () => cloudMirrorState(key), () => OFF);
+}
+
+function messageOf(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && "message" in error && typeof (error as { message: unknown }).message === "string") return (error as { message: string }).message;
+  return "The mirror could not be updated.";
+}
+
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunk) binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  return btoa(binary);
+}
+
+function inputOf(manifest: MirrorManifest): CloudMirrorManifestInput {
+  return { manifestId: manifest.manifestId, repositories: manifest.repositories, entries: manifest.entries, truncated: manifest.truncated };
+}
+
+/** One scan: read the manifest, and bring the mirror to it unless something local diverged. */
+async function scan(target: CloudTarget, run: Running): Promise<void> {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  const { orgId, workspaceId } = target;
+  const { signal } = run.abort;
+  try {
+    if (!run.client.hasCapability("mirror/1")) {
+      publish(key, { phase: "unsupported", progress: null, error: null });
+      return;
+    }
+    const manifest = await readMirrorManifest(run.client, { signal });
+    if (signal.aborted) return;
+    const input = inputOf(manifest);
+    run.manifest = input;
+    const skipped = { ...manifest.skipped };
+    if (manifest.truncated) {
+      publish(key, { phase: "failed", progress: null, skipped, error: "The workspace has more files than a mirror holds (50,000). Exclude folders in .terminalx-mirror-ignore." });
+      return;
+    }
+    // The workspace has not changed since the last published sync: only
+    // local changes can matter, and those need no manifest.
+    if (cloudMirrorState(key).revision?.manifestId === manifest.manifestId) {
+      const local = await api.cloudMirrorCheck(orgId, workspaceId);
+      if (signal.aborted) return;
+      if (local.divergedTotal > 0) publish(key, { phase: "diverged", progress: null, diverged: local.diverged, divergedTotal: local.divergedTotal, skipped, error: null });
+      else publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, skipped, error: null });
+      return;
+    }
+    const plan = await api.cloudMirrorPlan(orgId, workspaceId, input);
+    if (signal.aborted) return;
+    if (plan.divergedTotal > 0) {
+      publish(key, { phase: "diverged", progress: null, diverged: plan.diverged, divergedTotal: plan.divergedTotal, skipped, error: null });
+      return;
+    }
+    if (plan.upToDate) {
+      publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, skipped, error: null });
+      return;
+    }
+    const etags: Record<string, string> = {};
+    let bytes = 0;
+    publish(key, { phase: "syncing", diverged: [], divergedTotal: 0, skipped, error: null, progress: { files: 0, totalFiles: plan.fetch.length, bytes: 0, totalBytes: plan.fetchBytes } });
+    for (const [index, path] of plan.fetch.entries()) {
+      const file = await readRemoteFile(run.client, path, { signal });
+      if (signal.aborted) return;
+      await api.cloudMirrorStage(orgId, workspaceId, path, base64(file.bytes), file.etag);
+      etags[path] = file.etag;
+      bytes += file.bytes.length;
+      publish(key, { progress: { files: index + 1, totalFiles: plan.fetch.length, bytes, totalBytes: plan.fetchBytes } });
+    }
+    if (signal.aborted) return;
+    const published = await api.cloudMirrorPublish(orgId, workspaceId, input, etags);
+    if (published.divergedTotal > 0) {
+      publish(key, { phase: "diverged", progress: null, diverged: published.diverged, divergedTotal: published.divergedTotal, revision: published.status.revision });
+      return;
+    }
+    publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, revision: published.status.revision, root: published.status.root, error: null });
+  } catch (error) {
+    if (signal.aborted) return;
+    // The last successful revision stays: a failed sync changed nothing that was published.
+    publish(key, { phase: "failed", progress: null, error: messageOf(error) });
+  }
+}
+
+function scanNow(target: CloudTarget, run: Running): Promise<void> {
+  // One scan at a time per workspace; a tick during a scan is dropped.
+  run.scanning ??= scan(target, run).finally(() => {
+    run.scanning = null;
+  });
+  return run.scanning;
+}
+
+function stop(key: string) {
+  const run = running.get(key);
+  if (!run) return;
+  clearInterval(run.timer);
+  run.abort.abort();
+  running.delete(key);
+}
+
+/** Start syncing on a connection that is already open. Never opens one. */
+function start(target: CloudTarget, client: WorkspaceRpcClient) {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  stop(key);
+  const run: Running = { client, abort: new AbortController(), scanning: null, manifest: null, timer: setInterval(() => void scanNow(target, run), MIRROR_SCAN_MS) };
+  running.set(key, run);
+  publish(key, { phase: "queued", error: null });
+  void scanNow(target, run);
+}
+
+/** A workspace connected (for whatever reason someone opened it): sync if its mirror is on. */
+function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => void {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  let gone = false;
+  // From a microtask: a failure here must never reach the connection that is being announced.
+  void Promise.resolve()
+    .then(() => api.cloudMirrorStatus(target.orgId, target.workspaceId))
+    .then((status) => {
+      if (gone) return;
+      publish(key, { root: status.root, revision: status.revision, phase: status.enabled ? "paused" : "off" });
+      if (status.enabled) start(target, client);
+    })
+    .catch(() => {
+      /* No mirror to speak of: stays off. */
+    });
+  return () => {
+    gone = true;
+    if (running.has(key)) {
+      stop(key);
+      publish(key, { phase: "paused", progress: null });
+    }
+  };
+}
+
+let booted: (() => void) | null = null;
+
+/** Follow every workspace connection for the life of the app. Idempotent. */
+export function bootCloudMirrors(): void {
+  booted ??= onCloudConnected(onConnected);
+}
+
+/** What the mirror of a workspace is, read from disk; starts nothing and connects to nothing. */
+export async function loadCloudMirror(target: CloudTarget): Promise<CloudMirrorState> {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  const status = await api.cloudMirrorStatus(target.orgId, target.workspaceId);
+  if (!running.has(key)) publish(key, { root: status.root, revision: status.revision, phase: status.enabled ? "paused" : "off" });
+  else publish(key, { root: status.root, revision: status.revision });
+  return cloudMirrorState(key);
+}
+
+/**
+ * Turn the mirror on or off. Turning it on syncs only if the workspace is
+ * connected right now; otherwise it waits, paused, until someone opens it.
+ */
+export async function setCloudMirrorEnabled(target: CloudTarget, enabled: boolean, options: { removeFiles?: boolean } = {}): Promise<void> {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  if (!enabled) {
+    stop(key);
+    const status = await api.cloudMirrorDisable(target.orgId, target.workspaceId, options.removeFiles === true);
+    publish(key, { ...OFF, root: status.root, revision: status.revision });
+    return;
+  }
+  const status = await api.cloudMirrorEnable(target.orgId, target.workspaceId);
+  publish(key, { root: status.root, revision: status.revision, phase: "paused", error: null });
+  const client = connectedCloudClient(key);
+  if (client) start(target, client);
+}
+
+/** Scan now, if the workspace is connected. Opens nothing. */
+export async function syncCloudMirrorNow(target: CloudTarget): Promise<void> {
+  const run = running.get(cloudWorkspaceKey(target.orgId, target.workspaceId));
+  if (run) await scanNow(target, run);
+}
+
+/**
+ * The person's answer to a divergence: replace the divergent local paths
+ * with the workspace's versions, keeping their local versions aside first
+ * for `export`. Returns where they were kept.
+ */
+export async function resolveCloudMirror(target: CloudTarget, resolution: "discard" | "export"): Promise<string | null> {
+  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
+  const run = running.get(key);
+  if (!run?.manifest) throw new Error("Open the workspace to resolve its mirror: the workspace's current files are needed.");
+  await run.scanning;
+  const resolved = await api.cloudMirrorResolve(target.orgId, target.workspaceId, run.manifest, resolution);
+  await scanNow(target, run);
+  return resolved.exportedTo;
+}
+
+/** For tests. */
+export function resetCloudMirrors(): void {
+  for (const key of [...running.keys()]) stop(key);
+  booted?.();
+  booted = null;
+  states.clear();
+  for (const listener of listeners) listener();
+}

@@ -15,7 +15,7 @@ listed below, and only as of the last successful sync.
 | The file set: `mirror/1`, `mirror.manifest` | `src-tauri/src/remote/mirror.rs`, `src-tauri/src/mirror_rules.rs` | built |
 | Reading the manifest on the client | `packages/portable/src/workspaceMirror.ts` | built |
 | Writing the mirror: staging, verify, publish, divergence, discard and export | `src-tauri/src/cloud_mirror.rs`, the `cloud_mirror_*` commands | built |
-| The sync loop, the opt-in, states and labels in the UI | desktop, TypeScript | next PR |
+| The sync loop, the opt-in, states and labels in the UI | `src/lib/cloudMirror.ts`, `src/components/cloud/CloudMirrorDialog.tsx` | built |
 
 ## Direction
 
@@ -100,7 +100,7 @@ sync makes are `mirror.manifest { manifestId, cursor }` and
 `fs.read { path, offset, version }` with workspace-relative paths. The
 mirror's location exists only in the desktop's native side and its UI.
 
-## When it syncs: never by waking compute (next PR)
+## When it syncs: never by waking compute
 
 - A sync runs only on a connection that is **already open** for another
   reason (the person has the workspace open). It subscribes to
@@ -112,7 +112,13 @@ mirror's location exists only in the desktop's native side and its UI.
   are not activity, and with no lease of its own the connection still closes
   when the person leaves.
 - On connect it scans once, then every 30 seconds while connected. An
-  unchanged workspace answers the same `manifestId` and nothing is read.
+  unchanged workspace answers the same `manifestId` and nothing is read;
+  only local changes are checked, which asks the workspace nothing.
+- Turning the mirror on while the workspace is not connected copies nothing:
+  it stays paused until someone opens the workspace.
+- `src/lib/cloudMirror.ts` imports neither `retainCloudConnection` nor
+  `wakeCloudConnection`. Its tests fail if either is called, and check that
+  no timer is left once the connection is gone.
 
 ## How a sync is applied
 
@@ -170,12 +176,29 @@ nothing by itself.
 - Turning the mirror off keeps the files. Removing the local copy is a
   separate, explicit choice, and it keeps `exports/`.
 
-## Labels (next PR)
+## In the app
 
-Terminals are labelled by where they run: a local terminal opened in the
-mirror runs on this computer; a cloud terminal runs in the workspace. The
-"Synced" badge says files only: it never implies that anything runs locally
-or that the workspace is backed up.
+- **Opt-in:** the workspace menu on a cloud session's location chip has
+  "Local mirror…". The dialog says what the mirror is and is not, and has
+  "Turn on for this computer". Off is the default, per workspace, per device.
+- **State:** off, paused, waiting, copying (files so far), synced, failed
+  (with the reason), local changes, or "runtime too old". The last
+  successful revision stays on screen through a failure or a divergence:
+  time, file count and size, and each repository's branch and commit "with
+  the workspace's uncommitted files".
+- **Divergence:** the divergent paths with what happened to each, and two
+  buttons: "Keep a copy, then use the workspace's files" and "Discard my
+  changes". Opening the dialog resolves nothing.
+- **Off and remove:** "Turn off" keeps the files. "Remove local copy…" asks
+  again, says that files the person added to the folder go too, and keeps
+  the copies made when resolving.
+- **Badge:** a chip in the session header, absent while the mirror is off.
+  It says "Files mirrored" and its tooltip "A copy of files only; commands
+  still run in the cloud workspace, and it is not a backup." It never says
+  synced without "files", and never anything about running locally.
+- **Terminals by location:** the new-tab menu says "Terminal · on this
+  computer" in a local session and "Terminal · on the VM" in a cloud one.
+  A terminal tab's own title is unchanged.
 
 ## Tests
 
@@ -188,6 +211,13 @@ or that the workspace is backed up.
 - `src-tauri/src/mirror_rules.rs`: the secret names.
 - `packages/portable/src/workspaceMirror.test.ts`: paging, restart, an
   incomplete or escaping manifest refused, a runtime without `mirror/1`.
+- `src/lib/cloudMirror.test.ts`: off does nothing; sync on connect and
+  every 30 s; no connection opened and no wake; only a manifest request and
+  relative paths are sent; divergence stops and resumes only on the person's
+  answer; a failure keeps the last revision and retries; an old runtime.
+- `src/components/cloud/CloudMirrorDialog.test.tsx`: the opt-in and its
+  wording, the revision, divergence resolved only by choice, off against
+  remove, the chip's wording.
 - `src-tauri/src/cloud_mirror_tests.rs`: a first sync; remote create, edit
   and delete with local-only files left alone; content verified before
   anything moves; an interrupted publish finished by the next sync; local

@@ -80,8 +80,8 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
           {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
         </DropdownMenuItem>)}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)}>
-          <TerminalSquare /><span>Terminal</span>
+        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)} aria-label="Terminal on this computer">
+          <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on this computer</span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
           <Globe /><span>Browser</span>

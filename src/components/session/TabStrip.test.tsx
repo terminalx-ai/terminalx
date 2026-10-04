@@ -131,8 +131,8 @@ describe("mixed session tab actions", () => {
     expect(peerOrder(session, mocks.panes).map((tab) => tab.id)).toEqual(["agent-1", "shell-1", "agent-2"]);
     expect(screen.queryByRole("tablist", { name: "Session tabs" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New terminal" })).toBeNull();
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Claude", "Codex", "Terminal", "Browser"]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Terminal" }));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Claude", "Codex", "Terminalon this computer", "Browser"]);
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Terminal/ }));
     expect(mocks.openTerminal).toHaveBeenCalledWith("session-1", "/repo");
     fireEvent.click(screen.getByRole("menuitem", { name: "Browser" }));
     expect(mocks.openBrowserTab).toHaveBeenCalledWith("session-1", "/repo");
