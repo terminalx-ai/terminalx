@@ -55,8 +55,8 @@ describe("a paired computer's name", () => {
   });
 
   it("keeps its cleaning rule readable: the pattern is written with escapes, not invisible characters", async () => {
-    const { readFileSync } = await import("node:fs");
-    const source = readFileSync(new URL("./host-name.ts", import.meta.url), "utf8");
+    // The module's own text, through the bundler: it resolves the same way wherever the suite is run from.
+    const { default: source } = await import("./host-name.ts?raw");
     expect([...source].filter((c) => { const o = c.codePointAt(0)!; return (o < 0x20 && c !== "\n") || (o >= 0x7f && o <= 0x9f) || (o >= 0x200b && o <= 0x200f) || (o >= 0x202a && o <= 0x202e) || (o >= 0x2060 && o <= 0x2069) || o === 0xfeff; })).toEqual([]);
   });
 
