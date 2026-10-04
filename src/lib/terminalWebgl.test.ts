@@ -58,6 +58,22 @@ beforeEach(() => {
 });
 
 describe("WebGL contexts", () => {
+  it("releases a context allocated by an addon whose activation fails", async () => {
+    vi.useFakeTimers();
+    const { webgl, counters } = await load();
+    const a = terminal();
+    const activate = a.loads.getMockImplementation()!;
+    a.loads.mockImplementationOnce(() => { activate(); throw new Error("activation failed"); });
+    webgl.showWebgl(a.term);
+    expect(addons.made[0].disposed).toBe(true);
+    expect(a.loseContext).toHaveBeenCalledOnce();
+    expect(counters.rendererOf(a.term)).toBe("dom");
+    expect(counters.webglContexts.failed).toBe(1);
+    vi.advanceTimersByTime(30_000);
+    expect(counters.rendererOf(a.term)).toBe("webgl");
+    webgl.dropWebgl(a.term);
+  });
+
   it("gives a terminal a context when it is shown and releases it for good when the terminal goes", async () => {
     const { webgl, counters } = await load();
     const a = terminal();
@@ -189,5 +205,22 @@ describe("WebGL contexts", () => {
     webgl.showWebgl(term);
     expect(counters.rendererOf(term)).toBe("webgl");
     expect(counters.webglRefused()).toBe(false);
+  });
+
+  it("retries a refused context without a tab switch and cancels retries when closed", async () => {
+    vi.useFakeTimers();
+    const { webgl, counters } = await load();
+    addons.refuse = true;
+    const { term } = terminal();
+    webgl.showWebgl(term);
+    addons.refuse = false;
+    vi.advanceTimersByTime(30_000);
+    expect(counters.rendererOf(term)).toBe("webgl");
+    addons.made.at(-1)!.lose();
+    expect(vi.getTimerCount()).toBe(1);
+    webgl.dropWebgl(term);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(30_000);
+    expect(counters.rendererOf(term)).toBe("dom");
   });
 });

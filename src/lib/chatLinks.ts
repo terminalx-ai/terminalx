@@ -165,8 +165,8 @@ function canOpenInternally(info: LocalPathInfo): boolean {
 /** The default route for one real click/keyboard activation. */
 export async function openChatLink(destination: ChatLinkDestination, context: ChatLinkContext): Promise<void> {
   if (destination.kind === "web") {
-    if (getPrefs().linkBrowser === "system") await openUrl(destination.href);
-    else await openBrowserTab(context.sessionId, context.cwd, destination.href);
+    if (getPrefs().linkBrowser === "terminalx") await openBrowserTab(context.sessionId, context.cwd, destination.href);
+    else await openUrl(destination.href);
     return;
   }
   if (destination.kind === "application") {
