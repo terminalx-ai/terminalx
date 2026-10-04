@@ -194,8 +194,9 @@ export const api = {
     invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input, orgId: orgId ?? null }),
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input, orgId: orgId ?? null }),
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) =>
-    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
+  /** `agent`: the one a first prompt would go to; the answer then says whether the organization has a login for it. */
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null, agent?: string | null) =>
+    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null, agent: agent ?? null }),
   cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
   cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
   /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
@@ -403,7 +404,7 @@ export interface CloudCatalogFeed {
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
-export type CloudWorkspaceProviderId = "machine0" | "box" | "local-docker";
+export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -592,7 +593,8 @@ export interface CloudWorkspaceDisposition {
   activeOperation: { id: string; action: string; state: string } | null;
   runtime: { reporting: boolean; reportedAt: number | null; stale: boolean; activeTurns: number; pendingApprovals: number };
   attachedClients: number;
-  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string };
+  /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
+  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
   /** The periods an archive may ask for instead; absent or empty from a server that takes no choice. */
   archiveRetentionChoices?: number[];
@@ -680,8 +682,10 @@ export interface CloudWorkspaceOperation {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
     occurredAt: number;
   }[] | null;
-  /** An archive's final checkpoint (§10.3). */
+  /** A stop's or an archive's final checkpoint (§10.3). */
   checkpoint?: "committed" | "failed" | "timed-out" | "skipped" | (string & {}) | null;
+  /** When the runtime reported it; absent when it never answered. */
+  checkpointAt?: number | null;
   cleanup?: CloudWorkspaceCleanup | null;
 }
 
@@ -741,6 +745,8 @@ export interface CloudWorkspacePreflight {
   checks: {
     kind: string;
     cloneUrl: string | null;
+    /** On an `agent-credential` check from an API that answers per agent: the agent it is about. */
+    agent?: string | null;
     status: "verified" | "failed";
     errorCode: string | null;
     retryable: boolean;

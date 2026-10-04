@@ -13,7 +13,7 @@ vi.mock("expo-camera", () => ({
   useCameraPermissions: () => [{ granted: true }, vi.fn()],
   CameraView: (props: any) => { mocks.camera = props; return <div data-camera />; },
 }));
-vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X"].map((name) => [name, () => null])));
+vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "MoreVertical", "QrCode", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
   const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
   return {

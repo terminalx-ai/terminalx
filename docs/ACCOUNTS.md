@@ -362,6 +362,40 @@ reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
 authenticated device then appears in Settings → Devices; use Revoke to remove
 the row, close its live connection, and let the script finish.
 
+## What a paired computer is called on the phone (PRO-87)
+
+The phone shows a paired computer by its own name instead of "Paired Mac".
+
+- **With the pairing link.** The desktop appends its name to the link as a
+  second query parameter: `terminalx://pair?code=<offer>&name=<name>`. It is
+  deliberately not a field of the offer: phones parse the offer strictly, so
+  a new field would make every phone build before this one refuse to pair,
+  while an extra parameter is simply not read by them. A code pasted without
+  the link has no name.
+- **On every connection.** The phone asks `host.describe` and stores the
+  answer (`{ "name": … }`). That gives an entry paired as "Paired Mac" its
+  real name without pairing again, and follows a computer renamed in System
+  Settings. A desktop that predates the method refuses it and the fallback
+  stays.
+- The name is the macOS computer name (`scutil --get ComputerName`); the host
+  name on other systems.
+- A name typed on the phone (device menu → Rename) wins over the computer's
+  and is kept through reconnects, renames of the computer and app restarts;
+  clearing it goes back to the computer's name. It is local to the phone.
+- A name is a label from another device: both sides strip control and
+  invisible formatting characters, collapse whitespace and cap it at 64
+  characters, and nothing identifies or authenticates by it. Two computers
+  with the same name are told apart on the phone by a short ending of their
+  ids.
+
+**Unpairing from the phone.** The device menu's Remove asks the connected
+computer to drop this phone (`pairing.forget`) and then forgets the computer
+on the phone whatever the answer. `pairing.forget` takes no argument and
+revokes only the device the connection authenticated as, so a phone can
+unpair itself and nothing else. A computer the phone is not connected to
+cannot be asked; its entry stays in the desktop's Settings → Devices until
+it is revoked there.
+
 ## Cloud diagnostics and export
 
 **Contract:** `GET /v1/desktop/orgs/:orgId/cloud-diagnostics?windowDays=1..30`

@@ -32,11 +32,13 @@ import type { CloudSessionModel } from "@/lib/cloudSession";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
+import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { lastSavedText } from "@/lib/cloudLifecycle";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { useAccount } from "@/lib/account";
@@ -151,6 +153,17 @@ function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
   if (tab) return tab.title?.trim() || cloudAgentLabel(tab.harness);
   const terminal = cloud.terminals.find((candidate) => candidate.ptyId === tabId || candidate.id === tabId);
   return terminal ? `Terminal ${terminal.number}` : null;
+}
+
+/** When a stopped workspace was last saved, as its stop reported it (PRO-33). */
+function CloudLastSaved({ cloud }: { cloud: CloudSessionModel }) {
+  const item = findCloudWorkspace(useCloudCatalog(), cloud.orgId, cloud.workspaceId);
+  const saved = item ? lastSavedText(item) : null;
+  return saved ? (
+    <span className="max-w-md px-6 text-center text-xs text-faint" data-testid="cloud-last-saved">
+      {saved}
+    </span>
+  ) : null;
 }
 
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
@@ -468,6 +481,7 @@ export function SessionView({
             </WithTooltip>
           </div>
         </header>
+        {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress" || t.status === "waiting")} />}
 
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
@@ -561,6 +575,7 @@ export function SessionView({
                         <span className="text-xs text-faint">
                           {cloud.backend.readOnlyReason ? "Its saved conversations appear here; nothing runs while it is stopped." : "Its saved conversations appear here; nothing runs until you send a message."}
                         </span>
+                        <CloudLastSaved cloud={cloud} />
                       </>
                     ) : !cloud.connected ? (
                       <span data-testid="cloud-session-loading">Loading the session…</span>

@@ -149,21 +149,45 @@ describe("CloudWorkspaceLifecycleDialog", () => {
   it("pushes a repository's commits from the dialog, then reads what is still at risk (PRO-34)", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
     const workspace = item("ready");
-    const { check, push } = renderDialog(workspace, "archive", dirty);
+    // Unpublished work, and nothing running that would need its own confirmation.
+    const idle: RuntimeCheck = { kind: "checked", facts: { ...(dirty as Extract<RuntimeCheck, { kind: "checked" }>).facts, activeTasks: [], runningProcesses: 0 } };
+    const { check, push } = renderDialog(workspace, "archive", idle);
     await screen.findByText(/2 unpushed commits/);
+    expect(button(/Archive workspace/).disabled).toBe(false);
     // Only a repository with commits to publish offers a push.
     expect(screen.getAllByRole("button", { name: /^Push / })).toHaveLength(1);
     expect(screen.getByTestId("cloud-lifecycle-export").textContent).toMatch(/Uncommitted files need a commit, or a copy/);
     expect(check).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "Push site" }));
-    await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
-    expect(push).toHaveBeenCalledWith(workspace.workspace, "site");
-
+    // A push that fails says why, changes nothing and does not read again.
     push.mockRejectedValueOnce(new Error("GitHub refused the push."));
     fireEvent.click(screen.getByRole("button", { name: "Push site" }));
     expect((await screen.findByRole("alert")).textContent).toBe("GitHub refused the push.");
-    // A push that failed changes nothing and does not read again.
-    expect(check).toHaveBeenCalledTimes(2);
+    expect(check).toHaveBeenCalledTimes(1);
+
+    // While a push is out the action waits for it.
+    let finish = () => {};
+    push.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)));
+    fireEvent.click(screen.getByRole("button", { name: "Push site" }));
+    await waitFor(() => expect(button(/Archive workspace/).disabled).toBe(true));
+    finish();
+    await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+    expect(push).toHaveBeenLastCalledWith(workspace.workspace, "site");
+    // Pushed here: not offered again, even if the facts still count commits (a differently named upstream).
+    expect(screen.queryByRole("button", { name: "Push site" })).toBeNull();
+    expect(screen.getByText("Pushed")).toBeTruthy();
+    await waitFor(() => expect(button(/Archive workspace/).disabled).toBe(false));
+  });
+
+  it("does not offer a push for a detached HEAD, which has no branch to push", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const detached: RuntimeCheck = {
+      kind: "checked",
+      facts: { v: 1, repositories: [{ path: "site", branch: null, dirtyFiles: 0, untrackedFiles: 0, unpushedCommits: null, hasUpstream: false, localOnlyCommits: 2, openPullRequests: [] }], activeTasks: [], runningProcesses: 0, observedAt: 1 },
+    };
+    renderDialog(item("ready"), "archive", detached);
+    await screen.findByText(/2 commits on no remote branch/);
+    expect(screen.queryByRole("button", { name: /^Push / })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open workspace" })).toBeTruthy();
   });
 
   it("offers to archive instead of deleting unpublished work", async () => {
@@ -217,6 +241,37 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     fireEvent.click(button(/Stop workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(mocked.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1", null);
+  });
+
+  it("the Stop dialog names what the provider's resume brings back (PRO-33)", async () => {
+    const undo = () => screen.getByTestId("cloud-lifecycle-undo").textContent;
+    // Boat: a cold boot; what runs now is lost.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: false } }));
+    renderDialog(item("ready"), "stop", clean);
+    // Nothing is claimed before the server has answered.
+    expect(undo()).toBe("Resume at any time.");
+    await waitFor(() => expect(undo()).toMatch(/Boat starts the machine again from its disk \(a cold boot\).*programs and terminals that are running now do not/));
+    cleanup();
+
+    // A provider that freezes the machine: a warm reconnect.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(
+      disposition({ provider: "local-docker", providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: true } }),
+    );
+    renderDialog(item("ready", { provider: "local-docker" }), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/Local Docker freezes the machine as it is.*continue where they were/));
+    cleanup();
+
+    // An older server does not say: neither is promised.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    cleanup();
+
+    // The facts could not be read: the same caution, and Stop still works.
+    mocked.cloudWorkspaceDisposition.mockRejectedValue({ code: "cloud_workspace_unavailable" });
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    expect(button(/Stop workspace/).hasAttribute("disabled")).toBe(false);
   });
 
   it("switching to delete says it cannot be undone and needs an explicit acknowledgement", async () => {

@@ -64,6 +64,7 @@ const { CloudWorkspaceMain } = await import("@/components/cloud/CloudWorkspaceMa
 const catalog = await import("@/lib/cloudCatalog");
 const sessions = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
+const { dateTimeText } = await import("@/lib/cloudLifecycle");
 
 const ORG = "org-a";
 const repositories = [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true }];
@@ -284,6 +285,16 @@ describe("organization sections", () => {
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
     expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
     expect(connection.activate).not.toHaveBeenCalled();
+  });
+
+  it("a stopped workspace says when it was last saved, from its stop (PRO-33)", async () => {
+    const at = Date.UTC(2026, 9, 3, 12, 30);
+    const stop = { id: "op-s", workspaceId: "perf-sweep", action: "suspend", type: "create", state: "succeeded", stage: "ready", cancelable: false, createdAt: 1, updatedAt: 2, checkpoint: "committed", checkpointAt: at };
+    await catalog.ingestCloudList({ workspaces: [{ ...list.workspaces[1], latestOperation: stop } as CloudWorkspaceListItem] }, ORG);
+    render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:perf-sweep`} sidebarOpen onToggleSidebar={() => undefined} />);
+    await screen.findByTestId("workspace-view");
+    expect(screen.getByTestId("cloud-last-saved").textContent).toContain(`Last saved ${dateTimeText(at)}.`);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
   });
 
   it("Retry delete that the server refuses for running work opens the delete dialog instead of doing nothing (PRO-68 review)", async () => {

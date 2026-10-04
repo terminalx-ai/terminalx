@@ -27,8 +27,9 @@ use super::files::WorkspaceFiles;
 use super::git::WorkspaceGit;
 use super::collab::{self, Access, Change, Collaboration, LeaseRefusal, Role};
 use super::protocol::{self, Authority, IdempotencyCache, RpcError, PROTOCOL};
-use crate::cloud_agents::CloudAgents;
+use crate::cloud_agents::{slash, CloudAgents};
 use crate::events::AgentEvent;
+use crate::harness::claude::commands::SlashCommand;
 use crate::pty::{PaneSpec, PtyData, PtyExit, Terminals};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
@@ -39,6 +40,11 @@ pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
 const PTY_RING_BYTES: usize = 1024 * 1024;
 const PTY_PREFIX: &str = "remote-pty-";
+/// `session.files`: how long a query may be, and how many hits it answers.
+const MAX_FILE_QUERY_BYTES: usize = 400;
+const DEFAULT_FILE_HITS: usize = 30;
+const MAX_FILE_HITS: usize = 50;
+
 /// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
 /// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
 const AGENT_PTY_PREFIX: &str = "tab:";
@@ -287,6 +293,8 @@ pub struct WorkspaceRpc {
     /// Stands in for `harness::offered` in tests, which cannot install agents.
     #[cfg(test)]
     offered_for_tests: Mutex<Option<Vec<crate::harness::HarnessInfo>>>,
+    #[cfg(test)]
+    commands_for_tests: Mutex<Option<Vec<SlashCommand>>>,
     /// Terminal input this runtime counted as use of the workspace (the
     /// process-wide activity flag is shared by every test).
     #[cfg(test)]
@@ -328,6 +336,8 @@ impl WorkspaceRpc {
             sessions_changed: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             offered_for_tests: Mutex::new(None),
+            #[cfg(test)]
+            commands_for_tests: Mutex::new(None),
             #[cfg(test)]
             input_activity: AtomicUsize::new(0),
         });
@@ -584,17 +594,17 @@ impl WorkspaceRpc {
         self.tabs_changed.notify_one();
     }
 
-    /// A participant who may no longer drive loses the terminals they
-    /// control; everyone watching is told.
+    /// A participant who may no longer type into terminals (no longer a
+    /// driver, or no longer an approver) loses the ones they control;
+    /// everyone watching is told.
     fn revalidate_terminal_control(&self) {
         let mut released = Vec::new();
         let mut ptys = self.ptys.lock().unwrap();
         for (pty_id, pty) in ptys.iter_mut() {
             let Some((user, authority)) = pty.controller_user.clone() else { continue };
-            let access = self.collab.access_for(authority, user.as_deref());
-            // An agent's terminal also needs the right to approve (`agent_input_refusal`).
-            let may_type = access.can_drive() && (pty.agent.is_none() || access.role == Role::Manager || access.can_approve);
-            if may_type {
+            // One rule for a shell and for an agent's own terminal, the same
+            // as `authorize_participant` and `agent_input_refusal`.
+            if self.collab.access_for(authority, user.as_deref()).can_configure() {
                 continue;
             }
             pty.controller = None;
@@ -784,6 +794,14 @@ impl WorkspaceRpc {
             _ => Role::Viewer,
         };
         let access = self.access(peer);
+        // A shell is arbitrary code as the workspace's user: it can edit the
+        // agent's settings, read its tokens or start an agent with other
+        // flags. So typing into one needs what changing those settings
+        // needs (PRO-88): a manager, or a driver who may approve permissions.
+        if matches!(method, "pty.write" | "pty.resize" | "pty.control") && access.can_drive() && !access.can_configure() {
+            return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a terminal runs anything as the workspace's user"))
+                .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
+        }
         if access.role >= needed {
             return Ok(());
         }
@@ -827,6 +845,7 @@ impl WorkspaceRpc {
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
+            "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -838,6 +857,8 @@ impl WorkspaceRpc {
             "session.send" => self.session_send(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
+            "session.commands" => self.session_commands(peer, params),
+            "session.files" => self.session_files(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -1154,7 +1175,7 @@ impl WorkspaceRpc {
         if self.authority(peer) == Authority::Participate && !access.can_drive() {
             return Some(RpcError::forbidden("typing needs driver access to the workspace"));
         }
-        if access.role != Role::Manager && !access.can_approve {
+        if !access.can_configure() {
             return Some(
                 RpcError::forbidden("typing into an agent's terminal can approve its permission requests: it needs approval rights")
                     .with_data(json!({ "role": access.role, "needs": "canApprove" })),
@@ -2222,6 +2243,20 @@ impl WorkspaceRpc {
             return Err(RpcError::forbidden("sending needs driver access to the workspace"));
         }
         let busy = agents_busy(&self.agents, &session.id, &tab.id);
+        // And the same rule for what the CLI runs by itself (PRO-88): a
+        // slash command, a `!` shell command, an `@/path` mention.
+        if !self.access(peer).can_configure() {
+            if let Err(refusal) = slash::check(text, &tab.harness, Some(Path::new(&session.cwd))) {
+                return Err(RpcError::forbidden(refusal.message()).with_data(json!({ "reason": refusal.category(), "command": refusal.command })));
+            }
+        }
+        // A slash or `!` command never waits in the session's own queue,
+        // whoever sends it: nothing re-checks that queue if they lose the
+        // right before the running turn ends (the mailbox's follow-up queue
+        // is re-checked). Prose queues as before, mentions included.
+        if slash::is_command(text) && (busy || self.sessions.as_ref().is_some_and(|sessions| sessions.turn_open(&session.id, &tab.id))) {
+            return Err(RpcError::new("conflict", slash::NOT_QUEUED_MESSAGE).with_data(json!({ "reason": slash::NOT_QUEUED_CATEGORY })));
+        }
         let now = crate::cloud_agents::now_ms();
         match peer.user_id.as_deref() {
             Some(user) => {
@@ -2311,6 +2346,68 @@ impl WorkspaceRpc {
     fn session_tabs(&self, peer: &Peer) -> Result<Value, RpcError> {
         let tabs = if self.access(peer).can_view() { self.agents()?.tabs() } else { Vec::new() };
         Ok(json!({ "tabs": tabs }))
+    }
+
+    /// The slash commands the composer of an agent tab offers the caller
+    /// (`composer/1`, PRO-22): what the tab's CLI lists in the session's
+    /// directory, as a local tab's composer shows them. Someone who may not
+    /// decide what the agent does on its own is offered only the commands
+    /// they may send (PRO-88, `slash::allows`), and `restricted` says so;
+    /// someone who may not send at all is offered none. Reading it starts
+    /// no agent and no turn.
+    fn session_commands(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let tab_id = required_str(&params, "tabId")?;
+        let tab = session.tabs.iter().find(|tab| tab.id == tab_id).ok_or_else(|| RpcError::not_found("no such tab"))?;
+        let access = self.access(peer);
+        let may_send = self.authority(peer) == Authority::Manage || access.can_drive();
+        let restricted = !access.can_configure();
+        let commands: Vec<SlashCommand> = if may_send {
+            let listed = self.listed_commands(&tab.harness, Path::new(&session.cwd));
+            listed.into_iter().filter(|command| !restricted || slash::allows(&tab.harness, &command.name)).collect()
+        } else {
+            Vec::new()
+        };
+        Ok(json!({ "commands": commands, "restricted": restricted }))
+    }
+
+    /// The files of a session's directory whose path matches `query`, best
+    /// first, for the composer's `@` list (`composer/2`, PRO-22): the same
+    /// index and ranking as a local tab's (`files::search`), so paths are
+    /// relative to the session's directory, ignored files are left out and
+    /// an empty query lists the shallowest files. Names only, never
+    /// contents; anyone who may see the session may ask.
+    fn session_files(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.len() > MAX_FILE_QUERY_BYTES {
+            return Err(RpcError::invalid("the query is too long"));
+        }
+        let limit = params.get("limit").and_then(Value::as_u64).map_or(DEFAULT_FILE_HITS, |limit| limit as usize).clamp(1, MAX_FILE_HITS);
+        let files = crate::files::search(Path::new(&session.cwd), query, limit).map_err(RpcError::internal)?;
+        Ok(json!({ "files": files }))
+    }
+
+    /// What the CLI of `harness` lists in `cwd`, as `list_slash_commands`
+    /// does for a local tab: only Claude Code is asked. A CLI that is not
+    /// installed or does not answer lists nothing.
+    fn listed_commands(&self, harness: &str, cwd: &Path) -> Vec<SlashCommand> {
+        #[cfg(test)]
+        if let Some(commands) = self.commands_for_tests.lock().unwrap().clone() {
+            return commands;
+        }
+        if harness != "claude" {
+            return Vec::new();
+        }
+        crate::harness::claude::commands::list(cwd).unwrap_or_else(|error| {
+            log::warn!("list slash commands: {error:#}");
+            Vec::new()
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_commands_for_tests(&self, commands: Vec<SlashCommand>) {
+        *self.commands_for_tests.lock().unwrap() = Some(commands);
     }
 
     /// The agent tab `(sessionId, tabId)` names, if the caller may see it.

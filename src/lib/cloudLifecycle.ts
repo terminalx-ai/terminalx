@@ -132,6 +132,42 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
   }
 }
 
+/**
+ * What a stopped workspace's last stop saved, from the stop itself: when its
+ * conversations were saved, or that the save did not finish. Null when the
+ * workspace is not stopped, when something happened to it since, or when the
+ * server said nothing about a save. The disk is kept by a stop either way.
+ */
+export function lastSavedText(item: CloudWorkspaceListItem): string | null {
+  const operation = item.latestOperation;
+  if (item.workspace.state !== "suspended" || operation?.action !== "suspend" || operation.state !== "succeeded") return null;
+  switch (operation.checkpoint) {
+    case "committed":
+      return operation.checkpointAt ? `Last saved ${dateTimeText(operation.checkpointAt)}.` : "Its conversations were saved before it stopped.";
+    case "failed":
+    case "timed-out":
+      return "The save before it stopped did not finish; conversations may end earlier than the work did. The disk was kept as it was.";
+    default:
+      return null;
+  }
+}
+
+export function dateTimeText(at: number): string {
+  return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * What resuming a stopped workspace brings back, in the provider's terms
+ * (PRO-33): the same processes again, or a cold boot from the disk. `name`
+ * is the provider's display name; `null` is a server that does not say.
+ */
+export function resumeBehaviourText(name: string, preservesProcesses: boolean | null | undefined): string {
+  if (preservesProcesses === true) return `Resume at any time. ${name} freezes the machine as it is: programs and terminals that are running continue where they were.`;
+  if (preservesProcesses === false)
+    return `Resume at any time. ${name} starts the machine again from its disk (a cold boot): files, repositories and conversations come back; programs and terminals that are running now do not.`;
+  return "Resume at any time. Files, repositories and conversations come back; programs and terminals that are running now may not.";
+}
+
 const MESSAGES: Record<string, string> = {
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",
@@ -356,9 +392,12 @@ export async function pushRepository(workspace: CloudWorkspace, repo: string, wi
   }
 }
 
-/** Whether a repository has commits a push would publish. */
+/**
+ * Whether a repository has commits a push from the dialog would publish. A
+ * detached HEAD has no branch to push: its commits need the workspace opened.
+ */
 export function pushable(repo: RepositoryFacts): boolean {
-  return !!(repo.unpushedCommits || repo.localOnlyCommits);
+  return !!repo.branch && !!(repo.unpushedCommits || repo.localOnlyCommits);
 }
 
 /** "7 days", "1 day". */

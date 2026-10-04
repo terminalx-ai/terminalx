@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
-import type { AgentTabInfo, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -10,12 +10,14 @@ vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 
 import {
   applyLiveTabs,
+  settledStatus,
   attachCloudAgentTab,
   configureCloudAgentTab,
   configuresLive,
   decideCloudAgent,
   DEV_SCOPE_NOTICE,
   discardPendingConfig,
+  errorText,
   flushCloudAgentCache,
   getCloudAgents,
   loadCloudAgents,
@@ -198,6 +200,22 @@ describe("cloud agent tabs store", () => {
     const reads = backend.count("cloud_agent_checkpoint");
     expect(await refreshFromCheckpoint(scope, "t-1")).toBe(false);
     expect(backend.count("cloud_agent_checkpoint")).toBe(reads);
+  });
+
+  it("never shows an agent that cannot sign in as working (PRO-78)", async () => {
+    const signIn = { provider: "claude", state: "not-connected" };
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress", signIn })]);
+    expect(getCloudAgents(scope).tabs[0]!.info).toMatchObject({ status: "idle", signIn });
+    // A status event from the stream says "in progress" too: the prompt went to a sign-in screen.
+    const client = fakeClient();
+    await attachCloudAgentTab(scope, "t-1", client);
+    const { onStatus } = client.subscribeSession.mock.calls[0]![3] as { onStatus: (change: { status: string }) => void };
+    onStatus({ status: "in_progress" });
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("idle");
+    // Once the login is connected the same reports mean what they say.
+    applyLiveTabs(scope, [tabInfo({ status: "in_progress" })]);
+    expect(getCloudAgents(scope).tabs[0]!.info.status).toBe("in_progress");
+    expect(settledStatus({ signIn }, "waiting")).toBe("waiting");
   });
 
   it("merges a live replay that overlaps the cache by seq instead of duplicating it", async () => {
@@ -434,6 +452,19 @@ describe("cloud agent tabs store", () => {
     const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
     expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
     expect(entry.state).toBe("applied");
+    // What the runtime refused to type or to queue is said in its own words, not as a bare code (PRO-88).
+    const refusals = [
+      new WorkspaceRpcError("conflict", "A turn is running: send this command when it has ended.", "session.send", { reason: "command-not-queued" }),
+      new WorkspaceRpcError("forbidden", "Not sent: a message that starts with ! runs as a shell command.", "session.send", { reason: "shell-command-forbidden", command: "!" }),
+    ];
+    for (const refusal of refusals) {
+      client.mutate.mockRejectedValueOnce(refusal);
+      const shown = await sendToCloudAgent(dev, "t-1", "/model opus", client).catch((error: unknown) => errorText(error));
+      expect(shown).toBe(refusal.message);
+    }
+    // Any other failure keeps its code.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("lease_held", "someone else is driving this tab", "session.send", {}));
+    expect(await sendToCloudAgent(dev, "t-1", "hello", client).catch((error: unknown) => errorText(error))).toBe("lease_held");
     await expect(steerCloudAgent(dev, "t-1", "x", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(stopCloudAgent(dev, "t-1", client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);

@@ -137,9 +137,24 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
   "process",       // running | exited | not-started
   "pendingPermissions": [{ "requestId", "toolName", "input", "options" }],
   "followUps": [{ "clientCommandId", "text" }],
+  "signIn": { "provider", "state", "reason" },  // only when the agent cannot sign in
   "lastSeq": 0,    // newest committed event seq
   "created", "modified" }
 ```
+
+`signIn` (PRO-78) is present only when the tab's agent has no way to sign in:
+the server's last grant answer listed no usable login for its provider
+(`claude`, `codex`, `cursor`), the workspace configuration sets no key for it,
+and the session did not start with a credential. `state` is `not-connected`
+when the organization has no login for the provider, else the server's state
+for the one it has (`revoked`, `disconnected`, `unavailable`, with a `reason`
+such as `token-expired` or `shared-use-policy`). It is never set on a guess:
+not before the first grant sync, not after a failed one, and never for an
+agent the runtime cannot rule out a hand sign-in for (Cursor). Such a tab does not
+count as an active turn in the activity report, so it does not hold off the
+idle suspend, and the desktop shows it as "Needs sign-in", not "Working". A
+first prompt for such an agent fails with the launch category
+`agent-sign-in-required` instead of being typed into a sign-in screen.
 
 Subscribers of `session.subscribe` also get `session.status` notifications:
 `{ subscriptionId, sessionId, tabId, status }` (the process state comes with
@@ -206,6 +221,50 @@ the next `send` (the harness resumes the provider session).
   been sent" (`outcome-unknown`, never resent automatically).
 - Ordered events, the cursor, unread and completed state persist in the cache.
 
+### The composer (`composer/1`)
+
+A cloud tab's composer offers what a local tab's does, from the runtime
+instead of from this computer.
+
+- **Slash commands** (`session.commands { sessionId, tabId }`, read-only,
+  `src/lib/cloudComposer.ts`): what the tab's CLI lists in the session's
+  directory, exactly as `list_slash_commands` does for a local tab (Claude
+  Code is asked; the app's own commands are withheld). The answer is
+  `{ commands, restricted }`:
+  - a manager, or a driver who may approve permissions, gets the whole list;
+  - a driver without that right gets only the commands the runtime accepts
+    from them (PRO-88, `cloud_agents::slash::allows`, the list
+    `slash::check` judges a message with), and `restricted: true`. The
+    composer then says under the list that other commands need someone who
+    can approve permissions, and keeps the list open to say so when what
+    they typed is not offered;
+  - someone who cannot send (a viewer) gets none.
+
+  The desktop asks once per session, agent and right while connected. It
+  never wakes a stopped workspace for the list: a stopped workspace shows
+  what was last listed in this run of the app, or no list. A list read with
+  the right to approve is never shown to the same person without it. A
+  runtime from before `composer/1` gets no list (the message is still sent
+  as typed and judged by the runtime).
+
+  What is typed is still judged by the runtime when it is sent: the list is
+  what is offered, not what is allowed. A refusal shows the runtime's own
+  sentence on the outbox entry above the composer (docs/CLOUD-SHARING.md).
+
+- **`@` mentions** (`session.files { sessionId, query, limit }`,
+  `composer/2`, read-only): the files of the session's directory whose path
+  matches, best first, from the same index and ranking a local tab uses
+  (`files::search`): paths relative to the session's directory, ignored
+  files left out, and the shallowest files for a bare `@`. Names only.
+  Anyone who may see the session may ask; the composer offers the list (and
+  its "Mention a file" button) to people who can send, while the runtime is
+  connected. A stopped workspace is not woken to list files: there is then
+  no list, and a path can still be typed.
+
+  Every path the list offers is inside the project, so a mention picked
+  from it is one the runtime accepts from a plain driver too (PRO-88 refuses
+  only mentions of files outside the project).
+
 Mobile is out of scope for PRO-22. It can reuse the same keys, outbox and
 checkpoint formats.
 
@@ -254,12 +313,52 @@ never attached holds no workspace content key to encrypt a command with.
 
 The runtime half is `src-tauri/src/cloud_agents/launch.rs`:
 
-1. Claim the intent with the receipt store's `storageIncarnationId`.
-2. For each repository, switch to its base ref, then create the workspace's
+1. Claim the intent with the receipt store's `storageIncarnationId`,
+   declaring `launch-clone-v1`.
+2. Clone every repository the claim marks `clone` (see below).
+3. For each repository, switch to its base ref, then create the workspace's
    own work branch. If the branch already exists, it came from an earlier
    attempt of this same workspace, so switch to it instead.
-3. Start the agent tab in the primary repository and send the prompt.
-4. Report the outcome.
+4. Start the agent tab in the primary repository and send the prompt.
+5. Report the outcome.
+
+### Cloning at launch (Boat, Hetzner, Machine0)
+
+A workspace launched from an Environment image already holds its checkouts.
+Boat, Hetzner and Machine0 have no Environment images, so their workspaces
+start with an empty project root and the claim marks each repository
+`"clone": { "provider": "github" }` with a `path` directly inside the
+project root. The runtime then:
+
+- builds the URL itself, `https://github.com/<owner>/<name>.git`. The claim
+  carries no URL and no credential;
+- clones into `.terminalx-clone-<dir>` next to the final path, at the base
+  branch, and moves the finished clone into place. A clone that died halfway
+  is never mistaken for a checkout, and its leftover is removed on the next
+  attempt;
+- keeps a checkout that is already there (an earlier attempt of the same
+  workspace) when its `origin` is that repository, and refuses anything else
+  at the path without deleting it;
+- makes a full clone (all history and branches, as a local checkout has),
+  capped by time instead of depth: a transfer that stalls for a minute is
+  given up, and all of a launch's clones together get 30 minutes
+  (`CLONE_BUDGET`). At the deadline Git's whole process group is killed;
+- counts as work while it runs (`cloud_activity::launching`): the activity
+  report carries it as a running turn, so the server's idle suspend does not
+  stop a workspace whose clone is still going with nobody attached;
+- reports `repository-clone-failed` when a clone cannot be made. The agent is
+  not started and the prompt is not sent.
+
+**The GitHub token.** `launch.rs` never holds one. Git asks the credential
+helper `cloud_github` installs at boot (PRO-14), which gets a short-lived
+token from the API for this workspace's repositories only. The token is not
+in the clone URL, the `origin` remote, the Git config, the environment or a
+log line; it exists in Git's memory and in the helper's tmpfs cache (or
+nowhere, without tmpfs). A public repository clones without asking for one.
+
+A plan that names another provider, an owner or name that is not a plain
+GitHub name, or a path that is not a new directory directly in the project
+root is refused before Git runs (`payload-invalid`).
 
 `launch.json` (next to `receipts.jsonl`) records `applying` durably before
 the agent is touched, and the outcome after. So a restart or a lost

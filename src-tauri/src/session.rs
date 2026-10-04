@@ -844,7 +844,12 @@ impl SessionManager {
             let runtime = runtime.lock().unwrap();
             let running = runtime.child.is_some()
                 || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id));
-            (active + usize::from(running && runtime.status == TabStatus::InProgress), pending + runtime.pending.len())
+            // An agent sitting at its sign-in screen is not working, whatever
+            // its tab says (PRO-78): it must not hold off the idle suspend.
+            let turn = running
+                && runtime.status == TabStatus::InProgress
+                && crate::cloud_grants::sign_in_required_for_launch(&runtime.harness, &runtime.key()).is_none();
+            (active + usize::from(turn), pending + runtime.pending.len())
         })
     }
 

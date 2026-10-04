@@ -1,4 +1,4 @@
-// `git/1` and `lifecycle.dispositionFacts` from a client (PRO-27,
+// `git/1`, `lifecycle.dispositionFacts` and `lifecycle.resources` from a client (PRO-27,
 // docs/CLOUD-GIT.md): review, commit, push and pull requests in a cloud
 // workspace's repositories.
 // - Every call names its repository. A workspace with several is never
@@ -147,6 +147,26 @@ export async function listRepositories(client: WorkspaceRpcClient): Promise<Remo
 export async function dispositionFacts(client: WorkspaceRpcClient): Promise<DispositionFacts | null> {
   try {
     return await client.call<DispositionFacts>("lifecycle.dispositionFacts");
+  } catch (error) {
+    if (error instanceof WorkspaceRpcError && ["capability_not_granted", "method_not_found"].includes(error.code)) return null;
+    throw error;
+  }
+}
+
+/** What the machine under a workspace has left (`lifecycle.resources`, PRO-33). */
+export interface RuntimeResources {
+  v: 1;
+  /** Null where the machine does not report it (not Linux). */
+  memory: { totalBytes: number; availableBytes: number } | null;
+  /** The disk that holds the workspace; null when it could not be asked. */
+  storage: { totalBytes: number; availableBytes: number; totalInodes: number; availableInodes: number } | null;
+  observedAt: number;
+}
+
+/** Free memory and disk, read without side effects; null from a runtime that does not report them. */
+export async function runtimeResources(client: WorkspaceRpcClient): Promise<RuntimeResources | null> {
+  try {
+    return await client.call<RuntimeResources>("lifecycle.resources");
   } catch (error) {
     if (error instanceof WorkspaceRpcError && ["capability_not_granted", "method_not_found"].includes(error.code)) return null;
     throw error;

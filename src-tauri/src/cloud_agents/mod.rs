@@ -15,6 +15,7 @@ pub mod keys;
 pub mod launch;
 pub mod mailbox;
 pub mod receipts;
+pub mod slash;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,11 @@ pub struct AgentTabInfo {
     pub follow_ups: Vec<FollowUpView>,
     /// Who is driving the tab (contract §21.5), if anyone.
     pub lease: Option<crate::remote::collab::TabLease>,
+    /// Set when the tab's agent has no way to sign in (PRO-78): the
+    /// organization has no usable login for it and the workspace
+    /// configuration sets no key. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<crate::cloud_grants::SignInRequired>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -114,6 +120,11 @@ pub trait AgentOps: Send + Sync {
     fn events(&self, session_id: &str, tab_id: &str) -> Result<Vec<Value>>;
     /// The session a tab belongs to, for the checkpoint projection.
     fn session(&self, _session_id: &str) -> Option<SessionSummary> {
+        None
+    }
+    /// Where the session's agents run: what "inside the project" means for
+    /// a file a message mentions.
+    fn cwd(&self, _session_id: &str) -> Option<PathBuf> {
         None
     }
 }
@@ -228,6 +239,7 @@ impl AgentOps for ManagerOps {
                         .collect(),
                     follow_ups: Vec::new(),
                     lease: None,
+                    sign_in: crate::cloud_grants::sign_in_required_for_launch(&tab.harness, &format!("{}/{}", entry.id, tab.id)),
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),
@@ -240,6 +252,10 @@ impl AgentOps for ManagerOps {
     fn session(&self, session_id: &str) -> Option<SessionSummary> {
         let entry = index::get(session_id).ok().filter(|entry| entry.project_path == self.root)?;
         Some(SessionSummary { title: entry.title, branch: entry.branch })
+    }
+
+    fn cwd(&self, session_id: &str) -> Option<PathBuf> {
+        index::get(session_id).ok().map(|entry| PathBuf::from(entry.cwd))
     }
 
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
@@ -482,20 +498,47 @@ impl CloudAgents {
         }
     }
 
-    /// Whether a queued follow-up's sender may still drive. One queued
-    /// before sharing existed, or before the API listed anyone, is kept.
-    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
-        match self.collab.get() {
-            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)).can_drive(),
-            _ => true,
+    /// What `text` would make the agent's CLI do by itself (a slash command,
+    /// a `!` shell command, a file from outside the project) that this
+    /// person may not ask for (PRO-88). `harness` is the tab's agent.
+    pub fn slash_refusal(&self, access: Access, session_id: &str, harness: &str, text: &str) -> Option<slash::Refusal> {
+        if access.can_configure() {
+            return None;
         }
+        slash::check(text, harness, self.ops.cwd(session_id).as_deref()).err()
     }
 
-    /// Drop queued follow-ups whose sender lost driver access, saying so in
+    /// Why a queued follow-up may not be typed any more, as the note its
+    /// transcript gets: its sender no longer drives, or it is a slash or
+    /// shell command and they no longer approve. One queued before sharing
+    /// existed, or before the API listed anyone, is kept.
+    fn follow_up_refusal(&self, tab_id: &str, follow_up: &FollowUp) -> Option<&'static str> {
+        let access = match self.collab.get() {
+            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)),
+            _ => return None,
+        };
+        if !access.can_drive() {
+            return Some("Dropped a queued message from a person who no longer has driver access.");
+        }
+        if access.can_configure() {
+            return None;
+        }
+        // A tab that is gone has no CLI to name: nothing but prose passes.
+        // (`ops.tabs`, not `self.tab`: this runs while the queue is locked.)
+        let harness = self.ops.tabs().into_iter().find(|tab| tab.tab_id == tab_id).map(|tab| tab.harness).unwrap_or_default();
+        self.slash_refusal(access, &follow_up.session_id, &harness, &follow_up.text)
+            .map(|_| "Dropped a queued command from a person who can no longer approve permissions.")
+    }
+
+    fn follow_up_allowed(&self, tab_id: &str, follow_up: &FollowUp) -> bool {
+        self.follow_up_refusal(tab_id, follow_up).is_none()
+    }
+
+    /// Drop queued follow-ups their sender may no longer send, saying so in
     /// their transcripts (contract §21.5). False when the queue could not
     /// be rewritten.
     pub fn revalidate_follow_ups(&self) -> bool {
-        let dropped = match self.follow_ups.retain(|follow_up| self.follow_up_allowed(follow_up)) {
+        let dropped = match self.follow_ups.retain(|tab_id, follow_up| self.follow_up_allowed(tab_id, follow_up)) {
             Ok(dropped) => dropped,
             Err(error) => {
                 log::warn!("revalidate queued follow-ups: {error:#}");
@@ -503,7 +546,8 @@ impl CloudAgents {
             }
         };
         for (tab_id, follow_up) in dropped {
-            self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
+            let why = self.follow_up_refusal(&tab_id, &follow_up).unwrap_or("Dropped a queued message its sender may no longer send.");
+            self.ops.note(&follow_up.session_id, &tab_id, why);
             self.changed(Some(&tab_id), true);
         }
         true
@@ -633,7 +677,7 @@ impl CloudAgents {
             // may have changed while it waited.
             // Never typed while it may not be; if the queue cannot be
             // rewritten it waits for the next nudge rather than spinning.
-            if !self.follow_up_allowed(&next) {
+            if !self.follow_up_allowed(&tab_id, &next) {
                 if self.revalidate_follow_ups() {
                     self.nudge_follow_ups(&tab_id);
                 }
