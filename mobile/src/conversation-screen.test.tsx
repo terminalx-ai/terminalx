@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { act, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SessionScreen from "../app/session/[sessionId]";
@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   setParams: vi.fn(),
   sessionListeners: new Map<string, (event: unknown) => void>(),
   terminalListeners: new Map<string, (event: unknown) => void>(),
+  listProps: {} as any,
+  scrollToOffset: vi.fn(),
 }));
 vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -34,7 +36,12 @@ vi.mock("react-native", () => {
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{children}</button>,
     TextInput: ({ value, onChangeText, placeholder }: any) => <input value={value} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
-    FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
+    FlatList: (props: any) => {
+      mocks.listProps = props;
+      useImperativeHandle(props.ref, () => ({ scrollToOffset: mocks.scrollToOffset }));
+      const { data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent } = props;
+      return <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>;
+    },
     SectionList: ({ sections, renderItem, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.flatMap((section: any) => section.data.map((item: any) => <div key={item.key}>{renderItem({ item })}</div>)) : ListEmptyComponent}</div>,
   };
 });
@@ -66,6 +73,7 @@ beforeEach(() => {
   mocks.sessionListeners.clear();
   mocks.terminalListeners.clear();
   mocks.push.mockClear();
+  mocks.scrollToOffset.mockClear();
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
@@ -199,5 +207,80 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).toContain("claude transcript");
     expect(container.textContent).toContain("written while away");
     expect(container.textContent).not.toContain("Session unavailable");
+  });
+});
+
+// Native geometry and gestures are exercised by scripts/transcript-viewport.
+// These integration tests cover cache/host sequencing and conversation identity.
+describe("mobile latest conversation edge", () => {
+  const scroll = async (offset: number) => {
+    await act(async () => mocks.listProps.onScroll({ nativeEvent: { contentOffset: { y: offset } } }));
+  };
+  const latestText = () => mocks.listProps.data[0]?.turn.prompt.text;
+
+  it("opens cached content and then the newer host tail at the latest edge", async () => {
+    const key = `terminalx:transcript:${mocks.params.hostId}:worktree:claude`;
+    mocks.storage.set(key, JSON.stringify([event("claude", "cached latest")]));
+    let resolve!: (value: unknown) => void;
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    await render();
+    expect(latestText()).toBe("cached latest");
+    expect(mocks.listProps.inverted).toBe(true);
+    await act(async () => resolve({ events: [event("claude", "host latest", 2)], hasMore: true }));
+    expect(latestText()).toBe("host latest");
+    expect(mocks.listProps.ListFooterComponent.props.label).toBe("Load earlier");
+    expect(container.textContent).not.toContain("Jump to latest");
+  });
+
+  it("keeps a reader away through host loading, live events and reconnects; switching resets the edge", async () => {
+    let resolve!: (value: unknown) => void;
+    mocks.storage.set(`terminalx:transcript:${mocks.params.hostId}:worktree:claude`, JSON.stringify([event("claude", "cached latest")]));
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    await render(); await scroll(600);
+    await act(async () => resolve({ events: [event("claude", "host latest", 2)], hasMore: true }));
+    await act(async () => mocks.sessionListeners.get("claude")?.(event("claude", "live latest", 3)));
+    mocks.app = { ...mocks.app, connectionEpoch: 1 }; await render();
+    expect(button("Jump to latest")).toBeTruthy();
+    expect(mocks.scrollToOffset).not.toHaveBeenCalled();
+    await click("Jump to latest");
+    expect(mocks.scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
+    await scroll(0);
+    expect(container.textContent).not.toContain("Jump to latest");
+    await scroll(600); await select("codex");
+    expect(latestText()).toBe("codex transcript");
+    expect(container.textContent).not.toContain("Jump to latest");
+    await select("claude");
+    expect(latestText()).toBe("live latest");
+    expect(container.textContent).not.toContain("Jump to latest");
+  });
+
+  it("follows content and keyboard layout only near latest, and never interrupts a drag", async () => {
+    await render();
+    await act(async () => mocks.listProps.onContentSizeChange(400, 5000));
+    expect(mocks.scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
+    mocks.scrollToOffset.mockClear();
+    await act(async () => mocks.listProps.onScrollBeginDrag());
+    await act(async () => mocks.listProps.onContentSizeChange(400, 6000));
+    expect(mocks.scrollToOffset).not.toHaveBeenCalled();
+    await scroll(600);
+    await act(async () => mocks.listProps.onScrollEndDrag());
+    await act(async () => { mocks.listProps.onContentSizeChange(400, 7000); mocks.listProps.onLayout(); });
+    expect(mocks.scrollToOffset).not.toHaveBeenCalled();
+    await scroll(30);
+    await act(async () => mocks.listProps.onLayout());
+    expect(mocks.scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
+  });
+
+  it("adds earlier history at the opposite edge without resetting the reader", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "current", 30)], hasMore: true });
+    await render(); await scroll(900);
+    const position = mocks.listProps.maintainVisibleContentPosition;
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "earlier", 1)], hasMore: false });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 30);
+    expect(mocks.listProps.data.map((item: any) => item.turn.prompt.text)).toEqual(["current", "earlier"]);
+    expect(mocks.listProps.maintainVisibleContentPosition).toBe(position);
+    expect(mocks.scrollToOffset).not.toHaveBeenCalled();
+    expect(button("Jump to latest")).toBeTruthy();
   });
 });
