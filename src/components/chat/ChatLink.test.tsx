@@ -18,7 +18,7 @@ const local = (path: string): LocalPathInfo => ({ path, root: "/tmp", rel: path.
 
 beforeEach(() => {
   vi.resetAllMocks();
-  setPrefs({ linkBrowser: "ask", linkActions: true });
+  setPrefs({ linkBrowser: "ask", linkBrowserChosen: false, linkActions: true });
 });
 afterEach(cleanup);
 
@@ -76,8 +76,8 @@ describe("chat link actions", () => {
     expect(openBrowserTab).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: browser === "system" ? "Open in system browser" : "Open in TerminalX browser" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(getPrefs().linkBrowser).toBe(browser);
-    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).linkBrowser).toBe(browser);
+    expect(getPrefs()).toMatchObject({ linkBrowser: browser, linkBrowserChosen: true });
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: browser, linkBrowserChosen: true });
 
     fireEvent.click(screen.getByRole("link", { name: "second" }));
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -196,6 +196,72 @@ describe("chat link actions", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open in system browser" }));
     expect((await screen.findByRole("alert")).textContent).toContain("No registered browser");
     expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  describe("saved browser choices", () => {
+    beforeEach(() => setPrefs({ linkBrowser: "system", linkBrowserChosen: true }));
+
+    it("opens a plain click only in the system browser and describes the primary action", async () => {
+      render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
+      const link = screen.getByRole("link", { name: "website" });
+      expect(link.title).toMatch(/^Open in System Browser; .+-click to open in TerminalX Browser$/);
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      fireEvent(link, click);
+      expect(click.defaultPrevented).toBe(true);
+      await waitFor(() => expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://example.test"));
+      expect(openBrowserTab).not.toHaveBeenCalled();
+    });
+
+    it.each([{ metaKey: true }, { ctrlKey: true }])("opens the TerminalX alternate on Shift-modifier click (%j)", async (modifier) => {
+      render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
+      fireEvent.click(screen.getByRole("link", { name: "website" }), { shiftKey: true, ...modifier });
+      await waitFor(() => expect(openBrowserTab).toHaveBeenCalledExactlyOnceWith("session", "/workspace", "https://example.test"));
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(getPrefs().linkBrowser).toBe("system");
+    });
+
+    it("lists System Browser first and opens TerminalX on context-menu request", async () => {
+      render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
+      fireEvent.contextMenu(screen.getByRole("link", { name: "website" }));
+      expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual([
+        "Open in System Browser", "Open in TerminalX Browser", "Copy link",
+      ]);
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(openBrowserTab).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Open in TerminalX Browser" }));
+      await waitFor(() => expect(openBrowserTab).toHaveBeenCalledExactlyOnceWith("session", "/workspace", "https://example.test"));
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(getPrefs().linkBrowser).toBe("system");
+    });
+
+    it("updates the title, menu, and routes when the reader chooses TerminalX in Settings", async () => {
+      render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
+      act(() => setPrefs({ linkBrowser: "terminalx", linkBrowserChosen: true }));
+      const link = screen.getByRole("link", { name: "website" });
+      expect(link.title).toMatch(/^Open in TerminalX Browser; .+-click to open in System Browser$/);
+
+      fireEvent.click(link);
+      await waitFor(() => expect(openBrowserTab).toHaveBeenCalledExactlyOnceWith("session", "/workspace", "https://example.test"));
+      expect(openUrl).not.toHaveBeenCalled();
+      fireEvent.click(link, { shiftKey: true, metaKey: true });
+      await waitFor(() => expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://example.test"));
+      expect(openBrowserTab).toHaveBeenCalledTimes(1);
+
+      fireEvent.contextMenu(link);
+      expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual([
+        "Open in TerminalX Browser", "Open in System Browser", "Copy link",
+      ]);
+    });
+
+    it("keeps the primary action when alternate menu actions are hidden", async () => {
+      setPrefs({ linkActions: false });
+      render(<ChatLink href="https://example.test" context={context}>website</ChatLink>);
+      fireEvent.contextMenu(screen.getByRole("link", { name: "website" }));
+      expect((await screen.findAllByRole("menuitem")).map((item) => item.textContent)).toEqual([
+        "Open in System Browser", "Copy link",
+      ]);
+    });
+
   });
 
   it("does not apply a stale context-menu inspection after the href changes", async () => {

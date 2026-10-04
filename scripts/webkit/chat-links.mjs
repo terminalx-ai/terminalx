@@ -85,11 +85,18 @@ try {
   assert.equal((await opened()).system.length, 3);
   assert.equal((await opened()).terminalx.length, 0);
   await link.click();
+  await remember.check();
   await internal.click();
   await page.waitForFunction(() => window.__PW_LINK_OPENS__.terminalx.length === 1);
   await browserRows.waitFor();
   assert.deepEqual((await opened()).terminalx, [{ workspace: "/repos/p0", url: "https://example.test/docs" }]);
   console.log("ok  context menu still opens the system browser; choosing TerminalX creates its workspace browser page and sidebar row");
+  await page.reload();
+  await page.locator('[role="tree"]').waitFor();
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("raccoon.prefs")));
+  assert.equal(saved.linkBrowser, "terminalx");
+  assert.equal(saved.linkBrowserChosen, true);
+  console.log("ok  a remembered TerminalX choice survives reloading and the legacy preference migration");
 } finally {
   await browser?.close();
   server.close();

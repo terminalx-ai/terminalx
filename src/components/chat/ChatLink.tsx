@@ -20,12 +20,16 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 
 type Props = AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps & { context: ChatLinkContext };
 
+const BROWSER_NAMES = { system: "System Browser", terminalx: "TerminalX Browser" };
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 export function ChatLink({ context, href = "", children, className, node: _node, ...props }: Props) {
   const prefs = usePrefs();
+  const primaryBrowser = prefs.linkBrowser === "terminalx" ? "terminalx" : "system";
+  const alternateBrowser = primaryBrowser === "system" ? "terminalx" : "system";
   const originalHref = originalChatHref(href);
   const destination = useMemo(() => parseChatLink(originalHref), [originalHref]);
   const identity = `${context.sessionId}\0${context.cwd}\0${context.basePath ?? ""}\0${originalHref}`;
@@ -102,7 +106,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
 
   const chooseBrowser = (browser: "system" | "terminalx") => {
     setChooserIdentity(null);
-    if (rememberChoice) setPrefs({ linkBrowser: browser });
+    if (rememberChoice) setPrefs({ linkBrowser: browser, linkBrowserChosen: true });
     run(() => openChatLinkInBrowser(destination, context, browser));
   };
 
@@ -114,7 +118,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
       rel={undefined}
       className={`wrap-anywhere font-medium text-primary underline ${className ?? ""}`}
       data-streamdown="link"
-      title={destination.kind === "web" ? `${asksForBrowser ? "Choose a browser. " : ""}Open in ${prefs.linkBrowser === "terminalx" ? "System Browser" : "TerminalX Browser"} with ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click` : undefined}
+      title={destination.kind === "web" ? `${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : undefined}
       aria-haspopup={asksForBrowser ? "dialog" : undefined}
       aria-expanded={asksForBrowser ? chooserOpen : undefined}
       tabIndex={props.tabIndex ?? (asksForBrowser ? 0 : undefined)}
@@ -151,13 +155,8 @@ export function ChatLink({ context, href = "", children, className, node: _node,
           ) : <ContextMenuTrigger asChild>{anchor}</ContextMenuTrigger>}
           <ContextMenuContent>
             {destination.kind === "web" ? <>
-              {prefs.linkBrowser === "terminalx" ? <>
-                <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "terminalx"))}>Open in TerminalX Browser</ContextMenuItem>
-                {prefs.linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "system"))}>Open in System Browser</ContextMenuItem>}
-              </> : <>
-                <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "system"))}>Open in System Browser</ContextMenuItem>
-                {prefs.linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, "terminalx"))}>Open in TerminalX Browser</ContextMenuItem>}
-              </>}
+              <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, primaryBrowser))}>Open in {BROWSER_NAMES[primaryBrowser]}</ContextMenuItem>
+              {prefs.linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, alternateBrowser))}>Open in {BROWSER_NAMES[alternateBrowser]}</ContextMenuItem>}
             </> : destination.kind === "application" ? (
               <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open with default application</ContextMenuItem>
             ) : destination.kind === "local" ? inspecting === identity ? (

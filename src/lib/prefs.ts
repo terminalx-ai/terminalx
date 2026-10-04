@@ -7,6 +7,8 @@ import { useSyncExternalStore } from "react";
  */
 export interface Prefs {
   linkBrowser: "terminalx" | "system" | "ask";
+  /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
+  linkBrowserChosen: boolean;
   linkActions: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
@@ -67,6 +69,7 @@ export interface Prefs {
 
 const DEFAULTS: Prefs = {
   linkBrowser: "ask",
+  linkBrowserChosen: false,
   linkActions: true,
   sidebarOpen: true,
   sidebarWidth: 268,
@@ -103,7 +106,19 @@ function load(): Prefs {
     const raw = localStorage.getItem(KEY);
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw);
-    return { ...DEFAULTS, ...parsed };
+    const prefs = { ...DEFAULTS, ...parsed };
+    // Older versions saved the whole object, including the TerminalX default,
+    // without recording whether it was chosen. Migrate unmarked values once;
+    // choices made in Settings or remembered in the chooser survive this migration.
+    if (prefs.linkBrowser === "terminalx" && prefs.linkBrowserChosen !== true) {
+      prefs.linkBrowser = "system";
+      try {
+        localStorage.setItem(KEY, JSON.stringify(prefs));
+      } catch {
+        // Still use the migrated preferences when storage is unavailable.
+      }
+    }
+    return prefs;
   } catch {
     return { ...DEFAULTS };
   }

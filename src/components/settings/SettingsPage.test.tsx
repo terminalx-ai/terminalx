@@ -9,13 +9,15 @@ afterEach(cleanup);
 
 describe("Website links", () => {
   it("offers all three browser modes and can turn the chooser back on", () => {
-    setPrefs({ linkBrowser: "system" });
+    setPrefs({ linkBrowser: "system", linkBrowserChosen: false });
     render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    expect(getPrefs().linkBrowserChosen).toBe(false);
     const choices = within(screen.getByRole("radiogroup", { name: "Website links" })).getAllByRole("radio");
     expect(choices.map((choice) => choice.textContent)).toEqual(["Ask every time", "System Browser", "TerminalX Browser"]);
     for (const [index, value] of [[2, "terminalx"], [1, "system"], [0, "ask"]] as const) {
       fireEvent.click(choices[index]);
-      expect(getPrefs().linkBrowser).toBe(value);
+      expect(getPrefs()).toMatchObject({ linkBrowser: value, linkBrowserChosen: true });
+      expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: value, linkBrowserChosen: true });
       expect(choices[index].getAttribute("aria-checked")).toBe("true");
     }
   });

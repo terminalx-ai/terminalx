@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { openFile } from "@/lib/editors";
-import { setPrefs } from "@/lib/prefs";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./Markdown";
+import { setPrefs } from "@/lib/prefs";
 
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "light" }) }));
 vi.mock("@/lib/api", () => ({ fs: { inspectPath: vi.fn(), openPath: vi.fn() } }));
@@ -18,7 +19,7 @@ const textFile = (path: string, rel: string): LocalPathInfo => ({ path, root: pa
 
 beforeEach(() => {
   vi.clearAllMocks();
-  setPrefs({ linkBrowser: "terminalx" });
+  setPrefs({ linkBrowser: "system" });
   vi.mocked(fs.inspectPath).mockImplementation(async (_base, path) => path.startsWith("/")
     ? textFile(path, path.split("/").pop()!)
     : ({ path: `/workspace/${path}`, root: "/workspace", rel: path, kind: "file", text: true }));
@@ -44,7 +45,8 @@ describe("rendered chat links", () => {
     await waitFor(() => expect(openFile).toHaveBeenCalledWith("render-origin", "/workspace", "src/index.ts", { line: 12, col: 3 }, "/workspace"));
 
     fireEvent.click(screen.getByRole("link", { name: "http://localhost:4173/path?q=1#result" }));
-    await waitFor(() => expect(openBrowserTab).toHaveBeenCalledWith("render-origin", "/workspace", "http://localhost:4173/path?q=1#result"));
+    await waitFor(() => expect(openUrl).toHaveBeenCalledExactlyOnceWith("http://localhost:4173/path?q=1#result"));
+    expect(openBrowserTab).not.toHaveBeenCalled();
   });
 
   it("preserves file URL line fragments and encoded literal delimiters through Streamdown", async () => {
@@ -87,7 +89,7 @@ describe("rendered chat links", () => {
 
     const previewContext = { ...context, basePath: "/tmp" };
     rerender(<Markdown text="[web](https://example.test/from-preview) [nested](nested/Next.md)" linkContext={previewContext} />);
-    fireEvent.click(await screen.findByRole("link", { name: "web" }));
+    fireEvent.click(await screen.findByRole("link", { name: "web" }), { shiftKey: true, metaKey: true });
     await waitFor(() => expect(openBrowserTab).toHaveBeenCalledWith("render-origin", "/workspace", "https://example.test/from-preview"));
     fireEvent.click(screen.getByRole("link", { name: "nested" }));
     await waitFor(() => expect(fs.inspectPath).toHaveBeenLastCalledWith("/tmp", "nested/Next.md"));
@@ -130,11 +132,12 @@ describe("rendered chat links", () => {
     const link = await screen.findByRole("link", { name: "site" });
     link.focus();
     link.click(); // Native click with detail=0 is the activation browsers emit for Enter on an anchor.
-    await waitFor(() => expect(openBrowserTab).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://example.test/path"));
     const middle = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
     link.dispatchEvent(middle);
     expect(middle.defaultPrevented).toBe(true);
-    await waitFor(() => expect(openBrowserTab).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(openUrl).toHaveBeenCalledTimes(2));
+    expect(openBrowserTab).not.toHaveBeenCalled();
   });
 
   it("blocks script links and displays a useful error instead of navigating", async () => {
