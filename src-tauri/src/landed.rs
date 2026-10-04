@@ -53,10 +53,12 @@
 //! - **Files hidden from `git status`.** A file marked `skip-worktree` or
 //!   `assume-unchanged` can be modified without showing. When any file has
 //!   either flag the result is "not verified".
-//! - **Commits inside a submodule** that the submodule has not pushed. A
-//!   submodule with uncommitted changes, or checked out at a commit other
-//!   than the recorded one, shows as an uncommitted file; one whose recorded
-//!   commit exists only locally does not.
+//! - **Submodules.** Git can be told to leave them out of every comparison
+//!   (`submodule.<name>.ignore = all`, `diff.ignoreSubmodules`), and commits
+//!   made inside one may exist nowhere else. So a checkout whose index holds
+//!   any submodule is "not verified", and the question "does the branch
+//!   change anything" is answered by comparing trees, which no setting can
+//!   blind.
 
 use std::path::Path;
 use std::time::Duration;
@@ -196,17 +198,73 @@ fn hidden_from_status(cwd: &Path) -> Option<u32> {
 
 /// After a patch match: would merging HEAD into `base` leave `base` as it
 /// is? `Some(false)` when the merge is clean and changes the base, so the
-/// branch holds something the base does not. A merge that conflicts cannot
-/// say either way and leaves the patch verdict standing. `None` when git
-/// cannot do the test merge at all.
-fn base_already_holds_head(cwd: &Path, base: &str) -> Option<bool> {
+/// branch holds something the base does not.
+///
+/// A merge that conflicts cannot say by itself. The patch match is then left
+/// standing only when every hunk of the branch's change has a single place
+/// it could apply. With more than one (two identical blocks), the match may
+/// be for a change the base made somewhere else, and the answer is `None`:
+/// not verified. `None` too when git cannot do the test merge at all.
+fn base_already_holds_head(cwd: &Path, base: &str, merge_base: &str) -> Option<bool> {
     let base_tree = git::run(cwd, &["rev-parse", &format!("{base}^{{tree}}")]).ok()?.trim().to_string();
     match git::run(cwd, &["merge-tree", "--write-tree", base, "HEAD"]) {
         Ok(out) => Some(out.lines().next().map(str::trim) == Some(base_tree.as_str())),
         // Exit 1 with nothing on stderr is "there are conflicts".
-        Err(error) if format!("{error:#}").contains(": exit ") => Some(true),
+        Err(error) if format!("{error:#}").contains(": exit ") => (!applies_in_more_than_one_place(cwd, merge_base)?).then_some(true),
         Err(_) => None,
     }
+}
+
+/// Whether any hunk of the change `merge_base..HEAD` could apply at more
+/// than one place in the file it changes: its lines before the change (the
+/// context and what it removes) occur more than once in the old file. A
+/// patch id is the same wherever such a hunk lands. `None` when the diff
+/// cannot be read.
+fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str) -> Option<bool> {
+    let diff = git::run(cwd, &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=none", merge_base, "HEAD", "--"]).ok()?;
+    let mut old_file: Option<Vec<String>> = None;
+    let mut hunk: Vec<String> = Vec::new();
+    let mut in_hunk = false;
+    let mut ambiguous = false;
+    let mut close = |hunk: &mut Vec<String>, old_file: &Option<Vec<String>>| {
+        if let Some(old) = old_file {
+            if !hunk.is_empty() && old.windows(hunk.len()).filter(|window| *window == hunk.as_slice()).count() > 1 {
+                ambiguous = true;
+            }
+        }
+        hunk.clear();
+    };
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            close(&mut hunk, &old_file);
+            in_hunk = false;
+            // `--- a/<path>`, or `/dev/null` for a file the branch adds.
+            old_file = match path.strip_prefix("a/") {
+                Some(path) => Some(git::run(cwd, &["show", &format!("{merge_base}:{path}")]).ok()?.lines().map(String::from).collect()),
+                None => None,
+            };
+        } else if line.starts_with("@@") {
+            close(&mut hunk, &old_file);
+            in_hunk = true;
+        } else if line.starts_with("diff --git") {
+            close(&mut hunk, &old_file);
+            in_hunk = false;
+            old_file = None;
+        } else if in_hunk {
+            if let Some(text) = line.strip_prefix(' ').or_else(|| line.strip_prefix('-')) {
+                hunk.push(text.to_string());
+            }
+        }
+    }
+    close(&mut hunk, &old_file);
+    Some(ambiguous)
+}
+
+/// Submodules recorded in the checkout's index (`160000` entries in
+/// `git ls-files -s`). `None` when the index cannot be read.
+fn submodules_in(cwd: &Path) -> Option<u32> {
+    let out = git::run(cwd, &["ls-files", "-s"]).ok()?;
+    Some(out.lines().filter(|line| line.starts_with("160000 ")).count() as u32)
 }
 
 /// The exact patch ids (whitespace included) of the non-merge commits in
@@ -243,7 +301,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         // change exactly, not the same but for whitespace.
         let ours = verbatim_patch_ids(cwd, &[&format!("{base}..HEAD")])?;
         let theirs = upstream()?;
-        if ours.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base)? {
+        if ours.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base, &merge_base)? {
             return Some((Some(MergedBy::Rebase), 0));
         }
     }
@@ -257,7 +315,11 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     if merge_base.is_empty() {
         return Some((None, unmerged));
     }
-    if git::run(cwd, &["diff", "--quiet", &merge_base, "HEAD", "--"]).is_ok() {
+    // Trees, not `git diff --quiet`: a diff honours `submodule.<name>.ignore`
+    // and `diff.ignoreSubmodules`, and would call a branch that moves a
+    // submodule to another commit "no changes".
+    let tree = |rev: &str| git::run(cwd, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{tree}}")]).ok().map(|tree| tree.trim().to_string());
+    if tree(&merge_base)? == tree("HEAD")? {
         return Some((Some(MergedBy::NoChanges), 0));
     }
     // The whole branch as one commit on top of where it started; nothing
@@ -273,7 +335,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         // re-indents a line still matches when whitespace is ignored.
         let whole = verbatim_patch_ids(cwd, &["-1", squashed.trim()])?;
         let theirs = upstream()?;
-        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base)? {
+        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base, &merge_base)? {
             return Some((Some(MergedBy::Squash), 0));
         }
     }
@@ -349,7 +411,7 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
                 landed.merged = merged;
                 landed.unmerged_commits = unmerged;
             }
-            None => landed.not_verified = Some(format!("Git could not compare the branch with {base}.")),
+            None => landed.not_verified = Some(format!("Whether the branch's work is in {base} could not be established.")),
         }
     }
     if status.is_none() {
@@ -367,6 +429,18 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
                 ))
             }
             None => landed.not_verified = Some("Git could not list the files in the working tree.".to_string()),
+        }
+    }
+    if landed.not_verified.is_none() {
+        match submodules_in(path) {
+            Some(0) => {}
+            Some(count) => {
+                landed.not_verified = Some(format!(
+                    "It has {count} submodule{}, and work inside a submodule, or a change of which commit it points at, cannot be checked from here.",
+                    if count == 1 { "" } else { "s" }
+                ))
+            }
+            None => landed.not_verified = Some("Git could not read the index.".to_string()),
         }
     }
     landed.base = base;
@@ -729,6 +803,100 @@ mod tests {
         assert_eq!(landed.merged, None, "{landed:?}");
         assert!(!landed.safe);
         assert_eq!(landed.unmerged_commits, 1);
+    }
+
+    #[test]
+    fn a_conflicting_test_merge_does_not_let_a_position_blind_match_through() {
+        let f = Fixture::new();
+        let block = "start\nalpha\nbeta\ngamma\nvalue = 1\ndelta\nepsilon\nzeta\nend\n";
+        let file = |first: &str, second: &str| format!("{}{}", block.replace("value = 1", first), block.replace("value = 1", second));
+        f.elsewhere(|other| commit(other, "twin.txt", &file("value = 1", "value = 1")));
+        sh(&f.project, &["pull", "-q", "origin", "main"]);
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+
+        // Upstream changes block 1, and later edits block 2 as well.
+        f.elsewhere(|other| {
+            commit(other, "twin.txt", &file("value = 2", "value = 1"));
+            commit(other, "twin.txt", &file("value = 2", "value = 3"));
+        });
+        // The branch's unpushed commit makes the first change, in block 2.
+        commit(&wt, "twin.txt", &file("value = 1", "value = 2"));
+
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        // The patch ids match and the test merge conflicts...
+        let ours = verbatim_patch_ids(&wt, &["origin/main..HEAD"]).unwrap();
+        let theirs = verbatim_patch_ids(&wt, &["HEAD..origin/main"]).unwrap();
+        assert!(!ours.is_empty() && ours.iter().all(|id| theirs.contains(id)));
+        assert!(git::run(&wt, &["merge-tree", "--write-tree", "origin/main", "HEAD"]).is_err());
+        // ...and with two places the hunk could apply, that proves nothing.
+        assert_eq!(landed.merged, None, "{landed:?}");
+        assert!(landed.not_verified.is_some() && !landed.safe, "{landed:?}");
+    }
+
+    #[test]
+    fn a_squash_whose_lines_main_changed_again_is_still_recognised_when_the_change_has_one_place() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let branch = Fixture::branch("quiet-amber-fox");
+        commit(&wt, "a.txt", "one\ntwo from the branch\n");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        f.elsewhere(|other| {
+            sh(other, &["merge", "-q", "--squash", &format!("origin/{branch}")]);
+            sh(other, &["commit", "-q", "-m", "squashed"]);
+            // Main then changes the same line again: merging the old branch
+            // into it now conflicts.
+            commit(other, "a.txt", "one\ntwo, edited on main\n");
+        });
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        assert!(git::run(&wt, &["merge-tree", "--write-tree", "origin/main", "HEAD"]).is_err(), "the test merge conflicts");
+        assert!(landed.merged.is_some() && landed.safe, "{landed:?}");
+    }
+
+    #[test]
+    fn a_submodule_bump_hidden_by_ignore_all_is_not_no_changes() {
+        let f = Fixture::new();
+        // A repository to use as a submodule, with two commits.
+        let lib = f._dir.path().join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        sh(&lib, &["init", "-q", "-b", "main"]);
+        sh(&lib, &["config", "user.email", "l@example.com"]);
+        sh(&lib, &["config", "user.name", "L"]);
+        commit(&lib, "lib.txt", "v1\n");
+        let v1 = sh(&lib, &["rev-parse", "HEAD"]).trim().to_string();
+        commit(&lib, "lib.txt", "v2\n");
+
+        // The project records it at v1, told to ignore it in every diff.
+        sh(&f.project, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.to_str().unwrap(), "lib"]);
+        sh(&f.project.join("lib"), &["checkout", "-q", &v1]);
+        sh(&f.project, &["config", "-f", ".gitmodules", "submodule.lib.ignore", "all"]);
+        sh(&f.project, &["add", "."]);
+        sh(&f.project, &["commit", "-q", "-m", "add lib at v1"]);
+        sh(&f.project, &["push", "-q", "origin", "main"]);
+
+        // In the workspace, an unpushed commit moves the submodule to v2.
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        sh(&wt, &["-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init"]);
+        sh(&wt.join("lib"), &["checkout", "-q", "main"]);
+        sh(&wt, &["add", "lib"]);
+        sh(&wt, &["commit", "-q", "-m", "bump lib to v2"]);
+
+        // Git's own diff sees nothing, because it was told not to look...
+        assert!(git::run(&wt, &["diff", "--quiet", "origin/main", "HEAD", "--"]).is_ok());
+        assert!(sh(&wt, &["status", "--porcelain"]).trim().is_empty());
+        // ...while the branch does record a different commit for the submodule.
+        assert_ne!(sh(&wt, &["rev-parse", "origin/main:lib"]), sh(&wt, &["rev-parse", "HEAD:lib"]));
+
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        assert_ne!(landed.merged, Some(MergedBy::NoChanges), "{landed:?}");
+        assert!(!landed.safe, "{landed:?}");
+        assert!(landed.not_verified.as_deref().is_some_and(|reason| reason.contains("submodule")), "{landed:?}");
+
+        // A clean, merged workspace that merely has a submodule is not
+        // verified either: what is inside it cannot be checked from here.
+        let plain = PathBuf::from(git::create_worktree(&f.project, "calm-teal-bee", Some("main")).unwrap().path);
+        let landed = check(&f.project, &plain, Fetch::Fresh);
+        assert_eq!(landed.merged, Some(MergedBy::Ancestor));
+        assert!(landed.not_verified.as_deref().is_some_and(|reason| reason.contains("submodule")) && !landed.safe, "{landed:?}");
     }
 
     #[test]
