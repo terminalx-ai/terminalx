@@ -125,6 +125,9 @@ struct ComposerEcho {
     image_count: usize,
     sent_at: Instant,
     receipt: Option<DeliveryReceipt>,
+    /// Confirmation is armed only after Enter was written successfully, not
+    /// while the prompt is waiting for the CLI to become ready.
+    submitted: bool,
     /// Sent while a turn was running, so the CLI holds it until it has a
     /// use for it. Its echo may be a long time coming, and may arrive after
     /// the turn it was queued behind has ended — as the prompt of the next.
@@ -155,13 +158,30 @@ const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, queued: false, command: false, seq: 0 }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0 }
     }
 
     fn matches(&self, echoed: &str) -> bool {
         let (labels, rest) = strip_image_labels(echoed);
         let (rest, text) = (rest.trim(), self.text.trim());
-        labels == self.image_count && (rest == text || (self.command && text.split_whitespace().next() == Some(rest)))
+        if labels != self.image_count {
+            return false;
+        }
+        if rest == text || (self.command && text.split_whitespace().next() == Some(rest)) {
+            return true;
+        }
+        // The CLI may reflow a paste or enclose it (or its chunks) in these
+        // tags. Compare every word: a shared prefix/suffix alone could swallow
+        // a different prompt typed in the terminal.
+        static PASTED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?s)<pasted_content(?:\s+[^>]*)?>(.*?)</pasted_content(?:\s+[^>]*)?>").unwrap()
+        });
+        rest.split_whitespace().eq(text.split_whitespace())
+            || PASTED.replace_all(rest, "$1").split_whitespace().eq(text.split_whitespace())
+    }
+
+    fn confirm_delivery(&mut self) -> bool {
+        self.submitted && self.receipt.take().is_some_and(|receipt| receipt.send(Ok(())).is_ok())
     }
 
     fn expired(&self, now: Instant) -> bool {
@@ -209,13 +229,11 @@ fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Op
 /// the terminal, and the transcript's record is the only one there is.
 fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> Option<Echoed> {
     let Payload::UserMessage { text, .. } = payload else { return None };
-    let at = pending.iter().position(|prompt| prompt.matches(text))?;
+    let at = pending.iter().position(|prompt| (prompt.receipt.is_none() || prompt.submitted) && prompt.matches(text))?;
     if at > 0 {
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
-    if let Some(receipt) = &pending[at].receipt {
-        let _ = receipt.send(Ok(()));
-    }
+    pending[at].confirm_delivery();
     let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
     pending.drain(..=at);
     Some(echoed)
@@ -696,8 +714,8 @@ impl SessionManager {
     }
 
     /// Evidence from the CLI, not from writing bytes into its input. Keep
-    /// echo deduplication and continuation receipts separate: a continuation
-    /// still needs its exact prompt echoed before it acknowledges delivery.
+    /// startup recovery and continuation receipts separate: continuations
+    /// require a matching echo or a submit hook after their Enter was written.
     fn delivery_confirmed(&self, rt: &mut TabRuntime) {
         if let Engine::Cli(p) = &mut rt.engine {
             p.awaiting_delivery = None;
@@ -972,7 +990,7 @@ impl SessionManager {
     }
 
     /// Continuations use the normal send path, but only acknowledge delivery
-    /// when the provider's own saved transcript echoes the prompt.
+    /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
         let outcome = self.send_impl(session_id, tab_id, text.clone(), text, Vec::new(), Some(tx))?;
@@ -2002,7 +2020,7 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
-        self.type_prompt(rt_arc, &pane, agent, paths, Some(ready), receipt);
+        self.type_prompt(rt_arc, &pane, agent, paths, Some(ready), receipt.map(|receipt| (ev.seq, receipt)));
         Ok(SendOutcome { queued, events: vec![ev] })
     }
 
@@ -2037,7 +2055,7 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<DeliveryReceipt>) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<(u64, DeliveryReceipt)>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -2053,7 +2071,7 @@ impl SessionManager {
                 if !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready)) {
                     return;
                 }
-                if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref()) {
+                if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref().map(|(_, receipt)| receipt)) {
                     return;
                 }
             }
@@ -2068,7 +2086,19 @@ impl SessionManager {
                 let body = tui::body_bytes(&text);
                 terminals.write(&pane, &body)?;
                 std::thread::sleep(tui::submit_delay(body.len()));
-                terminals.write(&pane, tui::SUBMIT)?;
+                if let Some((seq, _)) = &receipt {
+                    // Hold the runtime lock across Enter and arming so a fast
+                    // submit hook/echo cannot arrive between the two.
+                    let mut rt = rt_arc.lock().unwrap();
+                    terminals.write(&pane, tui::SUBMIT)?;
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        if let Some(echo) = p.echoed.iter_mut().find(|echo| echo.seq == *seq) {
+                            echo.submitted = true;
+                        }
+                    }
+                } else {
+                    terminals.write(&pane, tui::SUBMIT)?;
+                }
                 Ok(())
             })();
             if let Err(e) = result {
@@ -2077,7 +2107,7 @@ impl SessionManager {
                 if ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready))) {
                     return;
                 }
-                if let Some(receipt) = receipt {
+                if let Some((_, receipt)) = receipt {
                     rt.turn_open = false;
                     manager.set_status(&mut rt, TabStatus::Idle);
                     let _ = receipt.send(Err(format!("The new session opened, but writing its continuation prompt failed: {e}. The prepared prompt is retained.")));
@@ -2087,7 +2117,7 @@ impl SessionManager {
                 }
             }
         });
-        if let (Err(e), Some(receipt)) = (spawned, spawn_receipt) {
+        if let (Err(e), Some((_, receipt))) = (spawned, spawn_receipt) {
             let _ = receipt.send(Err(format!("Could not start prompt delivery: {e}")));
         }
     }
@@ -2287,6 +2317,15 @@ impl SessionManager {
                 // while its transcript was being drained above.
                 if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
                     return HookReply::default();
+                }
+                if frame.event == "UserPromptSubmit" {
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        for echo in p.echoed.iter_mut().filter(|echo| echo.submitted && !echo.queued && !echo.command) {
+                            // A timed-out receipt must not absorb a later
+                            // submission's hook. Keep its echo for deduplication.
+                            if echo.confirm_delivery() { break; }
+                        }
+                    }
                 }
                 rt.last_activity = Instant::now();
                 if !rt.turn_open {
@@ -2789,18 +2828,37 @@ mod tests {
     }
 
     #[test]
-    fn delivery_is_confirmed_only_by_the_matching_provider_echo() {
+    fn delivery_is_confirmed_by_the_matching_provider_echo_after_submission() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
         echo.receipt = Some(tx);
         let mut pending = std::collections::VecDeque::from([echo]);
         let message = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
+        assert!(rx.try_recv().is_err(), "a prompt still waiting for readiness is not delivered");
+        pending[0].submitted = true;
         assert!(consume_composer_echo(&mut pending, &message("unrelated prompt")).is_none());
         assert!(rx.try_recv().is_err());
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_some());
         assert_eq!(rx.try_recv().unwrap(), Ok(()));
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn composer_echo_matches_pasted_content_and_whitespace_without_accepting_partial_prompts() {
+        let text = format!("Continue work\n\n{}\nKeep the transcript unchanged.", "historical context ".repeat(1000));
+        let echo = ComposerEcho::new(text.clone(), 0);
+        assert!(echo.matches(&format!("<pasted_content id=\"1\">\n{text}\n</pasted_content>")));
+        assert!(echo.matches(&format!("<pasted_content id=\"1\">\n{text}\n</pasted_content id=\"1\">")));
+        assert!(echo.matches(&text.split_whitespace().collect::<Vec<_>>().join(" \r\n\t")));
+        assert!(ComposerEcho::new("first part second part".into(), 0).matches(
+            "<pasted_content id=\"1\">first part</pasted_content>\n<pasted_content id=\"2\">second part</pasted_content>"
+        ));
+        assert!(!echo.matches("Continue work historical context Keep the transcript unchanged."));
+        assert!(!echo.matches(&format!("{text} extra instructions")));
+        assert!(!echo.matches(&format!("<pasted_content id=\"1\">{text}")));
+        assert!(!ComposerEcho::new(text.clone(), 1).matches(&format!("<pasted_content>{text}</pasted_content>")));
     }
 
     /// One echo the transcript never produces must not shift every later

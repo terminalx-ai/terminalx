@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import type { ContinuationContext } from "@/lib/continuation";
@@ -8,7 +8,7 @@ vi.mock("@/lib/continuation", async (original) => ({ ...await original<typeof im
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastAgent: "codex" }) }));
 vi.mock("@/lib/sessions", () => ({ addTab: vi.fn() }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn() }));
-vi.mock("@/lib/drafts", () => ({ setDraft: vi.fn() }));
+vi.mock("@/lib/drafts", () => ({ getDraft: vi.fn(), setDraft: vi.fn() }));
 import { ContinuationDialog } from "./ContinuationDialog";
 const source = { id: "source", harness: "claude", title: "Fix issue", status: "waiting" } as TabEntry;
 const session = { id: "workspace", cwd: "/same/cwd", title: "Workspace" } as SessionEntry;
@@ -76,6 +76,26 @@ it("retains the dialog on launch failure and resets errors and selection on reop
   expect(screen.queryByRole("alert")).toBeNull();
   expect((screen.getByLabelText("Provider") as HTMLSelectElement).value).toBe("claude");
   expect((screen.getByRole("radio", { name: /Focused handoff/ }) as HTMLInputElement).checked).toBe(true);
+});
+it.each(["button", "escape"])("allows opening the destination with %s while delivery is pending", async (dismiss) => {
+  let resolve!: (value: unknown) => void;
+  mocks.launch.mockImplementation((_context, _provider, _prompt, onCreated) => {
+    onCreated({ id: "new" });
+    return new Promise((done) => { resolve = done; });
+  });
+  const view = open(); await loaded();
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  expect(screen.getByRole("button", { name: "Starting…" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Open New Session" }).hasAttribute("disabled")).toBe(false);
+  if (dismiss === "button") fireEvent.click(screen.getByRole("button", { name: "Open New Session" }));
+  else fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(view.onClose).toHaveBeenCalledTimes(1);
+  view.unmount();
+  const reopened = open(); await loaded();
+  await act(async () => { resolve({ stage: "delivered", tab: { id: "new" } }); });
+  expect(view.onClose).toHaveBeenCalledTimes(1);
+  expect(reopened.onClose).not.toHaveBeenCalled();
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
 it("makes the destination reachable after delivery failure without offering a duplicate launch", async () => {
   mocks.launch.mockImplementation(async (_context, _provider, _prompt, onCreated) => {
