@@ -33,6 +33,8 @@ pub const MULTI_ORG_CAPABILITY: &str = "cloud.desktop.multi-org.v1";
 /// request (`GET /v1/desktop/cloud-catalog`, PRO-74). Without it the desktop
 /// lists each Organization on its own.
 pub const CATALOG_FEED_CAPABILITY: &str = "cloud.desktop.catalog-feed.v1";
+/// Any member creates a cloud workspace and manages their own (PRO-73).
+pub const MEMBER_WORKSPACES_CAPABILITY: &str = "cloud.workspaces.member-managed.v1";
 
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only: point the account service (and everything built on it,
@@ -100,6 +102,10 @@ pub struct AccountStatus {
     multi_org: bool,
     /// The server lists every member Organization in one request (PRO-74).
     catalog_feed: bool,
+    /// The server lets any member create a cloud workspace and manage the
+    /// ones they created (PRO-73). Without it, creating stays with owners
+    /// and admins, as that server enforces.
+    member_workspaces: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -419,6 +425,13 @@ impl AccountManager {
             .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
+    }
+
+    /// Tests: whether the server lets members create workspaces (PRO-73).
+    #[cfg(test)]
+    pub(crate) fn set_member_workspaces_for_test(&self, offered: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.session.as_mut().expect("signed in").capabilities.flags.insert(MEMBER_WORKSPACES_CAPABILITY.into(), offered);
     }
 
     /// Tests: whether the server advertises the catalog feed.
@@ -1152,6 +1165,14 @@ impl AccountManager {
         snapshot(&self.inner.lock().unwrap())
     }
 
+    /// The active organization's name, for a native dialog that must say
+    /// which organization something is about to be shared with. `None` when
+    /// `organization_id` is not the active one or its name is not known.
+    pub(crate) fn active_organization_name(&self, organization_id: &str) -> Option<String> {
+        let identity = self.snapshot().identity?;
+        (identity.organization_id.as_deref() == Some(organization_id)).then_some(identity.organization).flatten().filter(|name| !name.trim().is_empty())
+    }
+
     fn emit(&self, app: &AppHandle) {
         let _ = app.emit(STATUS_EVENT, self.snapshot());
     }
@@ -1257,6 +1278,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
+        member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
     }
 }
 
@@ -1758,6 +1780,17 @@ mod tests {
         // Switching the active organization drops no member organization's data.
         assert_eq!(manager.current_scope().unwrap().kept_orgs(), scope.kept_orgs());
         assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["multiOrg"], false);
+    }
+
+    #[test]
+    fn the_status_says_whether_the_server_lets_members_create_workspaces() {
+        let manager = signed_in("org-a");
+        // A server from before PRO-73 says nothing: creating stays with owners and admins.
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["memberWorkspaces"], false);
+        manager.set_member_workspaces_for_test(true);
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["memberWorkspaces"], true);
+        manager.set_member_workspaces_for_test(false);
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["memberWorkspaces"], false);
     }
 
     #[test]

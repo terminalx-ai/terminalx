@@ -25,10 +25,17 @@ import { countTerminalData, isOnScreen } from "@/lib/terminalCounters";
  *   receipt instead lets a suspended parser accumulate unlimited output,
  *   freezing terminal and chat together when the window resumes. Hidden
  *   windows skip shell pacing so each parser tick can release all its work.
+ *   The existing 2 MiB retirement limit also bounds a hidden parser if the
+ *   backend stops waiting for it; its next view restores backend scrollback.
  */
 export const ACK_BYTES = 256 * 1024;
 /** A hidden shell is acknowledged `ACK_BYTES` per tick: about 5 MB/s. */
 export const HIDDEN_ACK_MS = 50;
+export const HIDDEN_QUEUE_LIMIT = 2 * 1024 * 1024;
+
+let queuedBytes = 0;
+/** Bytes received by local parsers but not yet parsed. */
+export function queuedLocalOutputBytes(): number { return queuedBytes; }
 
 export interface PaneFeed {
   /** Give it what the pane printed. */
@@ -42,8 +49,9 @@ export interface PaneFeed {
  * agent's pane: acknowledged as soon as it is parsed, whether or not anyone
  * is looking.
  */
-export function feedLocalPane(id: string, token: string, term: Terminal, { paced = true }: { paced?: boolean } = {}): PaneFeed {
+export function feedLocalPane(id: string, token: string, term: Terminal, { paced = true, retire }: { paced?: boolean; retire?: () => void } = {}): PaneFeed {
   let stopped = false;
+  let received = 0;
   let parsed = 0;
   /** The total last reported. */
   let acked = 0;
@@ -70,15 +78,25 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
   };
   return {
     data: (bytes) => {
-      countTerminalData("local", bytes.length);
       if (stopped) return;
+      countTerminalData("local", bytes.length);
+      if (retire && document.hidden && received - parsed + bytes.length > HIDDEN_QUEUE_LIMIT) {
+        retire();
+        return;
+      }
+      received += bytes.length;
+      queuedBytes += bytes.length;
       term.write(bytes, () => {
+        if (stopped) return;
         parsed += bytes.length;
+        queuedBytes -= bytes.length;
         settle();
       });
     },
     stop: () => {
+      if (stopped) return;
       stopped = true;
+      queuedBytes -= received - parsed;
       if (timer) clearTimeout(timer);
       timer = null;
     },

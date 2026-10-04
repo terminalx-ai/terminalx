@@ -23,6 +23,9 @@ const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 tex
 interface LimitsDraft {
   maxWorkspaces: string;
   maxRunningWorkspaces: string;
+  perMember: string;
+  createsPerHour: string;
+  createsPerDay: string;
   maxIdleSuspendMinutes: string;
   machineClasses: Record<string, string>;
   locations: Record<string, string>;
@@ -31,10 +34,16 @@ interface LimitsDraft {
 const draftFrom = (policy: ComputePolicy): LimitsDraft => ({
   maxWorkspaces: String(policy.maxWorkspaces),
   maxRunningWorkspaces: policy.maxRunningWorkspaces === null ? "" : String(policy.maxRunningWorkspaces),
+  perMember: policy.maxRunningWorkspacesPerMember == null ? "" : String(policy.maxRunningWorkspacesPerMember),
+  createsPerHour: policy.maxCreatesPerMemberPerHour == null ? "" : String(policy.maxCreatesPerMemberPerHour),
+  createsPerDay: policy.maxCreatesPerMemberPerDay == null ? "" : String(policy.maxCreatesPerMemberPerDay),
   maxIdleSuspendMinutes: policy.maxIdleSuspendMinutes === null ? "" : String(policy.maxIdleSuspendMinutes),
   machineClasses: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedMachineClasses[provider] ?? []).join(", ")])),
   locations: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedLocations[provider] ?? []).join(", ")])),
 });
+
+/** The most the server takes for a create budget. */
+const CREATE_BUDGET_MAX = 500;
 
 const limitValue = (text: string, ceiling: number): number | null => {
   const value = Number(text.trim());
@@ -176,7 +185,22 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   const runningLimit = effectiveRunningLimit(view);
   const blankRunningLimit = effectiveRunningLimit({ ...view, policy: { ...policy, maxWorkspaces: maxWorkspaces ?? policy.maxWorkspaces, maxRunningWorkspaces: null } });
   const runningInvalid = Boolean(runningText) && (maxRunning === null || (maxWorkspaces !== null && maxRunning > maxWorkspaces));
-  const limitsInvalid = maxWorkspaces === null || runningInvalid;
+  // The cap per person (PRO-73), where the server has it. Blank means no cap of its own.
+  const hasPerMember = policy.maxRunningWorkspacesPerMember !== undefined;
+  const perMemberText = draft.perMember.trim();
+  const perMember = perMemberText ? limitValue(perMemberText, ceiling) : null;
+  const perMemberInvalid = hasPerMember && Boolean(perMemberText) && (perMember === null || (maxWorkspaces !== null && perMember > maxWorkspaces));
+  // How many one person may create per hour and per day (PRO-73), where the server has it. Blank is the service's default.
+  const hasCreateBudget = policy.maxCreatesPerMemberPerHour !== undefined && policy.maxCreatesPerMemberPerDay !== undefined;
+  const budgetValue = (text: string) => (text.trim() ? limitValue(text, CREATE_BUDGET_MAX) : null);
+  const createsPerHour = budgetValue(draft.createsPerHour);
+  const createsPerDay = budgetValue(draft.createsPerDay);
+  const budgetInvalid =
+    hasCreateBudget &&
+    ((Boolean(draft.createsPerHour.trim()) && createsPerHour === null) ||
+      (Boolean(draft.createsPerDay.trim()) && createsPerDay === null) ||
+      (createsPerHour !== null && createsPerDay !== null && createsPerHour > createsPerDay));
+  const limitsInvalid = maxWorkspaces === null || runningInvalid || perMemberInvalid || budgetInvalid;
   // The paused banner already says this.
   const alerts = (usage?.alerts ?? []).filter((alert) => alert.code !== "provisioning-paused");
   const idleOptions = [...new Set([...IDLE_CAP_OPTIONS, ...(policy.maxIdleSuspendMinutes === null ? [] : [policy.maxIdleSuspendMinutes])])].sort((a, b) => a - b);
@@ -192,6 +216,11 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
           expectedVersion: current.policy.version,
           maxWorkspaces: maxWorkspaces!,
           maxRunningWorkspaces: maxRunning,
+          // Sent only to a server that reported it: an older one refuses a key it does not know.
+          ...(current.policy.maxRunningWorkspacesPerMember !== undefined ? { maxRunningWorkspacesPerMember: perMember } : {}),
+          ...(current.policy.maxCreatesPerMemberPerHour !== undefined && current.policy.maxCreatesPerMemberPerDay !== undefined
+            ? { maxCreatesPerMemberPerHour: createsPerHour, maxCreatesPerMemberPerDay: createsPerDay }
+            : {}),
           maxIdleSuspendMinutes: draft.maxIdleSuspendMinutes ? Number(draft.maxIdleSuspendMinutes) : null,
           allowedMachineClasses: allowLists(draft.machineClasses, current.policy.allowedMachineClasses),
           allowedLocations: allowLists(draft.locations, current.policy.allowedLocations),
@@ -308,6 +337,51 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   onChange={(event) => change({ ...draft, maxRunningWorkspaces: event.target.value })}
                 />
               </label>
+              {hasPerMember && (
+                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many running workspaces one person's own creations may hold. Blank: no cap per person; the organization's limit applies.">
+                  Running per person
+                  <input
+                    aria-label="Maximum running workspaces per person"
+                    inputMode="numeric"
+                    placeholder="No cap"
+                    className={inputClass}
+                    value={draft.perMember}
+                    disabled={Boolean(busy)}
+                    aria-invalid={perMemberInvalid || undefined}
+                    onChange={(event) => change({ ...draft, perMember: event.target.value })}
+                  />
+                </label>
+              )}
+              {hasCreateBudget && (
+                <>
+                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in an hour, whatever became of them. Blank: the default.">
+                    New per person, per hour
+                    <input
+                      aria-label="Maximum workspaces one person may create per hour"
+                      inputMode="numeric"
+                      placeholder={view.createBudgetDefaults ? `${view.createBudgetDefaults.perHour} (default)` : "Default"}
+                      className={inputClass}
+                      value={draft.createsPerHour}
+                      disabled={Boolean(busy)}
+                      aria-invalid={budgetInvalid || undefined}
+                      onChange={(event) => change({ ...draft, createsPerHour: event.target.value })}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in a day, whatever became of them. Blank: the default.">
+                    New per person, per day
+                    <input
+                      aria-label="Maximum workspaces one person may create per day"
+                      inputMode="numeric"
+                      placeholder={view.createBudgetDefaults ? `${view.createBudgetDefaults.perDay} (default)` : "Default"}
+                      className={inputClass}
+                      value={draft.createsPerDay}
+                      disabled={Boolean(busy)}
+                      aria-invalid={budgetInvalid || undefined}
+                      onChange={(event) => change({ ...draft, createsPerDay: event.target.value })}
+                    />
+                  </label>
+                </>
+              )}
               <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
                 Idle suspend at most
                 <select
@@ -366,6 +440,16 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
       ) : (
         <div className="mt-3 text-[11px] leading-relaxed text-muted-foreground" aria-label="Compute limits">
           <p>Only owners and admins can change compute limits.</p>
+          {policy.maxRunningWorkspacesPerMember != null && (
+            <p>
+              Each person can have {policy.maxRunningWorkspacesPerMember} of their own workspace{policy.maxRunningWorkspacesPerMember === 1 ? "" : "s"} running at once.
+            </p>
+          )}
+          {view.createBudgetDefaults && (
+            <p>
+              Each person can create {policy.maxCreatesPerMemberPerHour ?? view.createBudgetDefaults.perHour} workspaces an hour and {policy.maxCreatesPerMemberPerDay ?? view.createBudgetDefaults.perDay} a day.
+            </p>
+          )}
           {policy.maxIdleSuspendMinutes !== null && <p>Workspaces must suspend after at most {policy.maxIdleSuspendMinutes} idle minutes.</p>}
           {[...new Set([...Object.keys(policy.allowedMachineClasses), ...Object.keys(policy.allowedLocations)])].sort().map((provider) => (
             <p key={provider}>

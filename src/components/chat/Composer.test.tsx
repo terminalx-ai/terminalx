@@ -2,6 +2,8 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { TabEntry } from "@/types/session";
 import { accessibilityPress, mouseClick } from "@/test/press";
 
@@ -344,7 +346,8 @@ describe("a Claude alias in the model picker (#256)", () => {
     show({ modelsAreLocal: false, tab: { ...onOpus, model: "claude-opus-5" } });
     mouseClick(screen.getByTitle("Model: Opus 5"));
     menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5"]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 5" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("offers the alias and, apart, the versions that can be pinned", async () => {
@@ -357,6 +360,26 @@ describe("a Claude alias in the model picker (#256)", () => {
     expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
     fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+  });
+
+  it("offers the VM's pinned versions and resolved alias, then aliases only when disconnected", async () => {
+    const runtime = new FakeAgentRuntime();
+    runtime.agents[0].models = [claude("opus", "Opus", { alias: true, isDefault: true, resolved: "claude-opus-4-6" }), claude("claude-opus-4-6", "Opus 4.6")];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    const onSetModel = vi.fn();
+    show({ modelsAreLocal: false, modelClient: client, onSetModel });
+    const button = await screen.findByTitle("Model: Opus (latest, running Opus 4.6)");
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("latest · Opus 4.6")).toBeTruthy();
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5" })).toBeNull();
+    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" }));
+    expect(onSetModel).toHaveBeenCalledWith("claude-opus-4-6");
+    act(() => runtime.emit({ state: "suspended" }));
+    mouseClick(screen.getByTitle("Model: Opus (latest)"));
+    const offline = await screen.findByRole("menu");
+    expect(within(offline).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
   });
 
   it("reads a stored pinned id the list no longer carries", async () => {
@@ -679,6 +702,43 @@ describe("composer history (PRO-85)", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
     press("ArrowUp");
     expect(field().value).toBe("third message");
+  });
+
+  // The flake behind four blocked merges: the list's arrival used to queue a "back to the first row" in a
+  // passive effect, and a key that landed after the rows were painted but before that effect ran was
+  // answered first and then undone by it.
+  it("a key pressed in the frame the @ list arrives still moves the highlight", async () => {
+    let deliver: (hits: { path: string; name: string; score: number }[]) => void = () => {};
+    invoke.mockImplementation((command: string) => (command === "search_files" ? new Promise((resolve) => (deliver = resolve)) : Promise.resolve(command === "list_slash_commands" ? [] : null)));
+    render(<HistoryComposer cwd="/repo-race" />);
+    const selected = () => screen.getAllByRole("option").find((option) => option.getAttribute("aria-selected") === "true")?.textContent;
+
+    type("@");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_files", expect.anything()));
+
+    // Outside act, as in the app: React commits the rows, and runs the commit's passive effects in a
+    // later task. The observer's callback is the first thing to run after the commit, before them.
+    const scope = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const acting = scope.IS_REACT_ACT_ENVIRONMENT;
+    scope.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      await new Promise<void>((resolve) => {
+        const painted = new MutationObserver(() => {
+          if (!screen.queryByText("b.ts")) return;
+          painted.disconnect();
+          field().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+          resolve();
+        });
+        painted.observe(document.body, { childList: true, subtree: true });
+        deliver([{ path: "src/a.ts", name: "a.ts", score: 1 }, { path: "src/b.ts", name: "b.ts", score: 1 }]);
+      });
+      // Let the commit's passive effects and the key's own render run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      scope.IS_REACT_ACT_ENVIRONMENT = acting;
+    }
+    await act(async () => {});
+    expect(selected()).toContain("b.ts");
   });
 
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {

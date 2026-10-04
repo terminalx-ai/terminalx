@@ -169,6 +169,76 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
     expect(runtime.params("pty.attach").at(-1)).toEqual({ ptyId: "tab:t-1" });
   });
 
+  describe("after the workspace stopped and woke under the open app (a new device, the same client)", () => {
+    const stopAndWake = async (kind: Parameters<FakeAgentRuntime["wokeAsNewDevice"]>[0]) => {
+      runtime.emit({ state: "suspended" });
+      runtime.wokeAsNewDevice(kind);
+      runtime.connect();
+      await settle();
+    };
+    const typedBefore = async () => {
+      await attachAgentTerminal(WS, client, "t-1", base);
+      await takeControl(WS, client, ID, null);
+      xterm.type("a");
+      xterm.type("b");
+      await settle();
+      expect(runtime.typed.join("")).toBe("ab");
+    };
+
+    it("on a runtime that survived the stop, watches until control is taken, and then every key arrives once", async () => {
+      await typedBefore();
+      await stopAndWake("frozen");
+      // The runtime's word: another device controls it. Nothing is taken or typed by itself.
+      expect(agentTerminalOf(WS, "t-1")).toMatchObject({ live: true, control: "other" });
+      expect(runtime.methods("pty.control")).toHaveLength(1);
+      // "Take control", then typing: the writer the runtime no longer knows is replaced, and the key is not lost.
+      await takeControl(WS, client, ID, null);
+      xterm.type("c");
+      await settle();
+      xterm.type("d");
+      await settle();
+      expect(runtime.typed.join("")).toBe("abcd");
+      expect(agentTerminalOf(WS, "t-1")).toMatchObject({ control: "you", inputError: null });
+      expect(runtime.conflicts).toBe(1);
+      // It stays that way through another stop and wake.
+      await stopAndWake("frozen");
+      await takeControl(WS, client, ID, null);
+      xterm.type("e");
+      await settle();
+      expect(runtime.typed.join("")).toBe("abcde");
+      expect(agentTerminalOf(WS, "t-1")?.inputError).toBeNull();
+    });
+
+    it("starts over on a machine that booted cold: a new screen, nobody controlling, and typing from 1", async () => {
+      await typedBefore();
+      await stopAndWake("restarted");
+      expect(agentTerminalOf(WS, "t-1")).toMatchObject({ gone: null, live: true, control: "none", inputError: null });
+      expect(xterm.screen()).toBe("fresh screen\r\n");
+      await takeControl(WS, client, ID, null);
+      xterm.type("c");
+      await settle();
+      expect(runtime.typed.join("")).toBe("abc");
+      expect(runtime.params("pty.write").at(-1)).toMatchObject({ seq: 1, epoch: "e1+" });
+      expect(runtime.conflicts).toBe(0);
+    });
+
+    it("never takes a terminal someone else took meanwhile", async () => {
+      await typedBefore();
+      runtime.emit({ state: "suspended" });
+      runtime.wokeAsNewDevice("frozen");
+      runtime.agent.control = "other";
+      runtime.agent.controllerId = "u-bob";
+      runtime.connect();
+      await settle();
+      expect(agentTerminalOf(WS, "t-1")).toMatchObject({ control: "other", controllerId: "u-bob" });
+      xterm.type("c");
+      await settle();
+      expect(runtime.typed.join("")).toBe("ab");
+      expect(runtime.methods("pty.control")).toHaveLength(1);
+      expect(agentTerminalOf(WS, "t-1")?.inputError).toBe("not_controller");
+    });
+  });
+
   it("goes with its workspace's other views when access ends", async () => {
     await attachAgentTerminal(WS, client, "t-1", base);
     dropCloudTerminals(WS);

@@ -91,6 +91,11 @@ pub struct Peer {
     /// The person the attachment belongs to (the API's `userId`); absent
     /// from an older API or a development link without it.
     pub user_id: Option<String>,
+    /// The API's key for this person's client installation in this
+    /// workspace: the same at every mint, while the attachment and device
+    /// are new each time (every wake of a stopped workspace). Absent from an
+    /// API that does not send it (`attachment-installation-v1`).
+    pub installation_key: Option<String>,
     outbound: mpsc::UnboundedSender<(Value, usize)>,
     /// Terminal output bytes queued for this connection that its transport
     /// has not taken yet. Past [`MAX_QUEUED_OUTPUT`] a terminal stream is
@@ -134,6 +139,10 @@ impl Peer {
     }
 
     pub fn for_user(device_id: String, authority: Authority, user_id: Option<String>) -> (Arc<Self>, Notifications) {
+        Self::for_installation(device_id, authority, user_id, None)
+    }
+
+    pub fn for_installation(device_id: String, authority: Authority, user_id: Option<String>, installation_key: Option<String>) -> (Arc<Self>, Notifications) {
         let (outbound, receiver) = mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let peer = Arc::new(Self {
@@ -141,6 +150,7 @@ impl Peer {
             device_id,
             authority,
             user_id: user_id.filter(|user| !user.is_empty()),
+            installation_key: installation_key.filter(|key| !key.is_empty()),
             outbound,
             queued: queued.clone(),
             granted: Mutex::new(None),
@@ -155,6 +165,24 @@ impl Peer {
     /// then hangs up.
     pub async fn closed(&self) {
         self.closed.notified().await
+    }
+
+    /// The person and their installation, when the API named both. The key
+    /// is only ever compared together with the person: the API supplies the
+    /// user id, so nobody else can present the pair.
+    fn installation(&self) -> Option<(&str, &str)> {
+        Some((self.user_id.as_deref()?, self.installation_key.as_deref()?))
+    }
+
+    /// Whose numbered terminal writes these are. A writer keeps its count
+    /// when its installation comes back as a new device, so a resend is
+    /// still recognised and the next write is still the next one. Without
+    /// an installation key writes are counted per device, as before.
+    fn input_scope(&self) -> String {
+        match self.installation() {
+            Some((user, key)) => format!("installation:{user}:{key}"),
+            None => format!("device:{}", self.device_id),
+        }
     }
 
     fn granted(&self, capability: &str) -> bool {
@@ -207,6 +235,9 @@ struct PtyState {
     /// The controlling person and their attachment's authority, shown to
     /// everyone watching and re-checked when roles change.
     controller_user: Option<(Option<String>, Authority)>,
+    /// The controller's installation key, when the API named one: see
+    /// [`WorkspaceRpc::resume_control`].
+    controller_installation: Option<String>,
     ring: VecDeque<u8>,
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
@@ -214,8 +245,9 @@ struct PtyState {
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
-    /// Last applied `pty.write` seq per (device, writer): a resend is
-    /// dropped and a gap is refused, so input is applied once and in order.
+    /// Last applied `pty.write` seq per ([`Peer::input_scope`], writer): a
+    /// resend is dropped and a gap is refused, so input is applied once and
+    /// in order.
     applied_seq: HashMap<(String, String), (u64, Instant)>,
     /// Accepted input, written by the terminal's own writer thread so a
     /// program that stops reading never stalls the connection.
@@ -278,6 +310,7 @@ pub struct WorkspaceRpc {
     root: PathBuf,
     files: Arc<WorkspaceFiles>,
     git: WorkspaceGit,
+    mirror: super::mirror::WorkspaceMirror,
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
@@ -340,6 +373,7 @@ impl WorkspaceRpc {
         let files = Arc::new(WorkspaceFiles::new(root.clone()));
         let rpc = Arc::new(Self {
             git: WorkspaceGit::new(root.clone(), files.clone()),
+            mirror: super::mirror::WorkspaceMirror::new(root.clone()),
             files,
             root,
             generation: AtomicU64::new(generation),
@@ -643,6 +677,7 @@ impl WorkspaceRpc {
             }
             pty.controller = None;
             pty.controller_user = None;
+            pty.controller_installation = None;
             for (subscription_id, subscriber) in &pty.subscribers {
                 subscriber.notify(
                     "pty.control",
@@ -912,6 +947,7 @@ impl WorkspaceRpc {
             "fs.search" => self.files.search(peer.id, &params),
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
+            "mirror.manifest" => self.mirror.manifest(&self.git, &params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
             "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
             git if git.starts_with("git.") => self
@@ -1012,6 +1048,47 @@ impl WorkspaceRpc {
             }
         }
         self.drop_peer_subscriptions(peer);
+        self.hand_over_control(peer);
+    }
+
+    /// A connection ended. The same installation may already be back under
+    /// its new device, watching a terminal the ended device controlled: once
+    /// that device has no connection left, the terminal is theirs.
+    fn hand_over_control(&self, gone: &Peer) {
+        let connected = self.connected_devices();
+        if connected.contains(&gone.device_id) {
+            return;
+        }
+        // Who might take which terminal, read under the lock; whether they
+        // may drive an agent's tab is asked outside it.
+        // (terminal, its agent tab as `(sessionId, tabId)`, who is watching it)
+        type Candidate = (String, Option<(String, String)>, Vec<Arc<Peer>>);
+        let candidates: Vec<Candidate> = self
+            .ptys
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, pty)| !pty.closed && pty.controller.as_deref() == Some(gone.device_id.as_str()))
+            .map(|(pty_id, pty)| {
+                let agent = pty.agent.as_ref().and_then(|agent| Some((agent.session_id.clone()?, agent.tab_id.clone())));
+                // An agent's terminal whose tab was never resolved has nobody who may be asked about its lease.
+                let askable = pty.agent.is_none() || agent.is_some();
+                let heirs = pty.subscribers.values().filter(|heir| askable && !heir.hung_up() && heir.installation().is_some()).cloned().collect();
+                (pty_id.clone(), agent, heirs)
+            })
+            .collect();
+        for (pty_id, agent, heirs) in candidates {
+            for heir in heirs {
+                if agent.as_ref().is_some_and(|(session_id, tab_id)| self.agent_input_refusal(&heir, session_id, tab_id).is_some()) {
+                    continue;
+                }
+                let mut ptys = self.ptys.lock().unwrap();
+                let Some(pty) = ptys.get_mut(&pty_id).filter(|pty| !pty.closed) else { break };
+                if self.resume_control(&pty_id, pty, &heir, &connected) {
+                    break;
+                }
+            }
+        }
     }
 
     fn drop_subscription(&self, id: &str, subscription: Subscription) {
@@ -1181,6 +1258,7 @@ impl WorkspaceRpc {
                     rows,
                     controller: None,
                     controller_user: None,
+                    controller_installation: None,
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
@@ -1385,6 +1463,7 @@ impl WorkspaceRpc {
                     rows: p.rows,
                     controller: Some(peer.device_id.clone()),
                     controller_user: Some((peer.user_id.clone(), peer.authority)),
+                    controller_installation: peer.installation_key.clone(),
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
@@ -1432,7 +1511,11 @@ impl WorkspaceRpc {
     /// Terminals of this runtime, oldest first; closed ones are gone.
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let scope = self.pty_session_scope(peer);
-        let ptys = self.ptys.lock().unwrap();
+        let connected = self.connected_devices();
+        let mut ptys = self.ptys.lock().unwrap();
+        for (pty_id, pty) in ptys.iter_mut().filter(|(_, pty)| !pty.closed && pty.agent.is_none()) {
+            self.resume_control(pty_id, pty, peer, &connected);
+        }
         let mut listed: Vec<(u64, Value)> = ptys
             .iter()
             // An agent tab's terminal is reached from its tab, never listed as a shell.
@@ -1445,6 +1528,52 @@ impl WorkspaceRpc {
             "runtimeGeneration": self.generation(),
             "terminals": listed.into_iter().map(|(_, pty)| pty).collect::<Vec<_>>(),
         }))
+    }
+
+    /// The devices with a connection now. Read before the terminals are locked.
+    fn connected_devices(&self) -> HashSet<String> {
+        self.live_peers().into_iter().filter(|peer| !peer.hung_up()).map(|peer| peer.device_id.clone()).collect()
+    }
+
+    /// The controller's device is gone and `peer` is the same person on the
+    /// same installation under the device the API issued it since (a stopped
+    /// workspace's attachments are revoked, so every wake brings a new
+    /// attachment and device): the terminal is still theirs, and they are
+    /// its controller again without asking. Nothing else moves control
+    /// without `pty.control`: not another person, not another installation
+    /// of the same person, not a controller with a connection still open,
+    /// not a link without an installation key, and not someone who may no
+    /// longer type into terminals.
+    ///
+    /// Called with the terminal's entry locked; `connected` is
+    /// [`Self::connected_devices`]. The caller has already decided that
+    /// `peer` may drive the tab of an agent's terminal
+    /// ([`Self::agent_input_refusal`], which cannot be asked under the
+    /// lock), and never calls this for what a terminal says by itself
+    /// (`report`): only attaching, listing, typing and sizing resume.
+    fn resume_control(&self, pty_id: &str, pty: &mut PtyState, peer: &Peer, connected: &HashSet<String>) -> bool {
+        let Some(controller) = pty.controller.as_deref() else { return false };
+        let Some((user, installation)) = peer.installation() else { return false };
+        if controller == peer.device_id || connected.contains(controller) {
+            return false;
+        }
+        let same_person = pty.controller_user.as_ref().is_some_and(|(controller_user, _)| controller_user.as_deref() == Some(user));
+        if !same_person || pty.controller_installation.as_deref() != Some(installation) {
+            return false;
+        }
+        // The rule `revalidate_terminal_control` keeps: only someone who may type holds a terminal.
+        if !self.collab.access_for(peer.authority, peer.user_id.as_deref()).can_configure() {
+            return false;
+        }
+        pty.controller = Some(peer.device_id.clone());
+        pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+        // A stream this device already had open learns it; to everyone else nothing changed.
+        for (subscription_id, subscriber) in &pty.subscribers {
+            if subscriber.device_id == peer.device_id {
+                subscriber.notify("pty.control", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": "you", "controllerId": peer.user_id }));
+            }
+        }
+        true
     }
 
     /// A terminal addressed by exact id in this runtime process. A client
@@ -1483,9 +1612,10 @@ impl WorkspaceRpc {
         // Decided before the terminals are locked: it reads the tab's own
         // state, which a restarting CLI can hold for seconds.
         let refusal = agent.as_ref().and_then(|(session_id, tab_id)| self.agent_input_refusal(peer, session_id, tab_id));
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
-        let key = (peer.device_id.clone(), writer.to_string());
+        let key = (peer.input_scope(), writer.to_string());
         let applied = pty.applied_seq.get(&key).map(|(seq, _)| *seq).unwrap_or(0);
         // A resend of what was applied is answered, never typed again, even
         // after control moved or the program exited.
@@ -1504,7 +1634,9 @@ impl WorkspaceRpc {
         if agent.is_some() && !self.terminals.is_running(&pty_id) {
             return Err(RpcError::new("unavailable", "the agent is not running"));
         }
-        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+        // What a person typed may bring their own terminal back to their new
+        // device; what the terminal emulator says by itself never moves control.
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) && (report || !self.resume_control(&pty_id, pty, peer, &connected)) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's input"));
         }
         if pty.input_pending.load(Ordering::SeqCst) + data.len() > MAX_PENDING_INPUT {
@@ -1583,10 +1715,11 @@ impl WorkspaceRpc {
                 return Err(refusal);
             }
         }
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // A viewer's window size never reshapes the controller's program.
-        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) && !self.resume_control(&pty_id, pty, peer, &connected) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's size"));
         }
         if pty.exit.is_none() {
@@ -1628,6 +1761,7 @@ impl WorkspaceRpc {
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
         pty.controller = Some(peer.device_id.clone());
         pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+        pty.controller_installation = peer.installation_key.clone();
         // Control first, so a device that just lost it takes the new size as
         // a viewer instead of ignoring it as its own.
         if changed {
@@ -1717,12 +1851,20 @@ impl WorkspaceRpc {
             }
         }
         // An agent tab's terminal exists from here on, even before its CLI runs.
-        self.agent_pty(peer, &params)?;
+        let agent = self.agent_pty(peer, &params)?;
+        // Whether this person may drive the tab now (someone else may hold
+        // its lease since): their terminal comes back to them only if so,
+        // so the view never reads "you" while every write is refused.
+        let may_resume = agent.as_ref().is_none_or(|(session_id, tab_id)| self.agent_input_refusal(peer, session_id, tab_id).is_none());
         let subscription_id = Self::subscription_id();
         let scope = self.pty_session_scope(peer);
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let pty_id = required_str(&params, "ptyId")?.to_string();
         let pty = ptys.get_mut(&pty_id).filter(|pty| !pty.closed).ok_or_else(|| RpcError::not_found("no such terminal"))?;
+        if may_resume {
+            self.resume_control(&pty_id, pty, peer, &connected);
+        }
         let start = pty.start();
         let from = since.unwrap_or(start).clamp(start, pty.end);
         let skip = (from - start) as usize;
@@ -1990,7 +2132,7 @@ impl WorkspaceRpc {
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
-        self.check_new_tab(&p.agent, p.mode.as_deref())?;
+        self.check_new_tab(&p.agent, &p.model, p.mode.as_deref())?;
         if p.use_worktree {
             // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
             if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
@@ -2044,8 +2186,8 @@ impl WorkspaceRpc {
         *self.offered_for_tests.lock().unwrap() = Some(offered);
     }
 
-    /// Refuse a new tab whose agent is not installed or whose mode is unknown.
-    fn check_new_tab(&self, agent: &str, mode: Option<&str>) -> Result<(), RpcError> {
+    /// Refuse a new tab whose agent, model or permission mode is unavailable.
+    fn check_new_tab(&self, agent: &str, model: &str, mode: Option<&str>) -> Result<(), RpcError> {
         if let Some(mode) = mode {
             if !PERMISSION_MODES.contains(&mode) {
                 return Err(RpcError::invalid(format!("unknown permission mode {mode}")));
@@ -2059,6 +2201,7 @@ impl WorkspaceRpc {
         if !agent.available {
             return Err(RpcError::new("unavailable", format!("{} is not installed in this workspace", agent.name)));
         }
+        crate::harness::claude::models::validate(&agent.id, model).map_err(|error| RpcError::invalid(error.to_string()))?;
         Ok(())
     }
 
@@ -2158,7 +2301,7 @@ impl WorkspaceRpc {
         let p: Params = parse(params)?;
         let session = self.visible_session(peer, &p.session_id)?;
         let mode = index::requested_mode(p.mode);
-        self.check_new_tab(&p.agent, mode.as_deref())?;
+        self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
         let tab = crate::session_ops::add_tab_entry(
             &session.id,
             &crate::session_ops::NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode },
@@ -2544,6 +2687,9 @@ impl WorkspaceRpc {
     fn session_configure(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let tab = self.visible_tab(peer, &params)?;
         let settings = crate::cloud_agents::Settings::from_json(&params).map_err(|error| RpcError::invalid(error.to_string()))?;
+        if let Some(model) = &settings.model {
+            crate::harness::claude::models::validate(&tab.harness, model).map_err(|error| RpcError::invalid(error.to_string()))?;
+        }
         let agents = self.agents()?;
         agents.ops.configure(&tab.session_id, &tab.tab_id, &settings).map_err(RpcError::internal)?;
         agents.changed(Some(&tab.tab_id), true);

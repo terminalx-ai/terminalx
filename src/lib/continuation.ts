@@ -1,6 +1,6 @@
 import { agent, api, errorMessage } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
-import { setDraft } from "@/lib/drafts";
+import { getDraft, setDraft } from "@/lib/drafts";
 import { getPrefs } from "@/lib/prefs";
 import { addTab } from "@/lib/sessions";
 import type { HarnessInfo, TabEntry } from "@/types/session";
@@ -82,10 +82,11 @@ export async function launchContinuation(
   try {
     const out = await agent.send(context.sessionId, tab.id, prompt, undefined, true);
     for (const event of out.events) applyEvent(event);
-    setDraft(tab.id, "");
+    // Delivery can finish after the dialog is dismissed and the reader has
+    // started a new draft in the destination.
+    if (getDraft(tab.id) === prompt) setDraft(tab.id, "");
     return { stage: "delivered", tab };
   } catch (e) {
-    setDraft(tab.id, prompt);
     return { stage: "delivery", tab, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. The prepared prompt is in its composer. ${errorMessage(e)}` };
   }
 }

@@ -195,6 +195,19 @@ export const api = {
   /** Check the saved key against the provider again, without entering it. */
   cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
     invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
+  // Agent logins for the organization's cloud workspaces (PRO-79). The login itself is collected in Rust
+  // (a native secure dialog, or this computer's own login) and never passes through the webview.
+  cloudAgentLogins: () => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins"),
+  cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
+    invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
+  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
+  // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
+  // The page opens in the browser; the code it shows is entered in a native dialog, never here.
+  cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
+  cloudAgentClaudeLoginOpen: (url: string) => invoke<void>("cloud_agent_claude_login_open", { url }),
+  cloudAgentClaudeLoginComplete: (attemptId: string, consent: AgentLoginConsent) =>
+    invoke<ClaudeLoginOutcome>("cloud_agent_claude_login_complete", { attemptId, consent }),
+  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string) => invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -265,6 +278,18 @@ export const api = {
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
+   * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
+   * Never wakes the workspace: rejects with `cloud_port_not_connected` unless the
+   * connection is live. `reassigned` says the named local port was taken; `exact`
+   * refuses instead (`cloud_port_in_use`). The forward closes when the workspace
+   * stops, access goes or the active organization changes.
+   */
+  cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
+    invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
+  cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
+  cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -391,6 +416,8 @@ export interface AccountStatus {
   multiOrg?: boolean;
   /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
   catalogFeed?: boolean;
+  /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
+  memberWorkspaces?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
@@ -442,6 +469,44 @@ export interface CloudProviderSummary {
     credentialFingerprint: string | null;
   } | null;
   capabilities: CloudProviderCapabilities;
+}
+
+export type AgentLoginProvider = "codex" | "claude" | "cursor";
+/** `api-key`: typed into a native secure dialog. `local-login`: the agent's own login on this computer. */
+export type AgentLoginSource = "api-key" | "local-login";
+
+/** What the service says about a stored agent login; never the login. */
+export interface AgentLogin {
+  provider: AgentLoginProvider;
+  authKind: "api-key" | "oauth-credentials-json" | (string & {});
+  fingerprint: string;
+  displayIdentity?: string;
+  version: number;
+  updatedAt: number;
+  state?: "connected" | "revoked" | "disconnected" | (string & {});
+  sharedUse?: "organization" | "managers" | (string & {});
+}
+
+export interface ClaudeLoginStarted {
+  attemptId: string;
+  authorizeUrl: string;
+  expiresInSeconds: number;
+  /** The browser was asked to open the page. */
+  opened: boolean;
+}
+
+export interface ClaudeLoginOutcome {
+  status: "complete" | "code-invalid" | "unavailable" | "pending" | "expired" | "canceled" | "failed" | (string & {});
+  credential?: AgentLogin;
+  attemptsLeft?: number;
+}
+
+export interface AgentLoginConsent {
+  contextRevision: string;
+  organizationSharing: boolean;
+  machineInstallation: boolean;
+  /** The login now stored for the agent may be replaced; required when there is one. */
+  replaceExisting: boolean;
 }
 
 export interface CloudProviderSummaryResponse {
@@ -787,6 +852,13 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+}
+
+/** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
+export interface CloudPortForward {
+  port: number;
+  localPort: number;
+  reassigned: boolean;
 }
 
 export interface CloudWorkspacePreflight {
@@ -1534,6 +1606,10 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
     else this.unlisten = unlisten;
   }
 
+  get id(): string | null {
+    return this.connectionId;
+  }
+
   bind(connectionId: string): void {
     this.connectionId = connectionId;
     const early = this.early;
@@ -1593,6 +1669,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
+  /** The native connection's id, for calls that act on it (port forwards); null until attached. */
+  connectionId?: () => string | null;
   /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
   activate(activation: Activation): Promise<void>;
   close(): void;
@@ -1652,6 +1730,7 @@ async function adopt(
   const connection: CloudWorkspaceConnection = {
     target,
     client,
+    connectionId: () => transport.id,
     activate: (next) => transport.activate(next),
     close: () => {
       if (connections.get(key) === self) connections.delete(key);

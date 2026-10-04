@@ -42,6 +42,7 @@ export interface SessionEntry {
   worktreeName?: string | null;
   branch?: string | null;
   baseRef?: string | null;
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   issue?: IssueRef | null;

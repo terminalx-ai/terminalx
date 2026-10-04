@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Cloud, FolderTree, GitBranch, Plus, TerminalSquare, UserPlus, X } from "lucide-react";
+import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlus, X } from "lucide-react";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { CloudAgentsView } from "./CloudAgents";
 import { CloudTerminalPane } from "./CloudTerminalPane";
 import { CloudFilesView } from "./CloudFiles";
 import { CloudGitView } from "./CloudGit";
+import { CloudPortsView } from "./CloudPorts";
 import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
 import { CloudShareDialog } from "./CloudShareDialog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
@@ -104,7 +105,7 @@ export function ExecutionLocation({ provider, name }: { provider: string | null;
   );
 }
 
-type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" };
+type View = { kind: "terminal" } | { kind: "agent" } | { kind: "files" } | { kind: "git" } | { kind: "ports" };
 
 export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; state: WorkspaceConnectionState }) {
   const { connection } = opened;
@@ -336,6 +337,15 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
         >
           <GitBranch className="size-3.5" /> Git
         </Button>
+        <Button
+          size="sm"
+          role="tab"
+          aria-selected={view.kind === "ports"}
+          variant={view.kind === "ports" ? "secondary" : "ghost"}
+          onClick={() => setView({ kind: "ports" })}
+        >
+          <Globe className="size-3.5" /> Ports
+        </Button>
       </div>
       {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
@@ -383,6 +393,12 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
       {gitShown && (
         <div className={view.kind === "git" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
           <CloudGitView workspaceKey={key} client={client} state={state} active={view.kind === "git"} />
+        </div>
+      )}
+      {/* Only while shown: it reads the workspace's ports on a timer. */}
+      {view.kind === "ports" && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <CloudPortsView client={client} state={state} connectionId={connection.connectionId?.() ?? null} mayOpen={mayControl} active />
         </div>
       )}
     </div>

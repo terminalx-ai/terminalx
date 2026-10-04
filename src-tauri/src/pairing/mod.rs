@@ -46,6 +46,7 @@ use self::registry::{DeviceRegistry, PairingSecrets};
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
+const PAIRING_MESSAGE_BYTES_LIMIT: usize = 10 * 1024 * 1024;
 
 #[derive(Default)]
 struct Inner {
@@ -1006,12 +1007,7 @@ impl PairingManager {
             _ => return static_rpc_response(request, device.scope),
         };
         match result {
-            Ok(result) => serde_json::json!({
-                "id": id,
-                "ok": true,
-                "result": result,
-                "_meta": { "runtimeId": "desktop" }
-            }),
+            Ok(result) => mobile::success_response(&id, result),
             Err(error) => serde_json::json!({
                 "id": id,
                 "ok": false,
@@ -1430,9 +1426,9 @@ pub(super) fn pairing_websocket_config() -> WebSocketConfig {
         // A 5 MB image is base64 encoded in JSON, then the encrypted frame is
         // base64 encoded for the text websocket. Keep the authenticated
         // pairing channel bounded while leaving room for that expansion.
-        .max_write_buffer_size(10 * 1024 * 1024)
-        .max_message_size(Some(10 * 1024 * 1024))
-        .max_frame_size(Some(10 * 1024 * 1024))
+        .max_write_buffer_size(PAIRING_MESSAGE_BYTES_LIMIT)
+        .max_message_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
+        .max_frame_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
 }
 
 fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {

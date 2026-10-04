@@ -14,7 +14,7 @@ pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{
     available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
-    sessions_in_workspace,
+    rename_workspace_entries, sessions_in_workspace,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -443,15 +443,26 @@ impl ProviderPromptError {
 
 #[cfg(target_os = "macos")]
 fn secure_provider_prompt(provider: crate::cloud_workspaces::CloudWorkspaceProviderId, organization_id: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    secure_prompt(
+        "Provider connection",
+        &format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id),
+        "Provider key",
+    )
+}
+
+/// A key typed into a native secure field: it never passes through the
+/// webview, and the field is emptied whichever way the dialog ends.
+#[cfg(target_os = "macos")]
+fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
     let mtm = MainThreadMarker::new().ok_or(ProviderPromptError::Unavailable)?;
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Provider connection"));
-    alert.setInformativeText(&NSString::from_str(&format!("Enter the {} provider key for organization {}. The key is sent to the account service only for validation and secure storage.", provider.as_str(), organization_id)));
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
     let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
-    field.setPlaceholderString(Some(&NSString::from_str("Provider key")));
+    field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     alert.setAccessoryView(Some(&field));
     alert.addButtonWithTitle(&NSString::from_str("Validate"));
     alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -498,6 +509,310 @@ pub async fn cloud_provider_connect(
     tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
         .await
         .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Mutation))?
+}
+
+#[cfg(not(target_os = "macos"))]
+fn secure_prompt(_title: &str, _text: &str, _placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+// ------------------------------------------------- agent logins (PRO-79)
+
+/// Where a login to store comes from. Either way it is collected here, in
+/// Rust: the webview names the source and never holds the login.
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentLoginSource {
+    /// An API key typed into a native secure dialog.
+    ApiKey,
+    /// The agent's own login already on this computer.
+    LocalLogin,
+}
+
+fn agent_label(provider: crate::cloud_workspaces::AgentLoginProvider) -> &'static str {
+    use crate::cloud_workspaces::AgentLoginProvider::*;
+    match provider {
+        Codex => "Codex",
+        Claude => "Claude Code",
+        Cursor => "Cursor",
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_agent_logins(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLoginList, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins())
+}
+
+/// Store an agent's login for the organization's cloud workspaces. The
+/// order matters: consent and the owner-or-admin check first, and only then
+/// is a key asked for or this computer's login read.
+#[tauri::command]
+pub async fn cloud_agent_login_connect(
+    app: AppHandle,
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    source: AgentLoginSource,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::AgentLogin, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    // Only Claude Code's sign-in can be lent without its refresh token.
+    if source == AgentLoginSource::LocalLogin && provider != AgentLoginProvider::Claude {
+        return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+    }
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(provider, &consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    // The organization by name when it is the active one; its id otherwise, as the provider dialog shows it.
+    // It is put into a native dialog: text from the account service, cleaned like any other.
+    let organization = state
+        .account
+        .active_organization_name(authorization.organization_id())
+        .map(|name| dialog_text(&name))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| authorization.organization_id().to_owned());
+    let replaces = authorization.replaces();
+    let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+    let (kind, secret, identity) = match source {
+        AgentLoginSource::ApiKey => {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let title = format!("{} API key", agent_label(provider));
+            let text = format!(
+                "Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                agent_label(provider),
+                organization
+            );
+            app.run_on_main_thread(move || {
+                let _ = sender.send(secure_prompt(&title, &text, "API key"));
+            })
+            .map_err(|_| unavailable())?;
+            let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+            (AgentLoginKind::ApiKey, entered.map_err(ProviderPromptError::client_error)?, None)
+        }
+        AgentLoginSource::LocalLogin => {
+            let read = tauri::async_runtime::spawn_blocking(crate::agent_local_login::claude)
+                .await
+                .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))?;
+            let login = read.map_err(|error| CloudWorkspaceClientError::local(error.code(), false))?;
+            // The confirmation that counts. What the webview says the person agreed to is only a
+            // request: this dialog is drawn by the app itself, names the organization and the
+            // account, and nothing is uploaded unless its own button is pressed. Every time.
+            let expires = local_time(login.expires_at_ms);
+            let account = login.account.clone().unwrap_or_else(|| "the Claude Code account signed in on this Mac (its name is not recorded here)".into());
+            let text = local_login_confirmation(&organization, &account, &expires, replaces);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            app.run_on_main_thread(move || {
+                let _ = sender.send(native_confirm("Lend this Mac's Claude Code sign-in?", &text, "Upload access token"));
+            })
+            .map_err(|_| unavailable())?;
+            let confirmed = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+            match confirmed {
+                Some(true) => {}
+                Some(false) => return Err(CloudWorkspaceClientError::local("cloud_agent_local_login_cancelled", false)),
+                None => return Err(unavailable()),
+            }
+            // The dialog has no time limit: what was valid when it opened may not be now.
+            if !crate::agent_local_login::still_worth_lending(login.expires_at_ms) {
+                return Err(CloudWorkspaceClientError::local(crate::agent_local_login::LocalLoginError::Expired.code(), false));
+            }
+            // The expiry travels as a time (UTC), so whoever looks at the list sees it in their own zone.
+            let identity = lent_identity(login.account.as_deref(), login.expires_at_ms);
+            (AgentLoginKind::LoginDocument, login.secret, Some(identity))
+        }
+    };
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret, identity.as_deref()))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+/// Text for a native dialog: no control or direction-changing characters, bounded.
+fn dialog_text(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
+        .take(120)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// What the stored login is called: whose sign-in it is, and when it stops
+/// working as a UTC time the list can read back ("… · lent until
+/// 2026-10-03T21:40:00Z").
+fn lent_identity(account: Option<&str>, expires_at_ms: i64) -> String {
+    use chrono::TimeZone;
+    let until = match chrono::Utc.timestamp_millis_opt(expires_at_ms) {
+        chrono::LocalResult::Single(at) => at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        _ => "an unknown time".into(),
+    };
+    format!("{} · lent until {until}", account.unwrap_or("Claude Code on a Mac"))
+}
+
+/// When a lent sign-in stops working, in this computer's own time.
+fn local_time(at_ms: i64) -> String {
+    use chrono::TimeZone;
+    match chrono::Local.timestamp_millis_opt(at_ms) {
+        chrono::LocalResult::Single(at) => at.format("%-d %b %Y, %H:%M").to_string(),
+        _ => "an unknown time".into(),
+    }
+}
+
+/// What the native confirmation says before a local sign-in is uploaded:
+/// which organization gets it, whose it is, what exactly leaves this Mac,
+/// who can use it, and when and how it ends.
+fn local_login_confirmation(organization: &str, account: &str, expires: &str, replaces: Option<crate::cloud_workspaces::AgentLoginKind>) -> String {
+    use crate::cloud_workspaces::AgentLoginKind;
+    let replacing = match replaces {
+        Some(AgentLoginKind::ApiKey) => format!(
+            "THIS REPLACES the API key now stored for Claude Code in {organization}. The key is removed; when the lent sign-in expires, Claude Code agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
+        Some(AgentLoginKind::LoginDocument) => format!(
+            "THIS REPLACES the login now stored for Claude Code in {organization}. When the lent sign-in expires, Claude Code agents in every workspace of the organization stop until a login is connected again.\n\n"
+        ),
+        None => String::new(),
+    };
+    format!(
+        "Organization: {organization}\nAccount (as Claude Code on this Mac records it): {account}\n\n{replacing}\
+         TerminalX will upload this sign-in's short-lived access token to the account service, for agents in the cloud workspaces of {organization}. \
+         The refresh token stays on this Mac, so this Mac's sign-in keeps working and the uploaded token cannot be renewed: it stops working on {expires}.\n\n\
+         Until then, agents in every member's workspaces of this organization may run on your Claude subscription, \
+         and anyone who can drive one of those workspaces can read the token off its machine.\n\n\
+         To end it sooner, disconnect it in Settings (the service refuses while a workspace still uses the login)."
+    )
+}
+
+/// A yes-or-no question asked by the app itself, outside the webview.
+/// `None` when it cannot be asked here.
+#[cfg(target_os = "macos")]
+fn native_confirm(title: &str, text: &str, confirm: &str) -> Option<bool> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertSecondButtonReturn, NSAlertStyle};
+    use objc2_foundation::NSString;
+    let mtm = MainThreadMarker::new()?;
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(text));
+    // Cancel first: Return and the default button never upload anything.
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.addButtonWithTitle(&NSString::from_str(confirm));
+    // Only the confirm button is a yes. Cancel, and any way a modal can end
+    // without a button (abort, stop), is a no.
+    Some(alert.runModal() == NSAlertSecondButtonReturn)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_confirm(_title: &str, _text: &str, _confirm: &str) -> Option<bool> {
+    None
+}
+
+// "Log in with Claude": the account service's own sign-in (PRO-82).
+
+/// What the page needs after a sign-in has begun. The page address is kept
+/// so "open the page again" can ask for the same one; it is not a secret.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLoginStarted {
+    attempt_id: String,
+    authorize_url: String,
+    expires_in_seconds: u64,
+    /// The browser was asked to open the page.
+    opened: bool,
+}
+
+/// Begin a sign-in and open the provider's page in the browser. Consent,
+/// the active organization, the owner-or-admin check and the explicit choice
+/// to replace a stored login all come first, as for any other way to connect.
+#[tauri::command]
+pub async fn cloud_agent_claude_login_start(
+    app: AppHandle,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<ClaudeLoginStarted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    use tauri_plugin_opener::OpenerExt;
+    let service = state.cloud_workspaces.clone();
+    let started = tauri::async_runtime::spawn_blocking(move || {
+        let authorization = service.authorize_agent_login(AgentLoginProvider::Claude, &consent)?;
+        service.start_claude_login(&authorization)
+    })
+    .await
+    .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))??;
+    let opened = app.opener().open_url(&started.authorize_url, None::<&str>).is_ok();
+    Ok(ClaudeLoginStarted { attempt_id: started.attempt_id, authorize_url: started.authorize_url, expires_in_seconds: started.expires_in_seconds, opened })
+}
+
+/// Open a sign-in page again. Only a page of the provider is opened,
+/// whatever the webview hands in.
+#[tauri::command]
+pub fn cloud_agent_claude_login_open(app: AppHandle, url: String) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use tauri_plugin_opener::OpenerExt;
+    let refused = || crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
+    if !crate::cloud_workspaces::claude_login_page(&url) {
+        return Err(refused());
+    }
+    app.opener().open_url(&url, None::<&str>).map_err(|_| refused())
+}
+
+/// Finish a sign-in: the code the provider's page showed is typed or pasted
+/// into a native secure dialog, never into the webview, and sent once.
+#[tauri::command]
+pub async fn cloud_agent_claude_login_complete(
+    app: AppHandle,
+    attempt_id: String,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::ClaudeLoginOutcome, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(AgentLoginProvider::Claude, &consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    let organization = state
+        .account
+        .active_organization_name(authorization.organization_id())
+        .map(|name| dialog_text(&name))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| authorization.organization_id().to_owned());
+    let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+    let text = format!(
+        "Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login, renews it, and agents in every member's cloud workspaces of the organization may run on it."
+    );
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = sender.send(secure_prompt("Log in with Claude", &text, "Code from the Claude page"));
+    })
+    .map_err(|_| unavailable())?;
+    let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+    let code = entered.map_err(ProviderPromptError::client_error)?;
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.complete_claude_login(authorization, &attempt_id, code))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+#[tauri::command]
+pub async fn cloud_agent_claude_login_cancel(
+    attempt_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_claude_login(&attempt_id, context_revision))
+}
+
+#[tauri::command]
+pub async fn cloud_agent_login_remove(
+    provider: crate::cloud_workspaces::AgentLoginProvider,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.remove_agent_login(provider, context_revision))
 }
 
 #[tauri::command]
@@ -1253,6 +1568,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             worktree_name: None,
             branch: src.branch.clone(),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: src.issue.clone(),
@@ -1275,6 +1591,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             entry.worktree_name = Some(wt.name);
             entry.branch = Some(wt.branch);
             entry.base_ref = Some(wt.base_tree);
+            entry.worktree_base = wt.worktree_base;
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
         if let Ok(dir) = store::sessions_dir() {
@@ -2082,6 +2399,28 @@ mod command_tests {
     use std::process::Command;
 
     use super::{rename_workspace_entries, NewSession, NewTab};
+
+    // PRO-79: the app's own confirmation before a local sign-in is uploaded.
+    #[test]
+    fn the_local_sign_in_confirmation_names_the_organization_the_account_and_the_expiry() {
+        use crate::cloud_workspaces::AgentLoginKind;
+        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", None);
+        assert!(text.starts_with("Organization: Acme Robotics\nAccount (as Claude Code on this Mac records it): ada@example.com\n"));
+        assert!(!text.contains("REPLACES") && !text.contains("sign out of Claude Code"));
+        // Review of #293: replacing a stored login is said, in the dialog too.
+        let replacing = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey));
+        assert!(replacing.contains("THIS REPLACES the API key now stored for Claude Code in Acme Robotics"));
+        assert!(replacing.contains("agents in every workspace of the organization stop"));
+        assert!(super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument)).contains("THIS REPLACES the login now stored"));
+        // The expiry is stored as a UTC time, and dialog text is cleaned.
+        assert_eq!(super::lent_identity(Some("ada@example.com"), 1_790_000_000_000), "ada@example.com · lent until 2026-09-21T14:13:20Z");
+        assert_eq!(super::dialog_text(" Acme\u{202E}\n Robotics "), "Acme Robotics");
+        assert!(text.contains("stops working on 3 Oct 2026, 21:40"));
+        assert!(text.contains("The refresh token stays on this Mac"));
+        assert!(text.contains("every member's workspaces"));
+        assert!(text.contains("anyone who can drive one of those workspaces can read the token"));
+        assert!(text.contains("the service refuses while a workspace still uses the login"));
+    }
     use crate::session_ops::{
         create_session_entry, delete_workspace_entries, new_tab_entry, notify_workspace_deleted,
         validate_session_target,
@@ -2421,6 +2760,7 @@ mod command_tests {
             worktree_name: Some("gone".into()),
             branch: Some("feature/gone".into()),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
@@ -2511,67 +2851,15 @@ pub async fn preview_workspace_name(project_path: String, requested: Option<Stri
     .map_err(err)?
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRename {
-    pub name: String,
-    pub path: String,
-    pub branch: String,
-    pub sessions: Vec<SessionEntry>,
-}
-
-fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> CmdResult<WorkspaceRename> {
-    let project = projects::canonical(project_path).map_err(err)?;
-    let target = std::fs::canonicalize(path).map_err(err)?;
-    let old_name = target
-        .file_name()
-        .and_then(|part| part.to_str())
-        .ok_or_else(|| "Workspace has no usable name.".to_string())?
-        .to_string();
-    let name = available_worktree_name(Path::new(&project), Some(requested), Some(&old_name))?;
-    let renamed = git::rename_worktree(Path::new(&project), &target, &name).map_err(err)?;
-    let new_path = renamed.path.clone();
-    let new_branch = renamed.branch.clone();
-    let update = index::update(|sessions| {
-        let mut affected = Vec::new();
-        for session in sessions {
-            // The old folder no longer exists after `git worktree move`, so
-            // compare its canonical path lexically instead of canonicalising
-            // the session cwd after the move.
-            let matches = Path::new(&session.cwd) == target || session.cwd == path;
-            if matches {
-                session.cwd = new_path.clone();
-                session.worktree_name = Some(name.clone());
-                session.branch = Some(new_branch.clone());
-                session.modified = index::now();
-                affected.push(session.clone());
-            }
-        }
-        Ok(affected)
-    });
-    match update {
-        Ok(sessions) => Ok(WorkspaceRename { name, path: renamed.path, branch: renamed.branch, sessions }),
-        Err(save_error) => {
-            let rollback = git::rename_worktree(Path::new(&project), Path::new(&renamed.path), &old_name);
-            match rollback {
-                Ok(_) => Err(err(save_error)),
-                Err(rollback_error) => Err(format!(
-                    "Workspace was renamed but its session metadata could not be saved ({save_error:#}); rollback also failed ({rollback_error:#})."
-                )),
-            }
-        }
-    }
-}
+pub use crate::session_ops::WorkspaceRename;
 
 /// Rename a managed workspace's folder and matching `raccoon/<name>` branch,
 /// then retarget every session that shares it.
 #[tauri::command]
 pub async fn rename_workspace(app: AppHandle, project_path: String, path: String, name: String) -> CmdResult<WorkspaceRename> {
     tauri::async_runtime::spawn_blocking(move || {
-        let renamed = rename_workspace_entries(&project_path, &path, &name)?;
-        for session in &renamed.sessions {
-            let _ = app.emit("session_updated", session);
-        }
+        let renamed = rename_workspace_entries(&project_path, &path, &name).map_err(err)?;
+        crate::session_ops::notify_workspace_settled(&app, &project_path, &renamed.sessions);
         Ok(renamed)
     })
     .await
@@ -2627,4 +2915,84 @@ pub async fn delete_workspace(app: AppHandle, project_path: String, path: String
     })
     .await
     .map_err(err)?
+}
+
+// ---- The local mirror of a cloud workspace (PRO-25) -------------------------
+//
+// The frontend reads the workspace (`mirror.manifest`, `fs.read`) and hands
+// what it read to these. None of them takes a local path: the mirror's
+// directory is chosen here from the two ids, and only reported back.
+
+fn cloud_mirror(organization_id: &str, workspace_id: &str) -> CmdResult<crate::cloud_mirror::Mirror> {
+    crate::cloud_mirror::Mirror::at(&store::root().map_err(err)?, organization_id, workspace_id).map_err(err)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMirrorCheck {
+    diverged: Vec<crate::cloud_mirror::Divergence>,
+    diverged_total: usize,
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_status(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.status().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable().map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_disable(organization_id: String, workspace_id: String, remove_files: bool) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.disable(remove_files).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_check(organization_id: String, workspace_id: String) -> CmdResult<CloudMirrorCheck> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (diverged, diverged_total) = cloud_mirror(&organization_id, &workspace_id)?.check().map_err(err)?;
+        Ok(CloudMirrorCheck { diverged, diverged_total })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_plan(organization_id: String, workspace_id: String, manifest: crate::cloud_mirror::Manifest) -> CmdResult<crate::cloud_mirror::Plan> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.plan(&manifest).map_err(err)).await.map_err(err)?
+}
+
+/// `relative` is workspace-relative; `data_b64` is the file as `fs.read` gave
+/// it; `size` is what the manifest listed for it.
+#[tauri::command]
+pub async fn cloud_mirror_stage(organization_id: String, workspace_id: String, relative: String, data_b64: String, size: u64, etag: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes()).map_err(err)?;
+        cloud_mirror(&organization_id, &workspace_id)?.stage(&relative, &bytes, size, &etag).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_publish(
+    organization_id: String,
+    workspace_id: String,
+    manifest: crate::cloud_mirror::Manifest,
+    etags: BTreeMap<String, String>,
+) -> CmdResult<crate::cloud_mirror::Published> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.publish(&manifest, &etags).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn cloud_mirror_resolve(
+    organization_id: String,
+    workspace_id: String,
+    manifest: crate::cloud_mirror::Manifest,
+    resolution: crate::cloud_mirror::Resolution,
+) -> CmdResult<crate::cloud_mirror::Resolved> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.resolve(&manifest, resolution).map_err(err)).await.map_err(err)?
 }

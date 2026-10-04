@@ -105,7 +105,8 @@ describe("a Claude alias and its pinned versions", () => {
   it("offers only the aliases for another machine, whose CLI may not run a version pinned here", () => {
     const codex = model("gpt-5.6-sol", "GPT-5.6 Sol");
     expect(offeredOn([...all, codex], true).map((m) => m.id)).toEqual(["opus", "sonnet", "claude-opus-5", "gpt-5.6-sol"]);
-    // A harness with no aliases is left as it is.
+    expect(offeredOn([pinned], false)).toEqual([]);
+    // A different harness with no aliases is left as it is.
     expect(offeredOn([...all, codex], false).map((m) => m.id)).toEqual(["opus", "sonnet", "gpt-5.6-sol"]);
   });
 

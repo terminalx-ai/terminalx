@@ -106,6 +106,7 @@ impl Rig {
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
                 tail: tail.clone(),
                 echoed: Default::default(),
+                awaiting_delivery: None,
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,

@@ -25,7 +25,8 @@ import { clearTabViewError, isPtyFirst, leaveTerminalView, startTabAgent, termin
 import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
-import { offeredOn, useModels } from "@/lib/models";
+import { useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
 
 /**
@@ -84,7 +85,7 @@ export function TabView({
   const recoveryLock = useRef(false);
   const [stopped, setStopped] = useState(false);
   const [continueOpen, setContinueOpen] = useState(false);
-  const models = useModels(tab.harness);
+  const { models, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !local, backend.modelClient, tab.harness);
   const eventRecovery = useMemo(() => recoveryFromEvents(log.events), [log.events, log.version]);
   // PRO-30: on a shared cloud workspace, who may send, stop and answer here.
   const shared = backend.collab ?? null;
@@ -306,6 +307,7 @@ export function TabView({
           }}
           reportedModel={transcript.model}
           modelsAreLocal={local}
+          modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
@@ -397,7 +399,7 @@ export function TabView({
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
     <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null} askDetail={!!shared}
-      models={offeredOn(models, local).filter(m => m.id !== tab.model && !m.upgrade)} modelsAreLocal={local} onPermission={answerPermission} onQuestions={answerQuestions}
+      models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
       onRetry={retry} onStop={stop} onContinue={() => {
         if (recoveryLock.current) return;
         recoveryLock.current = true;

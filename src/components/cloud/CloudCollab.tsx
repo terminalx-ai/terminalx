@@ -123,7 +123,9 @@ export function AccessChip({ you, viewOnly = false, className }: { you: Workspac
         ? "Shared with you as a viewer: you can read it; ask an admin for driver access to send or type."
         : "View only: this attachment can read the workspace, but not send, type or change anything in it."
       : role === "driver"
-        ? `Shared with you as a driver: you can send to agents and type in terminals${you?.canApprove ? ", and approve permission requests" : "; someone else approves permission requests"}.`
+        ? you?.canApprove
+          ? "Shared with you as a driver: you can send to agents, type in terminals, and approve permission requests."
+          : "Shared with you as a driver: you can send to agents. Someone else approves permission requests, and typing in terminals needs that right too."
         : "Not shared with you: ask an organization admin or its creator to share it.";
   return (
     <span

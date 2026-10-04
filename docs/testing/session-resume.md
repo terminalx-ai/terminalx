@@ -4,9 +4,10 @@
 
 Returning through visibility, focus or pageshow, or detecting a delayed webview
 heartbeat, refits the visible terminal and replaces its GPU surface. None of
-these signals is classified as proof of sleep or a process exit. The existing
-xterm and PTY attachment stay alive, preserving normal/alternate buffers and
-input. `Redraw terminal` repeats this recovery without writing to the PTY.
+these signals is classified as proof of sleep or a process exit. Renderer recovery keeps the existing
+xterm and PTY attachment alive, preserving normal/alternate buffers and
+input. The existing idle-cache and hidden-parser retirement policies still
+apply; retired local terminals restore the backend output tail when shown. `Redraw terminal` repeats this recovery without writing to the PTY.
 
 Local chat rereads mounted, previously loaded conversation logs and merges by
 event identity. Local status is refreshed from the backend, with concurrent
@@ -15,9 +16,9 @@ are retried on the next resume. These reads do not resend prompts or replace
 the composer. Cloud transport recovery remains owned by the cloud client.
 
 Hidden local terminal feeds acknowledge parsing, not receipt, avoiding an
-explicit bypass of flow control during timer throttling. This is not a hard
-queue bound: the backend's existing two-second unresponsive-view escape hatch
-still allows the process to run when the webview stops responding altogether.
+explicit bypass of flow control during timer throttling. The existing
+2 MiB hidden-parser retirement limit remains in place when the backend's
+two-second unresponsive-view escape hatch allows the process to keep running.
 The screenshots do not establish a single root cause; native validation is
 required, especially for sustained output while the webview is suspended.
 
