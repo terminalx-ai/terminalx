@@ -2335,12 +2335,40 @@ impl WorkspaceRpc {
             // nothing holds the directory.
             self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5)));
         };
-        // A remote caller was shown nothing of what the worktree holds, so a
-        // directory git cannot remove is reported, never deleted directly.
-        let deleted = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, crate::git::DirectDelete::Never, &stop)
-            .map_err(RpcError::internal)?;
-        let kept_branch = deleted.removal.kept_branch;
-        let removed = deleted.sessions;
+        // Deleting a session deletes that session. Its worktree goes with it
+        // only when asked, when no other session runs there, and through the
+        // same checked path as every other workspace removal: one that is
+        // not clean and merged needs `confirmedUnsafe`, the client's second
+        // confirmation. A directory git cannot remove is reported, never
+        // deleted directly.
+        let workspace = if remove_worktree { crate::session_ops::sole_workspace_of(&session.id).map_err(RpcError::internal)? } else { None };
+        let confirmed_unsafe = params.get("confirmedUnsafe").and_then(Value::as_bool).unwrap_or(false);
+        let mut kept_branch = None;
+        let removed = match &workspace {
+            Some(path) => {
+                let expected = vec![session.id.clone()];
+                let request = crate::session_ops::WorkspaceRemoval {
+                    project_path: &session.project_path,
+                    path,
+                    sessions: crate::session_ops::SessionsFate::Delete,
+                    delete_branch: true,
+                    confirmation: if confirmed_unsafe { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
+                    // The client asked to delete this one session. If
+                    // another has started in the worktree since, the
+                    // worktree is not this session's alone to take.
+                    expected_sessions: Some(&expected),
+                    direct: crate::git::DirectDelete::Never,
+                    fetch: crate::landed::Fetch::Fresh,
+                };
+                let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
+                kept_branch = removed.removal.kept_branch;
+                removed.sessions
+            }
+            None => vec![crate::session_ops::delete_session_blocking(&*self.sink, &session.id, &stop).map_err(RpcError::internal)?],
+        };
+        // Said when the worktree was asked for and stayed because other
+        // sessions still run in it.
+        let worktree_kept = remove_worktree && workspace.is_none() && session.worktree_name.is_some() && !session.worktree_removed;
         let removed_ids: HashSet<String> = removed.iter().map(|session| session.id.clone()).collect();
         if let Some(agents) = self.agents.get() {
             for tab in removed.iter().flat_map(|session| &session.tabs) {
@@ -2353,7 +2381,7 @@ impl WorkspaceRpc {
         self.close_agent_ptys(removed.iter().flat_map(|session| &session.tabs).map(|tab| &tab.id));
         let mut deleted: Vec<String> = removed_ids.into_iter().collect();
         deleted.sort();
-        Ok(json!({ "sessionId": session.id, "deleted": deleted, "keptBranch": kept_branch }))
+        Ok(json!({ "sessionId": session.id, "deleted": deleted, "keptBranch": kept_branch, "worktreeKept": worktree_kept }))
     }
 
     /// Close the terminals opened for sessions that are gone.

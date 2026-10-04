@@ -107,15 +107,15 @@ describe("worktree deletion events", () => {
     sessions.upsertSession(other);
     sessions.selectSession(other.id);
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return { sessions: [attached], keptBranch: null, rescuedBranch: null };
+      if (command === "remove_workspace") return { sessions: [attached], keptBranch: null, rescuedBranch: null };
       if (command === "list_workspaces") return [main];
       if (command === "list_harnesses") return [];
       throw new Error(`Unexpected command: ${command}`);
     });
 
-    await sessions.deleteWorkspace(projectPath, worktreePath, true);
+    await sessions.removeWorkspace(projectPath, worktreePath, { keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: [] });
 
-    expect(mocks.invoke).toHaveBeenCalledWith("delete_workspace", { projectPath, path: worktreePath, deleteBranch: true });
+    expect(mocks.invoke).toHaveBeenCalledWith("remove_workspace", { projectPath, path: worktreePath, keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: [] });
     expect(sessions.getSessionStore().sessions.map((session) => session.id)).toEqual([other.id]);
     expect(sessions.getSessionStore().selectedSessionId).toBe(other.id);
     expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]);

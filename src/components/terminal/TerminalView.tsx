@@ -6,7 +6,8 @@ import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
 import { fitTerminal } from "@/lib/terminalFit";
-import { hideWebgl, showWebgl } from "@/lib/terminalWebgl";
+import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
+import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
 import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
 
@@ -199,6 +200,22 @@ export function TerminalView({
   const fitting = useRef(fit);
   fitting.current = fit;
 
+  const recover = () => {
+    const el = host.current;
+    const inst = peekInstance(id);
+    if (!visible || !el || !inst || inst.el.parentNode !== el) return;
+    try {
+      if (fitting.current) fitTerminal(inst.term, el);
+    } catch {
+      // A stale renderer may not be measurable until it has been replaced.
+    }
+    recoverWebgl(inst.term);
+  };
+
+  useEffect(() => {
+    if (visible) return onAppResume(recover);
+  }, [id, visible]);
+
   useEffect(() => {
     const el = host.current;
     if (!el) return;
@@ -253,6 +270,7 @@ export function TerminalView({
       if (!inst) return;
       try {
         if (fitting.current) fitTerminal(inst.term, el);
+        inst.term.refresh(0, inst.term.rows - 1);
         inst.term.focus();
       } catch {
         /* ignore */
@@ -262,8 +280,19 @@ export function TerminalView({
   }, [id, shown, fit]);
 
   return (
-    <div ref={frame} className="relative h-full w-full" data-testid="terminal-drop-target" {...drop.zoneProps}>
-      <div ref={host} className="terminal-host h-full w-full px-2 pt-1" />
+    <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <div className="flex h-6 shrink-0 justify-end px-3">
+        <button
+          type="button"
+          className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
+          onClick={recover}
+          title="Redraw the terminal without restarting its process"
+          tabIndex={visible ? 0 : -1}
+        >
+          Redraw terminal
+        </button>
+      </div>
+      <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
       <TerminalDropHint drop={drop} />
     </div>
   );

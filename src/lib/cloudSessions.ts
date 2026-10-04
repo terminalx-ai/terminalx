@@ -437,10 +437,17 @@ export function updateCloudSession(row: CloudSessionRow, patch: RuntimeSessionPa
   });
 }
 
-/** Delete a session and its transcripts on the VM; a worktree it has goes with it, with every session in it. */
-export function deleteCloudSession(row: CloudSessionRow): Promise<string[]> {
+/** How a runtime's refusal starts when a worktree is not clean and merged and needs the second confirmation. */
+export const NEEDS_SECOND_CONFIRMATION = "This workspace needs a second confirmation before it is removed";
+
+/**
+ * Delete a session and its transcripts on the VM. Its worktree goes with it
+ * only when no other session runs there, and, when it is not clean and
+ * merged, only with `confirmedUnsafe`.
+ */
+export function deleteCloudSession(row: CloudSessionRow, options: { confirmedUnsafe?: boolean } = {}): Promise<string[]> {
   return onRuntime(row, async (client) => {
-    const result = await client.deleteSession(row.sessionId, { removeWorktree: !!row.worktreeName });
+    const result = await client.deleteSession(row.sessionId, { removeWorktree: !!row.worktreeName, confirmedUnsafe: options.confirmedUnsafe });
     const deleted = result.deleted?.length ? result.deleted : [row.sessionId];
     applySession(row, null, deleted);
     return deleted;

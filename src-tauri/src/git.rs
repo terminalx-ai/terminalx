@@ -89,6 +89,35 @@ pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration, stop:
     }
 }
 
+/// Run `git <first>` with its output fed to `git <second>`, and return what
+/// the second prints. For the plumbing pairs git expects to be piped
+/// (`log -p | patch-id`).
+pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
+    use std::process::Stdio;
+    let mut source = git().current_dir(cwd).args(first).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().with_context(|| format!("git {}", first.join(" ")))?;
+    let feed = source.stdout.take().context("no pipe from git")?;
+    let out = git().current_dir(cwd).args(second).stdin(Stdio::from(feed)).output().with_context(|| format!("git {}", second.join(" ")));
+    let produced = source.wait()?;
+    let out = out?;
+    if !produced.success() {
+        bail!("git {}: exit {produced}", first.join(" "));
+    }
+    if !out.status.success() {
+        bail!("git {}: {}", second.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run git with extra environment variables.
+pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -688,6 +717,7 @@ pub struct WorktreeRemoval {
 /// Where the managed worktree `name` lives. The guard keys on shape: a direct
 /// child of the worktree root or nothing, so an empty name can never resolve
 /// to the project itself and a name with a separator can never climb out.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn managed_worktree_path(project: &Path, name: &str) -> Result<PathBuf> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
         bail!("refusing to remove: bad worktree name");
@@ -805,7 +835,7 @@ pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<Strin
 }
 
 /// What a removal that failed left behind, in words for the person.
-fn leftover_state(path: &Path) -> String {
+pub fn leftover_state(path: &Path) -> String {
     if std::fs::symlink_metadata(path).is_err() {
         return "The directory is gone.".into();
     }
@@ -832,6 +862,12 @@ fn leftover_state(path: &Path) -> String {
 /// disposition counts them). After a direct delete the directory could not
 /// be checked, so such a branch is kept and named in the result, and a
 /// detached HEAD nothing else holds is given a branch of its own.
+///
+/// Workspaces are removed by path through `workspaces::delete`, which shares
+/// this function's guards and rules. Removing by name is for a managed
+/// worktree no session points at; nothing in the app does that yet, so
+/// outside tests this has no caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
     let mut removal = WorktreeRemoval::default();

@@ -21,12 +21,12 @@ import { countTerminalData, isOnScreen } from "@/lib/terminalCounters";
  *   queue behind a build log in another tab.
  * - An agent's CLI is never slowed for not being looked at. Its pane is
  *   acknowledged as fast as xterm parses, shown or not.
- * - While the window itself is hidden (minimized, covered, another space),
- *   WebKit runs this page's timers about once a second, and xterm parses on
- *   timers. Nothing is held for a page in that state: output is acknowledged
- *   as it arrives. If the parser falls behind by 2 MiB, the local view is
- *   retired and later restored from backend scrollback. The process keeps
- *   running without an unbounded queue in the suspended window.
+ * - A hidden window still acknowledges only parsed bytes. Acknowledging
+ *   receipt instead lets a suspended parser accumulate unlimited output,
+ *   freezing terminal and chat together when the window resumes. Hidden
+ *   windows skip shell pacing so each parser tick can release all its work.
+ *   The existing 2 MiB retirement limit also bounds a hidden parser if the
+ *   backend stops waiting for it; its next view restores backend scrollback.
  */
 export const ACK_BYTES = 256 * 1024;
 /** A hidden shell is acknowledged `ACK_BYTES` per tick: about 5 MB/s. */
@@ -34,19 +34,8 @@ export const HIDDEN_ACK_MS = 50;
 export const HIDDEN_QUEUE_LIMIT = 2 * 1024 * 1024;
 
 let queuedBytes = 0;
-/** Includes bytes acknowledged on receipt while the window is hidden. */
+/** Bytes received by local parsers but not yet parsed. */
 export function queuedLocalOutputBytes(): number { return queuedBytes; }
-
-/** Feeds that have something to say when the window is hidden. */
-const feeds = new Set<() => void>();
-let watching = false;
-function watchVisibility() {
-  if (watching || typeof document === "undefined") return;
-  watching = true;
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) for (const settle of feeds) settle();
-  });
-}
 
 export interface PaneFeed {
   /** Give it what the pane printed. */
@@ -68,13 +57,13 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
   let acked = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const report = (total: number) => {
+    if (stopped) return;
     acked = total;
     void pty.ack(id, token, total).catch(() => {});
   };
   const settle = () => {
     if (stopped) return;
-    // A hidden window is never waited for: what has arrived counts as drawn.
-    const drawn = document.hidden ? received : parsed;
+    const drawn = parsed;
     // Less than one step is never reported: it cannot hold the pane back.
     if (drawn - acked < ACK_BYTES) return;
     if (document.hidden || !paced || isOnScreen(term)) {
@@ -87,8 +76,6 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
       }, HIDDEN_ACK_MS);
     }
   };
-  watchVisibility();
-  feeds.add(settle);
   return {
     data: (bytes) => {
       if (stopped) return;
@@ -105,13 +92,11 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
         queuedBytes -= bytes.length;
         settle();
       });
-      if (document.hidden) settle();
     },
     stop: () => {
       if (stopped) return;
       stopped = true;
       queuedBytes -= received - parsed;
-      feeds.delete(settle);
       if (timer) clearTimeout(timer);
       timer = null;
     },
