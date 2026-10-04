@@ -38,8 +38,10 @@ Usage:
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
+      [--title TEXT] [--name NAME]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx sessions rename SESSION --title TEXT [--json]
   terminalx tabs list SESSION [--json]
   terminalx send SESSION_OR_TAB TEXT [--json]
   terminalx read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
@@ -48,6 +50,7 @@ Usage:
   terminalx permissions allow REQUEST [--option OPTION] [--json]
   terminalx permissions deny REQUEST [--json]
   terminalx worktrees list [--project PROJECT] [--json]
+  terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
   terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
@@ -334,10 +337,17 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
         }
+        "rename" => {
+            let title = tokens.required_option("--title")?;
+            let session = tokens.required_front("session")?;
+            rpc("sessions.rename", json!({"session": session, "title": title}), tokens)
+        }
         "create" => {
             let project = tokens.required_option("--project")?;
             let agent = tokens.required_option("--agent")?;
             let prompt = tokens.required_option("--prompt")?;
+            let title = tokens.option("--title")?;
+            let name = tokens.option("--name")?;
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
@@ -346,12 +356,17 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             if worktree && on_main {
                 return Err(invalid("--worktree and --on-main are mutually exclusive."));
             }
+            if name.is_some() && on_main {
+                return Err(invalid("--name requires a new worktree and cannot be used with --on-main."));
+            }
             rpc(
                 "sessions.create",
                 json!({
                     "project": project,
                     "agent": agent,
                     "prompt": prompt,
+                    "title": title,
+                    "name": name,
                     "useWorktree": !on_main,
                     "onMain": on_main,
                     "model": model.unwrap_or_default(),
@@ -390,6 +405,12 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "list" => {
             let project = tokens.option("--project")?;
             rpc("worktrees.list", json!({"project": project}), tokens)
+        }
+        "rename" => {
+            let project = tokens.option("--project")?;
+            let name = tokens.required_option("--name")?;
+            let worktree = tokens.required_front("worktree")?;
+            rpc("worktrees.rename", json!({"project": project, "worktree": worktree, "name": name}), tokens)
         }
         "delete" => {
             let project = tokens.option("--project")?;
@@ -533,6 +554,40 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_names_and_rename_commands() {
+        for (argv, expected_command, expected_params) in [
+            (vec!["sessions", "create", "--title", "#203 fix", "--name", "fix-203", "--project", "p", "--agent", "codex", "--prompt", "fix it"],
+             "sessions.create", json!({"title": "#203 fix", "name": "fix-203", "useWorktree": true})),
+            (vec!["sessions", "rename", "s1", "--title", "#203 review"],
+             "sessions.rename", json!({"session": "s1", "title": "#203 review"})),
+            (vec!["worktrees", "rename", "--name", "fix-203", "old", "--project", "p"],
+             "worktrees.rename", json!({"worktree": "old", "name": "fix-203", "project": "p"})),
+            (vec!["worktrees", "rename", "old", "--name", "fix-203"],
+             "worktrees.rename", json!({"worktree": "old", "name": "fix-203", "project": null})),
+        ] {
+            let Action::Rpc { command, params, .. } = parse(&args(&argv)).unwrap().action else { panic!("expected rpc") };
+            assert_eq!(command, expected_command);
+            for (key, value) in expected_params.as_object().unwrap() {
+                assert_eq!(&params[key], value, "{key}");
+            }
+        }
+        for argv in [
+            vec!["sessions", "rename", "s1"],
+            vec!["sessions", "rename", "--title", "t"],
+            vec!["worktrees", "rename", "old"],
+            vec!["worktrees", "rename", "old", "--name"],
+            vec!["sessions", "create", "--project", "p", "--agent", "codex", "--prompt", "fix", "--name", "fix-203", "--on-main"],
+        ] {
+            assert_eq!(parse(&args(&argv)).unwrap_err().code, "invalid_arguments");
+        }
+        for text in [help_text(), GUIDE.to_string()] {
+            for command in ["sessions rename", "worktrees rename", "--title", "--name"] {
+                assert!(text.contains(command), "missing {command}");
+            }
+        }
     }
 
     #[test]
