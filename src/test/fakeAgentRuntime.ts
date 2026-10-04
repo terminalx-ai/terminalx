@@ -283,6 +283,15 @@ export interface FakeXterm extends TerminalInstance {
   answers: boolean;
   /** The view's box changed and this view fits itself to it. */
   fitTo(cols: number, rows: number): void;
+  /**
+   * Text arrives the way an accessibility tool, dictation or voice control
+   * inserts it: the hidden input's whole value is set to what it held plus
+   * the new text, and xterm emits that whole value (measured against xterm
+   * in WebKit). A key on a keyboard (`type`) leaves nothing in the input.
+   */
+  insert(text: string): void;
+  /** Return on a keyboard: xterm empties its hidden input and sends a carriage return. */
+  pressReturn(): void;
 }
 
 export function fakeXterm(size: { cols: number; rows: number } = { cols: 100, rows: 40 }): FakeXterm {
@@ -306,6 +315,7 @@ export function fakeXterm(size: { cols: number; rows: number } = { cols: 100, ro
         done?.();
       });
     },
+    textarea: document.createElement("textarea"),
     reset: vi.fn(() => void (written.length = 0)),
     onData: (listener: (value: string) => void) => void data.push(listener),
     onBinary: () => undefined,
@@ -326,6 +336,14 @@ export function fakeXterm(size: { cols: number; rows: number } = { cols: 100, ro
     screen: () => written.join(""),
     type: emit,
     report: emit,
+    insert: (text: string) => {
+      term.textarea.value += text;
+      emit(term.textarea.value);
+    },
+    pressReturn: () => {
+      term.textarea.value = "";
+      emit("\r");
+    },
     fitTo: (cols: number, rows: number) => {
       term.cols = cols;
       term.rows = rows;
