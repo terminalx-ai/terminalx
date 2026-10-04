@@ -456,7 +456,7 @@ impl Mirror {
         }
         self.guard()?;
         let home = self.dir.ancestors().nth(3).ok_or_else(|| anyhow!("no home directory"))?.to_path_buf();
-        claim_owner(&home, account)?;
+        claim_owner(&home, account, None)?;
         crate::store::ensure_dir(home.join(DIR))?;
         crate::store::write_atomic(&home.join(DIR).join(OWNER), owner_hash(account).as_bytes())?;
         self.enable()
@@ -1079,13 +1079,22 @@ fn owner_hash(account: &str) -> String {
 /// while the app was closed, a direct switch of account), and ones found
 /// with no owner recorded at all, which nobody here can vouch for. Returns
 /// how many mirrors were removed. The owner is kept as a hash.
-pub fn claim_owner(home: &Path, account: &str) -> Result<usize> {
+///
+/// `account` is the account's own id (the user and cloud profile), which
+/// does not change with the address. `legacy` is what an owner file written
+/// before that was keyed on, the email: a file that still holds it for the
+/// same person is rewritten to the id, and their mirrors are kept.
+pub fn claim_owner(home: &Path, account: &str, legacy: Option<&str>) -> Result<usize> {
     let mirrors = existing(home);
     let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let file = home.join(DIR).join(OWNER);
     let wanted = owner_hash(account);
     let known = std::fs::read_to_string(&file).ok();
     if known.as_deref() == Some(wanted.as_str()) {
+        return Ok(0);
+    }
+    if legacy.is_some_and(|email| !email.is_empty() && known.as_deref() == Some(owner_hash(email).as_str())) {
+        crate::store::write_atomic(&file, wanted.as_bytes())?;
         return Ok(0);
     }
     let mut purged = 0;

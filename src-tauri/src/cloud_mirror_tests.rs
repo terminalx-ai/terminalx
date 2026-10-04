@@ -967,10 +967,10 @@ fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     f.mirror.enable_as("ada@example.com").unwrap();
     f.remote_write("a.txt", "v1\n");
     f.sync().unwrap();
-    assert_eq!(claim_owner(&f.home, "ada@example.com").unwrap(), 0);
+    assert_eq!(claim_owner(&f.home, "ada@example.com", None).unwrap(), 0);
     assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
     // The app was closed, and opens signed in as someone else.
-    assert_eq!(claim_owner(&f.home, "bob@example.com").unwrap(), 1);
+    assert_eq!(claim_owner(&f.home, "bob@example.com", None).unwrap(), 1);
     assert_eq!(f.local("a.txt"), None);
     assert!(existing(&f.home).is_empty());
     // The owner is kept as a hash, not as the address.
@@ -978,7 +978,7 @@ fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     assert!(!owner.contains("bob") && !owner.contains("example.com"));
     // Nothing is created for someone who has no mirror at all.
     let empty = tempfile::tempdir().unwrap();
-    assert_eq!(claim_owner(empty.path(), "ada@example.com").unwrap(), 0);
+    assert_eq!(claim_owner(empty.path(), "ada@example.com", None).unwrap(), 0);
     assert!(!empty.path().join("cloud-mirrors").exists());
 }
 
@@ -988,7 +988,7 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     // nothing and writes nothing.
     let dir = tempfile::tempdir().unwrap();
     let home = std::fs::canonicalize(dir.path()).unwrap();
-    assert_eq!(claim_owner(&home, "ada@example.com").unwrap(), 0);
+    assert_eq!(claim_owner(&home, "ada@example.com", None).unwrap(), 0);
     assert!(!home.join("cloud-mirrors/owner").exists());
     // A turns a mirror on later in that session, and it syncs.
     let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
@@ -1008,7 +1008,7 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     assert!(file.is_file());
 
     // A direct switch to B, with no sign-out in between: B's claim removes A's mirror.
-    assert_eq!(claim_owner(&home, "bob@example.com").unwrap(), 1);
+    assert_eq!(claim_owner(&home, "bob@example.com", None).unwrap(), 1);
     assert!(!file.exists());
     assert!(existing(&home).is_empty());
     // And B turning one on does not bring anything of A's back.
@@ -1022,9 +1022,43 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     orphan.enable_as("ada@example.com").unwrap();
     std::fs::remove_file(other_home.join("cloud-mirrors/owner")).unwrap();
     assert_eq!(existing(&other_home).len(), 1);
-    assert_eq!(claim_owner(&other_home, "ada@example.com").unwrap(), 1, "even for the same address: there is no record it was theirs");
+    assert_eq!(claim_owner(&other_home, "ada@example.com", None).unwrap(), 1, "even for the same address: there is no record it was theirs");
     assert!(existing(&other_home).is_empty());
 
     // Nobody signed in cannot turn one on.
     assert!(Mirror::at(&other_home, "org-1", "workspace-2").unwrap().enable_as("").is_err());
+}
+
+#[test]
+fn an_owner_file_keyed_on_the_email_is_migrated_for_the_same_person_only() {
+    let mut f = Fixture::new();
+    // As written before the owner was the account id: the hash of the email.
+    f.mirror.enable_as("ada@example.com").unwrap();
+    f.remote_write("a.txt", "v1\n");
+    f.sync().unwrap();
+    let owner = f.home.join("cloud-mirrors/owner");
+    let by_email = std::fs::read_to_string(&owner).unwrap();
+
+    // The same person, now known by their account id: nothing is removed,
+    // and the file is rewritten to the id.
+    assert_eq!(claim_owner(&f.home, "account-id-of-ada", Some("ada@example.com")).unwrap(), 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
+    let by_id = std::fs::read_to_string(&owner).unwrap();
+    assert_ne!(by_id, by_email);
+    // From then on the email no longer matters: a changed address keeps the mirrors.
+    assert_eq!(claim_owner(&f.home, "account-id-of-ada", Some("ada@new.example")).unwrap(), 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
+    // Someone else who has that address now does not inherit them.
+    assert_eq!(claim_owner(&f.home, "account-id-of-bob", Some("ada@example.com")).unwrap(), 1);
+    assert_eq!(f.local("a.txt"), None);
+
+    // A file keyed on another person's email is not migrated: removed.
+    let mut g = Fixture::new();
+    g.mirror.enable_as("carol@example.com").unwrap();
+    g.remote_write("a.txt", "v1\n");
+    g.sync().unwrap();
+    assert_eq!(claim_owner(&g.home, "account-id-of-ada", Some("ada@example.com")).unwrap(), 1);
+    assert_eq!(g.local("a.txt"), None);
+    // An empty legacy value never matches anything.
+    assert_eq!(claim_owner(&g.home, "account-id-of-dan", Some("")).unwrap(), 0);
 }
