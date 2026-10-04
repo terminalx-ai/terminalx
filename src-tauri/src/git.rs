@@ -481,7 +481,7 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
     let branch = worktree_branch(name);
-    run(project, &["worktree", "add", "--no-track", "-B", &branch, arg(&path)?, &base])?;
+    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();

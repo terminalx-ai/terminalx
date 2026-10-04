@@ -14,7 +14,7 @@ pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{
     available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
-    sessions_in_workspace,
+    rename_workspace_entries, sessions_in_workspace,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -2851,67 +2851,15 @@ pub async fn preview_workspace_name(project_path: String, requested: Option<Stri
     .map_err(err)?
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRename {
-    pub name: String,
-    pub path: String,
-    pub branch: String,
-    pub sessions: Vec<SessionEntry>,
-}
-
-fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> CmdResult<WorkspaceRename> {
-    let project = projects::canonical(project_path).map_err(err)?;
-    let target = std::fs::canonicalize(path).map_err(err)?;
-    let old_name = target
-        .file_name()
-        .and_then(|part| part.to_str())
-        .ok_or_else(|| "Workspace has no usable name.".to_string())?
-        .to_string();
-    let name = available_worktree_name(Path::new(&project), Some(requested), Some(&old_name))?;
-    let renamed = git::rename_worktree(Path::new(&project), &target, &name).map_err(err)?;
-    let new_path = renamed.path.clone();
-    let new_branch = renamed.branch.clone();
-    let update = index::update(|sessions| {
-        let mut affected = Vec::new();
-        for session in sessions {
-            // The old folder no longer exists after `git worktree move`, so
-            // compare its canonical path lexically instead of canonicalising
-            // the session cwd after the move.
-            let matches = Path::new(&session.cwd) == target || session.cwd == path;
-            if matches {
-                session.cwd = new_path.clone();
-                session.worktree_name = Some(name.clone());
-                session.branch = Some(new_branch.clone());
-                session.modified = index::now();
-                affected.push(session.clone());
-            }
-        }
-        Ok(affected)
-    });
-    match update {
-        Ok(sessions) => Ok(WorkspaceRename { name, path: renamed.path, branch: renamed.branch, sessions }),
-        Err(save_error) => {
-            let rollback = git::rename_worktree(Path::new(&project), Path::new(&renamed.path), &old_name);
-            match rollback {
-                Ok(_) => Err(err(save_error)),
-                Err(rollback_error) => Err(format!(
-                    "Workspace was renamed but its session metadata could not be saved ({save_error:#}); rollback also failed ({rollback_error:#})."
-                )),
-            }
-        }
-    }
-}
+pub use crate::session_ops::WorkspaceRename;
 
 /// Rename a managed workspace's folder and matching `raccoon/<name>` branch,
 /// then retarget every session that shares it.
 #[tauri::command]
 pub async fn rename_workspace(app: AppHandle, project_path: String, path: String, name: String) -> CmdResult<WorkspaceRename> {
     tauri::async_runtime::spawn_blocking(move || {
-        let renamed = rename_workspace_entries(&project_path, &path, &name)?;
-        for session in &renamed.sessions {
-            let _ = app.emit("session_updated", session);
-        }
+        let renamed = rename_workspace_entries(&project_path, &path, &name).map_err(err)?;
+        crate::session_ops::notify_workspace_settled(&app, &project_path, &renamed.sessions);
         Ok(renamed)
     })
     .await
