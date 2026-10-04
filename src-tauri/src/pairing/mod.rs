@@ -6,6 +6,7 @@
 mod cloud;
 mod crypto;
 mod diagnostics;
+mod direct;
 mod mobile;
 mod model;
 mod registry;
@@ -56,6 +57,7 @@ struct Inner {
     active_pairing: Option<PairingCode>,
     pending_pairing_device: Option<String>,
     direct_listener_started: bool,
+    direct_listener_retrying: bool,
     last_error: Option<String>,
 }
 
@@ -180,7 +182,9 @@ impl PairingManager {
             })?),
             PairingConnectionMode::LocalOnly => None,
         };
-        self.ensure_direct_listener()?;
+        if !direct::prepare(connection_mode, || self.ensure_direct_listener()).await? {
+            self.retry_direct_listener();
+        }
         let keypair = self.host_key(true)?;
         let device_id = Uuid::new_v4().simple().to_string();
         let token = random_token();
@@ -222,6 +226,9 @@ impl PairingManager {
             .map(|relay| relay.invite_expires_at)
             .unwrap_or_else(|| Utc::now().timestamp_millis() + OFFER_TTL_MS)
             .min(Utc::now().timestamp_millis() + OFFER_TTL_MS);
+        // Version-2 phones require a direct endpoint and race it against Relay.
+        // Keep the stable addresses even while binding retries in the background,
+        // so this offer and saved pairings regain LAN access when the port frees.
         let direct_endpoints = advertised_endpoints();
         let offer = PairingOffer {
             v: 2,
@@ -248,6 +255,7 @@ impl PairingManager {
             pairing_url,
             expires_at,
             connection_mode,
+            direct_available: self.inner.lock().unwrap().direct_listener_started,
             transport: match connection_mode {
                 PairingConnectionMode::Automatic => PairingTransport::Relay,
                 PairingConnectionMode::LocalOnly => PairingTransport::Direct,
@@ -491,8 +499,8 @@ impl PairingManager {
     pub(super) async fn relay_ready(self: &Arc<Self>, context: AccountContext, relay: RelayLive) {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
         if let Err(error) = self.ensure_direct_listener() {
-            self.set_error(format!("Direct pairing listener failed: {error:#}"));
-            return;
+            log::debug!("nearby pairing unavailable; continuing Relay setup: {error}");
+            self.retry_direct_listener();
         }
         let keypair = match self.host_key(true) {
             Ok(keypair) => keypair,
@@ -765,15 +773,43 @@ impl PairingManager {
         }
     }
 
-    fn ensure_direct_listener(self: &Arc<Self>) -> Result<()> {
+    fn retry_direct_listener(self: &Arc<Self>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.direct_listener_started || inner.direct_listener_retrying {
+            return;
+        }
+        inner.direct_listener_retrying = true;
+        drop(inner);
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(direct::RETRY_DELAY).await;
+                if manager.is_stopped() {
+                    break;
+                }
+                match manager.ensure_direct_listener() {
+                    Ok(()) => {
+                        manager.emit();
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                    Err(error) => {
+                        log::debug!("nearby pairing listener retry failed: {error}");
+                        break;
+                    }
+                }
+            }
+            manager.inner.lock().unwrap().direct_listener_retrying = false;
+        });
+    }
+
+    fn ensure_direct_listener(self: &Arc<Self>) -> std::io::Result<()> {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
         if inner.direct_listener_started {
             return Ok(());
         }
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 6768))?;
-        listener.set_nonblocking(true)?;
-        let listener = tokio::net::TcpListener::from_std(listener)?;
+        let listener = direct::bind(direct::PORT)?;
         inner.direct_listener_started = true;
         drop(inner);
         let manager = self.clone();
@@ -1182,7 +1218,10 @@ impl PairingManager {
                 .into_iter()
                 .filter(|device| device.last_seen_at.is_some())
                 .collect(),
-            active_pairing: inner.active_pairing.clone(),
+            active_pairing: inner.active_pairing.clone().map(|mut pairing| {
+                pairing.direct_available = inner.direct_listener_started;
+                pairing
+            }),
             last_error: inner.last_error.clone(),
         }
     }
