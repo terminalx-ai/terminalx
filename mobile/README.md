@@ -61,3 +61,60 @@ catch a missing entitlement in a packaged native executable.
 The OAuth redirect is `terminalx://auth/callback`, matching the deployed first-party client. iOS allows only one installed app to own that custom scheme reliably, so this companion replaces any other TerminalX mobile build on the same simulator or device. A mobile-specific scheme would require a server registration change and is deliberately not introduced here.
 
 Pairing uses the version 2 desktop offer exactly as issued by TerminalX: the QR contains a short-lived, single-use pairing credential, the Mac's public key, and a relay invite when relay reachability is available—never a long-lived credential. Installation keys, the device-bound E2EE client key, and per-host credentials are stored with the device-only SecureStore accessibility class.
+
+## Transcript viewport regression fixture
+
+The synthetic fixture renders the production `TranscriptList` and `TurnCard` with
+real native layout. It does not connect to a host or read session data. Run the
+measurement server and Expo fixture in separate terminals (after `pnpm install`):
+
+```sh
+node mobile/scripts/transcript-viewport/server.mjs
+```
+
+```sh
+cd mobile/scripts/transcript-viewport
+../../node_modules/.bin/expo start --go --ios --port 8089
+```
+
+Expo Go is sufficient for this isolated UI fixture; the paired app still requires
+a development build. Dismiss Expo's developer menu before checking the viewport.
+From the repository root, run:
+
+```sh
+node mobile/scripts/transcript-viewport/check.mjs suite
+```
+
+This checks empty/short/long histories, delayed cold loads, cached content followed
+by host data, live output, reconnect data, agent switches, streaming height changes,
+a delayed image resize, and a permission card. Assertions use native scroll events
+and measured marker positions within the viewport, not mocked scroll methods.
+Measurements are saved to `mobile/dist/viewport/`. Synthetic simulator screenshots
+are included in [light](scripts/transcript-viewport/screenshots/light.png) and
+[dark](scripts/transcript-viewport/screenshots/dark.png) appearance.
+
+Scroll up into history on the simulator, confirm **Jump to latest** appears, then run:
+
+```sh
+node mobile/scripts/transcript-viewport/check.mjs live preserve
+node mobile/scripts/transcript-viewport/check.mjs reconnect preserve
+node mobile/scripts/transcript-viewport/check.mjs grow preserve
+node mobile/scripts/transcript-viewport/check.mjs image preserve
+node mobile/scripts/transcript-viewport/check.mjs earlier preserve
+```
+
+Each command checks that a visible history marker keeps its screen position. To
+exercise the cache/host race, run `check.mjs cached bottom`, scroll up, then run
+`check.mjs host preserve`. Tap **Jump to latest**, then run `check.mjs measure bottom`.
+Focus the synthetic composer and repeat that measurement with the keyboard open.
+While reading history, `check.mjs dismiss away` dismisses the keyboard and checks
+that layout changes do not return the reader to latest. These commands use the
+same script path as above. If Expo Go fails during hot reload, terminate and reopen
+the fixture; the checker rejects stale measurements.
+
+Validated on 2026-10-04 with an iPhone 17 / iOS 27.0 simulator in Expo Go 57.0.9.
+Bottom scenarios settled at native offset zero; a history marker retained its
+exact y coordinate through live/reconnect/growth/image/pagination updates. Android
+and physical-device validation remain outstanding. The fixture substitutes data
+arrival for transport; cache loading, reconnect epochs, and agent selection are
+also covered by `src/conversation-screen.test.tsx`.

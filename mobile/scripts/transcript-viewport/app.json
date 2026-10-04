@@ -1,0 +1,7 @@
+{
+  "expo": {
+    "name": "Synthetic transcript viewport",
+    "slug": "terminalx-transcript-viewport",
+    "ios": { "bundleIdentifier": "com.terminalx.viewport.fixture" }
+  }
+}
