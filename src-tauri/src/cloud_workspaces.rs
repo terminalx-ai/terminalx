@@ -123,12 +123,88 @@ pub struct CloudProviderConnectionResponse {
     pub provider_account: Option<String>,
     pub operations_blocked: Option<bool>,
     pub disconnect_disposition: Option<DisconnectDisposition>,
+    /// `archive` while a disconnect that archives is under way (§10.7): the
+    /// server reports it apart from `disconnectDisposition`, which an older
+    /// desktop reads as retain or destroy only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_retention: Option<String>,
+    /// When the archived workspaces of that disconnect are deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_deadline: Option<i64>,
     pub resources: Option<Vec<CloudProviderResource>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DisconnectDisposition { Retain, Destroy }
+pub enum DisconnectDisposition { Retain, Archive, Destroy }
+
+/// What an organization-wide cloud teardown does with its workspaces (§10.7).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TeardownDisposition { Archive, Destroy }
+
+/// `GET`/`POST …/cloud-teardown` (§10.7): the teardown an owner or admin
+/// asked for, every resource the organization still has at its providers,
+/// and what still blocks completion. `disposition` stays a string so a newer
+/// server's value still reaches the page.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardown {
+    pub organization_id: String,
+    pub disposition: String,
+    pub requested_at: i64,
+    pub retention_deadline: i64,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub resources: Vec<CloudTeardownResource>,
+    #[serde(default)]
+    pub remaining: Vec<CloudTeardownResource>,
+}
+
+/// The preview the person confirmed: the count they were shown and the
+/// token of the set it counted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmedTeardown {
+    pub expected_workspaces: u32,
+    pub preview_token: String,
+}
+
+fn valid_preview_token(token: &str) -> bool {
+    token.len() == 43 && token.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// `GET …/cloud-teardown/preview`: what a teardown would take, as counts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardownPreview {
+    pub organization_id: String,
+    pub workspaces: u32,
+    /// Private workspaces created by someone other than the caller.
+    #[serde(default)]
+    pub others_private_workspaces: u32,
+    #[serde(default)]
+    pub archived_workspaces: u32,
+    /// Names exactly the set of workspaces counted; it goes back with the
+    /// request, and the server refuses a teardown of any other set.
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardownResource {
+    pub provider: String,
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    #[serde(default)]
+    pub release_disposition: Option<String>,
+    #[serde(default)]
+    pub cleanup_required: bool,
+    #[serde(default)]
+    pub delete_after: Option<i64>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1460,6 +1536,81 @@ impl CloudWorkspaceService {
         ensure_connection(result, provider)
     }
 
+    /// The organization's cloud teardown, if one was ever asked for (§10.7).
+    /// `None` when there is none; the server decides who may read it.
+    pub fn teardown_status(&self, org: Option<&str>) -> Result<Option<CloudTeardown>, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: Result<CloudTeardown, _> = client.request(context, &["cloud-teardown"], None, None, None, RequestRisk::Read);
+            match result {
+                Ok(teardown) => ensure_teardown(teardown, &context.organization_id, RequestRisk::Read).map(Some),
+                Err(error) if error.status == Some(404) && error.code == "cloud_teardown_not_found" => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    /// What a teardown would take: how many workspaces the organization
+    /// has, private ones the caller cannot list included. Counts only. It is
+    /// read for the organization the confirmation names, which must be the
+    /// active one, so the number shown is about what would be torn down.
+    pub fn teardown_preview(&self, organization_id: &str) -> Result<CloudTeardownPreview, CloudWorkspaceClientError> {
+        let context = self.context()?;
+        if context.organization_id != organization_id {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        let preview: CloudTeardownPreview = self.client.request(&context, &["cloud-teardown", "preview"], None, None, None, RequestRisk::Read)?;
+        if !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        if preview.organization_id != organization_id {
+            return Err(post_send_error(RequestRisk::Read));
+        }
+        Ok(preview)
+    }
+
+    /// Shut the organization's cloud down: archive every workspace with one
+    /// shared deadline, or delete them now. It cannot be undone, and an
+    /// archive may only be escalated to a destroy. The page asks for it only
+    /// after an explicit confirmation.
+    ///
+    /// The confirmation was given for one organization, at one account
+    /// context. Both are checked before anything is sent: if the active
+    /// organization changed since (a switch in another window, before the
+    /// page re-rendered), the name typed for one organization must never
+    /// tear down another. Nothing is sent then, as `disconnect_provider`
+    /// does.
+    pub fn request_teardown(
+        &self,
+        organization_id: &str,
+        context_revision: &str,
+        disposition: TeardownDisposition,
+        confirmed: &ConfirmedTeardown,
+    ) -> Result<CloudTeardown, CloudWorkspaceClientError> {
+        let context = self.context()?;
+        if context.organization_id != organization_id
+            || context_revision != AccountManager::context_revision(&context)
+            || !self.account.is_current(&context)
+        {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        if !valid_preview_token(&confirmed.preview_token) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        // What was shown must still be what would be taken: read it again
+        // now, and send nothing if it changed. The server checks the same
+        // against the count and token sent with the request.
+        let current = self.teardown_preview(organization_id)?;
+        if current.workspaces != confirmed.expected_workspaces || current.token != confirmed.preview_token {
+            return Err(CloudWorkspaceClientError::local("cloud_teardown_preview_changed", false));
+        }
+        let body = json!({ "disposition": disposition, "expectedWorkspaces": confirmed.expected_workspaces, "previewToken": confirmed.preview_token });
+        let result = self.client.request(&context, &["cloud-teardown"], None, Some(body), None, RequestRisk::Mutation)?;
+        if !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_teardown(result, organization_id, RequestRisk::Mutation)
+    }
+
     /// Whether new machines may be created on a provider (PRO-79). An owner's
     /// or admin's switch, as in the console: the saved key, its resources and
     /// every running workspace are untouched either way.
@@ -2162,6 +2313,8 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_active_work"
             | "cloud_workspace_archived"
             | "cloud_teardown_in_progress"
+            | "cloud_teardown_not_found"
+            | "cloud_teardown_preview_changed"
             | "cloud_workspace_quota_exceeded"
             | "cloud_workspace_concurrency_exceeded"
             | "idempotency_key_reused"
@@ -2398,6 +2551,13 @@ impl ProviderBound for CloudWorkspaceQuote {
     }
 }
 
+fn ensure_teardown(value: CloudTeardown, org_id: &str, risk: RequestRisk) -> Result<CloudTeardown, CloudWorkspaceClientError> {
+    if value.organization_id != org_id {
+        return Err(post_send_error(risk));
+    }
+    Ok(value)
+}
+
 fn ensure_snapshot(
     value: CloudWorkspaceSnapshot,
     org_id: &str,
@@ -2486,6 +2646,49 @@ mod tests {
                 .flatten()
         });
         content_length.is_none_or(|length| request.len() >= header_end + 4 + length)
+    }
+
+    /// Answer each request in turn, one connection each, and return what
+    /// was received. A connection that never comes is an empty string.
+    fn serve_each(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let handle = thread::spawn(move || {
+            let mut received = Vec::new();
+            for response in responses {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break Some(stream),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                        Err(_) => break None,
+                    }
+                };
+                let Some(mut stream) = stream else {
+                    received.push(String::new());
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while request.len() <= 64 * 1024 {
+                    let read = stream.read(&mut buffer).expect("read bounded fixture request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request_is_complete(&request) {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(response.as_bytes());
+                received.push(String::from_utf8_lossy(&request).into_owned());
+            }
+            received
+        });
+        (format!("http://{address}"), handle)
     }
 
     fn serve_once(
@@ -3757,6 +3960,148 @@ mod tests {
             request.join().unwrap();
             assert_eq!((error.code.as_str(), error.status), (code, Some(409)));
         }
+    }
+
+    #[test]
+    fn teardown_is_read_and_requested_for_that_organization_only() {
+        let teardown = json!({
+            "organizationId": "org-1", "disposition": "archive", "requestedAt": 10, "retentionDeadline": 40,
+            "resources": [
+                { "provider": "box", "id": "workspace-1", "kind": "workspace", "state": "archived", "releaseDisposition": "destroyed", "cleanupRequired": false, "deleteAfter": 40 },
+                { "provider": "box", "id": "workspace-2", "kind": "workspace", "state": "destroyed", "releaseDisposition": null, "cleanupRequired": false }
+            ],
+            "remaining": [{ "provider": "box", "id": "workspace-1", "kind": "workspace", "state": "archived", "releaseDisposition": "destroyed", "cleanupRequired": false, "deleteAfter": 40 }]
+        });
+        let (base, _, request) = serve_once(response("200 OK", &teardown.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let status = service.teardown_status(None).unwrap().unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-teardown HTTP/1.1"));
+        assert_eq!((status.disposition.as_str(), status.retention_deadline, status.completed_at), ("archive", 40, None));
+        assert_eq!((status.resources.len(), status.remaining.len(), status.remaining[0].delete_after), (2, 1, Some(40)));
+
+        // None was ever asked for: not an error.
+        let (base, _, request) = serve_once(response("404 Not Found", &json!({ "error": "cloud_teardown_not_found" }).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.teardown_status(None).unwrap().is_none());
+        request.join().unwrap();
+
+        // A member is refused by the server, and that is said.
+        let (base, _, request) = serve_once(response("403 Forbidden", &json!({ "error": "organization_admin_required" }).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_status(None).unwrap_err().code, "organization_admin_required");
+        request.join().unwrap();
+
+        // The request reads the preview again, then sends what was confirmed with it.
+        let preview = json!({ "organizationId": "org-1", "workspaces": 7, "othersPrivateWorkspaces": 3, "archivedWorkspaces": 2, "token": TOKEN });
+        let revision = AccountManager::context_revision(&context());
+        for (disposition, word) in [(TeardownDisposition::Archive, "archive"), (TeardownDisposition::Destroy, "destroy")] {
+            let (base, requests) = serve_each(vec![response("200 OK", &preview.to_string(), ""), response("202 Accepted", &teardown.to_string(), "")]);
+            let (_, service) = test_service(&base);
+            service.request_teardown("org-1", &revision, disposition, &confirmed(7)).unwrap();
+            let received = requests.join().unwrap();
+            assert!(received[0].starts_with("GET /v1/desktop/orgs/org-1/cloud-teardown/preview HTTP/1.1"), "{}", received[0]);
+            assert!(received[1].starts_with("POST /v1/desktop/orgs/org-1/cloud-teardown HTTP/1.1"), "{}", received[1]);
+            let body: Value = serde_json::from_str(received[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert_eq!(body, json!({ "disposition": word, "expectedWorkspaces": 7, "previewToken": TOKEN }));
+        }
+
+        // An answer about another organization is never shown as this one's.
+        let mut other = teardown.clone();
+        other["organizationId"] = json!("org-2");
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_status(None).unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+        let (base, requests) = serve_each(vec![response("200 OK", &preview.to_string(), ""), response("202 Accepted", &other.to_string(), "")]);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Destroy, &confirmed(7)).unwrap_err().code, "cloud_workspace_request_outcome_unknown");
+        requests.join().unwrap();
+    }
+
+    const TOKEN: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+
+    fn confirmed(workspaces: u32) -> ConfirmedTeardown {
+        ConfirmedTeardown { expected_workspaces: workspaces, preview_token: TOKEN.into() }
+    }
+
+    #[test]
+    fn a_teardown_is_not_sent_when_the_workspaces_are_not_the_ones_confirmed() {
+        let revision = AccountManager::context_revision(&context());
+        // Another workspace appeared since the count was shown, or the same number of different ones.
+        for now in [
+            json!({ "organizationId": "org-1", "workspaces": 8, "token": TOKEN }),
+            json!({ "organizationId": "org-1", "workspaces": 7, "token": "QPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba" }),
+        ] {
+            let (base, requests) = serve_each(vec![response("200 OK", &now.to_string(), ""), response("202 Accepted", "{}", "")]);
+            let (_, service) = test_service(&base);
+            let error = service.request_teardown("org-1", &revision, TeardownDisposition::Destroy, &confirmed(7)).unwrap_err();
+            assert_eq!(error.code, "cloud_teardown_preview_changed");
+            // Only the preview was read: no teardown request was made.
+            let received = requests.join().unwrap();
+            assert!(received[0].starts_with("GET ") && received[1].is_empty(), "{received:?}");
+        }
+        // The server refusing for the same reason keeps its code.
+        let preview = json!({ "organizationId": "org-1", "workspaces": 7, "token": TOKEN });
+        let (base, requests) = serve_each(vec![response("200 OK", &preview.to_string(), ""), response("409 Conflict", &json!({ "error": "cloud_teardown_preview_changed" }).to_string(), "")]);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Archive, &confirmed(7)).unwrap_err().code, "cloud_teardown_preview_changed");
+        requests.join().unwrap();
+        // A token that is not one is never sent anywhere.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        let bad = ConfirmedTeardown { expected_workspaces: 7, preview_token: "../x".into() };
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Archive, &bad).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn a_teardown_confirmed_for_one_organization_is_never_sent_for_another() {
+        // Nothing listens here: any request would fail as a transport error,
+        // so `account_context_changed` proves nothing was sent.
+        let revision = AccountManager::context_revision(&context());
+        let (account, service) = test_service("http://127.0.0.1:9");
+
+        // The confirmation named another organization than the active one.
+        let error = service.request_teardown("org-2", &revision, TeardownDisposition::Destroy, &confirmed(7)).unwrap_err();
+        assert_eq!(error.code, "account_context_changed");
+        // The account context is not the one the confirmation was given at.
+        assert_eq!(service.request_teardown("org-1", "old-context", TeardownDisposition::Destroy, &confirmed(7)).unwrap_err().code, "account_context_changed");
+
+        // The active organization changed while the confirmation was open:
+        // the name was typed for org-1, and org-2 is active at send time.
+        account.set_context_for_test(Some(AccountContext { organization_id: "org-2".into(), ..context() }));
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Destroy, &confirmed(7)).unwrap_err().code, "account_context_changed");
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Archive, &confirmed(7)).unwrap_err().code, "account_context_changed");
+        // The count is not read for an organization that is no longer active either.
+        assert_eq!(service.teardown_preview("org-1").unwrap_err().code, "account_context_changed");
+    }
+
+    #[test]
+    fn the_teardown_preview_counts_are_read_for_the_named_organization() {
+        let preview = json!({ "organizationId": "org-1", "workspaces": 7, "othersPrivateWorkspaces": 3, "archivedWorkspaces": 2, "token": TOKEN });
+        let (base, _, request) = serve_once(response("200 OK", &preview.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let read = service.teardown_preview("org-1").unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-teardown/preview HTTP/1.1"));
+        assert_eq!((read.workspaces, read.others_private_workspaces, read.archived_workspaces, read.token.as_str()), (7, 3, 2, TOKEN));
+
+        // Counts about another organization are never shown as this one's.
+        let other = json!({ "organizationId": "org-2", "workspaces": 1, "token": TOKEN });
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_preview("org-1").unwrap_err().code, "cloud_workspace_invalid_response");
+        request.join().unwrap();
+    }
+
+    #[test]
+    fn a_disconnect_may_archive_and_its_deadline_is_read() {
+        assert_eq!(json!({ "disposition": DisconnectDisposition::Archive }), json!({ "disposition": "archive" }));
+        let connection: CloudProviderConnectionResponse = serde_json::from_value(json!({
+            "provider": "box", "state": "connected", "canManage": true,
+            "credentialFingerprint": "sha256:0123abcd", "connectedAt": 1, "lastValidatedAt": 2, "credentialVersion": 1,
+            "operationsBlocked": true, "disconnectRetention": "archive", "retentionDeadline": 99, "resources": []
+        }))
+        .unwrap();
+        assert!(connection.disconnect_disposition.is_none());
+        assert_eq!((connection.disconnect_retention.as_deref(), connection.retention_deadline), (Some("archive"), Some(99)));
     }
 
     #[test]

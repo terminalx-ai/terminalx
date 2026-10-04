@@ -51,7 +51,7 @@ export function ProviderControls({
   const [replacing, setReplacing] = useState(false);
   const [consented, setConsented] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [disposition, setDisposition] = useState<"retain" | "destroy" | "">("");
+  const [disposition, setDisposition] = useState<"retain" | "archive" | "destroy" | "">("");
   const epoch = useRef(0);
   const provider = providers.find((item) => item.id === selected);
 
@@ -113,14 +113,17 @@ export function ProviderControls({
     }
   };
   const connected = connection?.state === "connected";
+  // A disconnect that archives is reported apart from retain and destroy (saas contract §10.7).
+  const archiving = connection?.disconnectRetention === "archive";
+  const disconnectPending = !!connection?.disconnectDisposition || archiving;
   const setupComplete =
     connected &&
     !connection?.operationsBlocked &&
-    !connection?.disconnectDisposition;
+    !disconnectPending;
   // New machines (PRO-79): an owner or admin can stop a connected provider from
   // being offered for new workspaces without touching its key or what runs on it.
   const creationPaused = provider?.availability === "disabled-for-create";
-  const creationSwitchable = connected && !connection?.disconnectDisposition && (provider?.availability === "available" || creationPaused);
+  const creationSwitchable = connected && !disconnectPending && (provider?.availability === "available" || creationPaused);
   const resources = connection?.resources ?? [];
   const hasContract =
     connection?.credentialVersion != null && connection.resources != null;
@@ -173,9 +176,11 @@ export function ProviderControls({
       ) : (
         <>
           <p role="status" className="font-medium">
-            {connection?.disconnectDisposition &&
-            connection.state !== "not-connected"
-              ? "Disconnect pending — new provisioning blocked"
+            {disconnectPending &&
+            connection?.state !== "not-connected"
+              ? archiving
+                ? `Disconnect pending — workspaces are archived${connection?.retentionDeadline ? ` and deleted on ${new Date(connection.retentionDeadline).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}` : ""}; new provisioning blocked`
+                : "Disconnect pending — new provisioning blocked"
               : setupComplete
                 ? "Setup complete — compute connection validated"
                 : connection?.state === "not-connected"
@@ -244,13 +249,13 @@ export function ProviderControls({
                     setDisposition("");
                   }}
                 >
-                  {connection.disconnectDisposition &&
+                  {disconnectPending &&
                   connection.state !== "not-connected"
                     ? "Retry disconnect / cleanup"
                     : "Disconnect"}
                 </Button>
                 {/* Not while a disconnect is under way: the key is on its way out, and re-checking it says nothing useful. */}
-                {connection.state !== "not-connected" && !connection.disconnectDisposition && (
+                {connection.state !== "not-connected" && !disconnectPending && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -400,6 +405,18 @@ export function ProviderControls({
                     <input
                       type="radio"
                       name="disposition"
+                      checked={disposition === "archive"}
+                      onChange={() => setDisposition("archive")}
+                      disabled={busy}
+                    />
+                    Archive workspaces — stop them and keep them for 30 days,
+                    then delete them. Storage keeps billing until then, and
+                    they cannot be unarchived while the disconnect is pending.
+                  </label>
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="radio"
+                      name="disposition"
                       checked={disposition === "destroy"}
                       onChange={() => setDisposition("destroy")}
                       disabled={busy}
@@ -421,7 +438,7 @@ export function ProviderControls({
                         api.cloudProviderDisconnect(
                           provider!.id,
                           contextRevision,
-                          disposition as "retain" | "destroy",
+                          disposition as "retain" | "archive" | "destroy",
                         ),
                       )
                     }
