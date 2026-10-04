@@ -12,7 +12,7 @@ vi.mock("@/lib/cloudConnections", () => ({
   },
 }));
 
-const { bytesText, memoryLow, SAMPLE_MS, setCloudResourcesReader, storageLevel, storageNotice, TURN_SAMPLE_MS } = await import("./cloudResources");
+const { bytesText, memoryLow, memoryNoticeText, SAMPLE_MS, setCloudResourcesReader, storageLevel, storageNotice, TURN_SAMPLE_MS } = await import("./cloudResources");
 const { CloudResourceNotice } = await import("@/components/cloud/CloudResourceNotice");
 
 const GIB = 1024 ** 3;
@@ -57,7 +57,12 @@ describe("storage levels", () => {
     expect(storageLevel(disk(20 * GIB, { availableInodes: 0 }))).toBe("full");
     expect(storageLevel(disk(20 * GIB, { availableInodes: 5_000 }))).toBe("low");
     expect(storageLevel(disk(20 * GIB, { totalInodes: 0, availableInodes: 0 }))).toBe("ok");
-    expect(storageNotice(disk(20 * GIB, { availableInodes: 0 }))?.text).toMatch(/no room for more files/);
+    expect(storageNotice(disk(20 * GIB, { availableInodes: 0 }))?.text).toMatch(/disk is full \(it has reached its limit on the number of files, with 20 GB free of 40 GB\)/);
+    // The real reason is named even when bytes are short too, but not short enough to be the cause.
+    expect(storageNotice(disk(1 * GIB, { totalBytes: 6 * GIB, availableInodes: 0 }))?.text).toMatch(/disk is full \(it has reached its limit on the number of files, with 1\.0 GB free of 6\.0 GB\)/);
+    expect(storageNotice(disk(20 * GIB, { availableInodes: 5_000 }))?.text).toMatch(/almost full \(it is close to its limit on the number of files/);
+    // Out of bytes and of inodes: the bytes are what is said.
+    expect(storageNotice(disk(10 * MIB, { availableInodes: 0 }))?.text).toMatch(/disk is full \(10 MB free of 40 GB\)/);
   });
 
   it("says how much is left and what to do", () => {
@@ -65,6 +70,14 @@ describe("storage levels", () => {
     expect(storageNotice(disk(100 * MIB))).toMatchObject({ level: "full", text: expect.stringMatching(/disk is full \(100 MB free of 40 GB\).*fail until space is freed.*Nothing already on the disk is lost/) });
     expect(storageNotice(disk(1.5 * GIB))).toMatchObject({ level: "low", text: expect.stringMatching(/almost full \(1\.5 GB free of 40 GB\)/) });
     expect(bytesText(0)).toBe("0 MB");
+    // Someone without a terminal there is told who can free space, not to use one.
+    expect(storageNotice(disk(100 * MIB), true)?.text).toMatch(/delete files or build output from a terminal/);
+    expect(storageNotice(disk(100 * MIB), false)?.text).toMatch(/someone who manages this workspace can delete files or build output/);
+    expect(storageNotice(disk(100 * MIB), false)?.text).not.toMatch(/from a terminal/);
+    expect(storageNotice(disk(1.5 * GIB), false)?.text).toMatch(/someone who manages this workspace/);
+    expect(storageNotice(disk(100 * MIB))?.text).toMatch(/refused, not half-applied/);
+    expect(memoryNoticeText(ram(300 * MIB), false)).toMatch(/Someone who manages this workspace can stop programs/);
+    expect(memoryNoticeText(ram(300 * MIB), true)).toMatch(/Stop programs you do not need from a terminal/);
   });
 });
 
@@ -172,7 +185,7 @@ describe("low memory during an agent turn (PRO-33)", () => {
     expect(memoryNotice()).toBeNull();
     await tick(TURN_SAMPLE_MS);
     expect(read).toHaveBeenCalledTimes(3);
-    expect(memoryNotice()?.textContent).toMatch(/almost out of memory \(300 MB free of 4\.0 GB\).*may be stopped by the machine/);
+    expect(memoryNotice()?.textContent).toMatch(/almost out of memory \(300 MB free of 4\.0 GB\).*may be stopped by the machine.*Someone who manages this workspace/);
     expect(memoryNotice()?.getAttribute("role")).toBe("status");
     // The disk has room: nothing is said about it.
     expect(screen.queryByTestId("cloud-storage-notice")).toBeNull();

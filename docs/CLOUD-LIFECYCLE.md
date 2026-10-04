@@ -14,9 +14,11 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
 
 What "resume" brings back depends on the provider, and the Stop tab says
 which (PRO-33): `providerCapabilities.preservesProcessesOnResume` in the
-disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot from
-the disk: files, repositories and conversations come back, running programs
-and terminals do not) and `true` only where the machine is frozen as it is
+disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot: the
+files in the workspace come back and its saved conversations are shown as
+before; running programs and terminals do not, and what was installed or
+written outside the workspace may not, because Boat keeps only part of the
+disk) and `true` only where the machine is frozen as it is
 (local Docker in pause mode). An older server does not send it, and the
 dialog then promises neither (`resumeBehaviourText`).
 
@@ -123,10 +125,45 @@ runtime reports what is left and the desktop says so.
   lost"), and **almost full** below both 5% and 2 GB, or below 1% of inodes.
   It clears by itself once space is freed.
 
+The notice names what ran out: bytes ("100 MB free of 40 GB"), or the
+filesystem's limit on the number of files when that is the cause, with the
+bytes still free beside it. Its advice follows the person's role: someone who
+manages the workspace is told to delete files or build output from a
+terminal; a viewer or a plain driver, who has no shell there, is told that
+someone who manages it can.
+
+What the runtime does on a full disk, each of which was already so and is now
+said in the notice ("a message the workspace could not record is refused, not
+half-applied"):
+
+- A command from the mailbox is applied only after its `applying` mark is on
+  disk (`cloud_agents/receipts.rs`). If that write fails the agent is not
+  touched and the command is answered `rejected` / `receipt-store-failed`
+  (`mailbox.rs`); the outbox shows "Not sent: the workspace could not record
+  it (its disk may be full)".
+- A receipt that cannot be written after the agent was touched leaves the
+  `applying` mark, so a redelivery is never applied twice.
+- A follow-up that cannot be queued is refused, not dropped silently.
+- A checkpoint's cursor is persisted before it is used
+  (`checkpoints.rs` `next_cursor`); when that fails the upload is skipped and
+  tried again later, and no version is reused.
+- Every such file is written to a temporary file and renamed
+  (`cloud_bootstrap::write_durable`), so a failed write leaves the previous
+  contents whole.
+
 ### Low memory during a turn
 
-While an agent turn runs in the session being shown (a tab working or
-waiting for an answer), the same reading is taken every 10 s instead of 60 s.
+Memory is what the runtime may actually use: in a container (local Docker,
+and any provider that runs the workspace in one) `/proc/meminfo` is the
+host's, so `lifecycle.resources` also reads the cgroup limit on the runtime's
+own cgroup and its ancestors (v2 `memory.max`/`memory.current`, v1
+`memory.limit_in_bytes`/`memory.usage_in_bytes`, less the reclaimable file
+cache from `memory.stat`). When that limit is tighter than the machine, the
+limit is the total and what is left under it is what is available. A tab
+waiting on an approval is not a running turn: the faster readings are for a
+tab that is working.
+
+While an agent turn runs in the session being shown (a tab working), the same reading is taken every 10 s instead of 60 s.
 Memory is low when `MemAvailable` is under both 10% of RAM and 512 MiB, the
 rule the server's worker uses before a relaunch (saas contract 9.5). Three low
 readings in a row show "The workspace's machine is almost out of memory (… free

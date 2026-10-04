@@ -142,6 +142,7 @@ fn make(dir: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>, incarnation: &
         store: Store::open(dir),
         incarnation: incarnation.into(),
         root: dir.join("workspace"),
+        cancel_poll: CANCEL_POLL,
     }
 }
 
@@ -505,6 +506,7 @@ fn cloning(dir: &Path, workspace: &str, remote: &Path, api: Arc<FakeApi>, starte
         store: Store::open(&state),
         incarnation: "incarnation-aaaaaaaaaaaa".into(),
         root: dir.join(workspace),
+        cancel_poll: CANCEL_POLL,
     }
 }
 
@@ -574,7 +576,7 @@ fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
     let checkout = GitCheckout::from_remote(remote.to_str().unwrap());
     // A clone that died halfway left its staging directory behind.
     std::fs::create_dir_all(root.join(".terminalx-clone-app").join("junk")).unwrap();
-    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
+    checkout.clone_missing(&app, CLONE_BUDGET, &|| false).unwrap();
     assert!(!root.join(".terminalx-clone-app").exists());
     checkout.prepare(&app, WORK_BRANCH).unwrap();
     std::fs::write(Path::new(&app.path).join("work.txt"), "work\n").unwrap();
@@ -583,13 +585,13 @@ fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
     let head = git(Path::new(&app.path), &["rev-parse", "HEAD"]);
 
     // The next attempt neither clones again nor resets the branch.
-    checkout.clone_missing(&app, CLONE_BUDGET).unwrap();
+    checkout.clone_missing(&app, CLONE_BUDGET, &|| false).unwrap();
     assert_eq!(checkout.prepare(&app, WORK_BRANCH).unwrap().head, head);
     assert!(Path::new(&app.path).join("work.txt").exists());
 
     // A checkout of something else at that path is refused, not replaced.
     let other = Repository { name: "other".into(), ..app.clone() };
-    assert!(checkout.clone_missing(&other, CLONE_BUDGET).unwrap_err().to_string().contains("another repository"));
+    assert!(matches!(checkout.clone_missing(&other, CLONE_BUDGET, &|| false), Err(CloneError::Failed { category: "repository-path-occupied", .. })));
     assert!(Path::new(&app.path).join("work.txt").exists());
 }
 
@@ -609,9 +611,9 @@ fn a_clone_that_cannot_be_made_fails_the_launch_and_deletes_nothing() {
     };
 
     // A repository the workspace cannot reach, and a base branch it does not have.
-    for (workspace, name, base) in [("a", "missing", None), ("a2", "app", Some("does-not-exist"))] {
+    for (workspace, name, base, category) in [("a", "missing", None, "repository-clone-failed"), ("a2", "app", Some("does-not-exist"), "repository-branch-not-found")] {
         let root = dir.path().join(workspace);
-        assert_eq!(failed(workspace, to_clone(&root, name, base)), "repository-clone-failed");
+        assert_eq!(failed(workspace, to_clone(&root, name, base)), category);
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "nothing half-cloned is left");
     }
 
@@ -619,7 +621,7 @@ fn a_clone_that_cannot_be_made_fails_the_launch_and_deletes_nothing() {
     let root = dir.path().join("b");
     std::fs::create_dir_all(root.join("app")).unwrap();
     std::fs::write(root.join("app").join("notes.txt"), "mine\n").unwrap();
-    assert_eq!(failed("b", to_clone(&root, "app", None)), "repository-clone-failed");
+    assert_eq!(failed("b", to_clone(&root, "app", None)), "repository-path-occupied");
     assert_eq!(std::fs::read_to_string(root.join("app").join("notes.txt")).unwrap(), "mine\n");
 }
 
@@ -629,11 +631,11 @@ fn a_clone_that_runs_out_of_time_is_stopped_and_leaves_nothing() {
     let remote = remotes(dir.path(), &["app"]);
     let root = dir.path().join("workspace");
     let app = to_clone(&root, "app", None);
-    let error = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, Duration::ZERO).unwrap_err();
-    assert!(error.to_string().contains("timed out"), "{error:#}");
+    let error = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, Duration::ZERO, &|| false).unwrap_err();
+    assert!(matches!(error, CloneError::Failed { category: "repository-clone-timed-out", .. }), "{error:?}");
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "no staging directory and no half clone");
     // With time, the same clone is made.
-    GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, CLONE_BUDGET).unwrap();
+    GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, CLONE_BUDGET, &|| false).unwrap();
     assert!(Path::new(&app.path).join("README.md").exists());
 }
 
@@ -641,7 +643,7 @@ fn a_clone_that_runs_out_of_time_is_stopped_and_leaves_nothing() {
 fn a_launch_counts_as_work_while_it_runs() {
     struct Watching(Mutex<Vec<bool>>);
     impl Checkout for Watching {
-        fn clone_missing(&self, _repository: &Repository, within: Duration) -> Result<()> {
+        fn clone_missing(&self, _repository: &Repository, within: Duration, _canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
             // Seen from inside the launch: the activity reporter would report a running turn.
             self.0.lock().unwrap().push(crate::cloud_activity::launches() >= 1 && within <= CLONE_BUDGET && within > Duration::ZERO);
             Ok(())
@@ -660,6 +662,7 @@ fn a_launch_counts_as_work_while_it_runs() {
         store: Store::open(dir.path()),
         incarnation: "incarnation-aaaaaaaaaaaa".into(),
         root,
+        cancel_poll: CANCEL_POLL,
     };
     assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
     assert_eq!(*checkout.0.lock().unwrap(), [true]);
@@ -740,4 +743,108 @@ fn the_claim_declares_that_this_runtime_clones_and_reads_the_plan() {
     assert_eq!(claimed.repositories[0].clone, Some(CloneSource { provider: "github".into() }));
     assert_eq!(claimed.repositories[0].base_ref.as_deref(), Some("main"));
     assert_eq!(claimed.repositories[1].clone, None);
+}
+
+#[test]
+fn a_create_canceled_while_git_runs_kills_it_and_starts_nothing() {
+    // Git itself: told to stop, it is killed and leaves no staging directory.
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let app = to_clone(&root, "app", None);
+    let stopped = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&app, CLONE_BUDGET, &|| true);
+    assert!(matches!(stopped, Err(CloneError::Canceled)), "{stopped:?}");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+
+    // The launcher: the server settles the create while the clone runs.
+    struct Slow(Arc<FakeApi>);
+    impl Checkout for Slow {
+        fn clone_missing(&self, _repository: &Repository, _within: Duration, canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
+            assert!(!canceled(), "not canceled yet");
+            *self.0.state.lock().unwrap() = "canceled".into();
+            for _ in 0..200 {
+                if canceled() {
+                    return Err(CloneError::Canceled);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("the launcher never noticed the cancel");
+        }
+        fn prepare(&self, _repository: &Repository, _work_branch: &str) -> Result<Branch> {
+            panic!("a canceled launch prepares nothing");
+        }
+    }
+    let api = FakeApi::new(Some(claim(vec![app])));
+    let starter = Arc::new(FakeStarter::default());
+    let launcher = Launcher {
+        api: api.clone(),
+        starter: starter.clone(),
+        checkout: Arc::new(Slow(api.clone())),
+        store: Store::open(dir.path()),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root,
+        cancel_poll: Duration::ZERO,
+    };
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("canceled".into()));
+    assert!(starter.starts.lock().unwrap().is_empty());
+    assert!(api.completions.lock().unwrap().is_empty(), "a canceled launch reports no outcome");
+}
+
+#[test]
+fn an_unreachable_api_is_not_a_cancel() {
+    struct Asking;
+    impl Checkout for Asking {
+        fn clone_missing(&self, _repository: &Repository, _within: Duration, canceled: &dyn Fn() -> bool) -> std::result::Result<(), CloneError> {
+            assert!(!canceled() && !canceled());
+            Ok(())
+        }
+        fn prepare(&self, repository: &Repository, work_branch: &str) -> Result<Branch> {
+            Ok(Branch { path: repository.path.clone(), branch: work_branch.into(), head: "0".repeat(40) })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("workspace");
+    let api = FakeApi::new(Some(claim(vec![to_clone(&root, "app", None)])));
+    let launcher = Launcher {
+        api: api.clone(),
+        starter: Arc::new(FakeStarter::default()),
+        checkout: Arc::new(Asking),
+        store: Store::open(dir.path()),
+        incarnation: "incarnation-aaaaaaaaaaaa".into(),
+        root,
+        cancel_poll: Duration::ZERO,
+    };
+    assert_eq!(launcher.pass().unwrap(), Pass::Settled("started".into()));
+}
+
+#[test]
+fn an_empty_repository_is_reported_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remotes");
+    std::fs::create_dir_all(remote.join("acme")).unwrap();
+    git(dir.path(), &["init", "-q", "--bare", remote.join("acme").join("empty.git").to_str().unwrap()]);
+    let root = dir.path().join("workspace");
+    let error = GitCheckout::from_remote(remote.to_str().unwrap()).clone_missing(&to_clone(&root, "empty", None), CLONE_BUDGET, &|| false).unwrap_err();
+    assert!(matches!(error, CloneError::Failed { category: "repository-empty", .. }), "{error:?}");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+}
+
+#[test]
+fn a_failed_clone_is_named_by_what_git_said() {
+    for (stderr, category) in [
+        ("fatal: write error: No space left on device\nfatal: fetch-pack: invalid index-pack output", "workspace-disk-full"),
+        ("error: unable to write file x: Disk quota exceeded", "workspace-disk-full"),
+        ("warning: Could not find remote branch nope to clone.\nfatal: Remote branch nope not found in upstream origin", "repository-branch-not-found"),
+        ("error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 60 seconds", "repository-clone-timed-out"),
+        ("fatal: Authentication failed for 'https://github.com/acme/app.git/'", "repository-access-denied"),
+        ("fatal: could not read Username for 'https://github.com': terminal prompts disabled", "repository-access-denied"),
+        ("remote: Repository not found.\nfatal: repository 'https://github.com/acme/app.git/' not found", "repository-access-denied"),
+        ("fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 403", "repository-access-denied"),
+        ("fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: github.com", "repository-clone-failed"),
+        ("fatal: early EOF", "repository-clone-failed"),
+    ] {
+        assert_eq!(clone_failure_category(stderr), category, "{stderr}");
+    }
+    // A full disk is the reason even when it also broke the transfer or the sign-in.
+    assert_eq!(clone_failure_category("fatal: Authentication failed\nerror: No space left on device"), "workspace-disk-full");
 }

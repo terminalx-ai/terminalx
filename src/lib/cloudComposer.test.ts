@@ -1,6 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { COMMANDS_RESTRICTED_NOTE, cloudComposerCommands, cloudComposerFiles, resetCloudComposer } from "./cloudComposer";
+import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
+import {
+  CLOUD_IMAGES_NEED_CONNECTION,
+  CLOUD_IMAGES_NEED_RUNNING,
+  CLOUD_IMAGES_OLD_RUNTIME,
+  CLOUD_TOO_MANY_IMAGES,
+  COMMANDS_RESTRICTED_NOTE,
+  CloudImageError,
+  cloudComposerCommands,
+  cloudComposerFiles,
+  cloudImagesBlocked,
+  resetCloudComposer,
+  uploadCloudImages,
+} from "./cloudComposer";
 
 const approver: WorkspaceYou = { userId: "u-me", role: "driver", canApprove: true, listed: true } as WorkspaceYou;
 const plain: WorkspaceYou = { ...approver, canApprove: false };
@@ -57,13 +69,53 @@ describe("a cloud tab's slash commands", () => {
     expect(call).not.toHaveBeenCalled();
   });
 
+  it("an empty list is not kept: the CLI may not have answered yet, so the next reading asks again", async () => {
+    const { call, client } = runtime(null);
+    call.mockResolvedValueOnce({ commands: [], restricted: false });
+    const source = cloudComposerCommands(target(client))!;
+    expect(await source.load()).toEqual({ commands: [], note: null });
+    expect(source.known()).toBeNull();
+    call.mockResolvedValueOnce({ commands: [{ name: "review", description: "", source: "builtin" }], restricted: false });
+    expect((await source.load()).commands.map((command) => command.name)).toEqual(["review"]);
+    expect(source.known()?.commands).toHaveLength(1);
+    await source.load();
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks once while a listing is on its way", async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const { call, client } = runtime(null);
+    call.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    const first = cloudComposerCommands(target(client))!.load();
+    const second = cloudComposerCommands({ ...target(client), tabId: "t-2" })!.load();
+    answer({ commands: [{ name: "review", description: "", source: "builtin" }], restricted: false });
+    expect(await first).toEqual(await second);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a list under the right the runtime made it for, not the one this desktop assumed", async () => {
+    // The desktop still believes this person may approve; the runtime already answers as for a plain driver.
+    const narrow = runtime({ commands: [{ name: "compact", description: "", source: "builtin" }], restricted: true });
+    const asApprover = cloudComposerCommands(target(narrow.client))!;
+    expect((await asApprover.load()).note).toBe(COMMANDS_RESTRICTED_NOTE);
+    // It is not remembered as an approver's list, and is what a plain driver's composer finds.
+    expect(asApprover.known()).toBeNull();
+    expect(cloudComposerCommands(target(narrow.client, plain))!.known()?.commands.map((command) => command.name)).toEqual(["compact"]);
+    // The other way round: a full list handed to someone believed restricted is not shown to a plain driver later.
+    resetCloudComposer();
+    const full = runtime({ commands: [{ name: "review", description: "", source: "builtin" }], restricted: false });
+    await cloudComposerCommands(target(full.client, plain))!.load();
+    expect(cloudComposerCommands(target(full.client, plain))!.known()).toBeNull();
+    expect(cloudComposerCommands(target(full.client))!.known()?.commands).toHaveLength(1);
+  });
+
   it("a failed listing is asked again", async () => {
     const { call, client } = runtime(null);
     call.mockRejectedValueOnce(new Error("timeout"));
     const source = cloudComposerCommands(target(client))!;
     await expect(source.load()).rejects.toThrow("timeout");
-    call.mockResolvedValueOnce({ commands: [], restricted: false });
-    expect(await source.load()).toEqual({ commands: [], note: null });
+    call.mockResolvedValueOnce({ commands: [{ name: "review", description: "", source: "builtin" }], restricted: false });
+    expect((await source.load()).commands).toHaveLength(1);
   });
 });
 
@@ -87,5 +139,76 @@ describe("a cloud tab's file mentions", () => {
     const asleep = { connection: { state: "suspended" }, hasCapability: () => false, call: vi.fn() } as unknown as WorkspaceRpcClient;
     expect(cloudComposerFiles({ ...where, client: asleep })).toBeNull();
     expect(old.call).not.toHaveBeenCalled();
+  });
+});
+
+describe("a cloud tab's images", () => {
+  const where = { sessionId: "s-1", tabId: "t-1" };
+  function uploader(refuse?: WorkspaceRpcError) {
+    const mutate = vi.fn(async (_method: string, _params: Record<string, unknown>) => {
+      if (refuse) throw refuse;
+      return {};
+    });
+    return { mutate, client: { mutate } as unknown as WorkspaceRpcClient };
+  }
+
+  it("are uploaded to the runtime in parts that each decode by themselves, and named by id", async () => {
+    const { mutate, client } = uploader();
+    // 600,000 base64 characters: one full part of 384 KiB and a rest.
+    const large = "QUJD".repeat(150_000);
+    const refs = await uploadCloudImages(client, where, [
+      { mediaType: "image/png", data: large, name: "large.png" },
+      { mediaType: "image/webp", data: "YWJj" },
+    ]);
+    expect(refs).toEqual([
+      { id: expect.stringMatching(/^att-[0-9a-f]{32}$/), mediaType: "image/png", name: "large.png" },
+      { id: expect.stringMatching(/^att-[0-9a-f]{32}$/), mediaType: "image/webp" },
+    ]);
+    const sent = mutate.mock.calls.map(([method, params]) => ({ method, ...params, data: (params.data as string).length }));
+    expect(sent).toEqual([
+      { method: "session.attach", ...where, attachmentId: refs[0]!.id, mediaType: "image/png", name: "large.png", offset: 0, data: 524_288, last: false },
+      { method: "session.attach", ...where, attachmentId: refs[0]!.id, mediaType: "image/png", name: "large.png", offset: 393_216, data: 75_712, last: true },
+      { method: "session.attach", ...where, attachmentId: refs[1]!.id, mediaType: "image/webp", offset: 0, data: 4, last: true },
+    ]);
+    expect(mutate.mock.calls.map(([, params]) => params.data).slice(0, 2).join("")).toBe(large);
+    expect(mutate.mock.calls.every(([, params]) => (params.data as string).length % 4 === 0)).toBe(true);
+  });
+
+  it("upload one attachment under one id, so a send tried again leaves no second upload behind", async () => {
+    const { mutate, client } = uploader();
+    const image = { mediaType: "image/png", data: "YWJj", name: "shot.png" };
+    const first = await uploadCloudImages(client, where, [image, image]);
+    const again = await uploadCloudImages(client, where, [image]);
+    expect(first).toEqual([{ id: expect.stringMatching(/^att-[0-9a-f]{32}$/), mediaType: "image/png", name: "shot.png" }]);
+    expect(again).toEqual(first);
+    expect(mutate.mock.calls.map(([, params]) => params.attachmentId)).toEqual([first[0]!.id, first[0]!.id]);
+    // The same picture attached anew is another attachment.
+    const [other] = await uploadCloudImages(client, where, [{ ...image }]);
+    expect(other!.id).not.toBe(first[0]!.id);
+  });
+
+  it("say in words why one was refused, and never send more than a message carries", async () => {
+    const refused = uploader(new WorkspaceRpcError("invalid_params", "the image is larger than 5 MB", "session.attach"));
+    const failure = await uploadCloudImages(refused.client, where, [{ mediaType: "image/png", data: "YWJj", name: "huge.png" }]).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CloudImageError);
+    expect((failure as Error).message).toBe("huge.png was not sent: the image is larger than 5 MB.");
+    const many = Array.from({ length: 9 }, () => ({ mediaType: "image/png", data: "YWJj" }));
+    const { mutate, client } = uploader();
+    await expect(uploadCloudImages(client, where, many)).rejects.toThrow(CLOUD_TOO_MANY_IMAGES);
+    expect(mutate).not.toHaveBeenCalled();
+    // A dropped connection is not a refusal: the caller sees it as it is.
+    const dropped = uploader();
+    dropped.mutate.mockRejectedValueOnce(new Error("connection closed"));
+    await expect(uploadCloudImages(dropped.client, where, [{ mediaType: "image/png", data: "YWJj" }])).rejects.not.toBeInstanceOf(CloudImageError);
+  });
+
+  it("need a connected runtime that takes them", () => {
+    expect(cloudImagesBlocked(null, true)).toBe(CLOUD_IMAGES_NEED_RUNNING);
+    expect(cloudImagesBlocked({ connection: { state: "suspended" }, hasCapability: () => false } as unknown as WorkspaceRpcClient, true)).toBe(CLOUD_IMAGES_NEED_RUNNING);
+    // Reconnecting or offline is not "starting": nothing is started for it.
+    expect(cloudImagesBlocked({ connection: { state: "reconnecting" }, hasCapability: () => false } as unknown as WorkspaceRpcClient, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
+    expect(cloudImagesBlocked(null, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
+    expect(cloudImagesBlocked(runtime({}, ["composer/1", "composer/2"]).client, false)).toBe(CLOUD_IMAGES_OLD_RUNTIME);
+    expect(cloudImagesBlocked(runtime({}, ["composer/3"]).client, false)).toBeNull();
   });
 });

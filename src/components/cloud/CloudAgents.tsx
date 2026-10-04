@@ -46,7 +46,7 @@ import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
-import { cloudComposerCommands, cloudComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
 /**
@@ -463,6 +463,8 @@ const KEY_MISSING = "cloud_agent_key_missing";
 const KEY_STORE_UNAVAILABLE = "cloud_agent_key_store_unavailable";
 
 export function commandError(e: unknown): string {
+  // Why a message's images did not go, already in words.
+  if (e instanceof CloudImageError) return e.message;
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   // The key is there but could not be read: connecting again would not help.
@@ -575,13 +577,16 @@ function CloudAgentPane({
   );
 
   const send = async (text: string, images: ImageInput[]) => {
-    if (images.length) {
-      setError("Images cannot be sent to cloud agent tabs yet.");
-      throw new Error("images unsupported");
+    // Images are uploaded straight to the runtime: a stopped workspace is started for them and the message stays here.
+    const imagesBlocked = images.length ? cloudImagesBlocked(connected ? client : null, sleeping) : null;
+    if (imagesBlocked) {
+      setError(imagesBlocked);
+      if (imagesBlocked === CLOUD_IMAGES_NEED_RUNNING && sleeping) wakeWorkspace?.();
+      throw new CloudImageError(imagesBlocked);
     }
     // Settings chosen while this person could approve are not sent once they cannot.
     if (!mayConfigure) discardPendingConfig(scope, tab.tabId);
-    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null));
+    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null, images));
   };
 
   const steer = async () => {
@@ -697,6 +702,7 @@ function CloudAgentPane({
                       : null
                   }
                   files={info.sessionId && !blocked ? cloudComposerFiles({ workspaceKey: collabKey, sessionId: info.sessionId, client: connected ? client : null }) : null}
+                  remote
                   busy={live}
                   draft={draft}
                   onDraftChange={changeDraft}
@@ -761,7 +767,8 @@ export function CloudOutbox({
       {followUps.map((f) => (
         <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
           <span className="text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
-          <span className="min-w-0 truncate">{f.text}</span>
+          {/* A queued message of images alone has no text to show. */}
+          {f.text ? <span className="min-w-0 truncate">{f.text}</span> : <span className="min-w-0 truncate text-muted-foreground">(images)</span>}
           <span className="ml-auto text-faint">sends when the agent finishes its turn</span>
         </li>
       ))}
@@ -775,7 +782,7 @@ export function CloudOutbox({
             data-state={entry.state}
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text && <span className="min-w-0 truncate">{entry.text}</span>}
+            {entry.text ? <span className="min-w-0 truncate">{entry.text}</span> : entry.kind === "send" ? <span className="min-w-0 truncate text-muted-foreground">(images)</span> : null}
             <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
               <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>
@@ -795,6 +802,8 @@ function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | un
     return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  // The runtime could not write its record of the command (a full disk, most often), so it did not touch the agent.
+  if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
   const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
   if (refused) return refused;
   const text = STATE_TEXT[entry.state] ?? entry.state;

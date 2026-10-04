@@ -295,6 +295,43 @@ describe("cloud agent tabs store", () => {
     expect(client.configureAgentTab).toHaveBeenCalledWith({ sessionId: "s-1", tabId: "t-1", model: "sonnet" });
   });
 
+  it("PRO-22: uploads a message's images to the runtime first, then names them in the command", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const order: string[] = [];
+    const mutate = vi.fn(async (method: string, _params: Record<string, unknown>) => {
+      order.push(method);
+      return {};
+    });
+    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      order.push(cmd);
+      return backend.handle(cmd, args);
+    });
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" });
+    await sendToCloudAgent(scope, "t-1", "what is this?", client, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }]);
+    const payload = backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload as { text: string; images: { id: string }[] };
+    expect(payload).toEqual({ text: "what is this?", images: [{ id: expect.stringMatching(/^att-/), mediaType: "image/png", name: "shot.png" }] });
+    expect(mutate).toHaveBeenCalledWith("session.attach", expect.objectContaining({ sessionId: "s-1", tabId: "t-1", attachmentId: payload.images[0]!.id, data: "YWJj", last: true }));
+    expect(order.indexOf("session.attach")).toBeLessThan(order.indexOf("cloud_agent_enqueue"));
+    // The image itself never rides in the command.
+    expect(JSON.stringify(payload)).not.toContain("YWJj");
+  });
+
+  it("PRO-22: sends nothing when the images cannot reach the runtime", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const image = [{ mediaType: "image/png", data: "YWJj" }];
+    await expect(sendToCloudAgent(scope, "t-1", "look", null, image)).rejects.toThrow("Not connected to the workspace");
+    await expect(sendToCloudAgent(scope, "t-1", "look", fakeClient(false), image)).rejects.toThrow("Not connected to the workspace");
+    const old = Object.assign(fakeClient(), { hasCapability: () => false });
+    await expect(sendToCloudAgent(scope, "t-1", "look", old, image)).rejects.toThrow("newer workspace runtime");
+    // The upload was refused: the message does not go without its image.
+    const mutate = vi.fn(async () => {
+      throw new WorkspaceRpcError("forbidden", "attaching an image needs driver access to the workspace", "session.attach");
+    });
+    const refused = Object.assign(fakeClient(), { mutate, hasCapability: () => true });
+    await expect(sendToCloudAgent(scope, "t-1", "look", refused, image)).rejects.toThrow("needs driver access");
+    expect(backend.count("cloud_agent_enqueue")).toBe(0);
+  });
+
   it("sends an approver's setting change with their next message instead of a live configure the runtime would refuse", async () => {
     applyLiveTabs(scope, [tabInfo()]);
     // A driver who may approve, on a participate attachment: `session.configure` needs manage.
