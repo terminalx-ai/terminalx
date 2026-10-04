@@ -44,7 +44,7 @@ impl Fixture {
         let mut etags = BTreeMap::new();
         for path in &plan.fetch {
             let bytes = &self.remote[path].0;
-            self.mirror.stage(path, bytes, &etag(bytes))?;
+            self.mirror.stage(path, bytes, bytes.len() as u64, &etag(bytes))?;
             etags.insert(path.clone(), etag(bytes));
         }
         self.mirror.publish(&manifest, &etags)
@@ -88,7 +88,8 @@ fn a_first_sync_copies_the_file_set_and_records_its_revision() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &str| std::fs::metadata(f.files().join(path)).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode("bin/run.sh"), 0o755);
+        // The workspace says run.sh is executable. Here nothing ever is.
+        assert_eq!(mode("bin/run.sh"), 0o644);
         assert_eq!(mode("README.md"), 0o644);
     }
     let revision = published.status.revision.unwrap();
@@ -148,15 +149,15 @@ fn content_is_verified_before_anything_moves() {
     f.remote_write("b.txt", "two\n");
     let manifest = f.manifest();
     // Bytes that do not match the hash the workspace reported.
-    assert!(f.mirror.stage("a.txt", b"tampered", &etag(b"one\n")).is_err());
-    assert!(f.mirror.stage("a.txt", b"one\n", "not-a-hash").is_err());
-    f.mirror.stage("a.txt", b"one\n", &etag(b"one\n")).unwrap();
+    assert!(f.mirror.stage("a.txt", b"tampered", 8, &etag(b"one\n")).is_err());
+    assert!(f.mirror.stage("a.txt", b"one\n", 4, "not-a-hash").is_err());
+    f.mirror.stage("a.txt", b"one\n", 4, &etag(b"one\n")).unwrap();
     // One file was never read: the publish is refused whole.
     let etags: BTreeMap<String, String> = [("a.txt".to_string(), etag(b"one\n"))].into();
     assert!(f.mirror.publish(&manifest, &etags).is_err());
     assert_eq!(std::fs::read_dir(f.files()).unwrap().count(), 0, "not even the file that was ready");
     // A staged file that was altered afterwards is refused too.
-    f.mirror.stage("b.txt", b"two\n", &etag(b"two\n")).unwrap();
+    f.mirror.stage("b.txt", b"two\n", 4, &etag(b"two\n")).unwrap();
     let staged = f.mirror.staged("b.txt", &etag(b"two\n"));
     std::fs::write(&staged, b"swapped").unwrap();
     let etags: BTreeMap<String, String> = [("a.txt".to_string(), etag(b"one\n")), ("b.txt".to_string(), etag(b"two\n"))].into();
@@ -166,34 +167,104 @@ fn content_is_verified_before_anything_moves() {
 }
 
 #[test]
-fn an_interrupted_publish_is_finished_by_the_next_sync_not_called_a_conflict() {
+fn a_publish_that_died_is_reconciled_once_and_exempts_nothing_from_the_divergence_check() {
     let mut f = Fixture::new();
-    f.remote_write("a.txt", "one\n");
-    f.remote_write("b.txt", "two\n");
-    f.remote_write("old.txt", "old\n");
+    for path in ["moved.txt", "unmoved.txt", "edited-since.txt", "old.txt"] {
+        f.remote_write(path, "v1\n");
+    }
     f.sync().unwrap();
-    f.remote_write("a.txt", "one v2\n");
-    f.remote_write("b.txt", "two v2\n");
+    for path in ["moved.txt", "unmoved.txt", "edited-since.txt"] {
+        f.remote_write(path, "v2\n");
+    }
     f.remote.remove("old.txt");
 
-    // The app died mid-publish: the journal is written, one file is already
-    // in place, the record still describes the old revision.
+    // The app died mid-publish: the journal is written, one file is in
+    // place, one removal is done, the record still describes the old revision.
     let dir = f.home.join("cloud-mirrors/org-1/workspace-1");
-    let journal = Journal { manifest_id: f.manifest().manifest_id, paths: ["a.txt", "b.txt", "old.txt"].map(String::from).into() };
+    let write = |version: &str| Write { etag: etag(b"v2\n"), version: version.into() };
+    let journal = Journal {
+        manifest_id: f.manifest().manifest_id,
+        writes: [("moved.txt", "v2"), ("unmoved.txt", "v2"), ("edited-since.txt", "v2")].into_iter().map(|(path, version)| (path.to_string(), write(version))).collect(),
+        deletes: ["old.txt".to_string()].into(),
+    };
     std::fs::write(dir.join("journal.json"), serde_json::to_vec(&journal).unwrap()).unwrap();
-    f.write_local("a.txt", "one v2\n");
+    f.write_local("moved.txt", "v2\n");
     std::fs::remove_file(f.files().join("old.txt")).unwrap();
+    // And the person edited a file the dead publish had not reached yet.
+    f.write_local("edited-since.txt", "my edit\n");
 
     let plan = f.mirror.plan(&f.manifest()).unwrap();
-    assert_eq!(plan.diverged_total, 0, "the mirror's own half-done work is not a local edit");
-    assert_eq!(plan.fetch, ["a.txt", "b.txt"]);
-    let published = f.sync().unwrap();
-    assert_eq!(published.diverged_total, 0);
-    assert_eq!(f.local("a.txt").as_deref(), Some("one v2\n"));
-    assert_eq!(f.local("b.txt").as_deref(), Some("two v2\n"));
+    assert!(!dir.join("journal.json").exists(), "consumed once");
+    // The file that did arrive is adopted, not fetched again and not a conflict.
+    assert_eq!(plan.fetch, ["unmoved.txt"]);
+    assert_eq!(plan.unchanged, 1);
+    // The local edit is a divergence: being in the journal exempts nothing.
+    assert_eq!(reasons(&plan.diverged), [("edited-since.txt", "modified")]);
+    assert_eq!(f.sync().unwrap().written, 0);
+    assert_eq!(f.local("edited-since.txt").as_deref(), Some("my edit\n"));
+
+    f.mirror.resolve(&f.manifest(), Resolution::Discard).unwrap();
+    f.sync().unwrap();
+    assert_eq!(f.local("edited-since.txt").as_deref(), Some("v2\n"));
+    assert_eq!(f.local("unmoved.txt").as_deref(), Some("v2\n"));
     assert_eq!(f.local("old.txt"), None);
-    assert!(!dir.join("journal.json").exists());
     assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
+}
+
+#[test]
+fn a_publish_that_fails_part_way_records_what_it_did_and_leaves_no_journal() {
+    let mut f = Fixture::new();
+    f.remote_write("a.txt", "v1\n");
+    f.remote_write("z/late.txt", "v1\n");
+    f.sync().unwrap();
+    f.remote_write("a.txt", "v2\n");
+    f.remote_write("z/late.txt", "v2\n");
+    // The second file cannot be written: a folder took its place between
+    // the plan and the publish.
+    let manifest = f.manifest();
+    let plan = f.mirror.plan(&manifest).unwrap();
+    assert_eq!(plan.fetch, ["a.txt", "z/late.txt"]);
+    let mut etags = BTreeMap::new();
+    for path in &plan.fetch {
+        f.mirror.stage(path, b"v2\n", 3, &etag(b"v2\n")).unwrap();
+        etags.insert(path.clone(), etag(b"v2\n"));
+    }
+    let error = {
+        // Divergence is checked before the journal; make the failure happen after it.
+        let late = f.files().join("z/late.txt");
+        let record = f.mirror.working_record().unwrap();
+        assert!(record.owned.contains_key("z/late.txt"));
+        // Same content and signature until the rename step, then a folder: simulate by
+        // making the target's parent unwritable instead.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(late.parent().unwrap(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let error = f.mirror.publish(&manifest, &etags);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(late.parent().unwrap(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        error
+    };
+    #[cfg(unix)]
+    {
+        assert!(error.is_err());
+        let dir = f.home.join("cloud-mirrors/org-1/workspace-1");
+        assert!(!dir.join("journal.json").exists(), "a failed publish leaves no journal behind");
+        assert_eq!(f.local("a.txt").as_deref(), Some("v2\n"));
+        assert_eq!(f.local("z/late.txt").as_deref(), Some("v1\n"));
+        // What moved is recorded as moved: only the other file is still to fetch.
+        let plan = f.mirror.plan(&f.manifest()).unwrap();
+        assert_eq!((plan.fetch.clone(), plan.unchanged, plan.diverged_total), (vec!["z/late.txt".to_string()], 1, 0));
+        // A local edit to the file that failed is still protected.
+        f.write_local("z/late.txt", "my edit\n");
+        assert_eq!(reasons(&f.sync().unwrap().diverged), [("z/late.txt", "modified")]);
+        assert_eq!(f.local("z/late.txt").as_deref(), Some("my edit\n"));
+    }
+    let _ = error;
 }
 
 #[test]
@@ -314,33 +385,249 @@ fn a_symbolic_link_in_the_mirror_never_redirects_a_write() {
 #[test]
 fn secrets_git_metadata_and_paths_that_leave_the_mirror_are_refused() {
     let mut f = Fixture::new();
-    // Staging a secret is refused even with the right hash.
-    for path in [".env", "deploy/prod.pem", ".aws/credentials", ".git/config", "sub/.git/HEAD"] {
-        assert!(f.mirror.stage(path, b"x", &etag(b"x")).is_err(), "{path}");
+    // Staging one is refused even with the right size and hash.
+    for path in [".env", "deploy/prod.pem", ".aws/credentials", ".git/config", "sub/.git/HEAD", ".claude/settings.json", ".mcp.json", ".vscode/tasks.json", ".claude/.credentials.json"] {
+        assert!(f.mirror.stage(path, b"x", 1, &etag(b"x")).is_err(), "{path}");
     }
     for path in ["../outside.txt", "/etc/passwd", "a/../../b", "a//b", "./a", "a\\b", "", "a/./b"] {
-        assert!(f.mirror.stage(path, b"x", &etag(b"x")).is_err(), "{path:?}");
+        assert!(f.mirror.stage(path, b"x", 1, &etag(b"x")).is_err(), "{path:?}");
     }
-    assert!(!f.home.join("cloud-mirrors/org-1/workspace-1/staging").exists() || std::fs::read_dir(f.home.join("cloud-mirrors/org-1/workspace-1/staging")).unwrap().count() == 0);
+    let staging = f.home.join("cloud-mirrors/org-1/workspace-1/staging");
+    assert!(!staging.exists() || std::fs::read_dir(&staging).unwrap().count() == 0);
 
-    // A manifest that lists a secret (a runtime with older rules): left out, counted.
+    // A manifest from a runtime with older rules, or a hostile one: each such
+    // entry is left out and counted, and the rest of the mirror still works.
     f.remote_write("app.ts", "x\n");
     f.remote_write(".env", "TOKEN=1\n");
-    let plan = f.mirror.plan(&f.manifest()).unwrap();
-    assert_eq!((plan.fetch.clone(), plan.refused), (vec!["app.ts".to_string()], 1));
+    f.remote_write(".claude/settings.json", "{}\n");
+    f.remote_write(".vscode/tasks.json", "{}\n");
+    let mut manifest = f.manifest();
+    for path in ["../outside.txt", "/etc/passwd", ".git/config", "a\\b", "a//b"] {
+        manifest.entries.push(Entry { path: path.into(), size: 1, version: "v1".into(), executable: false });
+    }
+    let plan = f.mirror.plan(&manifest).unwrap();
+    assert_eq!(plan.fetch, ["app.ts"]);
+    assert_eq!(plan.refused, Refused { secret: 1, tool_config: 2, invalid: 5, ..Refused::default() });
     f.sync().unwrap();
     assert_eq!(f.local(".env"), None);
+    assert!(!f.files().join(".claude").exists() && !f.files().join(".vscode").exists());
+    assert!(!f.home.join("outside.txt").exists());
 
-    // A manifest that names a path outside the workspace is broken: refused whole.
-    for path in ["../outside.txt", "/etc/passwd", ".git/config", "a\\b"] {
-        let mut manifest = f.manifest();
-        manifest.entries.push(Entry { path: path.into(), size: 1, version: "v1".into(), executable: false });
-        assert!(f.mirror.plan(&manifest).is_err(), "{path}");
-    }
     let mut truncated = f.manifest();
     truncated.truncated = true;
     assert!(f.mirror.plan(&truncated).unwrap_err().to_string().contains("more files"));
-    assert!(!f.home.join("outside.txt").exists());
+    let mut twice = f.manifest();
+    twice.entries.push(twice.entries[0].clone());
+    assert!(f.mirror.plan(&twice).unwrap_err().to_string().contains("twice"));
+}
+
+#[test]
+fn an_embedded_git_directory_is_never_written_under_any_name() {
+    let mut f = Fixture::new();
+    // The reproduced attack: a bare repository as ordinary files, whose
+    // config makes Git run a command.
+    f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("pkg/config", "[core]\n\tfsmonitor = touch /tmp/owned\n");
+    f.remote_write("pkg/objects/x", "x\n");
+    f.remote_write("pkg/refs/x", "x\n");
+    f.remote_write("pkg/README", "looks harmless\n");
+    f.remote_write("Deep/Er/head", "x\n");
+    f.remote_write("Deep/Er/OBJECTS/pack/p", "x\n");
+    f.remote_write("Deep/Er/Refs/heads/main", "x\n");
+    f.remote_write("src/objects/a.ts", "x\n");
+    f.remote_write("docs/HEAD.md", "x\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.fetch, ["docs/HEAD.md", "src/objects/a.ts"]);
+    assert_eq!(plan.refused.git_directory, 8);
+    f.sync().unwrap();
+    assert!(!f.files().join("pkg").exists() && !f.files().join("Deep").exists());
+
+    // It cannot be assembled over two syncs either: once the folder would
+    // be a Git directory, everything in it goes, including what was there.
+    let mut g = Fixture::new();
+    g.remote_write("lib/objects/x", "x\n");
+    g.remote_write("lib/refs/x", "x\n");
+    g.remote_write("lib/config", "[core]\n\tfsmonitor = touch /tmp/owned\n");
+    g.sync().unwrap();
+    assert!(g.files().join("lib/config").exists(), "not a Git directory yet");
+    g.remote_write("lib/HEAD", "ref: refs/heads/main\n");
+    let published = g.sync().unwrap();
+    assert_eq!((published.written, published.removed), (0, 3));
+    assert!(!g.files().join("lib").exists());
+    // Git agrees there is no repository there for it to obey.
+    assert!(!crate::git::is_repo(&g.files()));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn every_mirrored_file_is_quarantined_and_none_is_executable() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    f.remote.insert("Install.command".into(), (b"#!/bin/sh\necho hi\n".to_vec(), true, 1));
+    f.remote.insert("Tool.app/Contents/MacOS/Tool".into(), (b"\xcf\xfa\xed\xfe".to_vec(), true, 1));
+    f.remote_write("README.md", "x\n");
+    f.sync().unwrap();
+    for path in ["Install.command", "Tool.app/Contents/MacOS/Tool", "README.md"] {
+        let file = f.files().join(path);
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o111, 0, "{path} is not executable");
+        let name = std::ffi::CString::new("com.apple.quarantine").unwrap();
+        let c_path = std::ffi::CString::new(file.as_os_str().as_bytes()).unwrap();
+        let mut value = [0u8; 128];
+        // SAFETY: valid C strings and a buffer of the length given.
+        let read = unsafe { libc::getxattr(c_path.as_ptr(), name.as_ptr(), value.as_mut_ptr().cast(), value.len(), 0, 0) };
+        assert!(read > 0, "{path} is quarantined");
+        let text = String::from_utf8_lossy(&value[..read as usize]).into_owned();
+        assert!(text.starts_with("0081;") && text.ends_with(";TerminalX;"), "{text}");
+    }
+    // A rewrite keeps both.
+    f.remote.insert("Install.command".into(), (b"#!/bin/sh\necho again\n".to_vec(), true, 2));
+    f.sync().unwrap();
+    assert_eq!(std::fs::metadata(f.files().join("Install.command")).unwrap().permissions().mode() & 0o777, 0o644);
+}
+
+#[test]
+fn a_mirror_is_bounded_on_this_side_whatever_the_workspace_says() {
+    let mut f = Fixture::new();
+    // A size that lies: the manifest says 3 bytes, the read brings more.
+    f.remote_write("a.txt", "abc");
+    let big = vec![b'x'; 4096];
+    assert!(f.mirror.stage("a.txt", &big, 3, &etag(&big)).unwrap_err().to_string().contains("size"));
+    // Or the staged file is swapped for a larger one with a matching hash.
+    f.mirror.stage("a.txt", b"abc", 3, &etag(b"abc")).unwrap();
+    let manifest = f.manifest();
+    std::fs::write(f.mirror.staged("a.txt", &etag(b"abc")), &big).unwrap();
+    let etags: BTreeMap<String, String> = [("a.txt".to_string(), etag(b"abc"))].into();
+    assert!(f.mirror.publish(&manifest, &etags).unwrap_err().to_string().contains("size"));
+    assert_eq!(f.local("a.txt"), None);
+
+    // More files, or more bytes, than a mirror holds.
+    let entry = |path: String, size: u64| Entry { path, size, version: "v1".into(), executable: false };
+    let many = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: (0..=MAX_FILES).map(|index| entry(format!("f{index}"), 1)).collect(), truncated: false };
+    assert!(f.mirror.plan(&many).unwrap_err().to_string().contains("more files"));
+    let per_file = 32 * 1024 * 1024;
+    let heavy = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: (0..=(MAX_TOTAL_BYTES / per_file)).map(|index| entry(format!("f{index}"), per_file)).collect(), truncated: false };
+    assert!(f.mirror.plan(&heavy).unwrap_err().to_string().contains("larger than a mirror holds"));
+    let huge = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: vec![entry("one".into(), per_file + 1)], truncated: false };
+    assert!(f.mirror.plan(&huge).is_err());
+
+    // Too deep, a name too long for one folder entry, a path too long for this disk.
+    let deep = (0..40).map(|index| format!("d{index}")).collect::<Vec<_>>().join("/");
+    let long_name = "n".repeat(300);
+    let long_path = (0..8).map(|_| "p".repeat(200)).collect::<Vec<_>>().join("/");
+    let odd = Manifest {
+        manifest_id: "m".into(),
+        repositories: Vec::new(),
+        entries: vec![entry(deep, 1), entry(long_name, 1), entry(long_path, 1), entry("fine.txt".into(), 1)],
+        truncated: false,
+    };
+    let plan = f.mirror.plan(&odd).unwrap();
+    assert_eq!((plan.fetch.clone(), plan.refused.too_long), (vec!["fine.txt".to_string()], 3));
+
+    // What an abandoned sync staged does not pile up: the next plan starts clean.
+    f.mirror.stage("fine.txt", b"x", 1, &etag(b"x")).unwrap();
+    assert_eq!(std::fs::read_dir(f.home.join("cloud-mirrors/org-1/workspace-1/staging")).unwrap().count(), 1);
+    f.mirror.plan(&odd).unwrap();
+    assert!(!f.home.join("cloud-mirrors/org-1/workspace-1/staging").exists());
+}
+
+#[test]
+fn names_that_are_one_file_on_this_disk_are_settled_before_anything_is_written() {
+    let mut f = Fixture::new();
+    // The same name in two Unicode forms (composed and decomposed é).
+    f.remote_write("caf\u{e9}.txt", "composed\n");
+    f.remote_write("cafe\u{301}.txt", "decomposed\n");
+    // A file where another entry needs a folder.
+    f.remote_write("data", "a file\n");
+    f.remote_write("data/inner.txt", "needs data to be a folder\n");
+    f.remote_write("plain.txt", "x\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.refused.collision, 2, "one of each pair is refused, on every disk");
+    assert_eq!(plan.fetch.len(), 3);
+    assert!(plan.fetch.contains(&"data".to_string()) && !plan.fetch.contains(&"data/inner.txt".to_string()));
+    f.sync().unwrap();
+    // Stable: the mirror never sees its own file as a conflict.
+    let again = f.mirror.plan(&f.manifest()).unwrap();
+    assert!(again.up_to_date, "{again:?}");
+    assert_eq!(f.mirror.check().unwrap().1, 0);
+
+    if f.mirror.case_insensitive() {
+        // A file `a` beside a folder `A/`.
+        let mut g = Fixture::new();
+        g.remote_write("A/inner.txt", "x\n");
+        g.remote_write("a", "x\n");
+        let plan = g.mirror.plan(&g.manifest()).unwrap();
+        assert_eq!((plan.fetch.clone(), plan.refused.collision), (vec!["A/inner.txt".to_string()], 1));
+        g.sync().unwrap();
+        assert!(g.mirror.plan(&g.manifest()).unwrap().up_to_date);
+
+        // A rename that only changes case is the workspace's change, not a local file in the way.
+        let mut h = Fixture::new();
+        h.remote_write("Readme.md", "v1\n");
+        h.sync().unwrap();
+        h.remote.remove("Readme.md");
+        h.remote_write("readme.md", "v2\n");
+        let plan = h.mirror.plan(&h.manifest()).unwrap();
+        assert_eq!((plan.diverged_total, plan.fetch.clone(), plan.remove), (0, vec!["readme.md".to_string()], 1));
+        h.sync().unwrap();
+        assert_eq!(h.local("readme.md").as_deref(), Some("v2\n"));
+        assert!(h.mirror.plan(&h.manifest()).unwrap().up_to_date);
+        assert_eq!(std::fs::read_dir(h.files()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn none_of_the_mirrors_own_directories_may_be_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("precious")).unwrap();
+    std::fs::write(elsewhere.join("precious/file.txt"), "keep\n").unwrap();
+    let manifest = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: vec![Entry { path: "a.txt".into(), size: 1, version: "v1".into(), executable: false }], truncated: false };
+
+    // `files/` replaced by a link after the mirror was made.
+    let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
+    mirror.enable().unwrap();
+    let files = home.join("cloud-mirrors/org-1/workspace-1/files");
+    std::fs::remove_dir(&files).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("precious"), &files).unwrap();
+    for result in [mirror.plan(&manifest).map(|_| ()), mirror.stage("a.txt", b"x", 1, &etag(b"x")), mirror.publish(&manifest, &BTreeMap::new()).map(|_| ()), mirror.status().map(|_| ())] {
+        assert!(result.unwrap_err().to_string().contains("symbolic link"));
+    }
+    // "Remove local copy" does not follow it.
+    assert!(mirror.disable(true).is_err());
+    assert_eq!(std::fs::read_to_string(elsewhere.join("precious/file.txt")).unwrap(), "keep\n");
+
+    // The workspace's directory, the organization's, and `cloud-mirrors` itself.
+    for link in ["cloud-mirrors/org-2/workspace-2", "cloud-mirrors/org-3", "cloud-mirrors"] {
+        let home = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let at = home.join(link);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("precious"), &at).unwrap();
+        let (org, workspace) = if link.contains("org-2") { ("org-2", "workspace-2") } else if link.contains("org-3") { ("org-3", "w") } else { ("o", "w") };
+        let mirror = Mirror::at(&home, org, workspace).unwrap();
+        assert!(mirror.enable().unwrap_err().to_string().contains("symbolic link"), "{link}");
+        assert_eq!(std::fs::read_dir(elsewhere.join("precious")).unwrap().count(), 1, "{link}: nothing written through the link");
+    }
+}
+
+#[test]
+fn a_mirror_is_never_a_project_or_an_agents_working_directory() {
+    let f = Fixture::new();
+    std::fs::create_dir_all(f.files().join("src")).unwrap();
+    assert!(holds(&f.home, &f.files()));
+    assert!(holds(&f.home, &f.files().join("src")));
+    assert!(holds(&f.home, &f.home.join("cloud-mirrors")));
+    assert!(!holds(&f.home, &f.home));
+    assert!(!holds(&f.home, &f.home.join("cloud-mirrors-of-mine")));
+    // Through a link to it, too.
+    #[cfg(unix)]
+    {
+        let link = f.home.join("shortcut");
+        std::os::unix::fs::symlink(f.files(), &link).unwrap();
+        assert!(holds(&f.home, &link));
+    }
 }
 
 #[test]
@@ -356,7 +643,7 @@ fn a_mirror_belongs_to_one_workspace_and_is_off_until_enabled() {
     assert!(!home.join("cloud-mirrors").exists());
     let empty = Manifest { manifest_id: "m".into(), repositories: Vec::new(), entries: Vec::new(), truncated: false };
     assert!(mirror.plan(&empty).is_err());
-    assert!(mirror.stage("a.txt", b"x", &etag(b"x")).is_err());
+    assert!(mirror.stage("a.txt", b"x", 1, &etag(b"x")).is_err());
     assert!(mirror.publish(&empty, &BTreeMap::new()).is_err());
     assert!(!home.join("cloud-mirrors").exists());
 
@@ -392,17 +679,23 @@ fn turning_it_off_keeps_the_files_unless_asked_and_always_keeps_exports() {
 }
 
 #[test]
-fn names_that_differ_only_by_case_are_one_file_on_a_disk_that_folds_case() {
-    let mut f = Fixture::new();
-    f.remote_write("Readme.md", "upper\n");
-    f.remote_write("readme.md", "lower\n");
-    let plan = f.mirror.plan(&f.manifest()).unwrap();
-    if f.mirror.case_insensitive() {
-        assert_eq!((plan.fetch.len(), plan.refused), (1, 1));
-        f.sync().unwrap();
-        // Stable: the next scan does not see its own file as a conflict.
-        assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
-    } else {
-        assert_eq!((plan.fetch.len(), plan.refused), (2, 0));
+fn the_app_refuses_a_mirror_as_a_project_with_the_reason() {
+    let _home = crate::store::temp_home();
+    let home = crate::store::root().unwrap();
+    let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
+    mirror.enable().unwrap();
+    let files = std::path::PathBuf::from(mirror.status().unwrap().root);
+    std::fs::create_dir_all(files.join("src")).unwrap();
+    // The project picker and the CLI both add a project this way.
+    for path in [files.clone(), files.join("src")] {
+        let refused = crate::store::projects::add(&path.to_string_lossy()).unwrap_err().to_string();
+        assert!(refused.contains("local mirror of a cloud workspace") && refused.contains("cannot be opened as a project"), "{refused}");
     }
+    // An agent's working directory goes through the same check.
+    let canonical = std::fs::canonicalize(&files).unwrap();
+    assert!(crate::store::projects::refuse_mirror(&canonical.to_string_lossy()).is_err());
+    assert!(crate::store::projects::list().unwrap().0.is_empty());
+    // Any other folder is a project as before.
+    let other = tempfile::tempdir().unwrap();
+    assert!(crate::store::projects::add(&other.path().to_string_lossy()).is_ok());
 }

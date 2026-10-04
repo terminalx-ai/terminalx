@@ -10,10 +10,17 @@
 //! untracked files Git does not ignore. A workspace with no repository has
 //! nothing to mirror. Left out, and counted in `skipped` by reason:
 //!
-//! - `secret`: credential and key files by name ([`crate::mirror_rules`]);
+//! - `secret`: credential and key files by name ([`crate::mirror_rules`]),
+//!   and anything inside the runtime's own state directory;
+//! - `toolConfig`: tool configuration that runs commands by itself;
+//! - `gitDirectory`: everything inside a folder Git would take for a
+//!   repository's own directory, whatever it is called;
 //! - `excluded`: the repository's own `.terminalx-mirror-ignore`;
-//! - `symlink`, `unsupported`: links are never followed or copied, and
-//!   sockets, devices and nested repositories are not files;
+//! - `symlink`: links are never followed or copied. That includes every
+//!   file reached through a linked folder: Git lists what its index names,
+//!   whatever the working tree has turned into since;
+//! - `unsupported`: sockets, devices, nested repositories, and names a
+//!   desktop could not hold (a backslash);
 //! - `too_large`: over the largest file `fs.read` serves.
 //!
 //! The answer is paged to fit a relay frame. A page after the first names
@@ -53,6 +60,8 @@ struct Entry {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Skipped {
     secret: usize,
+    tool_config: usize,
+    git_directory: usize,
     excluded: usize,
     symlink: usize,
     unsupported: usize,
@@ -70,6 +79,9 @@ struct Listing {
 
 pub struct WorkspaceMirror {
     root: PathBuf,
+    /// Directories inside the workspace whose contents are never listed: the
+    /// runtime's own state, if it was ever configured to live in the workspace.
+    protected: Vec<PathBuf>,
     cache: Mutex<Option<Arc<Listing>>>,
 }
 
@@ -85,7 +97,29 @@ struct Params {
 impl WorkspaceMirror {
     /// `root` is canonical.
     pub fn new(root: PathBuf) -> Self {
-        Self { root, cache: Mutex::new(None) }
+        // The state directory holds the runtime credential and agent logins.
+        // It is deployed outside the workspace; if it is not, it is still
+        // never part of a mirror.
+        let state = crate::store::state_home_env().map(PathBuf::from).and_then(|dir| std::fs::canonicalize(dir).ok());
+        Self::with_protected(root, state.into_iter().collect())
+    }
+
+    pub fn with_protected(root: PathBuf, protected: Vec<PathBuf>) -> Self {
+        Self { root, protected, cache: Mutex::new(None) }
+    }
+
+    /// Is any folder on the way to `path` a symbolic link? Checked once per folder.
+    fn through_link(&self, path: &str, known: &mut std::collections::HashMap<PathBuf, bool>) -> bool {
+        let mut dir = self.root.clone();
+        let parts: Vec<&str> = path.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            dir.push(part);
+            let linked = *known.entry(dir.clone()).or_insert_with(|| std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()));
+            if linked {
+                return true;
+            }
+        }
+        false
     }
 
     /// `mirror.manifest`: `{ manifestId?, cursor? }` →
@@ -132,6 +166,8 @@ impl WorkspaceMirror {
             "totalBytes": listing.entries.iter().map(|entry| entry.size).sum::<u64>(),
             "skipped": {
                 "secret": listing.skipped.secret,
+                "toolConfig": listing.skipped.tool_config,
+                "gitDirectory": listing.skipped.git_directory,
                 "excluded": listing.skipped.excluded,
                 "symlink": listing.skipped.symlink,
                 "unsupported": listing.skipped.unsupported,
@@ -143,44 +179,60 @@ impl WorkspaceMirror {
 
     fn list(&self, git: &WorkspaceGit) -> Result<Listing, RpcError> {
         let (repositories, _) = git.repositories();
-        let mut entries = Vec::new();
         let mut skipped = Skipped::default();
-        let mut truncated = false;
         let mut described = Vec::new();
+        // Every listed name first: whether a folder is a Git directory is a
+        // question about all of its files together.
+        let mut listed = Vec::new();
         for repository in &repositories {
             let dir = if repository == "." { self.root.clone() } else { self.root.join(repository) };
             let prefix = if repository == "." { String::new() } else { format!("{}/", repository.replace('\\', "/")) };
-            let listed = list_files(&dir)?;
-            let ignore = repository_ignore(&dir);
-            for name in listed {
-                let path = format!("{prefix}{name}");
-                if crate::mirror_rules::reserved(&path) || !lexical(&path) {
-                    skipped.unsupported += 1;
-                    continue;
-                }
-                // Never followed: a link is looked at, not through.
-                let Ok(meta) = std::fs::symlink_metadata(self.root.join(&path)) else { continue };
-                if meta.file_type().is_symlink() {
-                    skipped.symlink += 1;
-                } else if !meta.is_file() {
-                    skipped.unsupported += 1;
-                } else if crate::mirror_rules::secret(&path) {
-                    skipped.secret += 1;
-                } else if ignore.as_ref().is_some_and(|ignore| ignore.matched_path_or_any_parents(&name, false).is_ignore()) {
-                    skipped.excluded += 1;
-                } else if meta.len() > MAX_FILE_BYTES {
-                    skipped.too_large += 1;
-                } else if entries.len() >= MAX_ENTRIES {
-                    truncated = true;
-                } else {
-                    entries.push(Entry { path, size: meta.len(), version: super::files::version_of(&meta), executable: executable(&meta) });
-                }
+            let ignore = Arc::new(repository_ignore(&dir));
+            for name in list_files(&dir)? {
+                listed.push((format!("{prefix}{name}"), name, ignore.clone()));
             }
             described.push(json!({
                 "repo": repository,
                 "branch": crate::git::current_branch(&dir),
                 "head": crate::git::head_commit(&dir),
             }));
+        }
+        let git_directories = crate::mirror_rules::git_directories(listed.iter().map(|(path, _, _)| path.as_str()));
+        let mut links = std::collections::HashMap::new();
+        let mut entries = Vec::new();
+        let mut truncated = false;
+        for (path, name, ignore) in &listed {
+            if crate::mirror_rules::reserved(path) || !lexical(path) {
+                skipped.unsupported += 1;
+                continue;
+            }
+            // A linked folder is never looked through: its files are another
+            // place's, under a name the rules below would not recognise.
+            if self.through_link(path, &mut links) {
+                skipped.symlink += 1;
+                continue;
+            }
+            let full = self.root.join(path);
+            let Ok(meta) = std::fs::symlink_metadata(&full) else { continue };
+            if meta.file_type().is_symlink() {
+                skipped.symlink += 1;
+            } else if !meta.is_file() {
+                skipped.unsupported += 1;
+            } else if crate::mirror_rules::secret(path) || self.protected.iter().any(|dir| full.starts_with(dir)) {
+                skipped.secret += 1;
+            } else if crate::mirror_rules::inside(path, &git_directories) {
+                skipped.git_directory += 1;
+            } else if crate::mirror_rules::tool_config(path) {
+                skipped.tool_config += 1;
+            } else if ignore.as_ref().as_ref().is_some_and(|ignore| ignore.matched_path_or_any_parents(name, false).is_ignore()) {
+                skipped.excluded += 1;
+            } else if meta.len() > MAX_FILE_BYTES {
+                skipped.too_large += 1;
+            } else if entries.len() >= MAX_ENTRIES {
+                truncated = true;
+            } else {
+                entries.push(Entry { path: path.clone(), size: meta.len(), version: super::files::version_of(&meta), executable: executable(&meta) });
+            }
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         entries.dedup_by(|a, b| a.path == b.path);
@@ -196,9 +248,10 @@ impl WorkspaceMirror {
     }
 }
 
-/// Only plain relative components: what `fs.read` will accept.
+/// Only plain relative components (what `fs.read` will accept), and no
+/// backslash: on a desktop that is a separator.
 fn lexical(path: &str) -> bool {
-    !path.is_empty() && path.len() <= 4096 && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)))
+    !path.is_empty() && path.len() <= 4096 && !path.contains('\\') && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
 #[cfg(unix)]
