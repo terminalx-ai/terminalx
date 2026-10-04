@@ -669,7 +669,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
             <div
               class="group/row relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground hover:bg-selected/40"
               data-tree-row="true"
-              title="/repos/raccoon"
+              title="/repos/raccoon · main"
             >
               <button
                 aria-label="Expand main"
@@ -819,6 +819,28 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                     />
                   </svg>
                 </button>
+              </span>
+            </div>
+            <div
+              class="ml-6 flex min-w-0 items-center gap-2 pr-2 pb-1 text-[10px] text-muted-foreground"
+            >
+              <span
+                class="min-w-0 flex-1 truncate font-mono"
+                title="main"
+              >
+                main
+              </span>
+              <span
+                class="shrink-0"
+                title="Local snapshot; refreshed from origin before deletion"
+              >
+                merged
+              </span>
+              <span
+                class="shrink-0 tabular-nums text-faint"
+                title="Size on disk"
+              >
+                8.0 KB
               </span>
             </div>
             <div
@@ -1198,7 +1220,7 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
             <div
               class="group/row relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground hover:bg-selected/40"
               data-tree-row="true"
-              title="/repos/raccoon"
+              title="/repos/raccoon · main"
             >
               <button
                 aria-label="Expand main"
@@ -1338,6 +1360,28 @@ exports[`sidebar rail DOM > signed in, with no organization that has cloud works
                     />
                   </svg>
                 </button>
+              </span>
+            </div>
+            <div
+              class="ml-6 flex min-w-0 items-center gap-2 pr-2 pb-1 text-[10px] text-muted-foreground"
+            >
+              <span
+                class="min-w-0 flex-1 truncate font-mono"
+                title="main"
+              >
+                main
+              </span>
+              <span
+                class="shrink-0"
+                title="Local snapshot; refreshed from origin before deletion"
+              >
+                merged
+              </span>
+              <span
+                class="shrink-0 tabular-nums text-faint"
+                title="Size on disk"
+              >
+                8.0 KB
               </span>
             </div>
             <div
@@ -2099,7 +2143,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
             <div
               class="group/row relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground hover:bg-selected/40"
               data-tree-row="true"
-              title="/repos/raccoon"
+              title="/repos/raccoon · main"
             >
               <button
                 aria-label="Expand main"
@@ -2249,6 +2293,28 @@ exports[`sidebar rail DOM > signed out 1`] = `
                     />
                   </svg>
                 </button>
+              </span>
+            </div>
+            <div
+              class="ml-6 flex min-w-0 items-center gap-2 pr-2 pb-1 text-[10px] text-muted-foreground"
+            >
+              <span
+                class="min-w-0 flex-1 truncate font-mono"
+                title="main"
+              >
+                main
+              </span>
+              <span
+                class="shrink-0"
+                title="Local snapshot; refreshed from origin before deletion"
+              >
+                merged
+              </span>
+              <span
+                class="shrink-0 tabular-nums text-faint"
+                title="Size on disk"
+              >
+                8.0 KB
               </span>
             </div>
             <div
@@ -2628,7 +2694,7 @@ exports[`sidebar rail DOM > signed out 1`] = `
             <div
               class="group/row relative flex min-h-7 items-center gap-1 rounded-md pr-1 text-[11px] text-muted-foreground hover:bg-selected/40"
               data-tree-row="true"
-              title="/repos/raccoon"
+              title="/repos/raccoon · main"
             >
               <button
                 aria-label="Expand main"
@@ -2768,6 +2834,28 @@ exports[`sidebar rail DOM > signed out 1`] = `
                     />
                   </svg>
                 </button>
+              </span>
+            </div>
+            <div
+              class="ml-6 flex min-w-0 items-center gap-2 pr-2 pb-1 text-[10px] text-muted-foreground"
+            >
+              <span
+                class="min-w-0 flex-1 truncate font-mono"
+                title="main"
+              >
+                main
+              </span>
+              <span
+                class="shrink-0"
+                title="Local snapshot; refreshed from origin before deletion"
+              >
+                merged
+              </span>
+              <span
+                class="shrink-0 tabular-nums text-faint"
+                title="Size on disk"
+              >
+                8.0 KB
               </span>
             </div>
             <div

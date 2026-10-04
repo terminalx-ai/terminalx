@@ -29,7 +29,7 @@ const NOW = new Date("2026-09-30T12:00:00.000Z");
 const projectPath = "/repos/raccoon";
 const workspace: Workspace = {
   path: projectPath, name: "raccoon", branch: "main", head: "abc1234", isMain: true, managed: false,
-  uncommitted: 0, additions: 2, deletions: 1, unpushed: 0, ahead: 0, behind: 0,
+  uncommitted: 0, additions: 2, deletions: 1, unpushed: 0, ahead: 0, behind: 0, state: "merged", sizeBytes: 8192,
 };
 const projects: Project[] = [{ path: projectPath, name: "Raccoon", pinned: true }, { path: "/notes", name: "Notes", kind: "folder" }];
 const sessionList: SessionEntry[] = [
