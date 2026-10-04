@@ -190,7 +190,8 @@ export class CloudWorkspaceSession {
     );
     await Promise.all([this.keys.load(), this.outbox.load()]);
     this.publish();
-    this.link.start();
+    // The app may have gone to the background while the above was read: then nothing connects until it is back (`resume`).
+    if (!this.paused) this.link.start();
     await this.readCheckpoints();
     // Only what the server already has is followed. What never left the phone
     // waits: delivering it could start a workspace that has stopped since.
@@ -224,8 +225,10 @@ export class CloudWorkspaceSession {
 
   /** Back in the foreground. */
   resume(): void {
-    if (this.closed || !this.started) return;
+    if (this.closed) return;
     this.paused = false;
+    // Not started yet: `start` connects by itself when it gets there.
+    if (!this.started) return;
     this.link.start();
     if (this.followable()) this.startPolling();
   }
@@ -414,7 +417,10 @@ export class CloudWorkspaceSession {
   private async syncOutbox(): Promise<boolean> {
     if (this.paused) return false;
     const deliver = this.outbox.unsent && (await this.mayPost(false)) === "post";
-    return this.outbox.sync({ deliver });
+    // Deciding took a request (the list read). If the app went to the background meanwhile, nothing is
+    // posted or polled now; and the check is made again before each message, so none leaves after that moment.
+    if (this.paused) return false;
+    return this.outbox.sync({ deliver: deliver && (() => !this.paused) });
   }
 
   private async connectionChanged(state: WorkspaceConnectionState): Promise<void> {
