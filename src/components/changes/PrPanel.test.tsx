@@ -47,6 +47,7 @@ const cleanMerged: WorkspaceDisposition = {
   prChecked: true,
   sessions: 0,
   sessionTitles: [],
+  sessionIds: [],
 };
 
 function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: () => boolean = () => false) {

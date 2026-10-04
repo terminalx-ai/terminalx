@@ -150,6 +150,21 @@ export interface WorkspaceRename {
   sessions: SessionEntry[];
 }
 
+/** How a workspace is removed. */
+export interface WorkspaceRemoveOptions {
+  /** Settling: the conversations stay and move to the project. */
+  keepSessions: boolean;
+  deleteBranch: boolean;
+  /**
+   * The second confirmation, as the digest of the check the person saw when
+   * they gave it. Null for a single confirmation, which is enough only for a
+   * workspace found clean and merged.
+   */
+  confirmedDigest: string | null;
+  /** The sessions the person was told are in the workspace; the removal is refused if that changed. */
+  expectedSessions: string[];
+}
+
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
@@ -313,8 +328,8 @@ export const api = {
    */
   workspaceDisposition: (projectPath: string, path: string, options: { fetch?: boolean } = {}) =>
     invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path, fetch: options.fetch ?? false }),
-  /** Remove a workspace. `keepSessions` is settling: the conversations stay. `confirmedRisky` is the second confirmation. */
-  removeWorkspace: (projectPath: string, path: string, options: { keepSessions: boolean; deleteBranch: boolean; confirmedRisky: boolean }) =>
+  /** Remove a workspace through the one checked path. */
+  removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
     invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   // sessions

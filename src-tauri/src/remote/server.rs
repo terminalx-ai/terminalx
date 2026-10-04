@@ -2206,12 +2206,17 @@ impl WorkspaceRpc {
         let mut kept_branch = None;
         let removed = match &workspace {
             Some(path) => {
-                let request = crate::session_ops::WorkspaceRemoval {
+let expected = vec![session.id.clone()];
+                                let request = crate::session_ops::WorkspaceRemoval {
                     project_path: &session.project_path,
                     path,
                     sessions: crate::session_ops::SessionsFate::Delete,
                     delete_branch: true,
-                    confirmed_risky: confirmed_unsafe,
+                    confirmation: if confirmed_unsafe { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
+                    // The client asked to delete this one session. If
+                    // another has started in the worktree since, the
+                    // worktree is not this session's alone to take.
+                    expected_sessions: Some(&expected),
                     direct: crate::git::DirectDelete::Never,
                     fetch: crate::landed::Fetch::Fresh,
                 };

@@ -665,7 +665,10 @@ impl ControlService {
             path: &worktree.path,
             sessions: crate::session_ops::SessionsFate::Delete,
             delete_branch: false,
-            confirmed_risky: force,
+            // The CLI shows nothing first, so its `--force` covers whatever
+            // is there, and it names no sessions to compare with.
+            confirmation: if force { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
+            expected_sessions: None,
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
         };

@@ -46,7 +46,12 @@ export function WorkspaceRemoveDialog() {
       // The one caller that fetches: the answer decides whether this
       // workspace can go with a single confirmation.
       const d = await api.workspaceDisposition(projectPath, path, { fetch: true });
-      if (isLive()) setDisp(d);
+      if (!isLive()) return;
+      setDisp(d);
+      // The branch goes by default only with a workspace found clean and
+      // merged. Otherwise it is the person's to turn on (and even then a
+      // branch holding commits nothing else has is kept).
+      setDeleteBranch(!!d.landed?.safe);
     } catch (e) {
       if (!isLive()) return;
       setCheckFailed(true);
@@ -57,7 +62,7 @@ export function WorkspaceRemoveDialog() {
   useEffect(() => {
     if (!request) return;
     setError(null);
-    setDeleteBranch(true);
+    setDeleteBranch(false);
     let live = true;
     void check(request.projectPath, request.path, () => live);
     return () => {
@@ -68,10 +73,15 @@ export function WorkspaceRemoveDialog() {
   if (!request) return null;
   const settle = request.mode === "settle";
   const landed = disp?.landed ?? null;
+  // A folder that is not on disk (removed by hand, or on a volume that is not
+  // mounted) cannot be checked, so it is never "safe".
   const gone = !!disp && !disp.exists;
-  const safe = gone || !!landed?.safe;
+  const safe = !!landed?.safe;
   const known = !!disp || checkFailed;
   const risky = known && !safe;
+  // The second confirmation is given for what was shown; without a check
+  // there is nothing to confirm against, so there is nothing to remove.
+  const confirmable = !!landed;
   const losses = landed?.losses ?? [];
   const pr = disp?.pr ?? null;
   const verb = settle ? "Settle" : "Delete";
@@ -81,7 +91,12 @@ export function WorkspaceRemoveDialog() {
     setBusy("remove");
     setError(null);
     try {
-      const report = await removeWorkspace(request.projectPath, request.path, { keepSessions: settle, deleteBranch, confirmedRisky: risky });
+      const report = await removeWorkspace(request.projectPath, request.path, {
+        keepSessions: settle,
+        deleteBranch,
+        confirmedDigest: risky ? (landed?.digest ?? null) : null,
+        expectedSessions: disp?.sessionIds ?? [],
+      });
       closeWorkspaceRemove();
       await reportBranchOutcome(report);
     } catch (e) {
@@ -135,9 +150,9 @@ export function WorkspaceRemoveDialog() {
               <Loader2 className="size-3.5 animate-spin" /> Fetching the default branch and checking the workspace…
             </span>
           )}
-          {checkFailed && <Row ok={false} text="The workspace could not be checked for uncommitted or unmerged work." />}
-          {gone && <span className="text-muted-foreground">The workspace folder is already gone.</span>}
-          {disp?.exists && (
+          {checkFailed && <Row ok={false} text="The workspace could not be checked, so it cannot be removed from here. Close this and try again." />}
+          {gone && <Row ok={false} text="The workspace folder is not on disk. It may have been removed by hand, or be on a volume that is not mounted." />}
+          {disp && (
             <>
               <SessionsRow count={disp.sessions} titles={disp.sessionTitles ?? []} kept={settle} />
               {landed?.checked && (
@@ -198,7 +213,7 @@ export function WorkspaceRemoveDialog() {
               {busy === "relocate" ? <Loader2 className="animate-spin" /> : <FolderInput />} Move session to project
             </Button>
           )}
-          <Button variant={risky ? "destructive" : "default"} onClick={() => void remove()} disabled={!!busy || !known || !!disp?.isMain}>
+          <Button variant={risky ? "destructive" : "default"} onClick={() => void remove()} disabled={!!busy || !known || !confirmable || !!disp?.isMain}>
             {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {risky ? `${verb} anyway…` : `${verb} workspace`}
           </Button>
         </DialogFooter>

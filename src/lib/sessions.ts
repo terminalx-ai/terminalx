@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api } from "@/lib/api";
+import { api, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
@@ -386,7 +386,7 @@ export async function setProjectLogo(path: string, source: string | null) {
  * Remove a workspace. Deleting it removes the sessions that ran in it;
  * settling (`keepSessions`) keeps them and moves them to the project.
  */
-export async function removeWorkspace(projectPath: string, path: string, options: { keepSessions: boolean; deleteBranch: boolean; confirmedRisky: boolean }) {
+export async function removeWorkspace(projectPath: string, path: string, options: WorkspaceRemoveOptions) {
   const report = await api.removeWorkspace(projectPath, path, options);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });

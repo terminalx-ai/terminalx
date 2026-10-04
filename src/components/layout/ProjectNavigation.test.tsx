@@ -190,7 +190,7 @@ describe("complete navigation hierarchy", () => {
       if (command === "list_workspaces") return [workspace("/alpha")];
       throw new Error(`Unexpected command: ${command}`);
     });
-    await act(async () => store.removeWorkspace("/alpha", path, { keepSessions: false, deleteBranch: false, confirmedRisky: false }));
+    await act(async () => store.removeWorkspace("/alpha", path, { keepSessions: false, deleteBranch: false, confirmedDigest: null, expectedSessions: [] }));
     expect(screen.queryByRole("treeitem", { name: "deleted-feature" })).toBeNull();
     expect(screen.queryByText("Session one")).toBeNull();
     expect(screen.queryByText("Session other")).toBeNull();
@@ -278,7 +278,7 @@ describe("complete navigation hierarchy", () => {
     expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/alpha/renamed");
     expect(screen.getByRole("button", { name: /Workspace renamed/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Workspace old/ })).toBeNull();
-    await act(async () => store.removeWorkspace("/alpha", "/alpha/renamed", { keepSessions: false, deleteBranch: false, confirmedRisky: false }));
+    await act(async () => store.removeWorkspace("/alpha", "/alpha/renamed", { keepSessions: false, deleteBranch: false, confirmedDigest: null, expectedSessions: [] }));
     expect(screen.queryByRole("button", { name: /Workspace renamed/ })).toBeNull();
     expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/alpha");
   });

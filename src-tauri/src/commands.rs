@@ -2625,7 +2625,8 @@ mod command_tests {
             path: worktree.to_str().unwrap(),
             sessions: crate::session_ops::SessionsFate::Delete,
             delete_branch: true,
-            confirmed_risky: true,
+            confirmation: crate::session_ops::Confirmation::Forced,
+            expected_sessions: None,
             direct: crate::git::DirectDelete::Allowed,
             fetch: crate::landed::Fetch::Skip,
         };
@@ -2849,11 +2850,14 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
         // which asks for it. Everything else that reads the disposition (the
         // pull request panel does so every 30 seconds) stays off the network
         // and gets no clean-and-merged verdict at all.
-        if fetch == Some(true) && disposition.exists && !disposition.is_main {
+        // A folder that is not on disk gets a verdict too ("cannot be
+        // checked"), so the dialog can ask about it rather than wave it through.
+        if fetch == Some(true) && !disposition.is_main {
             disposition.landed = Some(crate::landed::check(Path::new(&project_path), Path::new(&path), crate::landed::Fetch::Fresh));
         }
         let sessions = sessions_in_workspace(Path::new(&path))?;
         disposition.sessions = sessions.len();
+        disposition.session_ids = sessions.iter().map(|session| session.id.clone()).collect();
         disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
         Ok(disposition)
     })
@@ -2866,8 +2870,13 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 ///
 /// `keep_sessions` is settling: the conversations stay and move to the
 /// project root. Otherwise the sessions in the workspace are deleted with
-/// it. The clean-and-merged check runs again here; a workspace that is not
-/// safe is removed only with `confirmed_risky`, the second confirmation.
+/// it. `expected_sessions` are the ones the dialog named; if the workspace
+/// holds any other set by now, nothing is removed.
+///
+/// The clean-and-merged check runs again here. A workspace that is not safe
+/// is removed only with `confirmed_digest`: the digest of the check the
+/// person saw when they gave the second confirmation. If the workspace has
+/// changed since, it no longer matches and nothing is removed.
 #[tauri::command]
 pub async fn remove_workspace(
     app: AppHandle,
@@ -2875,20 +2884,23 @@ pub async fn remove_workspace(
     path: String,
     keep_sessions: bool,
     delete_branch: bool,
-    confirmed_risky: bool,
+    confirmed_digest: Option<String>,
+    expected_sessions: Vec<String>,
 ) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let browser_key = crate::browser::control::canonical(&path);
+        // Deleting a directory git cannot remove is itself a risk the person
+        // has to have confirmed.
+        let direct = if confirmed_digest.is_some() { git::DirectDelete::Allowed } else { git::DirectDelete::Never };
         let request = crate::session_ops::WorkspaceRemoval {
             project_path: &project_path,
             path: &path,
             sessions: if keep_sessions { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
             delete_branch,
-            confirmed_risky,
-            // Deleting a directory git cannot remove is itself a risk the
-            // person has to have confirmed.
-            direct: if confirmed_risky { git::DirectDelete::Allowed } else { git::DirectDelete::Never },
+            confirmation: confirmed_digest.map(crate::session_ops::Confirmation::Shown).unwrap_or(crate::session_ops::Confirmation::Single),
+            expected_sessions: Some(&expected_sessions),
+            direct,
             fetch: crate::landed::Fetch::Fresh,
         };
         let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));

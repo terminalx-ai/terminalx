@@ -104,6 +104,8 @@ pub struct Landed {
     /// The directory is a working tree of this project, so it could be read.
     pub checked: bool,
     pub branch: Option<String>,
+    /// The commit HEAD is at.
+    pub head: Option<String>,
     /// What the branch was compared with, e.g. `origin/main`.
     pub base: Option<String>,
     pub uncommitted: u32,
@@ -125,14 +127,34 @@ pub struct Landed {
     pub safe: bool,
     /// What deleting would lose, in plain words; empty when it is safe.
     pub losses: Vec<String>,
+    /// Stands for exactly what this check found. A second confirmation is
+    /// given for one digest: if anything the person was shown has changed
+    /// by the time of the removal, the digest differs and they are asked
+    /// again.
+    pub digest: String,
 }
 
 impl Landed {
+    fn describe_digest(&self) -> String {
+        format!(
+            "checked={} head={} branch={} uncommitted={} stashes={} merged={:?} unmerged={} fresh={} unverified={}",
+            self.checked,
+            self.head.as_deref().unwrap_or("-"),
+            self.branch.as_deref().unwrap_or("-"),
+            self.uncommitted,
+            self.stashes,
+            self.merged,
+            self.unmerged_commits,
+            self.fresh,
+            self.not_verified.as_deref().unwrap_or("-"),
+        )
+    }
+
     fn describe_losses(&self) -> Vec<String> {
         let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         let mut out = Vec::new();
         if !self.checked {
-            out.push("This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work.".to_string());
+            out.push("This folder is not on disk, or is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work.".to_string());
             return out;
         }
         if self.uncommitted > 0 {
@@ -388,10 +410,12 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     if !git::is_worktree_of(project, path) {
         let mut unchecked = Landed::default();
         unchecked.losses = unchecked.describe_losses();
+        // Whether there is anything there at all is part of what was shown.
+        unchecked.digest = format!("{} on-disk={}", unchecked.describe_digest(), std::fs::symlink_metadata(path).is_ok());
         return unchecked;
     }
     let branch = git::current_branch(path);
-    let mut landed = Landed { checked: true, branch: branch.clone(), ..Default::default() };
+    let mut landed = Landed { checked: true, branch: branch.clone(), head: git::head_commit(path), ..Default::default() };
 
     // The fetch can take many seconds. The working tree is read after it,
     // so what is reported is the tree as it is when the answer is given.
@@ -446,6 +470,7 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     landed.base = base;
     landed.safe = landed.clean && landed.merged.is_some() && landed.not_verified.is_none() && landed.fresh;
     landed.losses = landed.describe_losses();
+    landed.digest = landed.describe_digest();
     landed
 }
 
@@ -940,6 +965,26 @@ mod tests {
         STASH_LIST_FAILS.with(|fails| fails.set(false));
         assert!(landed.not_verified.as_deref().is_some_and(|reason| reason.contains("stash list")), "{landed:?}");
         assert!(!landed.clean && !landed.safe, "unknown is not 'no stashes'");
+    }
+
+    #[test]
+    fn the_digest_changes_with_anything_the_person_was_shown() {
+        let f = Fixture::new();
+        let wt = f.worktree("quiet-amber-fox");
+        let first = check(&f.project, &wt, Fetch::Fresh);
+        assert_eq!(first.digest, check(&f.project, &wt, Fetch::Fresh).digest, "the same state gives the same digest");
+        std::fs::write(wt.join("late.txt"), "x").unwrap();
+        let dirty = check(&f.project, &wt, Fetch::Fresh);
+        assert_ne!(dirty.digest, first.digest);
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "late"]);
+        let ahead = check(&f.project, &wt, Fetch::Fresh);
+        assert_ne!(ahead.digest, dirty.digest);
+        assert_ne!(ahead.digest, first.digest);
+        // A folder that is gone is not the same as one that cannot be read.
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        let broken = check(&f.project, &wt, Fetch::Skip).digest;
+        assert_ne!(broken, check(&f.project, &f.project.join("nowhere"), Fetch::Skip).digest);
     }
 
     #[test]

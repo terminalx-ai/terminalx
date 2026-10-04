@@ -26,6 +26,7 @@ const session = { id: "s1", title: "Fix login", projectPath: "/p", cwd: path, wo
 const safe: Landed = {
   checked: true,
   branch: "raccoon/quiet-amber-fox",
+  head: "0123abcd",
   base: "origin/main",
   uncommitted: 0,
   stashes: 0,
@@ -37,6 +38,7 @@ const safe: Landed = {
   notVerified: null,
   safe: true,
   losses: [],
+  digest: "safe-digest",
 };
 const workspace = (landed: Landed, extra: Partial<WorkspaceDisposition> = {}): WorkspaceDisposition => ({
   exists: true,
@@ -50,13 +52,14 @@ const workspace = (landed: Landed, extra: Partial<WorkspaceDisposition> = {}): W
   prChecked: true,
   sessions: 2,
   sessionTitles: ["Fix login", "Review the fix"],
+  sessionIds: ["s1", "s9"],
   landed,
   ...extra,
 });
-const dirty: Landed = { ...safe, uncommitted: 2, clean: false, safe: false, losses: ["2 uncommitted files would be lost."] };
-const unmerged: Landed = { ...safe, merged: null, unmergedCommits: 3, safe: false, losses: ["3 commits are not in origin/main. The branch is pushed, but not merged."] };
-const unverified: Landed = { ...safe, merged: "ancestor", notVerified: "origin/main could not be fetched (timed out).", safe: false, losses: ["Not verified: origin/main could not be fetched (timed out)."] };
-const unchecked: Landed = { ...safe, checked: false, clean: false, merged: null, safe: false, losses: ["This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work."] };
+const dirty: Landed = { ...safe, digest: "dirty-digest", uncommitted: 2, clean: false, safe: false, losses: ["2 uncommitted files would be lost."] };
+const unmerged: Landed = { ...safe, digest: "unmerged-digest", merged: null, unmergedCommits: 3, safe: false, losses: ["3 commits are not in origin/main. The branch is pushed, but not merged."] };
+const unverified: Landed = { ...safe, digest: "unverified-digest", merged: "ancestor", notVerified: "origin/main could not be fetched (timed out).", safe: false, losses: ["Not verified: origin/main could not be fetched (timed out)."] };
+const unchecked: Landed = { ...safe, digest: "unchecked-digest", checked: false, clean: false, merged: null, safe: false, losses: ["This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work."] };
 
 const removeButton = () => screen.getByRole("button", { name: /^(Delete|Settle) (workspace|anyway…)$/ }) as HTMLButtonElement;
 const openDelete = () => act(() => openWorkspaceDelete("/p", path, "quiet-amber-fox"));
@@ -97,7 +100,10 @@ describe("WorkspaceRemoveDialog", () => {
     expect(mocks.workspaceDisposition).toHaveBeenCalledWith("/p", path, { fetch: true });
 
     fireEvent.click(removeButton());
-    await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedRisky: false }));
+    // The sessions it named are the ones the removal is told to expect.
+    await waitFor(() =>
+      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
+    );
     expect(mocks.ask).not.toHaveBeenCalled();
   });
 
@@ -123,17 +129,36 @@ describe("WorkspaceRemoveDialog", () => {
       expect(mocks.ask.mock.calls[0][0]).toContain(line);
       expect(mocks.removeWorkspace).not.toHaveBeenCalled();
 
+      // The branch is not deleted by default with a workspace that is not
+      // safe, and the confirmation says what really happens to it.
+      expect(mocks.ask.mock.calls[0][0]).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
+      expect((screen.getByRole("switch") as HTMLButtonElement).getAttribute("aria-checked")).toBe("false");
+
       fireEvent.click(removeButton());
-      await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedRisky: true }));
+      // The second confirmation is sent as the digest of what was shown.
+      await waitFor(() =>
+        expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: false, confirmedDigest: landed.digest, expectedSessions: ["s1", "s9"] }),
+      );
     });
   }
 
-  it("treats a check that fails outright as needing the second confirmation", async () => {
+  it("removes nothing when the check fails outright: there is nothing to confirm against", async () => {
     mocks.workspaceDisposition.mockRejectedValue(new Error("git exploded"));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText(/could not be checked, so it cannot be removed from here/);
+    expect(removeButton().disabled).toBe(true);
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("names the sessions of a folder that is not on disk and asks the second time", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(unchecked, { exists: false, branch: null }));
     mocks.ask.mockResolvedValue(false);
     render(<WorkspaceRemoveDialog />);
     openDelete();
-    await screen.findByText("The workspace could not be checked for uncommitted or unmerged work.");
+    await screen.findByText(/The workspace folder is not on disk/);
+    expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
+    expect(removeButton().textContent).toContain("Delete anyway…");
     fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
     expect(mocks.removeWorkspace).not.toHaveBeenCalled();
@@ -151,7 +176,9 @@ describe("WorkspaceRemoveDialog", () => {
     expect(removeButton().textContent).toContain("Settle workspace");
 
     fireEvent.click(removeButton());
-    await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: true, deleteBranch: true, confirmedRisky: false }));
+    await waitFor(() =>
+      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: true, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
+    );
     // A kept branch is said, not just logged.
     await waitFor(() => expect(mocks.message).toHaveBeenCalled());
     expect(mocks.message.mock.calls[0][0]).toContain("raccoon/quiet-amber-fox was kept");

@@ -108,6 +108,8 @@ export interface Landed {
   /** The directory is a working tree of this project, so it could be read. */
   checked: boolean;
   branch: string | null;
+  /** The commit HEAD is at. */
+  head: string | null;
   /** What the branch was compared with, e.g. `origin/main`. */
   base: string | null;
   uncommitted: number;
@@ -125,6 +127,8 @@ export interface Landed {
   safe: boolean;
   /** What deleting would lose, in plain words; empty when it is safe. */
   losses: string[];
+  /** Stands for exactly what this check found; a second confirmation is given for one digest. */
+  digest: string;
 }
 
 export interface WorkspaceDisposition {
@@ -142,6 +146,8 @@ export interface WorkspaceDisposition {
   sessions: number;
   /** Their titles, so the confirmation can name what goes. */
   sessionTitles: string[];
+  /** Their ids, in the same order: what the removal is told to expect. */
+  sessionIds: string[];
   /** Whether the work is clean and merged into the default branch. Only present when the check was asked for with a fetch. */
   landed?: Landed | null;
 }
