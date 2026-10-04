@@ -37,23 +37,51 @@ These are the coordinator's defaults from the security review of
 
 | Never mirrored | Why | Counted as |
 | --- | --- | --- |
-| Anything inside a folder that has `HEAD`, `objects/` and `refs/`, under any name, at any depth | It is a Git directory. Git run inside it obeys its `config`, and `core.fsmonitor` names a command to run. A shell prompt, an editor's Git scan or an agent is enough to trigger it | `gitDirectory` |
-| `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.mcp.json`, `.cursorrules` | Agent settings, hooks and MCP servers: an agent opened there would run what they name | `toolConfig` |
-| `.vscode/`, `.idea/`, `.zed/`, `.devcontainer/` | Editor tasks and run configurations that start on open | `toolConfig` |
-| `.husky/`, `.githooks/`, `.pre-commit-config.yaml`, `lefthook.yml` | Git hooks | `toolConfig` |
-| `.cargo/config.toml`, `.cargo/config`, `.envrc`, `.direnv/` | Build and shell configuration that runs commands | `toolConfig` |
-| The executable bit | Every mirrored file is written `0644`. A script is readable, not runnable by double-click or by name | (always) |
+| Anything inside a folder that has `HEAD` and any other piece of a Git directory (`objects/`, `refs/`, `commondir`, `gitdir`, `config`, `config.worktree`), under any name, at any depth | It is a Git directory, or half of one: Git accepts a folder holding only `HEAD` and a `commondir` pointing at a sibling. Git run inside it obeys its config, which can name a command to run. A shell prompt, an editor's Git scan or an agent is enough to trigger it | `gitDirectory` |
+| A file named `commondir` or `gitdir`, anywhere | It points Git at a directory elsewhere | `gitDirectory` |
+| Agents: `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.windsurf/`, `.continue/`, `.roo/`, `.kiro/`, `.amazonq/`, `.mcp.json`, `.cursorrules`, `opencode.json`, `.aider.conf.yml` | Agent settings, hooks and MCP servers: an agent opened there would run what they name | `toolConfig` |
+| Editors: `.vscode/`, `.idea/`, `.zed/`, `.helix/`, `.run/`, `.devcontainer/`, `*.code-workspace`, `.nvim.lua`, `.exrc` | Tasks, run configurations and editor scripts that start on open | `toolConfig` |
+| Hooks and shells: `.husky/`, `.githooks/`, `.pre-commit-config.yaml`, `lefthook.yml`, `.envrc`, `.direnv/`, `mise.toml` | Run by Git or by the shell on entering the folder | `toolConfig` |
+| Other version control: `.hg/`, `.jj/`, `.sl/`, `.svn/` | Their tools obey these as Git obeys `.git` | `toolConfig` |
+| Build tools: `.cargo/config.toml`, `.cargo/config`, `.yarnrc.yml`, `.yarnrc`, `bunfig.toml`, `.pnpmfile.cjs`, `.mvn/`, `gradle/wrapper/gradle-wrapper.properties` | Configuration that names commands, plugins or downloads the tool then runs | `toolConfig` |
+| The executable bit | Every mirrored file is written `0644` | (always) |
+
+**How names are compared.** The way the disk compares them, not by ASCII
+lower-casing: Unicode case folding (the long s `ſ` is `s`, the Kelvin sign
+is `k`, so `objectſ` is `objects` and `.vſcode` is `.vscode` on APFS) and
+composed or decomposed forms alike. `pkg`, `PKG` and `Pkg` are one folder.
+
+**The disk has the last word.** The rules above are this code's knowledge of
+how the disk folds names, and that knowledge can be incomplete. So after
+every publish the desktop lists what is really under `files/`, by the names
+the filesystem gives back, and judges that: whatever the mirror wrote that
+is, there, inside a Git directory, a pointer to one, tool configuration or
+a secret is removed again, counted (`onDisk`), and never written again.
+Only the mirror's own files are removed. A folder left holding nothing but
+Finder's `.DS_Store` is removed with its files, so empty `objects/` and
+`refs/` do not wait for a later `HEAD`.
 
 And on this computer:
 
-- Every mirrored file gets the `com.apple.quarantine` attribute on macOS,
-  so opening one from Finder goes through Gatekeeper.
+- Every mirrored file gets the `com.apple.quarantine` attribute on macOS.
 - A mirror is never a project. The folder is refused as a local project and
   as an agent's working directory, in the app and in the CLI, with the
   reason. It is for reading.
-- The names are matched without regard to case, and by the rules in
-  `mirror_rules.rs`, on the runtime when it lists and again on the desktop
-  before it writes.
+- The rules are applied on the runtime when it lists and again on the
+  desktop before it writes.
+
+**What this does not do.** It lowers the risk of a hostile workspace; it
+does not make the copy safe.
+
+- Nothing in the copy is marked executable, and macOS asks before opening a
+  quarantined file. It asks; it does not prevent. An HTML page, a
+  `.terminal` file or a `.jar` opens once the person agrees.
+- An editor or language server opened on the folder may build or index it:
+  rust-analyzer runs `build.rs`, some linters load configuration written as
+  code, a package manager may run install scripts. Opening the folder in
+  such a tool runs the workspace's code on this computer.
+- The lists are names known today. A tool that reads a configuration file
+  not on them is not covered.
 
 Not covered by the defaults, and so still mirrored: `Makefile`,
 `package.json` scripts, `CLAUDE.md`/`AGENTS.md`, build scripts, and any
@@ -254,7 +282,8 @@ nothing by itself.
   are listed.
 - The person chooses, deliberately:
   - **Discard local changes**: the listed paths are replaced by the
-    workspace's versions.
+    workspace's versions. The choice covers what was there when it was
+    made: a file edited again before the next sync is a new divergence.
   - **Export, then discard**: the local versions are first copied to
     `exports/<time>/` beside the mirror.
 - Local files the workspace has no file for, at paths it does not use, are
@@ -283,7 +312,9 @@ or that the workspace is backed up.
   workspace), the bare-repository attack, tool configuration, the runtime's
   own state directory, a name with a backslash.
 - `src-tauri/src/mirror_rules.rs`: the secret names, agent logins, the tool
-  configuration list, Git directories under any name and case.
+  configuration list, Git directories under any name and case, one split
+  across two folders, names the disk folds (long s, Kelvin sign), one folder
+  under three spellings.
 - `packages/portable/src/workspaceMirror.test.ts`: paging, restart, an
   incomplete manifest refused, odd names left out and counted, a listing
   that never ends, a cursor that does not move, a runtime without
@@ -299,4 +330,8 @@ or that the workspace is backed up.
   directory, at once and assembled over two syncs; quarantine on macOS; the
   bounds, a size that lies, over-long names; Unicode forms, a file against a
   folder, a case-only rename; another workspace's record; off and removed;
-  a mirror refused as a project.
+  a mirror refused as a project. On this machine's own filesystem: a Git
+  directory split across two folders, long-s and Kelvin spellings, one
+  folder under three spellings, the check of the disk after a publish
+  taking back what landed in a Git directory, an edit after discard, a
+  `.DS_Store` not keeping a folder alive, long s against `s` as one file.

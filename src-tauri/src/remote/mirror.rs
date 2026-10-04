@@ -220,7 +220,7 @@ impl WorkspaceMirror {
                 skipped.unsupported += 1;
             } else if crate::mirror_rules::secret(path) || self.protected.iter().any(|dir| full.starts_with(dir)) {
                 skipped.secret += 1;
-            } else if crate::mirror_rules::inside(path, &git_directories) {
+            } else if crate::mirror_rules::inside(path, &git_directories) || crate::mirror_rules::git_pointer(path) {
                 skipped.git_directory += 1;
             } else if crate::mirror_rules::tool_config(path) {
                 skipped.tool_config += 1;
