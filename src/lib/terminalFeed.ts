@@ -24,12 +24,18 @@ import { countTerminalData, isOnScreen } from "@/lib/terminalCounters";
  * - While the window itself is hidden (minimized, covered, another space),
  *   WebKit runs this page's timers about once a second, and xterm parses on
  *   timers. Nothing is held for a page in that state: output is acknowledged
- *   as it arrives, so every program runs at full speed, as it did before
- *   there was flow control. The backlog is then xterm's to keep.
+ *   as it arrives. If the parser falls behind by 2 MiB, the local view is
+ *   retired and later restored from backend scrollback. The process keeps
+ *   running without an unbounded queue in the suspended window.
  */
 export const ACK_BYTES = 256 * 1024;
 /** A hidden shell is acknowledged `ACK_BYTES` per tick: about 5 MB/s. */
 export const HIDDEN_ACK_MS = 50;
+export const HIDDEN_QUEUE_LIMIT = 2 * 1024 * 1024;
+
+let queuedBytes = 0;
+/** Includes bytes acknowledged on receipt while the window is hidden. */
+export function queuedLocalOutputBytes(): number { return queuedBytes; }
 
 /** Feeds that have something to say when the window is hidden. */
 const feeds = new Set<() => void>();
@@ -54,7 +60,8 @@ export interface PaneFeed {
  * agent's pane: acknowledged as soon as it is parsed, whether or not anyone
  * is looking.
  */
-export function feedLocalPane(id: string, token: string, term: Terminal, { paced = true }: { paced?: boolean } = {}): PaneFeed {
+export function feedLocalPane(id: string, token: string, term: Terminal, { paced = true, retire }: { paced?: boolean; retire?: () => void } = {}): PaneFeed {
+  let stopped = false;
   let received = 0;
   let parsed = 0;
   /** The total last reported. */
@@ -65,6 +72,7 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
     void pty.ack(id, token, total).catch(() => {});
   };
   const settle = () => {
+    if (stopped) return;
     // A hidden window is never waited for: what has arrived counts as drawn.
     const drawn = document.hidden ? received : parsed;
     // Less than one step is never reported: it cannot hold the pane back.
@@ -83,15 +91,26 @@ export function feedLocalPane(id: string, token: string, term: Terminal, { paced
   feeds.add(settle);
   return {
     data: (bytes) => {
+      if (stopped) return;
       countTerminalData("local", bytes.length);
+      if (retire && document.hidden && received - parsed + bytes.length > HIDDEN_QUEUE_LIMIT) {
+        retire();
+        return;
+      }
       received += bytes.length;
+      queuedBytes += bytes.length;
       term.write(bytes, () => {
+        if (stopped) return;
         parsed += bytes.length;
+        queuedBytes -= bytes.length;
         settle();
       });
       if (document.hidden) settle();
     },
     stop: () => {
+      if (stopped) return;
+      stopped = true;
+      queuedBytes -= received - parsed;
       feeds.delete(settle);
       if (timer) clearTimeout(timer);
       timer = null;

@@ -34,8 +34,10 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   the live `session.send`).
 /// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
 ///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
-pub const CAPABILITIES: [&str; 15] =
-    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1"];
+/// - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
+///   into its local mirror. Read-only; the copies are read with `fs.read`.
+pub const CAPABILITIES: [&str; 16] =
+    ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1"];
 
 /// The namespace that lets a connection address an agent tab's own terminal
 /// (spelled out in [`CAPABILITIES`], which the client's tests read).
@@ -132,6 +134,9 @@ pub const METHODS: &[Method] = &[
     method("fs.mkdir", "fs/1", Manage, true),
     method("fs.watch", "fs/1", Participate, false),
     method("fs.unwatch", "fs/1", Participate, false),
+    // PRO-25: the file set of a local mirror. It lists what `fs.read`
+    // already serves to the same caller, and takes no path.
+    method("mirror.manifest", "mirror/1", Participate, false),
     // PRO-27: every git call names its repository (`repo`) unless the
     // workspace has exactly one (`remote/git.rs`).
     method("git.repositories", "git/1", Participate, false),
@@ -191,6 +196,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "agents/1" => &["runtime.agents"],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
+        "mirror/1" => &["mirror."],
         // `composer/N` adds what an agent tab's composer asks of its session.
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],

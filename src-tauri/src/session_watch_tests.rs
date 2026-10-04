@@ -125,6 +125,7 @@ impl Rig {
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
                 tail: tail.clone(),
                 echoed: Default::default(),
+                awaiting_delivery: None,
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,
@@ -274,10 +275,10 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         assert_eq!(rig.recovery(), None);
         assert!(!rig.kinds().iter().any(|k| k == "recovery"));
 
-        // If nothing ever follows the send, its own silence still times out.
+        // If nothing ever confirms the send, its own silence still times out.
         rig.advance(MOMENT);
         rig.tick();
-        assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+        assert_eq!(rig.recovery(), Some(RecoveryKind::DeliveryUnconfirmed));
     }
 }
 
