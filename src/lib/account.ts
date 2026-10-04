@@ -40,6 +40,20 @@ function set(patch: Partial<AccountState>) {
 /** The status as the native side last reported it; `state.status` is this with newer role signals applied. */
 let reported: AccountStatus = signedOut;
 
+/**
+ * Who owns the local mirrors on this computer, as the mirror module takes
+ * it: the account's own id (the user and cloud profile, never the email,
+ * which can change or be reused), `null` when nobody is signed in, and
+ * `undefined` when that is not known. A saved session that could not be
+ * read (a Keychain failure at launch reports signed-out with an error) is
+ * not a sign-out: nothing may be removed on the strength of it.
+ */
+export function mirrorOwnerOf(status: AccountStatus): string | null | undefined {
+  if (status.state === "signed-in") return status.context?.account || undefined;
+  if (status.state === "signed-out") return status.lastError ? undefined : null;
+  return undefined;
+}
+
 function applyStatus(status: AccountStatus) {
   // What a list implied about one account's role says nothing about another's.
   if (status.identity?.email !== reported.identity?.email) roleHints.clear();
@@ -72,7 +86,7 @@ function applyStatus(status: AccountStatus) {
   // Whoever is signed in now owns the mirrors on this computer. One made
   // under another account, or left by a sign-out while the app was closed,
   // is removed when this account (or nobody) is first reported.
-  void claimCloudMirrorOwner(status.state === "signed-in" ? (status.identity?.email ?? "") : null);
+  void claimCloudMirrorOwner(mirrorOwnerOf(status));
   if (state.status.state === "signed-in" && status.state === "signed-out") void purgeCloudMirrors(() => false);
   else {
     const left = new Set(leftMemberships(state.status, status));

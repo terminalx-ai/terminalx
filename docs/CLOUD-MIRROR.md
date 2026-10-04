@@ -323,7 +323,20 @@ policy, decided):
   mirrors were made under: a sign-out while the app was closed, or a direct
   switch of account.
 
-Whose the mirrors are is recorded as a hash in `cloud-mirrors/owner`. It is
+Whose the mirrors are is recorded as a hash in `cloud-mirrors/owner`. The
+owner is the account's own id (the user and cloud profile), not the email,
+which can change or be reused.
+
+- **Not knowing is not a sign-out.** When the saved session cannot be read
+  (a Keychain failure at launch reports signed-out with an error), nothing
+  is removed. Syncing stops until the account is known again.
+- **No sync without a confirmed owner.** A workspace that connects syncs its
+  mirror only after the claim for the signed-in account has succeeded. If
+  the claim fails, nothing is read into the mirror; it is tried again the
+  next time the account is reported, and a workspace still connected then
+  starts.
+
+The recorded hash is of the account id. It is
 written when a mirror is turned on, so a mirror made in the middle of a
 session has an owner too. Mirrors found with no owner recorded are nobody's:
 they are removed, never adopted, even for the same address. Nobody signed in

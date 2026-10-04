@@ -201,23 +201,39 @@ function start(target: CloudTarget, client: WorkspaceRpcClient) {
   void scanNow(target, run);
 }
 
+/** Workspaces connected now, by key: what a confirmed owner may start syncing. */
+const connected = new Map<string, { target: CloudTarget; client: WorkspaceRpcClient }>();
+
+/** Sync a connected workspace's mirror if it is on and the mirrors are confirmed to be this account's. */
+async function startIfAllowed(key: string): Promise<void> {
+  const entry = connected.get(key);
+  if (!entry) return;
+  const status = await api.cloudMirrorStatus(entry.target.orgId, entry.target.workspaceId);
+  if (connected.get(key) !== entry) return;
+  publish(key, { root: status.root, revision: status.revision, phase: status.enabled ? "paused" : "off" });
+  if (!status.enabled) return;
+  // Not confirmed whose the mirrors are (the claim failed, or nobody is
+  // known to be signed in): nothing is read from the workspace into them.
+  if (!ownerConfirmed) {
+    publish(key, { error: "Waiting to confirm that this mirror belongs to the signed-in account." });
+    return;
+  }
+  if (!running.has(key)) start(entry.target, entry.client);
+}
+
 /** A workspace connected (for whatever reason someone opened it): sync if its mirror is on. */
 function onConnected(target: CloudTarget, client: WorkspaceRpcClient): () => void {
   const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
-  let gone = false;
+  const entry = { target, client };
+  connected.set(key, entry);
   // From a microtask: a failure here must never reach the connection that is being announced.
   void Promise.resolve()
-    .then(() => api.cloudMirrorStatus(target.orgId, target.workspaceId))
-    .then((status) => {
-      if (gone) return;
-      publish(key, { root: status.root, revision: status.revision, phase: status.enabled ? "paused" : "off" });
-      if (status.enabled) start(target, client);
-    })
+    .then(() => startIfAllowed(key))
     .catch(() => {
       /* No mirror to speak of: stays off. */
     });
   return () => {
-    gone = true;
+    if (connected.get(key) === entry) connected.delete(key);
     if (running.has(key)) {
       stop(key);
       publish(key, { phase: "paused", progress: null });
@@ -255,7 +271,7 @@ export async function setCloudMirrorEnabled(target: CloudTarget, enabled: boolea
   }
   // A mirror belongs to whoever is signed in when it is turned on; the
   // native side records that, so the next account never inherits it.
-  if (!claimedOwner) throw new Error("Sign in to turn on a local mirror.");
+  if (!claimedOwner || !ownerConfirmed) throw new Error("Sign in to turn on a local mirror.");
   const status = await api.cloudMirrorEnable(target.orgId, target.workspaceId, claimedOwner);
   publish(key, { root: status.root, revision: status.revision, phase: "paused", error: null });
   const client = connectedCloudClient(key);
@@ -312,32 +328,68 @@ export async function purgeCloudMirrors(keep: (orgId: string, workspaceId: strin
 }
 
 let claimedOwner: string | null = null;
+/** The native side confirmed the mirrors on this computer are `claimedOwner`'s. */
+let ownerConfirmed = false;
+let claiming = 0;
+
+function stopAll() {
+  for (const key of [...running.keys()]) {
+    stop(key);
+    publish(key, { phase: "paused", progress: null });
+  }
+}
 
 /**
- * Say who is using the app now (`null`: nobody). Mirrors made under another
- * account are removed: this covers a sign-out that happened while the app
- * was closed and a direct switch of account, where nothing else notices.
+ * Say who is using the app now: the account's id, `null` for nobody, or
+ * `undefined` when it is not known (the saved session could not be read).
+ * Mirrors made under another account are removed: this covers a sign-out
+ * that happened while the app was closed and a direct switch of account,
+ * where nothing else notices.
+ *
+ * Until a claim for a signed-in account has succeeded, no mirror syncs.
+ * Not knowing who is signed in removes nothing and syncs nothing.
  */
-export async function claimCloudMirrorOwner(account: string | null): Promise<void> {
+export async function claimCloudMirrorOwner(account: string | null | undefined): Promise<void> {
+  if (account === undefined) {
+    // Unknown is not a sign-out: keep the files, stop reading into them.
+    claimedOwner = null;
+    ownerConfirmed = false;
+    stopAll();
+    return;
+  }
   const owner = account ?? "";
-  if (claimedOwner === owner) return;
+  if (claimedOwner === owner && (ownerConfirmed || account === null)) return;
   claimedOwner = owner;
+  ownerConfirmed = false;
+  const mine = ++claiming;
+  stopAll();
   try {
-    if (account === null) await purgeCloudMirrors(() => false);
-    else if ((await api.cloudMirrorClaimOwner(account)) > 0) {
-      for (const key of [...running.keys()]) stop(key);
+    if (account === null) {
+      await purgeCloudMirrors(() => false);
+      return;
+    }
+    const removed = await api.cloudMirrorClaimOwner(account);
+    if (mine !== claiming) return;
+    if (removed > 0) {
       states.clear();
       for (const listener of listeners) listener();
     }
+    ownerConfirmed = true;
+    // Workspaces that connected while the claim was in flight, or before a
+    // failed one, may sync now.
+    for (const key of [...connected.keys()]) void startIfAllowed(key).catch(() => undefined);
   } catch {
-    // Tried again the next time the account is reported.
-    claimedOwner = null;
+    // Not confirmed: nothing syncs. Tried again the next time the account is reported.
+    if (mine === claiming) claimedOwner = null;
   }
 }
 
 /** For tests. */
 export function resetCloudMirrors(): void {
   claimedOwner = null;
+  ownerConfirmed = false;
+  claiming += 1;
+  connected.clear();
   for (const key of [...running.keys()]) stop(key);
   booted?.();
   booted = null;
