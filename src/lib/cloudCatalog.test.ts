@@ -1147,6 +1147,16 @@ describe("the account's role, as the workspace list reports it", () => {
     expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("driver"))] })).toBeNull();
   });
 
+  it("does not take a member for an admin because they manage the workspaces they created (PRO-73)", () => {
+    // Where creators manage, "manager" on every row says nothing about the organization role...
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("manager"))] }, true)).toBeNull();
+    expect(listedOrgManages({ workspaces: [item("w1", { authority: "manage" })] }, true)).toBeNull();
+    // ...while one row this person does not manage says they are not an owner or admin.
+    expect(listedOrgManages({ workspaces: [item("w1", you("manager")), item("w2", you("driver"))] }, true)).toBe(false);
+    expect(listedOrgManages({ workspaces: [item("w1", you("none"))] }, true)).toBe(false);
+    expect(listedOrgManages({ workspaces: [] }, true)).toBeNull();
+  });
+
   it("tells the account what each list says, with when the list was asked for", async () => {
     signIn();
     let now = 1_000;

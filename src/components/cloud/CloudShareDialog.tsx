@@ -64,6 +64,8 @@ export function shareErrorMessage(error: unknown, who?: string): string {
       return "That share was already revoked.";
     case "cloud_workspace_not_found":
       return "This workspace no longer exists.";
+    case "cloud_workspace_manager_required":
+      return "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization. Ask one of them to change it.";
     case "organization_admin_required":
       return "Only an organization owner or admin can change whether a workspace is private or visible to the organization. Ask one to change it.";
     case "cloud_workspace_request_outcome_unknown":
@@ -89,10 +91,11 @@ const OUTCOME_UNKNOWN = "cloud_workspace_request_outcome_unknown";
  * A workspace starts private (only its creator sees it). Sharing it with the
  * first person makes it visible in the organization's sidebar, after the
  * person confirms that here; "Make private again" hides it and revokes every
- * share. Both go through the API's `/access` route, which only an
- * organization owner or admin may call: a creator who is a plain member
- * manages the shares of a workspace that is already organization-visible,
- * and is told who can change its visibility.
+ * share. Both go through the API's `/access` route, which is for whoever
+ * manages the workspace: its creator, or an organization owner or admin
+ * (PRO-73). Against a server from before that rule a creator who is a plain
+ * member only manages the shares of a workspace that is already
+ * organization-visible, and is told who can change its visibility.
  */
 export function CloudShareDialog({
   orgId = null,

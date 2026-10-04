@@ -71,7 +71,8 @@ function codeOf(error: unknown): string | null {
  */
 export function isRoleRefusal(error: unknown): boolean {
   const code = codeOf(error);
-  return code === "organization_admin_required" || code === "forbidden";
+  // `cloud_workspace_manager_required` (PRO-73): not this workspace's creator and not an owner or admin.
+  return code === "organization_admin_required" || code === "cloud_workspace_manager_required" || code === "forbidden";
 }
 
 /**
@@ -89,7 +90,12 @@ export function noteCallFailure(error: unknown) {
   if (isRoleRefusal(error) || isMembershipRefusal(error)) void refreshAccountRoles(true);
 }
 
-/** A refusal for lack of role, in the words of what was attempted. The app only offers these to an owner or admin, so the role it held has changed. */
+/** A refusal for lack of role, in the words of what was attempted, for what only an owner or admin does. The app only offers these to one, so the role it held has changed. */
+/** The same for a workspace: its creator manages it too (PRO-73), so the refusal names both. */
+export function managerRefusedMessage(action: string): string {
+  return `Only this workspace's creator or an organization owner or admin can ${action}.`;
+}
+
 export function roleRefusedMessage(action: string): string {
   return `Only an organization owner or admin can ${action} (your role changed).`;
 }

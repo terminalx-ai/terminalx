@@ -32,7 +32,8 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `composer/3`: `session.attach`, an image uploaded in parts for the
  *   message that then names it;
  * - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback, for
- *   private previews (docs/CLOUD-PREVIEWS.md). Nothing calls it yet;
+ *   private previews (docs/CLOUD-PREVIEWS.md): `listPorts` here; the streams
+ *   themselves are carried by the desktop's native forwarder;
  * - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
  *   into its local mirror of the workspace.
  * An older runtime grants none of them; check `hasCapability` before offering
@@ -134,6 +135,9 @@ export type WorkspaceConnectionState =
 
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
 export type PtyControl = "you" | "other" | "none";
+
+/** The most ports or streams `listPorts` returns, whatever the runtime sent. */
+export const MAX_LISTED_PORTS = 256;
 
 /** An agent process on the runtime. A tab whose process ended keeps its saved conversation. */
 export type AgentProcessState = "running" | "exited" | "not-started";
@@ -527,6 +531,27 @@ export class WorkspaceRpcClient {
     const info = await this.mutate<PtyInfo>("pty.create", params);
     this.ptyEpochs.set(info.ptyId, info.epoch);
     return info;
+  }
+
+  /**
+   * The workspace's listening ports and this connection's open streams
+   * (`ports/1`, docs/CLOUD-PREVIEWS.md). `detected: false` where the runtime
+   * cannot tell which ports listen. Refused unless the person may open a
+   * port: a manager, or a driver who may approve.
+   */
+  async listPorts(): Promise<{ detected: boolean; ports: { port: number }[]; streams: { streamId: string; port: number }[] }> {
+    const listed = await this.call<{ detected?: unknown; ports?: unknown; streams?: unknown }>("ports.list");
+    // The runtime is not trusted for the shape: whole port numbers only, and a bounded list.
+    const port = (value: unknown): number | null => (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null);
+    const entries = (value: unknown): Record<string, unknown>[] => (Array.isArray(value) ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object") : []);
+    const ports = [...new Set(entries(listed.ports).map((entry) => port(entry.port)).filter((value): value is number => value !== null))].sort((a, b) => a - b).slice(0, MAX_LISTED_PORTS);
+    const streams = entries(listed.streams)
+      .flatMap((entry) => {
+        const value = port(entry.port);
+        return typeof entry.streamId === "string" && value !== null ? [{ streamId: entry.streamId, port: value }] : [];
+      })
+      .slice(0, MAX_LISTED_PORTS);
+    return { detected: listed.detected === true, ports: ports.map((value) => ({ port: value })), streams };
   }
 
   async listPtys(): Promise<{ epoch: string; terminals: PtyInfo[] }> {

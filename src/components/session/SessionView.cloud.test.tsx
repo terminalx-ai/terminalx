@@ -1835,7 +1835,7 @@ describe("sharing states found in the live two-user test", () => {
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual([
       "Who has access…2",
-      "Only an organization owner or admin can stop, archive or delete a cloud workspace",
+      "Only this workspace's creator or an organization owner or admin can stop, archive or delete it",
       // A viewer can read the files, so they can mirror them (PRO-25).
       "Local mirror…",
     ]);

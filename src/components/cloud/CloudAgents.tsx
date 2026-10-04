@@ -332,7 +332,7 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
     signIn.reason === "token-expired"
       ? `The organization's ${agent} login has expired`
       : signIn.reason === "shared-use-policy"
-        ? `The organization's ${agent} login is limited to workspaces its owners and admins create`
+        ? `The organization's ${agent} login is limited to its owners and admins`
         : signIn.state === "not-connected"
           ? `${agent} isn't connected for this organization`
           : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;

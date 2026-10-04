@@ -41,7 +41,7 @@ vi.mock("react-native", () => {
 vi.mock("@mobile/ui/primitives", () => ({
   Button: ({ label, onPress, disabled }: any) => <button disabled={disabled} onClick={onPress}>{label}</button>,
   Card: ({ children }: any) => <div>{children}</div>,
-  EmptyState: ({ title }: any) => <div>{title}</div>, StatusDot: () => null,
+  EmptyState: ({ title, detail }: any) => <div>{title}{detail}</div>, StatusDot: () => null,
 }));
 
 let root: Root;
@@ -199,5 +199,125 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).toContain("claude transcript");
     expect(container.textContent).toContain("written while away");
     expect(container.textContent).not.toContain("Session unavailable");
+  });
+
+  it("clears failed initial loading and retries without showing empty-history copy", async () => {
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("Transcript event 12 is too large to load on mobile. Open this conversation on your Mac."));
+    await render();
+    expect(container.textContent).toContain("Could not load transcript");
+    expect(container.textContent).toContain("Open this conversation on your Mac.");
+    expect(container.textContent).not.toContain("No transcript yet");
+    expect(container.textContent).not.toContain("Loading transcript");
+    expect(button("Retry loading transcript").disabled).toBe(false);
+    await click("Retry loading transcript");
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps cached history and the draft visible when a refresh fails", async () => {
+    await render(); await type("Keep my draft");
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("Connection closed"));
+    mocks.app.connectionEpoch = 1;
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("Connection closed");
+    expect(input().value).toBe("Keep my draft");
+    await click("Retry loading transcript");
+    expect(container.textContent).not.toContain("Could not load transcript");
+    expect(input().value).toBe("Keep my draft");
+  });
+
+  it("shows a recoverable offline error when the connection drops during the initial load", async () => {
+    let reject!: (reason: Error) => void;
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await render();
+    expect(container.textContent).toContain("Loading transcript");
+    mocks.app.connectionStage = "cant-connect";
+    await render();
+    await act(async () => reject(new Error("Connection closed")));
+    expect(container.textContent).toContain("Reconnect to your Mac");
+    expect(container.textContent).not.toContain("No transcript yet");
+    expect(container.textContent).not.toContain("Loading transcript");
+    expect(button("Retry loading transcript").disabled).toBe(true);
+    mocks.app.connectionStage = "connected";
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).not.toContain("Could not load transcript");
+  });
+
+  it("only shows empty-history copy for a successfully loaded empty transcript", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [], hasMore: false });
+    await render();
+    expect(container.textContent).toContain("No transcript yet");
+    expect(container.textContent).not.toContain("Could not load transcript");
+  });
+
+  it("offers earlier context when a page split inside a turn contains only tool results", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [{
+      ...event("claude", "", 8), payload: { type: "tool_call_completed", callId: "read", result: { text: "contents", isError: false } },
+    }], hasMore: true });
+    await render();
+    expect(container.textContent).toContain("Earlier turns available");
+    expect(container.textContent).not.toContain("No transcript yet");
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Read the file", 1)], hasMore: false });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 8);
+    expect(container.textContent).toContain("Read the file");
+  });
+
+  it("retries the same earlier cursor after failure and prevents duplicate loads", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "latest", 10)], hasMore: true });
+    await render();
+    let reject!: (reason: Error) => void;
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    await click("Load earlier");
+    expect(button("Loading earlier…").disabled).toBe(true);
+    await click("Loading earlier…");
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
+    await act(async () => reject(new Error("Timed out")));
+    expect(container.textContent).toContain("latest");
+    expect(container.textContent).toContain("Could not load earlier turns");
+    expect(container.textContent).toContain("Timed out");
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "earlier", 9)], hasMore: false });
+    await click("Retry loading earlier");
+    expect(mocks.app.api.tail.mock.calls.slice(1)).toEqual([["worktree", "claude", 10], ["worktree", "claude", 10]]);
+    expect(container.textContent).toContain("earlier");
+    expect(container.textContent).toContain("latest");
+    expect(container.textContent).not.toContain("Could not load earlier turns");
+    expect(container.textContent).not.toContain("Load earlier");
+  });
+
+  it("uses the page cursor even when cached events are older", async () => {
+    mocks.storage.set(`terminalx:transcript:${mocks.params.hostId}:worktree:claude`, JSON.stringify([event("claude", "cached", 1)]));
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "latest", 10)], hasMore: true });
+    await render();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "gap", 5)], hasMore: true });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 10);
+    expect(container.textContent).toContain("cached");
+    expect(container.textContent).toContain("gap");
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 5);
+  });
+
+  it("ignores an earlier page that finishes after switching conversations", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "latest", 10)], hasMore: true });
+    await render();
+    let finish!: (value: unknown) => void;
+    mocks.app.api.tail.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await click("Load earlier");
+    await select("codex");
+    await act(async () => finish({ events: [event("claude", "stale earlier", 5)], hasMore: false }));
+    expect(container.textContent).not.toContain("stale earlier");
+    await select("claude");
+    expect(container.textContent).not.toContain("stale earlier");
+  });
+
+  it("does not report a successful transcript load as failed when notes cannot load", async () => {
+    mocks.app.api.listNotes.mockRejectedValueOnce(new Error("Notes unavailable"));
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).not.toContain("Could not load transcript");
   });
 });

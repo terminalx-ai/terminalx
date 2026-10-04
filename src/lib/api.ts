@@ -278,6 +278,18 @@ export const api = {
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
+   * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
+   * Never wakes the workspace: rejects with `cloud_port_not_connected` unless the
+   * connection is live. `reassigned` says the named local port was taken; `exact`
+   * refuses instead (`cloud_port_in_use`). The forward closes when the workspace
+   * stops, access goes or the active organization changes.
+   */
+  cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
+    invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
+  cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
+  cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -428,6 +440,8 @@ export interface AccountStatus {
   multiOrg?: boolean;
   /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
   catalogFeed?: boolean;
+  /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
+  memberWorkspaces?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
@@ -919,6 +933,13 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+}
+
+/** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
+export interface CloudPortForward {
+  port: number;
+  localPort: number;
+  reassigned: boolean;
 }
 
 export interface CloudWorkspacePreflight {
@@ -1666,6 +1687,10 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
     else this.unlisten = unlisten;
   }
 
+  get id(): string | null {
+    return this.connectionId;
+  }
+
   bind(connectionId: string): void {
     this.connectionId = connectionId;
     const early = this.early;
@@ -1725,6 +1750,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
+  /** The native connection's id, for calls that act on it (port forwards); null until attached. */
+  connectionId?: () => string | null;
   /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
   activate(activation: Activation): Promise<void>;
   close(): void;
@@ -1784,6 +1811,7 @@ async function adopt(
   const connection: CloudWorkspaceConnection = {
     target,
     client,
+    connectionId: () => transport.id,
     activate: (next) => transport.activate(next),
     close: () => {
       if (connections.get(key) === self) connections.delete(key);
