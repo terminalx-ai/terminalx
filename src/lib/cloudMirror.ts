@@ -253,7 +253,10 @@ export async function setCloudMirrorEnabled(target: CloudTarget, enabled: boolea
     publish(key, { ...OFF, root: status.root, revision: status.revision });
     return;
   }
-  const status = await api.cloudMirrorEnable(target.orgId, target.workspaceId);
+  // A mirror belongs to whoever is signed in when it is turned on; the
+  // native side records that, so the next account never inherits it.
+  if (!claimedOwner) throw new Error("Sign in to turn on a local mirror.");
+  const status = await api.cloudMirrorEnable(target.orgId, target.workspaceId, claimedOwner);
   publish(key, { root: status.root, revision: status.revision, phase: "paused", error: null });
   const client = connectedCloudClient(key);
   if (client) start(target, client);

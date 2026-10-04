@@ -446,8 +446,24 @@ impl Mirror {
         Ok(self.status_of(self.record()?.as_ref()))
     }
 
+    /// Turn the mirror on for `account`, and record that the mirrors on this
+    /// computer are that account's. Without this a mirror made after the
+    /// app's launch would have no owner, and the next account to arrive
+    /// would inherit it. Mirrors of anyone else are removed first.
+    pub fn enable_as(&self, account: &str) -> Result<Status> {
+        if account.is_empty() {
+            bail!("sign in to turn on a local mirror");
+        }
+        self.guard()?;
+        let home = self.dir.ancestors().nth(3).ok_or_else(|| anyhow!("no home directory"))?.to_path_buf();
+        claim_owner(&home, account)?;
+        crate::store::ensure_dir(home.join(DIR))?;
+        crate::store::write_atomic(&home.join(DIR).join(OWNER), owner_hash(account).as_bytes())?;
+        self.enable()
+    }
+
     /// Turn the mirror on. Nothing is copied until a sync publishes.
-    pub fn enable(&self) -> Result<Status> {
+    fn enable(&self) -> Result<Status> {
         self.guard()?;
         crate::store::ensure_dir(self.dir.clone())?;
         crate::store::ensure_dir(self.files())?;
@@ -1048,28 +1064,32 @@ pub fn existing(home: &Path) -> Vec<(String, String)> {
 
 const OWNER: &str = "owner";
 
-/// Say which account is using the app. Mirrors made under another one (a
-/// sign-out while the app was closed, a direct switch of account) are
-/// removed, as at sign-out. Returns how many mirrors were removed. The owner
-/// is kept as a hash.
+fn owner_hash(account: &str) -> String {
+    Sha256::digest(account.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Say which account is using the app. Mirrors that are not this account's
+/// are removed, as at sign-out: ones made under another account (a sign-out
+/// while the app was closed, a direct switch of account), and ones found
+/// with no owner recorded at all, which nobody here can vouch for. Returns
+/// how many mirrors were removed. The owner is kept as a hash.
 pub fn claim_owner(home: &Path, account: &str) -> Result<usize> {
     let mirrors = existing(home);
     let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let file = home.join(DIR).join(OWNER);
-    let wanted: String = Sha256::digest(account.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+    let wanted = owner_hash(account);
     let known = std::fs::read_to_string(&file).ok();
     if known.as_deref() == Some(wanted.as_str()) {
         return Ok(0);
     }
     let mut purged = 0;
-    if known.is_some() {
-        for (organization, workspace) in &mirrors {
-            Mirror::at(&home, organization, workspace)?.purge()?;
-            purged += 1;
-        }
+    for (organization, workspace) in &mirrors {
+        Mirror::at(&home, organization, workspace)?.purge()?;
+        purged += 1;
     }
-    // Nothing is created for someone who has no mirror.
-    if known.is_some() || !mirrors.is_empty() {
+    // Nothing is created for someone who has no mirror: `enable_as` writes
+    // the owner with the first one.
+    if known.is_some() {
         crate::store::write_atomic(&file, wanted.as_bytes())?;
     }
     Ok(purged)

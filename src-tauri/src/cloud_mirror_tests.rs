@@ -921,10 +921,9 @@ fn names_that_fold_by_unicode_not_only_by_ascii_are_one_file() {
 #[test]
 fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     let mut f = Fixture::new();
+    f.mirror.enable_as("ada@example.com").unwrap();
     f.remote_write("a.txt", "v1\n");
     f.sync().unwrap();
-    // The first account to be seen owns what is there.
-    assert_eq!(claim_owner(&f.home, "ada@example.com").unwrap(), 0);
     assert_eq!(claim_owner(&f.home, "ada@example.com").unwrap(), 0);
     assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
     // The app was closed, and opens signed in as someone else.
@@ -934,8 +933,55 @@ fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
     // The owner is kept as a hash, not as the address.
     let owner = std::fs::read_to_string(f.home.join("cloud-mirrors/owner")).unwrap();
     assert!(!owner.contains("bob") && !owner.contains("example.com"));
-    // Nothing to do when there are no mirrors at all.
+    // Nothing is created for someone who has no mirror at all.
     let empty = tempfile::tempdir().unwrap();
     assert_eq!(claim_owner(empty.path(), "ada@example.com").unwrap(), 0);
     assert!(!empty.path().join("cloud-mirrors").exists());
+}
+
+#[test]
+fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
+    // The reproduced gap. Launch as A with no mirrors: the claim finds
+    // nothing and writes nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    assert_eq!(claim_owner(&home, "ada@example.com").unwrap(), 0);
+    assert!(!home.join("cloud-mirrors/owner").exists());
+    // A turns a mirror on later in that session, and it syncs.
+    let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
+    mirror.enable_as("ada@example.com").unwrap();
+    assert!(home.join("cloud-mirrors/owner").is_file(), "turning a mirror on records whose it is");
+    let content = b"ada's workspace\n";
+    let manifest = Manifest {
+        manifest_id: "m".into(),
+        repositories: Vec::new(),
+        entries: vec![Entry { path: "secret-plans.txt".into(), size: content.len() as u64, version: "v1".into(), executable: false }],
+        truncated: false,
+    };
+    mirror.plan(&manifest).unwrap();
+    mirror.stage("secret-plans.txt", content, content.len() as u64, &etag(content)).unwrap();
+    mirror.publish(&manifest, &[("secret-plans.txt".to_string(), etag(content))].into()).unwrap();
+    let file = home.join("cloud-mirrors/org-1/workspace-1/files/secret-plans.txt");
+    assert!(file.is_file());
+
+    // A direct switch to B, with no sign-out in between: B's claim removes A's mirror.
+    assert_eq!(claim_owner(&home, "bob@example.com").unwrap(), 1);
+    assert!(!file.exists());
+    assert!(existing(&home).is_empty());
+    // And B turning one on does not bring anything of A's back.
+    let again = Mirror::at(&home, "org-1", "workspace-1").unwrap();
+    assert_eq!(again.enable_as("bob@example.com").unwrap().files, 0);
+
+    // Mirrors found with no owner recorded are nobody's here: removed, not adopted.
+    let other = tempfile::tempdir().unwrap();
+    let other_home = std::fs::canonicalize(other.path()).unwrap();
+    let orphan = Mirror::at(&other_home, "org-1", "workspace-1").unwrap();
+    orphan.enable_as("ada@example.com").unwrap();
+    std::fs::remove_file(other_home.join("cloud-mirrors/owner")).unwrap();
+    assert_eq!(existing(&other_home).len(), 1);
+    assert_eq!(claim_owner(&other_home, "ada@example.com").unwrap(), 1, "even for the same address: there is no record it was theirs");
+    assert!(existing(&other_home).is_empty());
+
+    // Nobody signed in cannot turn one on.
+    assert!(Mirror::at(&other_home, "org-1", "workspace-2").unwrap().enable_as("").is_err());
 }

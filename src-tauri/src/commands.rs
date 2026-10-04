@@ -2652,8 +2652,8 @@ pub async fn cloud_mirror_status(organization_id: String, workspace_id: String) 
 }
 
 #[tauri::command]
-pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
-    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable().map_err(err)).await.map_err(err)?
+pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String, account: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable_as(&account).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]

@@ -348,7 +348,9 @@ export const api = {
   // None of these takes a local path: the native side derives the mirror's
   // directory from the two ids and only reports it back (`root`).
   cloudMirrorStatus: (organizationId: string, workspaceId: string) => invoke<CloudMirrorStatus>("cloud_mirror_status", { organizationId, workspaceId }),
-  cloudMirrorEnable: (organizationId: string, workspaceId: string) => invoke<CloudMirrorStatus>("cloud_mirror_enable", { organizationId, workspaceId }),
+  /** `account` is who is signed in: the mirrors on this computer are recorded as theirs. */
+  cloudMirrorEnable: (organizationId: string, workspaceId: string, account: string) =>
+    invoke<CloudMirrorStatus>("cloud_mirror_enable", { organizationId, workspaceId, account }),
   cloudMirrorDisable: (organizationId: string, workspaceId: string, removeFiles: boolean) =>
     invoke<CloudMirrorStatus>("cloud_mirror_disable", { organizationId, workspaceId, removeFiles }),
   cloudMirrorCheck: (organizationId: string, workspaceId: string) =>

@@ -30,10 +30,21 @@ other tools read. So the mirror treats the workspace as hostile:
   written are the bytes the workspace served. It never means authentic or
   safe. A mirrored script is whatever the workspace says it is.
 
-### Dangerous-content policy (defaults, for the owner to confirm)
+### Dangerous-content policy (decided)
 
-These are the coordinator's defaults from the security review of
-2026-10-04. They hold until the owner changes them.
+The owner confirmed the strict policy on 2026-10-04. It is the rule, not a
+default:
+
+1. Anything that looks like a Git folder is refused.
+2. Tool configuration that runs by itself is skipped, and shown to the
+   person as not mirrored.
+3. The executable bit is never written.
+4. Every mirrored file carries the macOS quarantine flag.
+5. A mirror can never be a project or an agent's folder.
+6. The mirror is deleted when access is revoked, at sign-out, and when the
+   workspace is deleted, by the recorded manifest only.
+
+The tables below are how each point is carried out.
 
 | Never mirrored | Why | Counted as |
 | --- | --- | --- |
@@ -83,12 +94,11 @@ does not make the copy safe.
 - The lists are names known today. A tool that reads a configuration file
   not on them is not covered.
 
-Not covered by the defaults, and so still mirrored: `Makefile`,
+Not covered by the policy, and so still mirrored: `Makefile`,
 `package.json` scripts, `CLAUDE.md`/`AGENTS.md`, build scripts, and any
-other file that only does something when a person runs a command on it. The
-rule above (a mirror is never a project or an agent's working directory) is
-what stands between those and an agent. **For the owner:** whether that is
-enough, or whether more names should be left out.
+other file that only does something when a person runs a command on it.
+Point 5 (a mirror is never a project or an agent's working directory) is
+what stands between those and an agent.
 
 ## Direction
 
@@ -301,8 +311,8 @@ nothing by itself.
 
 ## When the copy is removed
 
-The mirrored copy goes with the access to the workspace (the coordinator's
-default from the security review, for the owner to confirm):
+The mirrored copy goes with the access to the workspace (point 6 of the
+policy, decided):
 
 - when the organization's list no longer has the workspace for this person:
   it was deleted, or it is no longer shared with them (role `none`);
@@ -310,8 +320,13 @@ default from the security review, for the owner to confirm):
 - at sign-out, every mirror;
 - when the app next sees a different account, or nobody, than the one the
   mirrors were made under: a sign-out while the app was closed, or a direct
-  switch of account. The owner is remembered as a hash in
-  `cloud-mirrors/owner`.
+  switch of account.
+
+Whose the mirrors are is recorded as a hash in `cloud-mirrors/owner`. It is
+written when a mirror is turned on, so a mirror made in the middle of a
+session has an owner too. Mirrors found with no owner recorded are nobody's:
+they are removed, never adopted, even for the same address. Nobody signed in
+cannot turn a mirror on.
 
 Removal is by the record only (`cloud_mirror_purge`): every file the mirror
 wrote, its staging, journal and record. A mirrored file the person edited is

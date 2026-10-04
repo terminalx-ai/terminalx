@@ -75,7 +75,7 @@ const settle = async () => {
   for (let turn = 0; turn < 20; turn++) await Promise.resolve();
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.useFakeTimers();
   sent = [];
   for (const mock of Object.values(mocks.api)) mock.mockReset();
@@ -96,7 +96,10 @@ beforeEach(() => {
   mocks.api.cloudMirrorStage.mockResolvedValue(undefined);
   mocks.api.cloudMirrorPublish.mockResolvedValue({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0, takenBack: 0 });
   mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0 });
+  mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
   mirror.bootCloudMirrors();
+  await mirror.claimCloudMirrorOwner("ada@example.com");
+  mocks.api.cloudMirrorClaimOwner.mockClear();
 });
 
 afterEach(() => {
@@ -275,14 +278,27 @@ describe("the local mirror's sync loop", () => {
     expect(mocks.wake).not.toHaveBeenCalled();
   });
 
+  it("turns a mirror on only for the signed-in account, and tells the native side whose it is", async () => {
+    mocks.api.cloudMirrorEnable.mockResolvedValue(status(true));
+    // Nobody has been reported as signed in yet.
+    mirror.resetCloudMirrors();
+    await expect(mirror.setCloudMirrorEnabled(target, true)).rejects.toThrow(/Sign in/);
+    expect(mocks.api.cloudMirrorEnable).not.toHaveBeenCalled();
+    mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
+    await mirror.claimCloudMirrorOwner("ada@example.com");
+    await mirror.setCloudMirrorEnabled(target, true);
+    expect(mocks.api.cloudMirrorEnable).toHaveBeenCalledWith("org-1", "ws-1", "ada@example.com");
+  });
+
   it("removes mirrors left by another account or by a sign-out while the app was closed", async () => {
     mocks.api.cloudMirrorList.mockResolvedValue([{ organizationId: "org-1", workspaceId: "ws-1" }]);
     mocks.api.cloudMirrorPurge.mockResolvedValue(1);
     mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
-    // Signed in: the native side compares with who made the mirrors.
+    // Signed in as Ada since the app started (claimed once, before each test):
+    // the same account reported again asks the native side nothing more.
     await mirror.claimCloudMirrorOwner("ada@example.com");
     await mirror.claimCloudMirrorOwner("ada@example.com");
-    expect(mocks.api.cloudMirrorClaimOwner.mock.calls).toEqual([["ada@example.com"]]);
+    expect(mocks.api.cloudMirrorClaimOwner).not.toHaveBeenCalled();
     // Another account is reported without a sign-out in between.
     mocks.api.cloudMirrorClaimOwner.mockResolvedValue(1);
     await mirror.claimCloudMirrorOwner("bob@example.com");
