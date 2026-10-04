@@ -17,6 +17,51 @@ listed below, and only as of the last successful sync.
 | Writing the mirror: staging, verify, publish, divergence | desktop, Rust | next PR |
 | The sync loop, the opt-in, states and labels in the UI | desktop, TypeScript | next PR |
 
+## The workspace is not trusted
+
+A cloud workspace runs agents, and a shared one runs other people's. What
+it lists ends up in a folder on this computer that editors, shells and
+other tools read. So the mirror treats the workspace as hostile:
+
+- its file list, sizes and flags are checked again on this side;
+- some content is never mirrored because of what a local tool would do
+  with it (the policy below);
+- "verified" in this document means **intact in transit**: the bytes
+  written are the bytes the workspace served. It never means authentic or
+  safe. A mirrored script is whatever the workspace says it is.
+
+### Dangerous-content policy (defaults, for the owner to confirm)
+
+These are the coordinator's defaults from the security review of
+2026-10-04. They hold until the owner changes them.
+
+| Never mirrored | Why | Counted as |
+| --- | --- | --- |
+| Anything inside a folder that has `HEAD`, `objects/` and `refs/`, under any name, at any depth | It is a Git directory. Git run inside it obeys its `config`, and `core.fsmonitor` names a command to run. A shell prompt, an editor's Git scan or an agent is enough to trigger it | `gitDirectory` |
+| `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.mcp.json`, `.cursorrules` | Agent settings, hooks and MCP servers: an agent opened there would run what they name | `toolConfig` |
+| `.vscode/`, `.idea/`, `.zed/`, `.devcontainer/` | Editor tasks and run configurations that start on open | `toolConfig` |
+| `.husky/`, `.githooks/`, `.pre-commit-config.yaml`, `lefthook.yml` | Git hooks | `toolConfig` |
+| `.cargo/config.toml`, `.cargo/config`, `.envrc`, `.direnv/` | Build and shell configuration that runs commands | `toolConfig` |
+| The executable bit | Every mirrored file is written `0644`. A script is readable, not runnable by double-click or by name | (always) |
+
+And on this computer:
+
+- Every mirrored file gets the `com.apple.quarantine` attribute on macOS,
+  so opening one from Finder goes through Gatekeeper.
+- A mirror is never a project. The folder is refused as a local project and
+  as an agent's working directory, in the app and in the CLI, with the
+  reason. It is for reading.
+- The names are matched without regard to case, and by the rules in
+  `mirror_rules.rs`, on the runtime when it lists and again on the desktop
+  before it writes.
+
+Not covered by the defaults, and so still mirrored: `Makefile`,
+`package.json` scripts, `CLAUDE.md`/`AGENTS.md`, build scripts, and any
+other file that only does something when a person runs a command on it. The
+rule above (a mirror is never a project or an agent's working directory) is
+what stands between those and an agent. **For the owner:** whether that is
+enough, or whether more names should be left out.
+
 ## Direction
 
 Cloud to local, only.
@@ -39,8 +84,9 @@ Left out, and counted by reason in the manifest's `skipped`:
 | --- | --- |
 | `secret` | Credential and key files by name: `.env` and `.env.*` (not `.env.example` and the like), `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.kdbx`, `*.ppk`, `*.tfstate`, `*.tfvars`, `id_rsa` and its siblings, `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `credentials.json`, `secrets.*`, and anything under `.ssh`, `.aws`, `.gnupg`, `.kube`, `.azure`, `.gcloud`, `.docker`. Tracked or not. |
 | `excluded` | The repository's own `.terminalx-mirror-ignore` at its root (gitignore syntax). |
-| `symlink` | Every symbolic link. Links are never followed and never recreated locally. |
-| `unsupported` | Sockets, devices, nested repositories and submodules, `.git` itself. |
+| `toolConfig`, `gitDirectory` | The dangerous-content policy above. |
+| `symlink` | Every symbolic link, and every file reached through a linked folder. Links are never followed and never recreated locally. Git lists what its index names, so a folder replaced by a link (`d -> .git`, `d -> .aws`) would otherwise serve another place's files under an innocent name. |
+| `unsupported` | Sockets, devices, nested repositories and submodules, `.git` itself, and names a desktop cannot hold (a backslash, a drive letter). |
 | `tooLarge` | Files over 32 MiB, the largest `fs.read` serves. |
 
 The rules are in `mirror_rules.rs`, compiled into both the runtime and the
@@ -48,7 +94,10 @@ desktop. The runtime applies them when it lists, so excluded bytes are never
 read; the desktop applies them again before it writes.
 
 The runtime's own credentials (its API credential, agent logins, GitHub
-tokens) live outside the workspace root and cannot appear in the file set.
+tokens) live outside the workspace root. If the runtime's state directory
+is ever inside it, everything under that directory is left out as `secret`.
+Agent logins by name (`.claude/.credentials.json`, `.codex/auth.json`), the
+GitHub CLI's `.config/gh/` and `.terraformrc` are secrets too.
 
 More than 50,000 files makes the manifest `truncated`. A truncated manifest
 is never published: the mirror fails with that reason instead of holding a
@@ -80,6 +129,11 @@ parameters are refused.
 - It runs off the connection's ordered loop, like `fs.search`.
 - A runtime from before `mirror/1` does not grant the capability. The
   desktop then says the workspace's runtime is too old for a mirror.
+- The client does not take the runtime's word for when to stop: it reads at
+  most 1,000 pages and 50,000 entries, and refuses a cursor that does not
+  move forward, a page of another listing and an empty page.
+- A name the client could never ask for (a backslash, a drive letter, a
+  `..`) is left out and counted, instead of failing the whole mirror.
 
 ## Where the mirror lives (next PR)
 
@@ -164,6 +218,12 @@ or that the workspace is backed up.
   exclusions, several repositories, no repository, paging under one id, a
   changed listing refused as `cursor_expired`, no parameter that names a
   place, the capability.
-- `src-tauri/src/mirror_rules.rs`: the secret names.
+- Also there: a file behind a linked folder (into `.git` and out of the
+  workspace), the bare-repository attack, tool configuration, the runtime's
+  own state directory, a name with a backslash.
+- `src-tauri/src/mirror_rules.rs`: the secret names, agent logins, the tool
+  configuration list, Git directories under any name and case.
 - `packages/portable/src/workspaceMirror.test.ts`: paging, restart, an
-  incomplete or escaping manifest refused, a runtime without `mirror/1`.
+  incomplete manifest refused, odd names left out and counted, a listing
+  that never ends, a cursor that does not move, a runtime without
+  `mirror/1`.

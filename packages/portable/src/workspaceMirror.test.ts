@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RpcWireRequest } from "./rpc";
 import { WorkspaceRpcClient, WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceTransport } from "./workspace";
-import { MirrorManifestError, readMirrorManifest, type MirrorEntry } from "./workspaceMirror";
+import { MIRROR_MAX_ENTRIES, MIRROR_MAX_PAGES, MirrorManifestError, readMirrorManifest, type MirrorEntry } from "./workspaceMirror";
 
 type Handler = (params: Record<string, unknown>) => unknown;
 
@@ -48,7 +48,7 @@ function connect(handler: Handler, capabilities: WorkspaceConnectionState["capab
 }
 
 const entry = (path: string, version = "v1"): MirrorEntry => ({ path, size: 1, version, executable: false });
-const skipped = { secret: 0, excluded: 0, symlink: 0, unsupported: 0, tooLarge: 0 };
+const skipped = { secret: 0, toolConfig: 0, gitDirectory: 0, excluded: 0, symlink: 0, unsupported: 0, tooLarge: 0 };
 const page = (manifestId: string, entries: MirrorEntry[], next: number | null, total: number) => ({
   manifestId,
   repositories: [{ repo: ".", branch: "main", head: "a".repeat(40) }],
@@ -98,15 +98,55 @@ describe("readMirrorManifest", () => {
     expect(restless.runtime.sent.length).toBe(8);
   });
 
-  it("refuses a manifest that is incomplete or names a path outside the workspace", async () => {
+  it("refuses a manifest that is incomplete or names a path twice", async () => {
     const short = connect(() => page("m1", [entry("a.ts")], null, 2));
     await expect(readMirrorManifest(short.client)).rejects.toBeInstanceOf(MirrorManifestError);
-    for (const path of ["../outside.ts", "/etc/passwd", "a/../../b", "a//b.ts", "./a.ts"]) {
-      const bad = connect(() => page("m1", [entry(path)], null, 1));
-      await expect(readMirrorManifest(bad.client), path).rejects.toThrow();
-    }
     const twice = connect(() => page("m1", [entry("a.ts"), entry("a.ts")], null, 2));
     await expect(readMirrorManifest(twice.client)).rejects.toMatchObject({ code: "invalid" });
+    const notAFile = connect(() => page("m1", [{ path: "a.ts", size: -1, version: "v", executable: false }], null, 1));
+    await expect(readMirrorManifest(notAFile.client)).rejects.toMatchObject({ code: "invalid" });
+  });
+
+  it("leaves out and counts a name it could never ask for, without failing the mirror", async () => {
+    const odd = ["../outside.ts", "/etc/passwd", "a/../../b", "a//b.ts", "./a.ts", "dir\\file.ts", "c:evil.ts", "C:/x.ts", ""];
+    const all = [entry("ok.ts"), ...odd.map((path) => entry(path)), entry("also/ok.ts")];
+    const { client } = connect(() => ({ ...page("m1", all, null, all.length), skipped: { ...skipped, unsupported: 2 } }));
+    const manifest = await readMirrorManifest(client);
+    expect(manifest.entries.map((item) => item.path)).toEqual(["ok.ts", "also/ok.ts"]);
+    expect(manifest.skipped.unsupported).toBe(2 + odd.length);
+    expect(manifest.totalBytes).toBe(2);
+  });
+
+  it("stops a workspace that never stops listing", async () => {
+    // More entries than a mirror holds, whatever the workspace's own flag says.
+    const many = Array.from({ length: MIRROR_MAX_ENTRIES + 1 }, (_, index) => entry(`f${index}`));
+    const big = connect(() => page("m1", many, null, many.length));
+    await expect(readMirrorManifest(big.client)).rejects.toMatchObject({ code: "too_many" });
+
+    // Pages without end: each one valid, the cursor always moving.
+    let asked = 0;
+    const endless = connect((params) => {
+      asked += 1;
+      const cursor = typeof params.cursor === "number" ? params.cursor : 0;
+      return page("m1", [entry(`f${cursor}`)], cursor + 1, 10_000_000);
+    });
+    await expect(readMirrorManifest(endless.client)).rejects.toMatchObject({ code: "too_many" });
+    expect(asked).toBeLessThanOrEqual(MIRROR_MAX_PAGES);
+
+    // A cursor that does not move, a page of another listing, an empty page.
+    for (const hostile of [
+      (cursor: number) => page("m1", [entry(`f${cursor}`)], 1, 5),
+      (cursor: number) => page("other", [entry(`f${cursor}`)], cursor + 1, 5),
+      () => page("m1", [], 1, 5),
+    ]) {
+      let calls = 0;
+      const stuck = connect((params) => {
+        calls += 1;
+        return params.manifestId === undefined ? page("m1", [entry("f0")], 1, 5) : hostile(params.cursor as number);
+      });
+      await expect(readMirrorManifest(stuck.client)).rejects.toMatchObject({ code: "invalid" });
+      expect(calls).toBeLessThan(5);
+    }
   });
 
   it("is not asked of a runtime without mirror/1, and passes other refusals on", async () => {
