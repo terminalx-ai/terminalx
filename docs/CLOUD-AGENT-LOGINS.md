@@ -94,8 +94,11 @@ has passed, even though the service still calls the login connected.
 The service holds one login per organization and agent, so lending a sign-in
 **replaces** whatever is stored, an API key included. When one is stored the
 button reads "Replace…", the page asks for that choice explicitly, the app
-refuses without it (`cloud_agent_login_replace_unconfirmed`), and the native
-confirmation says what is replaced and that agents in every workspace stop
+refuses without it (`cloud_agent_login_replace_unconfirmed`), and every
+native dialog (the lend's confirmation, the API-key prompt and the sign-in's
+code prompt) says what is replaced. If someone else stores a login while a
+sign-in is open, the open sign-in asks for the replace choice itself before
+the code can be entered again. The lend's confirmation also says and that agents in every workspace stop
 when the lent sign-in expires.
 
 The steps, in order:

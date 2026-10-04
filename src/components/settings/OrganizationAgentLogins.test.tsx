@@ -166,6 +166,11 @@ describe("agent logins in Settings (PRO-79)", () => {
   });
 
   // Review of #293: the row said Connected after the lent sign-in had expired.
+  it("says who a restricted login reaches by who can drive, as the service decides it", () => {
+    expect(agentLoginStatus(login({ sharedUse: "managers" })).text).toContain(" · only workspaces that nobody but owners and admins can drive · ");
+    expect(agentLoginStatus(login({ sharedUse: "managers" })).text).not.toContain("created by");
+  });
+
   it("shows a lent sign-in's expiry as a time, and Expired once it has passed", () => {
     const lent = login({ displayIdentity: "ada@example.com · lent until 2026-10-03T21:40:00Z" });
     const at = Date.parse("2026-10-03T21:40:00Z");
@@ -262,6 +267,26 @@ describe("agent logins in Settings (PRO-79)", () => {
       await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("expired"));
       expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull();
       expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected");
+    });
+
+    // Review of #293: another admin stores a login during the ten minutes; the panel had no way to choose Replace.
+    it("asks for the replace choice in the open sign-in when a login was stored meanwhile", async () => {
+      const code = await begin();
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockImplementationOnce(async () => {
+        stored = [login({ authKind: "api-key" })];
+        throw { code: "cloud_agent_login_replace_unconfirmed" };
+      });
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("A login was stored for this agent after you started");
+      // The sign-in is still open, with the choice in it, and cannot be finished without making it.
+      const choice = await code.findByTestId("agent-login-replace");
+      expect(choice.textContent).toContain("Replace the API key now stored for Claude Code.");
+      expect(code.getByRole("button", { name: "Enter the code" }).hasAttribute("disabled")).toBe(true);
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockResolvedValueOnce({ status: "complete" });
+      fireEvent.click(within(choice).getByRole("checkbox"));
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      await waitFor(() => expect(api.cloudAgentClaudeLoginComplete).toHaveBeenLastCalledWith("attempt_1", expect.objectContaining({ replaceExisting: true })));
+      await waitFor(() => expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull());
     });
 
     it("opens the page again and cancels the sign-in", async () => {

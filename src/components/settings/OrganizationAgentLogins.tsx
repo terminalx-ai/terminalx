@@ -30,6 +30,8 @@ interface SignIn {
   authorizeUrl: string;
   opened: boolean;
   consent: AgentLoginConsent;
+  /** Someone stored a login for the agent after this sign-in began: finishing it needs the replace choice made now. */
+  replaceAsked?: boolean;
 }
 
 /** What to say after trying to finish a sign-in, and whether the attempt is over. */
@@ -130,7 +132,8 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
   if (lent && lent.at <= now) {
     return { text: `Expired ${new Date(lent.at).toLocaleString()} (${how}${who}): agents can no longer sign in with it. Connect a login again.`, warn: true };
   }
-  const scope = login.sharedUse === "managers" ? " · only workspaces created by owners and admins" : "";
+  // The service's rule for this scope is about who can drive a workspace, not who created it.
+  const scope = login.sharedUse === "managers" ? " · only workspaces that nobody but owners and admins can drive" : "";
   if (lent) return { text: `Connected · ${how}${who}${scope} · expires in ${remaining(lent.at - now)} (${new Date(lent.at).toLocaleString()})`, warn: lent.at - now < 60 * 60_000 };
   return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
@@ -225,12 +228,19 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
       if (result.done) setNotice(result.text);
       else setError(result.text);
     } catch (failure) {
-      const gone = !!failure && typeof failure === "object" && "code" in failure && failure.code === "cloud_agent_login_attempt_gone";
-      if (gone) {
+      const code = failure && typeof failure === "object" && "code" in failure ? String(failure.code) : "";
+      if (code === "cloud_agent_login_attempt_gone") {
         setSignIn(null);
         setPending(null);
       }
-      setError(agentLoginMessage(failure));
+      if (code === "cloud_agent_login_replace_unconfirmed") {
+        // A login was stored for this agent while the sign-in was open. The sign-in stays; the choice is asked for here.
+        setSignIn({ ...signIn, replaceAsked: true });
+        await load();
+        setError("A login was stored for this agent after you started. Choose to replace it below, then enter the code again. Nothing was changed.");
+      } else {
+        setError(agentLoginMessage(failure));
+      }
     } finally {
       setBusy(false);
     }
@@ -342,8 +352,22 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                         {signIn.opened ? "The Claude page opened in your browser." : "The Claude page could not be opened by itself; open it with the button below."} Sign
                         in and approve there. Claude then shows a code: copy it, come back and press Enter the code. The sign-in stays open for ten minutes.
                       </p>
+                      {signIn.replaceAsked && (
+                        <label className="flex items-start gap-2 rounded-md border border-destructive/25 p-2" data-testid="agent-login-replace">
+                          <input
+                            type="checkbox"
+                            checked={signIn.consent.replaceExisting}
+                            disabled={busy}
+                            onChange={(event) => setSignIn({ ...signIn, consent: { ...signIn.consent, replaceExisting: event.target.checked } })}
+                          />
+                          <span>
+                            <strong>Replace the {storedKind} now stored for {agent.name}.</strong> It was stored after this sign-in began. The organization
+                            has one login per agent, so finishing this sign-in removes it.
+                          </span>
+                        </label>
+                      )}
                       <div className="flex flex-wrap gap-1.5">
-                        <Button size="xs" disabled={busy} onClick={() => void finishSignIn()}>
+                        <Button size="xs" disabled={busy || (!!signIn.replaceAsked && !signIn.consent.replaceExisting)} onClick={() => void finishSignIn()}>
                           {busy && <Loader2 className="animate-spin" />}
                           Enter the code
                         </Button>

@@ -596,7 +596,8 @@ pub async fn cloud_agent_login_connect(
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             let title = format!("{} API key", agent_label(provider));
             let text = format!(
-                "Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                "{}Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                replacement_notice(agent_label(provider), &organization, replaces),
                 agent_label(provider),
                 organization
             );
@@ -642,6 +643,18 @@ pub async fn cloud_agent_login_connect(
     tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret, identity.as_deref()))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+/// What a native dialog says first when storing a login replaces one that
+/// is there: every way of connecting says it, in the dialog as on the page.
+/// Empty when nothing is stored for the agent.
+fn replacement_notice(agent: &str, organization: &str, replaces: Option<crate::cloud_workspaces::AgentLoginKind>) -> String {
+    use crate::cloud_workspaces::AgentLoginKind;
+    match replaces {
+        Some(AgentLoginKind::ApiKey) => format!("THIS REPLACES the API key now stored for {agent} in {organization}.\n\n"),
+        Some(AgentLoginKind::LoginDocument) => format!("THIS REPLACES the login now stored for {agent} in {organization}.\n\n"),
+        None => String::new(),
+    }
 }
 
 /// Text for a native dialog: no control or direction-changing characters, bounded.
@@ -796,7 +809,8 @@ pub async fn cloud_agent_claude_login_complete(
         .unwrap_or_else(|| authorization.organization_id().to_owned());
     let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
     let text = format!(
-        "Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login, renews it, and agents in every member's cloud workspaces of the organization may run on it."
+        "{}Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login, renews it, and agents in every member's cloud workspaces of the organization may run on it.",
+        replacement_notice("Claude Code", &organization, authorization.replaces())
     );
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
@@ -2786,6 +2800,10 @@ mod command_tests {
         assert!(replacing.contains("THIS REPLACES the API key now stored for Claude Code in Acme Robotics"));
         assert!(replacing.contains("agents in every workspace of the organization stop"));
         assert!(super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument)).contains("THIS REPLACES the login now stored"));
+        // Review of #293: the API-key and the sign-in dialogs say it too.
+        assert_eq!(super::replacement_notice("Claude Code", "Acme", Some(AgentLoginKind::ApiKey)), "THIS REPLACES the API key now stored for Claude Code in Acme.\n\n");
+        assert_eq!(super::replacement_notice("Cursor", "Acme", Some(AgentLoginKind::LoginDocument)), "THIS REPLACES the login now stored for Cursor in Acme.\n\n");
+        assert_eq!(super::replacement_notice("Cursor", "Acme", None), "");
         // The expiry is stored as a UTC time, and dialog text is cleaned.
         assert_eq!(super::lent_identity(Some("ada@example.com"), 1_790_000_000_000), "ada@example.com · lent until 2026-09-21T14:13:20Z");
         assert_eq!(super::dialog_text(" Acme\u{202E}\n Robotics "), "Acme Robotics");
