@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
+import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, unsettledRequest, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
 
 const USER = "owner@example.test";
 const record = (patch: Partial<OrganizationSetupRecord> = {}): OrganizationSetupRecord => ({ ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", ...patch });
@@ -124,6 +124,11 @@ describe("reconciling against the server", () => {
     expect(reconcileSetup(unsent, facts({ workspaces: [] }), 1_000_000 + 1)).toBe(unsent);
     // Too old, and the list is not known: kept, but no longer offered for resending.
     expect(reconcileSetup(unsent, facts({ workspaces: null }), 1_000_000 + DAY).workspace).toEqual({ pending, id: null });
+    // ...and it stands in the way of a new request until the list says what it did.
+    expect(unsettledRequest(unsent, 1_000_000 + DAY)).toBe(true);
+    expect(unsettledRequest(unsent, 1_000_000 + 1)).toBe(false);
+    expect(unsettledRequest(withWorkspace(), 1_000_000 + DAY)).toBe(false);
+    expect(unsettledRequest(record(), 1_000_000 + DAY)).toBe(false);
     // Too old, and the workspace it asked for exists after all: that is the setup workspace.
     const made = workspace({ id: "ws-made", name: "Setup check", createdAt: 1_000_500 });
     const older = workspace({ id: "ws-old", name: "Setup check", createdAt: 1 });
