@@ -31,6 +31,7 @@ const ready: PairingStatus = {
     pairingUrl: "terminalx://pair?code=typed-fallback",
     expiresAt: Date.now() + 300_000,
     connectionMode: "automatic",
+    directAvailable: true,
     transport: "relay",
   },
   lastError: null,
@@ -41,6 +42,7 @@ const localReady: PairingStatus = {
     pairingUrl: "terminalx://pair?code=local-fallback",
     expiresAt: Date.now() + 300_000,
     connectionMode: "local-only",
+    directAvailable: true,
     transport: "direct",
   },
 };
@@ -134,5 +136,67 @@ describe("paired devices settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
     await screen.findByText("typed-fallback");
     expect(mocks.invoke).toHaveBeenCalledWith("pairing_generate", { connectionMode: "automatic" });
+  });
+
+  it("shows a usable Relay code with a quiet nearby warning until the listener recovers", async () => {
+    const relayOnly: PairingStatus = {
+      ...ready,
+      activePairing: { ...ready.activePairing!, directAvailable: false },
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "pairing_generate") return relayOnly;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    act(() => mocks.statusListener!({ payload: { ...empty, relay: ready.relay } }));
+    render(<DevicesTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
+
+    await screen.findByAltText("TerminalX phone pairing QR code");
+    expect(screen.getByText("typed-fallback")).toBeTruthy();
+    expect(screen.getByText("Nearby connections are temporarily unavailable. This code works through Relay.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Includes direct and Relay paths. The phone uses the first secure connection that succeeds.")).toBeNull();
+
+    act(() => mocks.statusListener!({ payload: ready }));
+    expect(screen.queryByText(/Nearby connections are temporarily unavailable/)).toBeNull();
+    expect(screen.getByText("Includes direct and Relay paths. The phone uses the first secure connection that succeeds.")).toBeTruthy();
+    expect(screen.getByText("typed-fallback")).toBeTruthy();
+  });
+
+  it("keeps a LAN bind error beside Retry across status updates and clears it after a successful retry", async () => {
+    const message = "Another program, or another copy of TerminalX, is using port 6768. Close it and retry.";
+    const status = { ...empty, relay: ready.relay };
+    let portBusy = true;
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "pairing_status") return status;
+      if (command === "pairing_generate") {
+        if (portBusy) throw new Error(message);
+        return localReady;
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    act(() => mocks.statusListener!({ payload: status }));
+    render(<DevicesTab />);
+    fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create LAN pairing code" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(message);
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(alert.closest("section")).toBe(retry.closest("section"));
+    expect(screen.getAllByText(message)).toHaveLength(1);
+    expect(screen.queryByAltText("TerminalX phone pairing QR code")).toBeNull();
+
+    act(() => mocks.statusListener!({ payload: status }));
+    expect(screen.getByRole("alert").textContent).toBe(message);
+    fireEvent.click(screen.getByRole("radio", { name: /TerminalX Relay/ }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: /LAN/ }));
+    portBusy = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("local-fallback");
+    expect(mocks.invoke).toHaveBeenLastCalledWith("pairing_generate", { connectionMode: "local-only" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });

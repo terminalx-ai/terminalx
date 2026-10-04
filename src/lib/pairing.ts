@@ -7,6 +7,7 @@ interface PairingState {
   status: PairingStatus;
   ready: boolean;
   busy: boolean;
+  generationError: { connectionMode: PairingConnectionMode; message: string } | null;
 }
 
 const emptyStatus: PairingStatus = {
@@ -17,7 +18,7 @@ const emptyStatus: PairingStatus = {
   lastError: null,
 };
 
-let state: PairingState = { status: emptyStatus, ready: false, busy: false };
+let state: PairingState = { status: emptyStatus, ready: false, busy: false, generationError: null };
 const listeners = new Set<() => void>();
 
 function set(patch: Partial<PairingState>) {
@@ -53,16 +54,16 @@ export function bootPairing(): Promise<void> {
 }
 
 export async function generatePairing(connectionMode: PairingConnectionMode): Promise<void> {
-  set({ busy: true, status: { ...state.status, lastError: null } });
+  set({ busy: true, generationError: null, status: { ...state.status, lastError: null } });
   try {
     applyStatus(await api.pairingGenerate(connectionMode));
   } catch (error) {
     const message = errorMessage(error);
     try {
       const status = await api.pairingStatus();
-      set({ status: { ...status, lastError: message }, ready: true });
+      set({ status, ready: true, generationError: { connectionMode, message } });
     } catch {
-      set({ status: { ...state.status, lastError: message } });
+      set({ generationError: { connectionMode, message } });
     }
   } finally {
     set({ busy: false });

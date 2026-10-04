@@ -85,6 +85,7 @@ export function DevicesTab() {
   const activeOffer = pairing.status.activePairing;
   const [connectionMode, setConnectionMode] = useState<PairingConnectionMode>(() => activeOffer?.connectionMode ?? "automatic");
   const offer = activeOffer?.connectionMode === connectionMode ? activeOffer : null;
+  const generationError = pairing.generationError?.connectionMode === connectionMode ? pairing.generationError.message : null;
   const remaining = useCountdown(offer?.expiresAt ?? null);
   const expired = Boolean(offer && remaining === 0);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -176,10 +177,10 @@ export function DevicesTab() {
                 : pairing.status.relay.message ?? "Relay is not connected. Choose LAN to pair, or wait for Relay to reconnect."}
           </div>
         )}
-        {!offer || expired ? (
+        {!offer || expired || generationError ? (
           <Button className="mt-3" size="sm" disabled={pairing.busy || !canGenerate} onClick={() => void generatePairing(connectionMode)}>
-            {pairing.busy ? <Loader2 className="animate-spin" /> : <QrCode />}
-            {expired ? "Generate a new code" : !canGenerate && connectionMode === "automatic" ? "Choose LAN to pair" : connectionMode === "local-only" ? "Create LAN pairing code" : "Create pairing code"}
+            {pairing.busy ? <Loader2 className="animate-spin" /> : generationError ? <RotateCw /> : <QrCode />}
+            {generationError ? "Retry" : expired ? "Generate a new code" : !canGenerate && connectionMode === "automatic" ? "Choose LAN to pair" : connectionMode === "local-only" ? "Create LAN pairing code" : "Create pairing code"}
           </Button>
         ) : (
           <div className="mt-3 rounded-lg border border-hairline bg-well p-3">
@@ -195,7 +196,9 @@ export function DevicesTab() {
                 <div className="text-xs font-medium">Ready for {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}</div>
                 <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                   {offer.connectionMode === "automatic"
-                    ? "Includes direct and Relay paths. The phone uses the first secure connection that succeeds."
+                    ? offer.directAvailable
+                      ? "Includes direct and Relay paths. The phone uses the first secure connection that succeeds."
+                      : "Nearby connections are temporarily unavailable. This code works through Relay."
                     : "Available only on this Wi-Fi or Tailscale; the code contains no Relay invite."}
                 </p>
                 <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
@@ -214,6 +217,7 @@ export function DevicesTab() {
             </div>
           </div>
         )}
+        {generationError && <p role="alert" className="mt-2 text-xs text-destructive">{generationError}</p>}
       </section>
 
       <section>

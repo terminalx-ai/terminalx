@@ -233,6 +233,7 @@ export interface PairingCodeStatus {
   pairingUrl: string;
   expiresAt: number;
   connectionMode: PairingConnectionMode;
+  directAvailable: boolean;
   transport: MobileE2EETransport;
 }
 
