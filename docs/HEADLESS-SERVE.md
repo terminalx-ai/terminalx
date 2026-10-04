@@ -112,10 +112,11 @@ The token is kept in every failure case.
 Requests carry `x-terminalx-cloud-workspace-runtime-version` and, on refresh,
 `x-terminalx-cloud-workspace-runtime-capabilities` (`organization-access-v1`,
 `agent-grants-v1`, `github-broker-v1`, `quiesce-v1`, `environment-template-v1`,
-`collaboration-v1`; see `CAPABILITIES` in `src/cloud_bootstrap.rs`). With `quiesce-v1` the
+`collaboration-v1`, `attachment-installation-v1`; see `CAPABILITIES` in `src/cloud_bootstrap.rs`). With `quiesce-v1` the
 refresh answer carries an archive's final-checkpoint request, which `src/cloud_quiesce.rs`
 answers (see [CLOUD-LIFECYCLE.md](CLOUD-LIFECYCLE.md)). With `collaboration-v1` it carries
-who the workspace is shared with ([CLOUD-SHARING.md](CLOUD-SHARING.md)). The `ready` line reports `cloudWorkspace`
+who the workspace is shared with ([CLOUD-SHARING.md](CLOUD-SHARING.md)). With `attachment-installation-v1` each attachment carries
+an `installationKey`, by which a person's terminal comes back to them after a wake (same document). The `ready` line reports `cloudWorkspace`
 (`workspaceId`, `relayHostId`, `capabilities`), or `null` without a bootstrap. The session
 is refreshed every 5 seconds in the background, as the legacy runtime did: a new
 attachment waits for the next refresh before the relay host can answer it, and a revoked
