@@ -156,7 +156,7 @@ function cloneUrlOf(project: CloudProject): string | null {
 }
 
 /** Providers in the order the desktop prefers them when the organization's provider list cannot be read. */
-const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "local-docker"];
+const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "hetzner", "local-docker"];
 
 /**
  * The provider a new workspace in this organization uses. In the default

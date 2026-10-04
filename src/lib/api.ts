@@ -178,9 +178,16 @@ export const api = {
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
   /** The organization's cloud teardown, or null when none was ever asked for. Owners and admins only; the server decides. */
   cloudTeardownStatus: (orgId?: string | null) => invoke<CloudTeardown | null>("cloud_teardown_status", { orgId: orgId ?? null }),
-  /** Archive or delete every cloud workspace of the organization. It cannot be cancelled; call it only after an explicit confirmation. */
-  cloudTeardownRequest: (disposition: "archive" | "destroy", orgId?: string | null) =>
-    invoke<CloudTeardown>("cloud_teardown_request", { disposition, orgId: orgId ?? null }),
+  /** How many workspaces a teardown of `organizationId` would take, private ones the caller cannot list included. Refused if that is not the active organization. */
+  cloudTeardownPreview: (organizationId: string) => invoke<CloudTeardownPreview>("cloud_teardown_preview", { organizationId }),
+  /**
+   * Archive or delete every cloud workspace of `organizationId`. It cannot be
+   * cancelled; call it only after an explicit confirmation, with the
+   * organization and the context revision that confirmation was given for.
+   * Nothing is sent if either is no longer current.
+   */
+  cloudTeardownRequest: (organizationId: string, contextRevision: string, disposition: "archive" | "destroy") =>
+    invoke<CloudTeardown>("cloud_teardown_request", { organizationId, contextRevision, disposition }),
   /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
   cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
     invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
@@ -405,7 +412,7 @@ export interface CloudCatalogFeed {
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
-export type CloudWorkspaceProviderId = "machine0" | "box" | "local-docker";
+export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -462,6 +469,14 @@ export interface CloudTeardownResource {
   releaseDisposition: string | null;
   cleanupRequired: boolean;
   deleteAfter: number | null;
+}
+
+/** What a teardown would take, as counts (no names or ids). */
+export interface CloudTeardownPreview {
+  organizationId: string;
+  workspaces: number;
+  privateWorkspaces: number;
+  archivedWorkspaces: number;
 }
 
 /** An organization-wide cloud teardown: what was asked, the deadline, and what still blocks completion. */
@@ -619,7 +634,8 @@ export interface CloudWorkspaceDisposition {
   activeOperation: { id: string; action: string; state: string } | null;
   runtime: { reporting: boolean; reportedAt: number | null; stale: boolean; activeTurns: number; pendingApprovals: number };
   attachedClients: number;
-  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string };
+  /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
+  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
   blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
   removedOnDelete: string[];

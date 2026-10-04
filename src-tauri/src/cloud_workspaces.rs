@@ -17,9 +17,10 @@ const CONTRACT: &str = "providers-v1";
 /// Archive, tombstones and cleanup reports (terminalx-saas contract §10.6).
 /// Without it an archived workspace reads as suspended.
 const LIFECYCLE: &str = "archive-v1";
-/// The local Docker provider (terminalx-saas `cloud:e2e:local --serve`) is
-/// offered only by debug builds.
-const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,local-docker" } else { "machine0,box" };
+/// The providers this client can show and drive; the server leaves every
+/// other one out of its answers. The local Docker provider (terminalx-saas
+/// `cloud:e2e:local --serve`) is offered only by debug builds.
+const SUPPORTED_PROVIDERS: &str = if cfg!(debug_assertions) { "machine0,box,hetzner,local-docker" } else { "machine0,box,hetzner" };
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const RESPONSE_LIMIT_BYTES: u64 = 512 * 1024;
 /// The catalog feed carries every member Organization's list in one answer.
@@ -33,6 +34,7 @@ const DIAGNOSTICS_RESPONSE_LIMIT_BYTES: u64 = 4 * 1024 * 1024;
 pub enum CloudWorkspaceProviderId {
     Machine0,
     Box,
+    Hetzner,
     #[serde(rename = "local-docker")]
     LocalDocker,
 }
@@ -42,6 +44,7 @@ impl CloudWorkspaceProviderId {
         match self {
             Self::Machine0 => "machine0",
             Self::Box => "box",
+            Self::Hetzner => "hetzner",
             Self::LocalDocker => "local-docker",
         }
     }
@@ -155,6 +158,18 @@ pub struct CloudTeardown {
     pub resources: Vec<CloudTeardownResource>,
     #[serde(default)]
     pub remaining: Vec<CloudTeardownResource>,
+}
+
+/// `GET …/cloud-teardown/preview`: what a teardown would take, as counts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudTeardownPreview {
+    pub organization_id: String,
+    pub workspaces: u32,
+    #[serde(default)]
+    pub private_workspaces: u32,
+    #[serde(default)]
+    pub archived_workspaces: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -865,6 +880,10 @@ pub struct DispositionRuntime {
 pub struct DispositionCapabilities {
     pub permanent_delete: bool,
     pub release_disposition: String,
+    /// Whether a resume after a stop brings the same processes back (a warm
+    /// reconnect) or is a cold boot. Absent from an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserves_processes_on_resume: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1507,15 +1526,54 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// What a teardown would take: how many workspaces the organization
+    /// has, private ones the caller cannot list included. Counts only. It is
+    /// read for the organization the confirmation names, which must be the
+    /// active one, so the number shown is about what would be torn down.
+    pub fn teardown_preview(&self, organization_id: &str) -> Result<CloudTeardownPreview, CloudWorkspaceClientError> {
+        let context = self.context()?;
+        if context.organization_id != organization_id {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        let preview: CloudTeardownPreview = self.client.request(&context, &["cloud-teardown", "preview"], None, None, None, RequestRisk::Read)?;
+        if !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        if preview.organization_id != organization_id {
+            return Err(post_send_error(RequestRisk::Read));
+        }
+        Ok(preview)
+    }
+
     /// Shut the organization's cloud down: archive every workspace with one
     /// shared deadline, or delete them now. It cannot be undone, and an
     /// archive may only be escalated to a destroy. The page asks for it only
     /// after an explicit confirmation.
-    pub fn request_teardown(&self, org: Option<&str>, disposition: TeardownDisposition) -> Result<CloudTeardown, CloudWorkspaceClientError> {
-        self.run_in(org, RequestRisk::Mutation, |client, context| {
-            let result = client.request(context, &["cloud-teardown"], None, Some(json!({ "disposition": disposition })), None, RequestRisk::Mutation)?;
-            ensure_teardown(result, &context.organization_id, RequestRisk::Mutation)
-        })
+    ///
+    /// The confirmation was given for one organization, at one account
+    /// context. Both are checked before anything is sent: if the active
+    /// organization changed since (a switch in another window, before the
+    /// page re-rendered), the name typed for one organization must never
+    /// tear down another. Nothing is sent then, as `disconnect_provider`
+    /// does.
+    pub fn request_teardown(
+        &self,
+        organization_id: &str,
+        context_revision: &str,
+        disposition: TeardownDisposition,
+    ) -> Result<CloudTeardown, CloudWorkspaceClientError> {
+        let context = self.context()?;
+        if context.organization_id != organization_id
+            || context_revision != AccountManager::context_revision(&context)
+            || !self.account.is_current(&context)
+        {
+            return Err(context_changed_error(RequestRisk::Read));
+        }
+        let result = self.client.request(&context, &["cloud-teardown"], None, Some(json!({ "disposition": disposition })), None, RequestRisk::Mutation)?;
+        if !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        ensure_teardown(result, organization_id, RequestRisk::Mutation)
     }
 
     /// Whether new machines may be created on a provider (PRO-79). An owner's
@@ -2851,6 +2909,20 @@ mod tests {
     }
 
     #[test]
+    fn hetzner_is_a_provider_this_client_names_and_reads() {
+        assert!(SUPPORTED_PROVIDERS.split(',').any(|provider| provider == "hetzner"));
+        let provider: CloudWorkspaceProviderId = serde_json::from_str(r#""hetzner""#).unwrap();
+        assert_eq!(provider, CloudWorkspaceProviderId::Hetzner);
+        assert_eq!(provider.as_str(), "hetzner");
+        assert_eq!(serde_json::to_string(&provider).unwrap(), r#""hetzner""#);
+        // Every provider the client declares is one it can also read back.
+        for name in SUPPORTED_PROVIDERS.split(',') {
+            let parsed: CloudWorkspaceProviderId = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(parsed.as_str(), name);
+        }
+    }
+
+    #[test]
     fn sends_provider_contract_and_encodes_native_organization() {
         let body = r#"{"providers":[]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
@@ -2872,7 +2944,7 @@ mod tests {
         let lower = request.to_ascii_lowercase();
         assert!(lower.contains("authorization: bearer native-secret-token"));
         assert!(lower.contains("x-terminalx-cloud-workspace-contract: providers-v1"));
-        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box"));
+        assert!(lower.contains("x-terminalx-cloud-workspace-providers: machine0,box,hetzner"));
     }
 
     #[test]
@@ -3795,7 +3867,7 @@ mod tests {
         for (disposition, body) in [(TeardownDisposition::Archive, r#"{"disposition":"archive"}"#), (TeardownDisposition::Destroy, r#"{"disposition":"destroy"}"#)] {
             let (base, _, request) = serve_once(response("202 Accepted", &teardown.to_string(), ""), Duration::ZERO);
             let (_, service) = test_service(&base);
-            service.request_teardown(None, disposition).unwrap();
+            service.request_teardown("org-1", &AccountManager::context_revision(&context()), disposition).unwrap();
             let captured = request.join().unwrap();
             assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-teardown HTTP/1.1"));
             assert!(captured.text.ends_with(body), "{}", captured.text);
@@ -3810,7 +3882,49 @@ mod tests {
         request.join().unwrap();
         let (base, _, request) = serve_once(response("202 Accepted", &other.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.request_teardown(None, TeardownDisposition::Destroy).unwrap_err().code, "cloud_workspace_request_outcome_unknown");
+        assert_eq!(
+            service.request_teardown("org-1", &AccountManager::context_revision(&context()), TeardownDisposition::Destroy).unwrap_err().code,
+            "cloud_workspace_request_outcome_unknown"
+        );
+        request.join().unwrap();
+    }
+
+    #[test]
+    fn a_teardown_confirmed_for_one_organization_is_never_sent_for_another() {
+        // Nothing listens here: any request would fail as a transport error,
+        // so `account_context_changed` proves nothing was sent.
+        let revision = AccountManager::context_revision(&context());
+        let (account, service) = test_service("http://127.0.0.1:9");
+
+        // The confirmation named another organization than the active one.
+        let error = service.request_teardown("org-2", &revision, TeardownDisposition::Destroy).unwrap_err();
+        assert_eq!(error.code, "account_context_changed");
+        // The account context is not the one the confirmation was given at.
+        assert_eq!(service.request_teardown("org-1", "old-context", TeardownDisposition::Destroy).unwrap_err().code, "account_context_changed");
+
+        // The active organization changed while the confirmation was open:
+        // the name was typed for org-1, and org-2 is active at send time.
+        account.set_context_for_test(Some(AccountContext { organization_id: "org-2".into(), ..context() }));
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Destroy).unwrap_err().code, "account_context_changed");
+        assert_eq!(service.request_teardown("org-1", &revision, TeardownDisposition::Archive).unwrap_err().code, "account_context_changed");
+        // The count is not read for an organization that is no longer active either.
+        assert_eq!(service.teardown_preview("org-1").unwrap_err().code, "account_context_changed");
+    }
+
+    #[test]
+    fn the_teardown_preview_counts_are_read_for_the_named_organization() {
+        let preview = json!({ "organizationId": "org-1", "workspaces": 7, "privateWorkspaces": 3, "archivedWorkspaces": 2 });
+        let (base, _, request) = serve_once(response("200 OK", &preview.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let read = service.teardown_preview("org-1").unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-teardown/preview HTTP/1.1"));
+        assert_eq!((read.workspaces, read.private_workspaces, read.archived_workspaces), (7, 3, 2));
+
+        // Counts about another organization are never shown as this one's.
+        let other = json!({ "organizationId": "org-2", "workspaces": 1 });
+        let (base, _, request) = serve_once(response("200 OK", &other.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.teardown_preview("org-1").unwrap_err().code, "cloud_workspace_invalid_response");
         request.join().unwrap();
     }
 
@@ -3951,6 +4065,15 @@ mod tests {
         assert_eq!(disposition.runtime.active_turns, 1);
         assert_eq!(disposition.blockers, ["active-turns", "pending-approvals"]);
         assert!(disposition.runtime_facts.available);
+        // An older server does not say what a resume brings back.
+        assert_eq!(disposition.provider_capabilities.preserves_processes_on_resume, None);
+
+        let mut cold = facts.clone();
+        cold["providerCapabilities"]["preservesProcessesOnResume"] = json!(false);
+        let (base, _, request) = serve_once(response("200 OK", &cold.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.disposition(None, "workspace-1").unwrap().provider_capabilities.preserves_processes_on_resume, Some(false));
+        request.join().unwrap();
 
         let (base, _, request) = serve_once(response("200 OK", &facts.to_string(), ""), Duration::ZERO);
         let (_, service) = test_service(&base);

@@ -3,6 +3,7 @@ import { Alert, Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { Check, ChevronDown, ChevronUp, Trash2 } from "lucide-react-native";
 import { disableLocalNotifications, enableLocalNotifications, localNotificationsEnabled } from "@mobile/notifications/local";
 import { useApp } from "@mobile/state/AppProvider";
+import { hostDisplayName, hostDisplayNames } from "@mobile/store/host-name";
 import { Button, Card, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme, type ThemeName } from "@mobile/ui/theme";
 
@@ -10,6 +11,7 @@ const themes: ThemeName[] = ["Den", "Slate", "Moss", "Ember"];
 
 export default function SettingsScreen() {
   const app = useApp();
+  const names = hostDisplayNames(app.hosts);
   const { name, palette, setName } = useTheme();
   const [notifications, setNotifications] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
@@ -39,7 +41,7 @@ export default function SettingsScreen() {
     <Card style={styles.block}>{app.session ? <><Text style={[styles.title, { color: palette.ink }]}>{app.session.user.displayName ?? "TerminalX account"}</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.session.user.email}</Text><Button label="Sign out" kind="secondary" onPress={() => void app.signOut()} /></> : <><Text style={[styles.title, { color: palette.ink }]}>Not signed in</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in to discover Macs bound to your account.</Text><Button label="Sign in" onPress={() => void app.signIn()} /></>}</Card>
 
     <SectionTitle>Paired machines</SectionTitle>
-    <Card>{app.hosts.length ? app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>{host.label}</Text><Text style={[styles.detail, { color: palette.muted }]}>{host.provenance.kind === "explicit" ? "QR pairing · kept after sign-out" : "Account pairing · removed at sign-out"}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Forget ${host.label}`} hitSlop={10} onPress={() => Alert.alert("Forget this Mac?", "Its device credential will be deleted from this phone. Agents on the Mac keep running.", [{ text: "Cancel", style: "cancel" }, { text: "Forget", style: "destructive", onPress: () => void app.forgetHost(host.id) }])}><Trash2 size={19} color={palette.danger} /></Pressable></View>) : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>No paired Macs on this phone.</Text></View>}</Card>
+    <Card>{app.hosts.length ? app.hosts.map((host, index) => <View key={host.id} style={[styles.hostRow, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}><View style={styles.flex}><Text style={[styles.rowTitle, { color: palette.ink }]}>{names.get(host.id) ?? hostDisplayName(host)}</Text><Text style={[styles.detail, { color: palette.muted }]}>{host.provenance.kind === "explicit" ? "QR pairing · kept after sign-out" : "Account pairing · removed at sign-out"}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Forget ${host.label}`} hitSlop={10} onPress={() => Alert.alert("Forget this Mac?", "Its device credential will be deleted from this phone. Agents on the Mac keep running.", [{ text: "Cancel", style: "cancel" }, { text: "Forget", style: "destructive", onPress: () => void app.forgetHost(host.id) }])}><Trash2 size={19} color={palette.danger} /></Pressable></View>) : <View style={styles.block}><Text style={[styles.detail, { color: palette.muted }]}>No paired Macs on this phone.</Text></View>}</Card>
 
     <SectionTitle>Appearance</SectionTitle>
     <Card style={styles.themeGrid}>{themes.map((theme) => <Pressable key={theme} accessibilityRole="button" accessibilityState={{ selected: theme === name }} onPress={() => setName(theme)} style={[styles.theme, { backgroundColor: theme === name ? palette.selected : palette.raised }]}><Text style={[styles.rowTitle, { color: palette.ink }]}>{theme}</Text>{theme === name ? <Check size={17} color={palette.accent} /> : null}</Pressable>)}</Card>

@@ -56,7 +56,7 @@ import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
+const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", hetzner: "Hetzner", "local-docker": "Local Docker" };
 
 /** A cloud provider's display name. */
 export function cloudProviderName(provider: string | null | undefined): string {

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type CloudTeardown, type CloudTeardownResource } from "@/lib/api";
-import { cloudOrgArg } from "@/lib/cloudCatalog";
+import { api, type CloudTeardown, type CloudTeardownPreview, type CloudTeardownResource } from "@/lib/api";
 import { dateText, deadlineText } from "@/lib/cloudLifecycle";
 import { cloudProviderName } from "@/lib/cloudSession";
 
@@ -16,7 +15,7 @@ export function teardownErrorMessage(code: string): string {
     case "forbidden":
       return "Only an organization owner or administrator can shut down its cloud workspaces.";
     case "account_context_changed":
-      return "The account or organization changed. Refresh before trying again.";
+      return "The account or the active organization changed after this was opened, so nothing was sent. Check which organization is selected, then start again.";
     case "cloud_workspace_request_outcome_unknown":
       return "The request may or may not have gone through. Refresh to see whether the shutdown started before trying again.";
     case "cloud_workspace_unavailable":
@@ -27,13 +26,36 @@ export function teardownErrorMessage(code: string): string {
 }
 
 const KINDS: Record<string, string> = { workspace: "Workspace", "session-runtime": "Session runtime", "build-template": "Build template" };
+/** The server's state words, in the app's own. An unknown one is shown as it comes. */
+const STATES: Record<string, string> = {
+  ready: "running",
+  suspended: "stopped",
+  archived: "archived",
+  provisioning: "changing state",
+  "attention-required": "needs attention",
+  deleting: "being deleted",
+  destroyed: "released",
+};
+
+/** What a teardown would take, in one sentence, private workspaces named as such. */
+export function teardownPreviewText(preview: CloudTeardownPreview, organizationName: string): string {
+  const { workspaces, privateWorkspaces, archivedWorkspaces } = preview;
+  if (workspaces === 0) return `${organizationName} has no cloud workspaces now. A shutdown still blocks new ones until it finishes.`;
+  const count = `${workspaces} cloud workspace${workspaces === 1 ? "" : "s"}`;
+  const hidden =
+    privateWorkspaces > 0
+      ? `, including ${privateWorkspaces} private one${privateWorkspaces === 1 ? "" : "s"} that ${privateWorkspaces === 1 ? "belongs" : "belong"} to other people and may not appear in your own list`
+      : "";
+  const archived = archivedWorkspaces > 0 ? ` ${archivedWorkspaces} ${archivedWorkspaces === 1 ? "is" : "are"} already archived.` : "";
+  return `This takes every cloud workspace of ${organizationName}: ${count}${hidden}.${archived}`;
+}
 
 /** One line for a resource that is still at a provider. */
 export function teardownResourceText(resource: CloudTeardownResource, now = Date.now()): string {
   const kind = KINDS[resource.kind] ?? resource.kind;
   const when = resource.deleteAfter ? `, deleted ${deadlineText(resource.deleteAfter, now)}` : "";
   const cleanup = resource.cleanupRequired ? ", cleanup unresolved" : "";
-  return `${cloudProviderName(resource.provider)} · ${kind} ${resource.id}: ${resource.state}${when}${cleanup}`;
+  return `${cloudProviderName(resource.provider)} · ${kind} ${resource.id}: ${STATES[resource.state] ?? resource.state}${when}${cleanup}`;
 }
 
 /**
@@ -43,23 +65,27 @@ export function teardownResourceText(resource: CloudTeardownResource, now = Date
  *
  * It cannot be cancelled, and while it runs nobody in the organization can
  * create, resume or unarchive a workspace. So nothing is sent before the
- * person has chosen what happens to the data and typed the organization's
- * name. An archive may later be escalated to deleting now, never the reverse.
+ * person has seen how many workspaces it takes (counted by the server, with
+ * the private ones their own list leaves out), chosen what happens to the
+ * data and typed the organization's name. The confirmation is for one
+ * organization at one account context: both go with the request, and the
+ * native side sends nothing if either changed meanwhile. An archive may later
+ * be escalated to deleting now, never the reverse.
  * What still remains at the providers is listed until nothing does; things
  * the shutdown does not remove (session runtimes, build templates) are named
  * so they are not mistaken for progress.
  */
 export function OrganizationCloudTeardown({
   contextRevision,
+  organizationId,
   organizationName,
   member = false,
-  orgId = null,
 }: {
   contextRevision: string;
+  /** The active organization, which is the one this shuts down. Without its id nothing is offered. */
+  organizationId: string | null;
   organizationName: string;
   member?: boolean;
-  /** The organization to shut down: the active one when none (Settings). */
-  orgId?: string | null;
 }) {
   const [teardown, setTeardown] = useState<CloudTeardown | null>(null);
   const [loading, setLoading] = useState(!member);
@@ -67,8 +93,12 @@ export function OrganizationCloudTeardown({
   const [refused, setRefused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [disposition, setDisposition] = useState<Disposition | "">("");
+  // The organization and account context the open confirmation is for; they go with the request.
+  const [confirming, setConfirming] = useState<{ organizationId: string; contextRevision: string } | null>(null);
+  const [preview, setPreview] = useState<CloudTeardownPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  // Archive is the one that can still be undone for 30 days: it is the one preselected.
+  const [disposition, setDisposition] = useState<Disposition>("archive");
   const [typed, setTyped] = useState("");
   const loadSeq = useRef(0);
 
@@ -76,9 +106,10 @@ export function OrganizationCloudTeardown({
     const current = ++loadSeq.current;
     setLoading(true);
     try {
-      const status = await api.cloudTeardownStatus(cloudOrgArg(orgId));
+      const status = await api.cloudTeardownStatus(null);
       if (current !== loadSeq.current) return;
-      setTeardown(status);
+      // Only this organization's: an answer about another is not shown as its own.
+      setTeardown(status && status.organizationId === organizationId ? status : null);
       setLoaded(true);
       setError(null);
     } catch (e) {
@@ -90,41 +121,69 @@ export function OrganizationCloudTeardown({
     } finally {
       if (current === loadSeq.current) setLoading(false);
     }
-  }, [orgId]);
+  }, [organizationId]);
 
   useEffect(() => {
     setTeardown(null);
     setLoaded(false);
     setRefused(false);
-    setConfirming(false);
-    setDisposition("");
+    // A confirmation opened for another organization or context is void.
+    setConfirming(null);
+    setPreview(null);
+    setPreviewError(null);
+    setDisposition("archive");
     setTyped("");
     // The account already says this is a member: skip a request the server refuses.
-    if (!member) void load();
+    if (!member && organizationId) void load();
     return () => {
       loadSeq.current += 1;
     };
-  }, [contextRevision, member, load]);
+  }, [contextRevision, organizationId, member, load]);
 
-  if (member || refused) return null;
+  if (member || refused || !organizationId) return null;
 
   const pending = !!teardown && !teardown.completedAt;
   const escalating = pending && teardown.disposition === "archive";
   // A pending archive can only be turned into a delete; a pending delete has nothing left to choose.
   const choices: Disposition[] = escalating ? ["destroy"] : ["archive", "destroy"];
-  const chosen: Disposition | "" = escalating ? "destroy" : disposition;
+  const chosen: Disposition = escalating ? "destroy" : disposition;
   const nameMatches = typed.trim() === organizationName.trim() && organizationName.trim() !== "";
   // Only once the status is known: none yet, one that finished (a new one may start), or an archive that may be escalated.
   const canStart = loaded && !loading && (!teardown || !!teardown.completedAt || escalating);
 
+  const open = () => {
+    const fence = { organizationId, contextRevision };
+    setConfirming(fence);
+    setError(null);
+    setPreview(null);
+    setPreviewError(null);
+    api
+      .cloudTeardownPreview(fence.organizationId)
+      .then((counts) => {
+        // Still the same confirmation, and about the organization it names.
+        if (counts.organizationId === fence.organizationId) setPreview(counts);
+        else setPreviewError(teardownErrorMessage("account_context_changed"));
+      })
+      .catch((e: unknown) => {
+        const code = errorCode(e);
+        setPreviewError(
+          code === "account_context_changed"
+            ? teardownErrorMessage(code)
+            : `The number of workspaces this would take could not be read (${code || "unknown"}), so it cannot be started from here.`,
+        );
+      });
+  };
+
   const start = async () => {
-    if (!chosen || !nameMatches) return;
+    if (!confirming || !preview || !nameMatches) return;
     setBusy(true);
     setError(null);
     try {
-      setTeardown(await api.cloudTeardownRequest(chosen, cloudOrgArg(orgId)));
-      setConfirming(false);
-      setDisposition("");
+      // For the organization and context the confirmation was opened at, not whatever is active now.
+      setTeardown(await api.cloudTeardownRequest(confirming.organizationId, confirming.contextRevision, chosen));
+      setConfirming(null);
+      setPreview(null);
+      setDisposition("archive");
       setTyped("");
     } catch (e) {
       setError(teardownErrorMessage(errorCode(e)));
@@ -213,10 +272,7 @@ export function OrganizationCloudTeardown({
             size="sm"
             variant="outline"
             disabled={loading || busy}
-            onClick={() => {
-              setConfirming(true);
-              setError(null);
-            }}
+            onClick={open}
           >
             {escalating ? "Delete everything now…" : "Shut down cloud workspaces…"}
           </Button>
@@ -225,8 +281,21 @@ export function OrganizationCloudTeardown({
             <p>
               {escalating
                 ? "This deletes every archived workspace now instead of at the deadline. It cannot be undone or cancelled."
-                : "This applies to every cloud workspace of the organization, whoever created it, and cannot be cancelled once started. Choose what happens to them:"}
+                : "This cannot be cancelled once started. Choose what happens to the workspaces:"}
             </p>
+            {preview ? (
+              <p className="font-medium" data-testid="cloud-teardown-count">
+                {teardownPreviewText(preview, organizationName)}
+              </p>
+            ) : previewError ? (
+              <p className="text-destructive" role="alert">
+                {previewError}
+              </p>
+            ) : (
+              <p className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" /> Counting the organization's workspaces…
+              </p>
+            )}
             {choices.includes("archive") && (
               <label className="flex items-start gap-2">
                 <input type="radio" name="teardown-disposition" checked={chosen === "archive"} onChange={() => setDisposition("archive")} disabled={busy} />
@@ -254,7 +323,7 @@ export function OrganizationCloudTeardown({
               />
             </label>
             <div className="flex items-center gap-2">
-              <Button size="sm" variant="destructive" disabled={busy || !chosen || !nameMatches} onClick={() => void start()}>
+              <Button size="sm" variant="destructive" disabled={busy || !preview || !nameMatches} onClick={() => void start()}>
                 {busy && <Loader2 className="animate-spin" />}
                 {chosen === "archive" ? "Archive every workspace" : "Delete every workspace"}
               </Button>
@@ -263,7 +332,7 @@ export function OrganizationCloudTeardown({
                 variant="ghost"
                 disabled={busy}
                 onClick={() => {
-                  setConfirming(false);
+                  setConfirming(null);
                   setTyped("");
                 }}
               >

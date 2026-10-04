@@ -29,6 +29,50 @@ pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// `run` with a deadline, for a transfer that may never end. After `timeout`
+/// the whole process group is killed, so no transport or credential helper
+/// is left behind.
+pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> Result<()> {
+    use std::io::Read;
+    let mut command = git();
+    command.current_dir(cwd).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().with_context(|| format!("git {}", args.join(" ")))?;
+    // Read as it comes, so a full pipe never blocks git.
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut stderr) = stderr {
+            let _ = stderr.read_to_string(&mut text);
+        }
+        text
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                #[cfg(unix)]
+                // SAFETY: signals the process group this function just created.
+                unsafe {
+                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let err = reader.join().unwrap_or_default();
+    match status {
+        Some(status) if status.success() => Ok(()),
+        Some(status) => bail!("git {}: {}", args.join(" "), if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() }),
+        None => bail!("git {}: timed out after {} s", args.join(" "), timeout.as_secs()),
+    }
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }

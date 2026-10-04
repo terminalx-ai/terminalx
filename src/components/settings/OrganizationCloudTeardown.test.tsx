@@ -1,10 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type CloudTeardown, type CloudTeardownResource } from "@/lib/api";
-import { OrganizationCloudTeardown, teardownResourceText } from "./OrganizationCloudTeardown";
+import { api, type CloudTeardown, type CloudTeardownPreview, type CloudTeardownResource } from "@/lib/api";
+import { OrganizationCloudTeardown, teardownPreviewText, teardownResourceText } from "./OrganizationCloudTeardown";
 
-vi.mock("@/lib/api", () => ({ api: { cloudTeardownStatus: vi.fn(), cloudTeardownRequest: vi.fn() } }));
-vi.mock("@/lib/cloudCatalog", () => ({ cloudOrgArg: (orgId: string | null) => orgId }));
+vi.mock("@/lib/api", () => ({ api: { cloudTeardownStatus: vi.fn(), cloudTeardownPreview: vi.fn(), cloudTeardownRequest: vi.fn() } }));
 vi.mock("@/lib/cloudSession", () => ({ cloudProviderName: (provider: string) => (provider === "box" ? "Boat" : provider) }));
 
 const mocked = vi.mocked(api);
@@ -26,33 +25,43 @@ function teardown(fields: Partial<CloudTeardown> = {}): CloudTeardown {
   return { organizationId: "org-1", disposition: "archive", requestedAt: Date.now(), retentionDeadline: Date.now() + 29.5 * DAY, completedAt: null, resources: remaining, remaining, ...fields };
 }
 
-const mount = (props: Partial<Parameters<typeof OrganizationCloudTeardown>[0]> = {}) => render(<OrganizationCloudTeardown contextRevision="rev-1" organizationName="Acme" {...props} />);
+const view = (props: Partial<Parameters<typeof OrganizationCloudTeardown>[0]> = {}) => <OrganizationCloudTeardown contextRevision="rev-1" organizationId="org-1" organizationName="Acme" {...props} />;
+const mount = (props: Partial<Parameters<typeof OrganizationCloudTeardown>[0]> = {}) => render(view(props));
+const counts = (fields: Partial<CloudTeardownPreview> = {}): CloudTeardownPreview => ({ organizationId: "org-1", workspaces: 7, privateWorkspaces: 3, archivedWorkspaces: 2, ...fields });
 const button = (name: RegExp | string) => screen.getByRole("button", { name }) as HTMLButtonElement;
 const typeName = (value: string) => fireEvent.change(screen.getByLabelText("Organization name"), { target: { value } });
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocked.cloudTeardownStatus.mockResolvedValue(null);
+  mocked.cloudTeardownPreview.mockResolvedValue(counts());
 });
 
 afterEach(cleanup);
 
 describe("OrganizationCloudTeardown", () => {
-  it("sends nothing until a disposition is chosen and the organization's name is typed", async () => {
+  it("shows how many workspaces it takes, private ones included, and sends nothing until the name is typed", async () => {
     mocked.cloudTeardownRequest.mockResolvedValue(teardown());
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
-    const confirm = button("Delete every workspace");
-    expect(confirm.disabled).toBe(true);
+    // The safer choice is the one preselected.
+    expect((screen.getByRole("radio", { name: /Archive everything/ }) as HTMLInputElement).checked).toBe(true);
+    const confirm = button("Archive every workspace");
     typeName("Acme");
-    // The name alone is not enough: what happens to the data must be chosen.
+    // Not before the server's count is on screen.
     expect(confirm.disabled).toBe(true);
-    fireEvent.click(screen.getByRole("radio", { name: /Archive everything/ }));
+    const count = await screen.findByTestId("cloud-teardown-count");
+    expect(mocked.cloudTeardownPreview).toHaveBeenCalledWith("org-1");
+    expect(count.textContent).toBe(
+      "This takes every cloud workspace of Acme: 7 cloud workspaces, including 3 private ones that belong to other people and may not appear in your own list. 2 are already archived.",
+    );
+    expect(confirm.disabled).toBe(false);
     typeName("acme");
-    expect(button("Archive every workspace").disabled).toBe(true);
+    expect(confirm.disabled).toBe(true);
     typeName(" Acme ");
-    fireEvent.click(button("Archive every workspace"));
-    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("archive", null));
+    fireEvent.click(confirm);
+    // For the organization and the context the confirmation was opened at.
+    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("org-1", "rev-1", "archive"));
     expect(mocked.cloudTeardownRequest).toHaveBeenCalledTimes(1);
 
     const status = await screen.findByTestId("cloud-teardown-status");
@@ -63,14 +72,69 @@ describe("OrganizationCloudTeardown", () => {
     expect(screen.queryByTestId("cloud-teardown-confirm")).toBeNull();
   });
 
+  it("words the count for one workspace, none private, and for an organization with none", () => {
+    expect(teardownPreviewText(counts({ workspaces: 1, privateWorkspaces: 0, archivedWorkspaces: 0 }), "Acme")).toBe("This takes every cloud workspace of Acme: 1 cloud workspace.");
+    expect(teardownPreviewText(counts({ workspaces: 2, privateWorkspaces: 1, archivedWorkspaces: 1 }), "Acme")).toMatch(/2 cloud workspaces, including 1 private one that belongs to other people.*1 is already archived/);
+    expect(teardownPreviewText(counts({ workspaces: 0, privateWorkspaces: 0, archivedWorkspaces: 0 }), "Acme")).toMatch(/has no cloud workspaces now/);
+  });
+
+  it("cannot be started when the count cannot be read", async () => {
+    mocked.cloudTeardownPreview.mockRejectedValue({ code: "cloud_workspace_unavailable" });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/number of workspaces this would take could not be read.*cannot be started from here/);
+    typeName("Acme");
+    expect(button("Archive every workspace").disabled).toBe(true);
+    expect(mocked.cloudTeardownRequest).not.toHaveBeenCalled();
+  });
+
+  it("a confirmation opened for one organization is void once the active organization changes", async () => {
+    const shown = mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    await screen.findByTestId("cloud-teardown-count");
+    typeName("Acme");
+    expect(button("Archive every workspace").disabled).toBe(false);
+    // The active organization changes (another window, a switch in Settings): the page re-renders for it.
+    mocked.cloudTeardownPreview.mockResolvedValue(counts({ organizationId: "org-2", workspaces: 40 }));
+    shown.rerender(view({ contextRevision: "rev-2", organizationId: "org-2", organizationName: "Beta" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-teardown-confirm")).toBeNull());
+    expect(mocked.cloudTeardownRequest).not.toHaveBeenCalled();
+    // Starting again asks about, and names, the organization now active; the name typed before is gone.
+    fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    expect((await screen.findByTestId("cloud-teardown-count")).textContent).toMatch(/every cloud workspace of Beta: 40 cloud workspaces/);
+    expect((screen.getByLabelText("Organization name") as HTMLInputElement).value).toBe("");
+    expect(button("Archive every workspace").disabled).toBe(true);
+  });
+
+  it("says nothing was sent when the native side refuses for a changed context, before the page has re-rendered", async () => {
+    mocked.cloudTeardownRequest.mockRejectedValue({ code: "account_context_changed" });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    await screen.findByTestId("cloud-teardown-count");
+    typeName("Acme");
+    fireEvent.click(button("Archive every workspace"));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/active organization changed after this was opened, so nothing was sent/);
+    // What was sent named the organization the confirmation was for.
+    expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("org-1", "rev-1", "archive");
+  });
+
+  it("shows counts only for the organization the confirmation names", async () => {
+    mocked.cloudTeardownPreview.mockResolvedValue(counts({ organizationId: "org-2" }));
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/active organization changed/);
+    expect(screen.queryByTestId("cloud-teardown-count")).toBeNull();
+  });
+
   it("deletes everything now only after the same confirmation, and offers nothing more once it runs", async () => {
     mocked.cloudTeardownRequest.mockResolvedValue(teardown({ disposition: "destroy", retentionDeadline: Date.now() }));
-    mount({ orgId: "org-1" });
+    mount();
     fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    await screen.findByTestId("cloud-teardown-count");
     fireEvent.click(screen.getByRole("radio", { name: /Delete everything now/ }));
     typeName("Acme");
     fireEvent.click(button("Delete every workspace"));
-    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("destroy", "org-1"));
+    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("org-1", "rev-1", "destroy"));
     expect((await screen.findByTestId("cloud-teardown-status")).textContent).toMatch(/every workspace is being deleted/);
     expect(screen.queryByRole("button", { name: /Shut down cloud workspaces|Delete everything now/ })).toBeNull();
   });
@@ -83,9 +147,10 @@ describe("OrganizationCloudTeardown", () => {
     expect(screen.queryByRole("radio")).toBeNull();
     expect(screen.getByTestId("cloud-teardown-confirm").textContent).toMatch(/deletes every archived workspace now instead of at the deadline/);
     expect(button("Delete every workspace").disabled).toBe(true);
+    await screen.findByTestId("cloud-teardown-count");
     typeName("Acme");
     fireEvent.click(button("Delete every workspace"));
-    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("destroy", null));
+    await waitFor(() => expect(mocked.cloudTeardownRequest).toHaveBeenCalledWith("org-1", "rev-1", "destroy"));
   });
 
   it("lists what remains, names what a shutdown does not remove, and what the provider kept", async () => {
@@ -96,7 +161,8 @@ describe("OrganizationCloudTeardown", () => {
     mount();
     await waitFor(() => expect(screen.getAllByTestId("cloud-teardown-remaining")).toHaveLength(2));
     expect(screen.getByText("2 things remain at the providers:")).toBeTruthy();
-    expect(screen.getByText("Boat · Workspace ws-2: attention-required, cleanup unresolved")).toBeTruthy();
+    expect(screen.getByText("Boat · Workspace ws-2: needs attention, cleanup unresolved")).toBeTruthy();
+    expect(screen.getByText("Boat · Session runtime rt-1: running")).toBeTruthy();
     expect(screen.getByText(/removes workspaces only\. Session runtimes and build templates/)).toBeTruthy();
     expect(screen.getByTestId("cloud-teardown-kept").textContent).toMatch(/1 released workspace is still listed because the provider kept it/);
     expect(teardownResourceText(resource("ws-9", { deleteAfter: 5 * DAY }), 0)).toBe("Boat · Workspace ws-9: archived, deleted in 5 days");
@@ -135,6 +201,7 @@ describe("OrganizationCloudTeardown", () => {
     mocked.cloudTeardownRequest.mockRejectedValue({ code: "cloud_workspace_request_outcome_unknown" });
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Shut down cloud workspaces…" }));
+    await screen.findByTestId("cloud-teardown-count");
     fireEvent.click(screen.getByRole("radio", { name: /Delete everything now/ }));
     typeName("Acme");
     fireEvent.click(button("Delete every workspace"));

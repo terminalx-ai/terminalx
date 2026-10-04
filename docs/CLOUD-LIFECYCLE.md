@@ -12,6 +12,14 @@ an archive's `checkpoint`, a delete's `cleanup` report and the list's
 | Archive | stops   | kept until `deleteAfter` (30 days)       | storage keeps billing          | unarchive, then resume |
 | Delete  | removed | removed once the provider confirms       | stop once the provider confirms | none; a tombstone stays |
 
+What "resume" brings back depends on the provider, and the Stop tab says
+which (PRO-33): `providerCapabilities.preservesProcessesOnResume` in the
+disposition facts is `false` for Boat, Hetzner and Machine0 (a cold boot from
+the disk: files, repositories and conversations come back, running programs
+and terminals do not) and `true` only where the machine is frozen as it is
+(local Docker in pause mode). An older server does not send it, and the
+dialog then promises neither (`resumeBehaviourText`).
+
 ## Desktop
 
 - `src/components/cloud/CloudWorkspaceLifecycle.tsx`: one dialog for all
@@ -70,9 +78,19 @@ cleanup as a single workspace's archive and delete.
   organization with one deadline, or delete them now
   (`GET`/`POST …/cloud-teardown`, `cloud_teardown_status` and
   `cloud_teardown_request`). It cannot be cancelled, and while it runs nobody
-  in the organization can create, resume or unarchive a workspace, so nothing
-  is sent before a disposition is chosen and the organization's name is
-  typed. A pending archive can only be escalated to deleting now. The section
+  in the organization can create, resume or unarchive a workspace. So the
+  confirmation first shows how many workspaces it takes, counted by the
+  server (`GET …/cloud-teardown/preview`, `cloud_teardown_preview`) because
+  an admin's own list leaves out other people's private workspaces, and says
+  so ("including 3 private ones that belong to other people"); it cannot be
+  started when the count cannot be read. Archive, the choice that can still
+  be undone, is preselected, and nothing is sent before the organization's
+  name is typed. The confirmation is for one organization at one account
+  context: the request carries both, and `request_teardown` sends nothing
+  (`account_context_changed`) if the active organization or the context
+  changed since it was opened, so a name typed for one organization never
+  tears down another; the page also drops an open confirmation when either
+  changes. A pending archive can only be escalated to deleting now. The section
   shows the deadline, what still remains at the providers (with each
   resource's own deadline and whether its cleanup is unresolved), that
   session runtimes and build templates are not removed by it, and released
@@ -119,20 +137,66 @@ It says nothing when the server said nothing (an older server, a workspace
 that was not running), and nothing once another operation (a failed resume)
 is the latest: the list carries only the latest operation.
 
+## A full disk (PRO-33)
+
+A workspace whose disk fills up fails in ways that look like something else:
+a save that is refused, a commit that stops, an agent that ends mid-turn. The
+runtime reports what is left and the desktop says so.
+
+- Runtime: `lifecycle.resources` (`src-tauri/src/cloud_resources.rs`, in
+  `lifecycle/1`, for anyone who may look) answers
+  `{ v, memory: { totalBytes, availableBytes } | null, storage: { totalBytes,
+  availableBytes, totalInodes, availableInodes } | null, observedAt }`. Storage
+  is one `statvfs` of the workspace root, counting what an unprivileged
+  process may still write; memory is `MemTotal`/`MemAvailable` from
+  `/proc/meminfo`. It holds no state and decides nothing: the thresholds are
+  the client's. A runtime from before it answers `method_not_found`.
+- Desktop: `src/lib/cloudResources.ts` reads it over the connection a session
+  already holds, on connect and every 60 s, and never connects or wakes for
+  it; a workspace that is not connected is not asked and nothing is shown for
+  it. `CloudResourceNotice` (in a cloud session and in the workspace view)
+  says **full** below 128 MB free or with no inodes left ("Saves, commits and
+  agent work fail until space is freed … Nothing already on the disk is
+  lost"), and **almost full** below both 5% and 2 GB, or below 1% of inodes.
+  It clears by itself once space is freed.
+
+### Low memory during a turn
+
+While an agent turn runs in the session being shown (a tab working or
+waiting for an answer), the same reading is taken every 10 s instead of 60 s.
+Memory is low when `MemAvailable` is under both 10% of RAM and 512 MiB, the
+rule the server's worker uses before a relaunch (saas contract 9.5). Three low
+readings in a row show "The workspace's machine is almost out of memory (… free
+of …). The agent, or a program it runs, may be stopped by the machine." One
+reading with room breaks the run and clears the warning; so do the end of the
+turn and the loss of the connection. Low memory with nothing running is not
+warned about.
+
+Not done: the server is not told, so the workspace list and an admin's
+diagnostics do not show a full disk to someone who is not connected to it,
+and a stopped workspace's disk is not known.
+
 ## Tests
 
 - `src/components/settings/OrganizationCloudTeardown.test.tsx`,
   `ProviderControls.test.tsx`: nothing is sent without a disposition and the
-  typed name; escalation only; what remains; a finished teardown; a member;
-  an unknown outcome; archive on disconnect and its deadline.
-
-- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: dirty files,
+  typed name; the count shown, private workspaces included; a context change
+  while the confirmation is open; escalation only; what remains; a finished
+  teardown; a member; an unknown outcome; archive on disconnect and its
+  deadline.
+- `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: what a resume
+  brings back, per provider; dirty files,
   unpushed commits, an open PR and a running turn before an archive; force
   only once confirmed; a refusal for new work; an offline workspace; a
   provider without permanent delete; cleanup progress; retry after a
   provider failure.
 - `src/components/layout/cloud/CloudSections.test.tsx`: the archive list,
   unarchive without compute, a failed archive, a tombstone's notice.
+- `src/lib/cloudResources.test.tsx`, `src-tauri/src/cloud_resources.rs`,
+  `src-tauri/src/remote/server_tests.rs`: the disk levels and their wording;
+  only a connected workspace is asked; the notice follows the disk and goes
+  with the connection; a runtime that does not report is asked once; the
+  low-memory rule, three in a row, only during a turn.
 - `src/lib/cloudLifecycle.test.ts`: the last-saved line; purging a deleted workspace and only it;
   an already-purged tombstone; a failed native purge retried.
 - `src-tauri/src/cloud_workspaces.rs`: the header, force, the archive
