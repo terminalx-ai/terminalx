@@ -207,9 +207,13 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
-  /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
-  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null }),
+  /**
+   * Archive (30-day trash by default). `force` only after the person confirmed
+   * stopping running agent work. `retentionDays` only when the person chose a
+   * period the disposition facts offer; a server without the choice refuses it.
+   */
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null, retentionDays?: number | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null, retentionDays: retentionDays ?? null }),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
   cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
@@ -592,6 +596,8 @@ export interface CloudWorkspaceDisposition {
   /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
   providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
+  /** The periods an archive may ask for instead; absent or empty from a server that takes no choice. */
+  archiveRetentionChoices?: number[];
   blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
   removedOnDelete: string[];
   runtimeFacts: { available: boolean };
