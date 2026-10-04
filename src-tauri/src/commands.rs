@@ -2171,10 +2171,19 @@ pub fn cloud_control_setting() -> bool {
     crate::cloud_control::enabled()
 }
 
+/// What became of a request to change the switch: what it is now and, when
+/// it did not turn on, why (`declined`, `backoff:<seconds>`, `busy`, `expired`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudControlSettingChange {
+    enabled: bool,
+    refused: Option<String>,
+}
+
 /// Turn the switch on or off. Turning it on asks the person in a native
 /// dialog first, which neither the window nor computer use can answer.
 #[tauri::command]
-pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<CloudControlSettingChange, String> {
     if enabled && !crate::cloud_control::enabled() {
         let answer = cloud_control_question(
             app,
@@ -2184,43 +2193,75 @@ pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> 
         )
         .await;
         if answer != crate::cloud_control::Answer::Accepted {
-            return Ok(false);
+            return Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: Some(answer.wire()) });
         }
     }
     crate::cloud_control::set_enabled(enabled)?;
-    Ok(crate::cloud_control::enabled())
+    Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: None })
 }
 
 /// Ask the person about a cloud request that came from the command line.
-/// Answers `accepted`, `declined`, or `backoff:<seconds>` when they refused a
-/// moment ago and are not asked again yet.
+/// Answers `accepted`, `declined`, `expired` (not answered in time),
+/// `busy` (another question is on screen) or `backoff:<seconds>` (they
+/// refused or left one unanswered a moment ago and are not asked again yet).
 #[tauri::command]
 pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label: String) -> String {
     let message = format!("A terminalx command (run by you or by an agent in a local session) asks to {what}");
     cloud_control_question(app, "Cloud workspace request".to_string(), message, ok_label).await.wire()
 }
 
-/// One native question. "Refuse" is the first, default button, so Return
-/// refuses; agreeing takes a click on the other one. Shown off the main
-/// thread; while it is open, computer-use actions are refused.
+/// One native question, one at a time.
+///
+/// - **Only the agree button agrees.** The dialog reports which button was
+///   pressed; anything else (Refuse, a dismissal, a result this code does not
+///   know) is a refusal. "Refuse" is the first, default button, so Return
+///   refuses.
+/// - **It expires.** The caller is answered after [`QUESTION_TTL`] whether or
+///   not the person has answered. An expired request is dropped: the dialog
+///   may still be on screen (it cannot be closed from here), and pressing
+///   anything on it later does nothing. No other question is shown until it
+///   is gone, and the back-off starts when it expired.
+/// - Computer-use actions are refused for as long as the dialog is on screen.
+///
+/// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
     let ok_label: String = ok_label.chars().filter(|c| !c.is_control()).take(40).collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::cloud_control::confirm_with(|| {
-            let refused = app
-                .dialog()
-                .message(message)
-                .title(title)
-                .kind(MessageDialogKind::Warning)
-                .buttons(MessageDialogButtons::OkCancelCustom("Refuse".to_string(), ok_label))
-                .blocking_show();
-            !refused
-        })
-    })
-    .await
-    .unwrap_or(crate::cloud_control::Answer::Declined)
+    if let Err(answer) = question_begin(std::time::Instant::now()) {
+        return answer;
+    }
+    let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let agree = ok_label.clone();
+    let mut dialog = tauri::async_runtime::spawn_blocking(move || {
+        let _open = Confirming::begin();
+        let pressed = app
+            .dialog()
+            .message(message)
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Refuse".to_string(), ok_label))
+            .blocking_show_with_result();
+        cloud_control_agreed(&pressed, &agree)
+    });
+    match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
+        Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
+        Err(_) => {
+            let answer = question_expired(std::time::Instant::now());
+            // The dialog is still up. Wait for it to go, ignoring what was pressed.
+            tauri::async_runtime::spawn(async move {
+                let _ = dialog.await;
+                question_closed();
+            });
+            answer
+        }
+    }
+}
+
+/// Whether the dialog's result is the explicit agree button, and nothing else.
+fn cloud_control_agreed(pressed: &tauri_plugin_dialog::MessageDialogResult, agree: &str) -> bool {
+    matches!(pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == agree && label != "Refuse")
 }
 
 /// The window's answer to a `cloud_control_request` event (PRO-40).
@@ -2457,6 +2498,26 @@ pub fn github_repo(project_path: String) -> Option<String> {
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn only_the_agree_button_agrees_to_a_cloud_request() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Resume and send".into()), "Resume and send"));
+        // Everything else is a refusal: the Refuse button, a dismissal, and any result this code does not expect.
+        for pressed in [
+            MessageDialogResult::Custom("Refuse".into()),
+            MessageDialogResult::Custom("Something else".into()),
+            MessageDialogResult::Custom(String::new()),
+            MessageDialogResult::Cancel,
+            MessageDialogResult::No,
+            MessageDialogResult::Ok,
+            MessageDialogResult::Yes,
+        ] {
+            assert!(!super::cloud_control_agreed(&pressed, "Resume and send"), "{pressed:?}");
+        }
+        // A caller cannot make "Refuse" the agree button.
+        assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom("Refuse".into()), "Refuse"));
+    }
+
     use std::path::Path;
     use std::process::Command;
 

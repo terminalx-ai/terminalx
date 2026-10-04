@@ -158,11 +158,19 @@ signed-in person's account, and any agent in a local session can run them. They 
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
 cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
 command that starts billed compute or stops a workspace is still confirmed by the person in a
-native dialog first, and answers `declined` if they refuse. After a refusal the app does not ask
-again for a while (a minute, growing to fifteen): the command answers `declined` at once. While
-such a dialog is open, `terminalx computer` actions answer `confirmation_pending`: only the
-person can answer it. Do not try to work around any of this, and do not answer it for them: ask
-the person.
+native dialog first. Only its agree button agrees: Refuse, closing it, or no answer within 40
+seconds all answer `declined`, and answering an expired dialog later does nothing. One question
+is shown at a time. After a refusal or an unanswered question the app does not ask again for a
+while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
+open, `terminalx computer` actions answer `confirmation_pending`: only the person can answer it.
+Do not try to work around any of this, and do not answer it for them: ask the person.
+
+What the confirmation is and is not: it stops mistakes, and an agent that only uses this app. It
+does not stop a hostile program with a shell on this computer. Such a program can talk to the
+computer-use helper directly, start its own, or use the system's own scripting to press a
+button, without going through `terminalx computer` at all; the app cannot prevent that from
+inside. The person's switch and their answer are the control, not a security boundary against
+software already running as them.
 
 `send` to a workspace the app is not connected to reads the workspace list again first. If the
 workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the

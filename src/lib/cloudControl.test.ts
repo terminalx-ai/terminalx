@@ -33,7 +33,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, open: vi.fn() }));
 vi.mock("@/lib/cloudControlNative", () => ({
   cloudControlNative: {
     setting: vi.fn(async () => false),
-    setSetting: vi.fn(async (enabled: boolean) => enabled),
+    setSetting: vi.fn(async (enabled: boolean) => ({ enabled, refused: null })),
     confirm: async (what: string, okLabel: string) =>
       (await mocks.ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" })) ? "accepted" : "declined",
   },
@@ -66,6 +66,8 @@ vi.mock("@/lib/cloudNewSession", async (importOriginal) => {
 });
 
 const { answerCloudControl, handleCloudControl, waitForCloudTab, CloudControlError, setCloudControlPolicy, setCloudControlEnabled, cloudControlEnabled, CLOUD_CONTROL_POLICY, WAIT_CHUNK_SECONDS } = await import("./cloudControl");
+// The lifecycle refusal is the app's own sentence, whatever it currently says (PRO-73 rewords it).
+const { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON } = await import("@/lib/cloudCollab");
 const catalog = await import("@/lib/cloudCatalog");
 const connections = await import("@/lib/cloudConnections");
 const newSession = await import("@/lib/cloudNewSession");
@@ -528,7 +530,7 @@ describe("creating a session", () => {
   it("is refused to a plain member, as the project's + is, before anything is asked of the server", async () => {
     signIn({ [ORG]: "member", [OTHER]: "member" });
     const refused = await refusal("sessions.create", { project: PROJECT, prompt: "go", wake: true, confirmSpend: true });
-    expect(refused).toEqual({ code: "forbidden", message: "Only an organization owner or admin can start a new cloud session", recovery: null });
+    expect(refused).toEqual({ code: "forbidden", message: NEW_SESSION_ADMIN_REASON, recovery: null });
     expect(newSession.startInWorkspace).not.toHaveBeenCalled();
     expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
     expectNoWake();
@@ -572,7 +574,7 @@ describe("stop and resume", () => {
   it("is refused to anyone the workspace menu would not offer it to, without calling the server", async () => {
     for (const you of [{ role: "driver", canApprove: true, canManageShares: true }, { role: "viewer", canApprove: false, canManageShares: false }, { role: "none", canApprove: false, canManageShares: false }]) {
       await list(ORG, [item("ws-1", ORG, { you }), item("ws-stopped", ORG, { state: "suspended", you })]);
-      expect(await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).toMatchObject({ code: "forbidden", message: "Only an organization owner or admin can stop, archive or delete a cloud workspace." });
+      expect(await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).toMatchObject({ code: "forbidden", message: `${LIFECYCLE_ADMIN_REASON}.` });
       expect(await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` })).toMatchObject({ code: "forbidden" });
     }
     expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
@@ -747,21 +749,29 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
   });
 
   describe("the switch is native code's to keep", () => {
-    it("shows what native code says after asking it to change: a refused turn-on leaves it off", async () => {
+    it("shows what native code says after asking it to change, and says why it did not turn on", async () => {
       const { requestCloudControlSetting, loadCloudControlSetting } = await import("./cloudControl");
       const native = await import("@/lib/cloudControlNative");
+      const set = vi.mocked(native.cloudControlNative.setSetting);
       setCloudControlEnabled(false);
-      // The person refused the native dialog: native answers "still off".
-      vi.mocked(native.cloudControlNative.setSetting).mockResolvedValueOnce(false);
-      expect(await requestCloudControlSetting(true)).toBe(false);
+      // The person refused the native dialog.
+      set.mockResolvedValueOnce({ enabled: false, refused: "declined" });
+      expect(await requestCloudControlSetting(true)).toEqual({ enabled: false, reason: "Not turned on: you refused the confirmation." });
       expect(cloudControlEnabled()).toBe(false);
-      expect(native.cloudControlNative.setSetting).toHaveBeenLastCalledWith(true);
+      expect(set).toHaveBeenLastCalledWith(true);
+      // Asked again too soon, not answered, or another question is up: each says so, never a silent no.
+      set.mockResolvedValueOnce({ enabled: false, refused: "backoff:95" });
+      expect((await requestCloudControlSetting(true)).reason).toBe("Not turned on: a confirmation was refused or left unanswered a moment ago. Try again in 2 minutes.");
+      set.mockResolvedValueOnce({ enabled: false, refused: "expired" });
+      expect((await requestCloudControlSetting(true)).reason).toBe("Not turned on: the confirmation was not answered in time.");
+      set.mockResolvedValueOnce({ enabled: false, refused: "busy" });
+      expect((await requestCloudControlSetting(true)).reason).toContain("another TerminalX question is waiting");
       // They agreed.
-      vi.mocked(native.cloudControlNative.setSetting).mockResolvedValueOnce(true);
-      expect(await requestCloudControlSetting(true)).toBe(true);
-      // A native call that fails changes nothing shown.
-      vi.mocked(native.cloudControlNative.setSetting).mockRejectedValueOnce(new Error("unwritable"));
-      expect(await requestCloudControlSetting(false)).toBe(true);
+      set.mockResolvedValueOnce({ enabled: true, refused: null });
+      expect(await requestCloudControlSetting(true)).toEqual({ enabled: true, reason: null });
+      // A native call that fails changes nothing shown, and says so.
+      set.mockRejectedValueOnce(new Error("unwritable"));
+      expect(await requestCloudControlSetting(false)).toEqual({ enabled: true, reason: "The setting could not be changed. Try again." });
       // At boot it is read from native code; unreadable means off.
       vi.mocked(native.cloudControlNative.setting).mockRejectedValueOnce(new Error("no file"));
       expect(await loadCloudControlSetting()).toBe(false);
@@ -776,12 +786,34 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
       const confirm = vi.spyOn(native.cloudControlNative, "confirm").mockResolvedValue("backoff:95");
       const refused = await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` });
       expect(refused.code).toBe("declined");
-      expect(refused.message).toContain("refused in the TerminalX window a moment ago");
+      expect(refused.message).toContain("refused or left unanswered in the TerminalX window a moment ago");
       expect(refused.recovery).toContain("2 minutes");
       expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
-      // A dialog that could not be shown at all is a refusal too.
-      confirm.mockRejectedValue(new Error("no window"));
-      expect((await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` })).code).toBe("declined");
+      confirm.mockRestore();
+    });
+
+    it("acts only on an explicit yes: no answer in time, a question already on screen, a dialog that failed, and any other answer all do nothing", async () => {
+      setCloudControlPolicy("both");
+      setCloudControlEnabled(true);
+      const native = await import("@/lib/cloudControlNative");
+      const confirm = vi.spyOn(native.cloudControlNative, "confirm");
+      for (const [answer, words] of [
+        ["expired", "did not answer in the TerminalX window in time"],
+        ["busy", "Another request is waiting"],
+        ["declined", "was refused in the TerminalX window"],
+        ["", "was refused in the TerminalX window"],
+        ["yes", "was refused in the TerminalX window"],
+      ] as const) {
+        confirm.mockResolvedValueOnce(answer as never);
+        const refused = await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+        expect(refused.code).toBe("declined");
+        expect(refused.message).toContain(words);
+      }
+      confirm.mockRejectedValueOnce(new Error("no window"));
+      expect((await refusal("stop", { workspace: `cloud:${ORG}:ws-1`, confirmed: true })).code).toBe("declined");
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceSuspend).not.toHaveBeenCalled();
+      expectNoWake();
       confirm.mockRestore();
     });
   });

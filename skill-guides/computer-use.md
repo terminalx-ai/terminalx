@@ -110,6 +110,7 @@ printf '%s' "$TEXT" | terminalx computer set-value --app <app> --element-index <
 - Coordinates are window-local; use coordinates from the latest screenshot/state for the same target window.
 - Password managers are blocked (`app_blocked`); secure text fields are never read.
 - TerminalX's own confirmations are the person's to answer. While one is open, every action (click, type, key, paste, set-value, scroll, drag, secondary action) on any app answers `confirmation_pending`; reading state still works. Never answer one, and never turn on a TerminalX setting that asks for the person's confirmation.
+  This pause covers actions sent through `terminalx computer`. It is there so that an agent does not answer by accident; it is not a barrier against software that drives the screen by other means.
 
 ## Screenshots
 

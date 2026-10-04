@@ -127,6 +127,7 @@ function GeneralTab() {
   const prefs = usePrefs();
   // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
   const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
+  const [cloudControlReason, setCloudControlReason] = useState<string | null>(null);
   useEffect(() => {
     void loadCloudControlSetting();
   }, []);
@@ -156,8 +157,23 @@ function GeneralTab() {
         <SettingRow
           label={CLOUD_CONTROL_SETTING}
           description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
-          control={<Switch aria-label={CLOUD_CONTROL_SETTING} checked={cloudControlOn} onCheckedChange={(v) => void requestCloudControlSetting(v)} />}
+          control={
+            <Switch
+              aria-label={CLOUD_CONTROL_SETTING}
+              checked={cloudControlOn}
+              onCheckedChange={(v) => {
+                setCloudControlReason(null);
+                void requestCloudControlSetting(v).then((result) => setCloudControlReason(result.reason));
+              }}
+            />
+          }
         />
+      )}
+      {/* Why the switch did not turn on (refused, not answered, or asked again too soon): never a silent no. */}
+      {CLOUD_CONTROL_HAS_SETTING && cloudControlReason && (
+        <p role="status" data-testid="cloud-control-reason" className="pb-2 text-[11px] text-amber-600 dark:text-amber-400">
+          {cloudControlReason}
+        </p>
       )}
       <SettingRow
         label="Command line tool"

@@ -47,8 +47,9 @@ import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable
  * - `sessions.create` follows the new-session form: a running workspace takes
  *   the session; a stopped one is only woken with `wake`, and a new machine is
  *   only created with `confirmSpend`.
- * - `stop` and `resume` are the workspace menu's: offered to owners and
- *   admins only, and the server enforces the same.
+ * - `stop` and `resume` are the workspace menu's: offered to whoever manages
+ *   the workspace (its creator, or an organization owner or admin; PRO-73),
+ *   and the server enforces the same.
  */
 
 export const CLOUD_CONTROL_VERSION = 1;
@@ -125,13 +126,39 @@ export async function loadCloudControlSetting(): Promise<boolean> {
   return settingOn;
 }
 
+/** Why a question was not answered with "yes", in words the person or a caller can act on. */
+export function refusalWords(answer: string): { message: string; recovery: string } {
+  if (answer.startsWith("backoff:")) {
+    const minutes = Math.max(1, Math.ceil(Number(answer.slice("backoff:".length)) / 60));
+    return {
+      message: "A request like this was refused or left unanswered in the TerminalX window a moment ago, so the person is not asked again yet.",
+      recovery: `Do not retry now. Ask the person, or try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+    };
+  }
+  if (answer === "busy") return { message: "Another request is waiting for the person's answer in the TerminalX window.", recovery: "Do not retry now: ask the person to answer the question on their screen." };
+  if (answer === "expired") return { message: "The person did not answer in the TerminalX window in time, so the request was dropped. Answering it later does nothing.", recovery: "Do not retry in a loop: ask the person, then run the command again." };
+  return { message: "The request was refused in the TerminalX window.", recovery: "Do not retry: ask the person instead." };
+}
+
 /**
  * The Settings switch. Turning it on is confirmed by the person in a native
- * dialog, which this window cannot answer; the result is what it then is.
+ * dialog, which this window cannot answer; the result is what it then is,
+ * and when it did not turn on, the reason to show beside the switch.
  */
-export async function requestCloudControlSetting(enabled: boolean): Promise<boolean> {
-  setCloudControlEnabled(await cloudControlNative.setSetting(enabled).catch(() => settingOn));
-  return settingOn;
+export async function requestCloudControlSetting(enabled: boolean): Promise<{ enabled: boolean; reason: string | null }> {
+  const change = await cloudControlNative.setSetting(enabled).catch(() => null);
+  if (!change) return { enabled: settingOn, reason: "The setting could not be changed. Try again." };
+  setCloudControlEnabled(change.enabled);
+  if (!enabled || change.enabled || !change.refused) return { enabled: settingOn, reason: null };
+  const words =
+    change.refused === "declined"
+      ? "Not turned on: you refused the confirmation."
+      : change.refused === "expired"
+        ? "Not turned on: the confirmation was not answered in time."
+        : change.refused === "busy"
+          ? "Not turned on: another TerminalX question is waiting for your answer. Answer it first."
+          : `Not turned on: a confirmation was refused or left unanswered a moment ago. ${refusalWords(change.refused).recovery.replace("Do not retry now. Ask the person, or try", "Try")}`;
+  return { enabled: settingOn, reason: words };
 }
 
 /** With the setting: nothing of the cloud is reachable from the command line until the person allows it. */
@@ -152,20 +179,22 @@ function assertAllowed() {
  * person still decides each time. Only under `"setting"` alone is nothing
  * asked.
  *
- * The question is a native dialog (`cloud_control_confirm`): its default
- * button refuses, computer use is paused while it is open, and after a
- * refusal the app does not ask again for a while, so a caller cannot answer
- * it itself or wear the person down.
+ * The question is a native dialog (`cloud_control_confirm`): only its agree
+ * button agrees (Refuse, a dismissal and no answer within 40 seconds all
+ * decline), its default button refuses, one is shown at a time, the app's
+ * computer use is paused while it is open, and after a refusal or an
+ * unanswered question the app does not ask again for a while. That stops
+ * mistakes and nagging. It does not stop a hostile agent with a shell, which
+ * can reach the computer-use helper or the system's own scripting without
+ * going through this app (see skill-guides/terminalx-cli.md).
  */
 async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   if (policy === "setting") return;
   const answer = await cloudControlNative.confirm(what, okLabel).catch(() => "declined" as const);
+  // Only "accepted" is agreement: a refusal, no answer in time, a question already on screen, and anything unexpected all decline.
   if (answer === "accepted") return;
-  if (answer.startsWith("backoff:")) {
-    const minutes = Math.max(1, Math.ceil(Number(answer.slice("backoff:".length)) / 60));
-    throw new CloudControlError("declined", "A request like this was refused in the TerminalX window a moment ago, so the person is not asked again yet.", `Do not retry now. Ask the person, or try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`);
-  }
-  throw new CloudControlError("declined", "The request was refused in the TerminalX window.", "Do not retry: ask the person instead.");
+  const { message, recovery } = refusalWords(answer);
+  throw new CloudControlError("declined", message, recovery);
 }
 export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
 

@@ -13,13 +13,18 @@ import { invoke } from "@tauri-apps/api/core";
  *   open the app refuses computer-use actions, and after a refusal it does
  *   not ask again for a while.
  */
-export type CloudControlAnswer = "accepted" | "declined" | `backoff:${number}`;
+export type CloudControlAnswer = "accepted" | "declined" | "expired" | "busy" | `backoff:${number}`;
+/** What the switch is after a request to change it, and why it did not turn on (an answer other than accepted). */
+export interface CloudControlSettingChange {
+  enabled: boolean;
+  refused: CloudControlAnswer | null;
+}
 
 export const cloudControlNative = {
   /** Whether the person lets the command line use cloud workspaces. */
   setting: () => invoke<boolean>("cloud_control_setting"),
-  /** Ask to turn it on (the person confirms in a native dialog) or turn it off. Resolves to what it is afterwards. */
-  setSetting: (enabled: boolean) => invoke<boolean>("cloud_control_set_setting", { enabled }),
+  /** Ask to turn it on (the person confirms in a native dialog) or turn it off. Resolves to what it is afterwards, and why if it did not turn on. */
+  setSetting: (enabled: boolean) => invoke<CloudControlSettingChange>("cloud_control_set_setting", { enabled }),
   /** Ask the person about one request: "…asks to <what>". */
   confirm: (what: string, okLabel: string) => invoke<CloudControlAnswer>("cloud_control_confirm", { what, okLabel }),
 };

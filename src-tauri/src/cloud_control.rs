@@ -177,24 +177,38 @@ impl Drop for Confirming {
     }
 }
 
+/// How long a question waits for the person. The control socket gives a
+/// command 50 s, so the caller hears "not answered" before it gives up, and
+/// an answer given after this moment does nothing.
+pub const QUESTION_TTL: Duration = Duration::from_secs(40);
+
 #[derive(Default)]
-struct Refusals {
+struct Questions {
+    /// A dialog is on screen (answered or not). Only one at a time.
+    open: bool,
     strikes: u32,
     until: Option<Instant>,
 }
 
-fn refusals() -> &'static Mutex<Refusals> {
-    static REFUSALS: OnceLock<Mutex<Refusals>> = OnceLock::new();
-    REFUSALS.get_or_init(Mutex::default)
+fn questions() -> &'static Mutex<Questions> {
+    static QUESTIONS: OnceLock<Mutex<Questions>> = OnceLock::new();
+    QUESTIONS.get_or_init(Mutex::default)
 }
 
 /// What became of a question.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Answer {
+    /// The person pressed the button that agrees. Nothing else is agreement.
     Accepted,
     Declined,
-    /// Not asked: the person refused a moment ago. Seconds until a question may be shown again.
+    /// Not asked: the person refused, or left a question unanswered, a moment
+    /// ago. Seconds until a question may be shown again.
     Backoff(u64),
+    /// Not asked: another question is still on screen.
+    Busy,
+    /// Asked and not answered in time. The request is dropped: answering the
+    /// dialog later does nothing.
+    Expired,
 }
 
 impl Answer {
@@ -203,35 +217,85 @@ impl Answer {
             Self::Accepted => "accepted".into(),
             Self::Declined => "declined".into(),
             Self::Backoff(seconds) => format!("backoff:{seconds}"),
+            Self::Busy => "busy".into(),
+            Self::Expired => "expired".into(),
         }
     }
 }
 
-/// Ask the person with `ask` (true: they agreed), unless they refused
-/// recently. Computer use is paused for as long as `ask` runs.
-pub fn confirm_with(ask: impl FnOnce() -> bool) -> Answer {
-    confirm_at(Instant::now(), ask)
+fn strike(questions: &mut Questions, now: Instant) {
+    questions.strikes = questions.strikes.saturating_add(1);
+    let wait = BACKOFF_FIRST.saturating_mul(1 << (questions.strikes - 1).min(4)).min(BACKOFF_MAX);
+    questions.until = Some(now + wait);
 }
 
-fn confirm_at(now: Instant, ask: impl FnOnce() -> bool) -> Answer {
-    if let Some(until) = refusals().lock().unwrap().until {
+/// Before showing a question: refused at once while another is on screen, or
+/// while backing off. `Ok` means this caller now owns the one open question
+/// and must end it with [`question_answered`], or [`question_expired`] then
+/// [`question_closed`].
+pub fn question_begin(now: Instant) -> Result<(), Answer> {
+    let mut questions = questions().lock().unwrap();
+    if questions.open {
+        return Err(Answer::Busy);
+    }
+    if let Some(until) = questions.until {
         if until > now {
-            return Answer::Backoff(until.duration_since(now).as_secs().max(1));
+            return Err(Answer::Backoff(until.duration_since(now).as_secs().max(1)));
         }
+    }
+    questions.open = true;
+    Ok(())
+}
+
+/// The person answered in time. Only `agreed` (the explicit agree button) is
+/// agreement; a refusal counts toward the back-off.
+pub fn question_answered(agreed: bool, now: Instant) -> Answer {
+    let mut questions = questions().lock().unwrap();
+    questions.open = false;
+    if agreed {
+        questions.strikes = 0;
+        questions.until = None;
+        return Answer::Accepted;
+    }
+    strike(&mut questions, now);
+    Answer::Declined
+}
+
+/// Nobody answered within [`QUESTION_TTL`]. The request is dropped and counts
+/// like a refusal: the back-off starts now, with the first unanswered
+/// question. The dialog may still be on screen, so the question stays "open"
+/// (no other is shown) until [`question_closed`].
+pub fn question_expired(now: Instant) -> Answer {
+    strike(&mut questions().lock().unwrap(), now);
+    Answer::Expired
+}
+
+/// The dialog of an expired question has gone from the screen. Whatever was
+/// pressed on it is ignored.
+pub fn question_closed() {
+    questions().lock().unwrap().open = false;
+}
+
+/// One whole question for a caller that can wait for the answer: `ask`
+/// returns true only for the explicit agree button. Computer use is paused
+/// while `ask` runs. Used by tests; the app's command drives the same steps
+/// around a dialog it cannot wait on forever.
+pub fn confirm_with(ask: impl FnOnce() -> bool) -> Answer {
+    let start = Instant::now();
+    if let Err(answer) = question_begin(start) {
+        return answer;
     }
     let agreed = {
         let _open = Confirming::begin();
         ask()
     };
-    let mut refusals = refusals().lock().unwrap();
-    if agreed {
-        *refusals = Refusals::default();
-        return Answer::Accepted;
+    let now = Instant::now();
+    if now.duration_since(start) > QUESTION_TTL {
+        question_expired(now);
+        question_closed();
+        return Answer::Expired;
     }
-    refusals.strikes = refusals.strikes.saturating_add(1);
-    let wait = BACKOFF_FIRST.saturating_mul(1 << (refusals.strikes - 1).min(4)).min(BACKOFF_MAX);
-    refusals.until = Some(now + wait);
-    Answer::Declined
+    question_answered(agreed, now)
 }
 
 fn setting_path() -> Option<std::path::PathBuf> {
@@ -353,36 +417,56 @@ mod tests {
     }
 
     #[test]
-    fn a_question_pauses_computer_use_while_it_is_open_and_backs_off_after_a_refusal() {
+    fn a_question_is_one_at_a_time_times_out_and_backs_off() {
         // One test: the question state is process-wide.
-        *refusals().lock().unwrap() = Refusals::default();
+        *questions().lock().unwrap() = Questions::default();
         let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+
+        // Open: computer use is paused, and no second question is shown.
         assert!(!confirming());
-        // Open: computer use is paused. Closed again afterwards, whatever the answer.
-        assert_eq!(confirm_at(start, || { assert!(confirming()); true }), Answer::Accepted);
+        assert_eq!(confirm_with(|| { assert!(confirming()); assert_eq!(question_begin(Instant::now()), Err(Answer::Busy)); true }), Answer::Accepted);
         assert!(!confirming());
 
         // Refused: the next request is not shown at all for a minute...
-        assert_eq!(confirm_at(start, || false), Answer::Declined);
-        let mut asked = false;
-        assert_eq!(confirm_at(start + Duration::from_secs(10), || { asked = true; true }), Answer::Backoff(50));
-        assert!(!asked);
+        assert_eq!(question_begin(at(0)), Ok(()));
+        assert_eq!(question_answered(false, at(0)), Answer::Declined);
+        assert_eq!(question_begin(at(10)), Err(Answer::Backoff(50)));
         // ...and a second refusal doubles the wait.
-        assert_eq!(confirm_at(start + Duration::from_secs(61), || false), Answer::Declined);
-        assert!(matches!(confirm_at(start + Duration::from_secs(61 + 100), || true), Answer::Backoff(_)));
-        assert_eq!(confirm_at(start + Duration::from_secs(61 + 121), || true), Answer::Accepted);
+        assert_eq!(question_begin(at(61)), Ok(()));
+        assert_eq!(question_answered(false, at(61)), Answer::Declined);
+        assert!(matches!(question_begin(at(61 + 100)), Err(Answer::Backoff(_))));
+        assert_eq!(question_begin(at(61 + 121)), Ok(()));
         // Agreeing clears the count: the next refusal waits a minute again.
-        assert_eq!(confirm_at(start + Duration::from_secs(200), || false), Answer::Declined);
-        assert_eq!(confirm_at(start + Duration::from_secs(261), || true), Answer::Accepted);
+        assert_eq!(question_answered(true, at(190)), Answer::Accepted);
+        assert_eq!(question_begin(at(200)), Ok(()));
+        assert_eq!(question_answered(false, at(200)), Answer::Declined);
+        assert_eq!(question_begin(at(261)), Ok(()));
+        assert_eq!(question_answered(true, at(261)), Answer::Accepted);
+
+        // Unanswered: the request is dropped at the deadline and the back-off
+        // starts then, with this first unanswered question. While its dialog
+        // is still on screen nothing else is shown; once it closes, the
+        // back-off still holds, and whatever was pressed changed nothing.
+        assert_eq!(question_begin(at(300)), Ok(()));
+        assert_eq!(question_expired(at(340)), Answer::Expired);
+        assert_eq!(question_begin(at(341)), Err(Answer::Busy));
+        question_closed();
+        assert_eq!(question_begin(at(350)), Err(Answer::Backoff(50)));
+        assert_eq!(question_begin(at(401)), Ok(()));
+        assert_eq!(question_answered(true, at(401)), Answer::Accepted);
 
         // It never grows past fifteen minutes.
-        let mut now = start + Duration::from_secs(1_000);
+        let mut now = at(1_000);
         for _ in 0..12 {
-            assert_eq!(confirm_at(now, || false), Answer::Declined);
+            assert_eq!(question_begin(now), Ok(()));
+            assert_eq!(question_answered(false, now), Answer::Declined);
             now += BACKOFF_MAX + Duration::from_secs(1);
         }
-        assert_eq!(confirm_at(now, || true), Answer::Accepted);
-        assert_eq!(Answer::Backoff(7).wire(), "backoff:7");
-        *refusals().lock().unwrap() = Refusals::default();
+        assert_eq!(question_begin(now), Ok(()));
+        assert_eq!(question_answered(true, now), Answer::Accepted);
+        assert_eq!([Answer::Backoff(7).wire(), Answer::Busy.wire(), Answer::Expired.wire()], ["backoff:7", "busy", "expired"]);
+        assert!(QUESTION_TTL < DEFAULT_TIMEOUT, "the caller must hear \"not answered\" before the socket gives up");
+        *questions().lock().unwrap() = Questions::default();
     }
 }
