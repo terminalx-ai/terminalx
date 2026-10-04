@@ -24,7 +24,10 @@
 //! repositories and the workspace's own branch. The runtime sets each one up
 //! once and remembers it in `checkout.json`, so a later boot never switches
 //! a person's branch back or clones again what they removed. No agent is
-//! started and nothing is reported.
+//! started. What became of each repository is reported to the server (its
+//! path, `ready` or `failed`, and the failure's category; never Git's
+//! output), so a failed clone reaches the person; and while one failed for
+//! a reason that may pass, the runtime claims and tries again by itself.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,7 +47,17 @@ pub const MAX_REPOSITORIES: usize = 5;
 /// Sent with the claim (the header `cloud_bootstrap` uses on refresh): this
 /// runtime clones the repositories of a workspace that has no Environment
 /// image. A server that does not know it answers as before.
-pub const CLAIM_CAPABILITIES: &str = "launch-clone-v1";
+///
+/// `launch-checkout-v1`: this runtime also sets up the `checkout` plan (the
+/// repositories without a first prompt) and reports on it. It is its own
+/// token because runtimes released with only `launch-clone-v1` ignore that
+/// plan, and the server must be able to tell.
+pub const CLAIM_CAPABILITIES: &str = "launch-clone-v1,launch-checkout-v1";
+/// A checkout that failed is tried again after these waits, the last one
+/// repeating: access granted later is picked up without a restart.
+const CHECKOUT_RETRY: [Duration; 4] = [Duration::from_secs(60), Duration::from_secs(5 * 60), Duration::from_secs(15 * 60), Duration::from_secs(30 * 60)];
+/// Failures that waiting cannot mend: the person has to act in the workspace.
+const CHECKOUT_FINAL: [&str; 3] = [PATH_OCCUPIED, REPOSITORY_EMPTY, "payload-invalid"];
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 const GITHUB: &str = "https://github.com";
 const GITHUB_PROVIDER: &str = "github";
@@ -145,6 +158,27 @@ pub struct CheckoutPlan {
     pub repositories: Vec<Repository>,
 }
 
+/// What became of one repository of a checkout plan, as reported to the server.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutResult {
+    pub path: String,
+    /// `ready` or `failed`.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+impl CheckoutResult {
+    fn ready(repository: &Repository) -> Self {
+        Self { path: repository.path.clone(), state: "ready", category: None }
+    }
+
+    fn failed(repository: &Repository, category: &str) -> Self {
+        Self { path: repository.path.clone(), state: "failed", category: Some(category.into()) }
+    }
+}
+
 /// What one claim answered.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Claimed {
@@ -232,6 +266,11 @@ pub trait LaunchApi: Send + Sync {
     /// or settled by the server): the launch must stop.
     fn phase(&self, launch_id: &str, phase: &str) -> Result<Option<String>, CallError>;
     fn complete(&self, launch_id: &str, outcome: &Outcome) -> Result<Completed, CallError>;
+    /// Tell the server what became of each repository of a checkout plan,
+    /// so a failure reaches the person. The default says nothing.
+    fn report_checkout(&self, _results: &[CheckoutResult]) -> Result<(), CallError> {
+        Ok(())
+    }
 }
 
 impl LaunchApi for HttpMailboxApi {
@@ -252,6 +291,15 @@ impl LaunchApi for HttpMailboxApi {
             // A server without launch intents (§19 is additive).
             (404, _) => Ok(Claimed::default()),
             (status, body) => Err(CallError::Transient(anyhow!("launch claim: HTTP {status} {}", error_code(&body)))),
+        }
+    }
+
+    fn report_checkout(&self, results: &[CheckoutResult]) -> Result<(), CallError> {
+        let body = json!({ "v": 1, "repositories": results });
+        match self.call("POST", "/v1/cloud-workspace-bootstrap/launch-intent/checkout", Some(body))? {
+            // A server from before the report has no such route.
+            (200, _) | (404, _) => Ok(()),
+            (status, body) => Err(CallError::Transient(anyhow!("checkout report: HTTP {status} {}", error_code(&body)))),
         }
     }
 
@@ -426,10 +474,23 @@ impl Launcher {
     /// failures are retried with backoff; a claim with nothing to do ends it.
     pub fn run(&self) {
         let mut failures = 0u32;
+        let mut retries = 0usize;
         loop {
-            match self.pass() {
-                Ok(Pass::None) => return,
-                Ok(Pass::Settled(state)) => {
+            match self.pass_once() {
+                // A repository could not be set up for a reason that may
+                // pass (access not granted yet, the network): claim and try
+                // again later. Nothing runs in between, so the workspace is
+                // free to go idle.
+                Ok((pass, true)) => {
+                    if let Pass::Settled(state) = pass {
+                        log::info!("launch intent settled: {state}");
+                    }
+                    std::thread::sleep(checkout_retry_delay(retries));
+                    retries += 1;
+                    failures = 0;
+                }
+                Ok((Pass::None, false)) => return,
+                Ok((Pass::Settled(state), false)) => {
                     log::info!("launch intent settled: {state}");
                     return;
                 }
@@ -443,22 +504,35 @@ impl Launcher {
     }
 
     pub fn pass(&self) -> Result<Pass, CallError> {
+        self.pass_once().map(|(pass, _)| pass)
+    }
+
+    /// One pass, and whether a checkout failed in a way worth trying again.
+    pub(crate) fn pass_once(&self) -> Result<(Pass, bool), CallError> {
         match self.attempt() {
-            Err(CallError::Settled(state)) => Ok(Pass::Settled(state)),
+            Err(CallError::Settled(state)) => Ok((Pass::Settled(state), false)),
             other => other,
         }
     }
 
-    fn attempt(&self) -> Result<Pass, CallError> {
+    fn attempt(&self) -> Result<(Pass, bool), CallError> {
         let claimed = self.api.claim(&self.incarnation)?;
+        let mut retry = false;
         // Sent only when there is no prompt to deliver; a launch being
         // delivered sets its repositories up itself.
         if let Some(plan) = claimed.checkout.as_ref().filter(|_| claimed.launch.as_ref().is_none_or(|claim| claim.state != "deliver")) {
-            self.ensure_checkout(plan);
+            let results = self.ensure_checkout(plan);
+            retry = results.iter().any(|result| result.state == "failed" && !result.category.as_deref().is_some_and(|category| CHECKOUT_FINAL.contains(&category)));
+            if !results.is_empty() {
+                // The report is for the person; failing to send it changes nothing here.
+                if let Err(error) = self.api.report_checkout(&results) {
+                    log::warn!("checkout report: {error}");
+                }
+            }
         }
-        let Some(claim) = claimed.launch else { return Ok(Pass::None) };
+        let Some(claim) = claimed.launch else { return Ok((Pass::None, retry)) };
         if claim.state != "deliver" {
-            return Ok(Pass::Settled(claim.state));
+            return Ok((Pass::Settled(claim.state), retry));
         }
         let outcome = match self.store.get(&claim.launch_id) {
             // Ran before this restart: report the same outcome again.
@@ -471,30 +545,32 @@ impl Launcher {
             None => self.launch(&claim)?,
         };
         match self.api.complete(&claim.launch_id, &outcome)? {
-            Completed::Settled(state) | Completed::Conflict(state) => Ok(Pass::Settled(state)),
-            Completed::NotFound => Ok(Pass::Settled("not-found".into())),
+            Completed::Settled(state) | Completed::Conflict(state) => Ok((Pass::Settled(state), false)),
+            Completed::NotFound => Ok((Pass::Settled("not-found".into()), false)),
         }
     }
 
     /// Set up every repository of `plan` that is not set up yet: clone it,
     /// then cut the workspace's work branch. One that fails is logged and
     /// left for the next boot; the others are still done.
-    fn ensure_checkout(&self, plan: &CheckoutPlan) {
-        if !valid_branch(&plan.work_branch) || plan.repositories.len() > MAX_REPOSITORIES {
-            log::warn!("checkout plan refused: invalid work branch or too many repositories");
-            return;
-        }
+    fn ensure_checkout(&self, plan: &CheckoutPlan) -> Vec<CheckoutResult> {
         let known = self.store.set_up();
         let pending: Vec<&Repository> = plan.repositories.iter().filter(|repository| repository.clone.is_some() && !known.contains(&repository.path)).collect();
         if pending.is_empty() {
-            return;
+            return Vec::new();
+        }
+        if !valid_branch(&plan.work_branch) || plan.repositories.len() > MAX_REPOSITORIES {
+            log::warn!("checkout plan refused: invalid work branch or too many repositories");
+            return pending.iter().take(MAX_REPOSITORIES).map(|repository| CheckoutResult::failed(repository, "payload-invalid")).collect();
         }
         // Work, like a launch: a clone must not be cut short by idle suspend.
         let _launching = crate::cloud_activity::launching();
         let deadline = std::time::Instant::now() + CLONE_BUDGET;
+        let mut results = Vec::new();
         for repository in pending {
             if let Err(error) = validate_repository(repository, &self.root) {
                 log::warn!("checkout plan: {}/{} refused: {error:#}", repository.owner, repository.name);
+                results.push(CheckoutResult::failed(repository, "payload-invalid"));
                 continue;
             }
             // A checkout from before this runtime kept a record (or made by
@@ -506,19 +582,24 @@ impl Launcher {
                     Ok(()) => {}
                     Err(CloneError::Canceled) => continue,
                     Err(CloneError::Failed { category, detail }) => {
+                        // Git's own words stay in this log; the server gets the category.
                         log::warn!("checkout {}/{}: {category}: {detail}", repository.owner, repository.name);
+                        results.push(CheckoutResult::failed(repository, category));
                         continue;
                     }
                 }
                 if let Err(error) = self.checkout.prepare(repository, &plan.work_branch) {
                     log::warn!("checkout {}/{}: work branch: {error:#}", repository.owner, repository.name);
+                    results.push(CheckoutResult::failed(repository, "branch-create-failed"));
                     continue;
                 }
             }
             if let Err(error) = self.store.mark_set_up(std::slice::from_ref(&repository.path)) {
                 log::warn!("record the checkout of {}: {error:#}", repository.path);
             }
+            results.push(CheckoutResult::ready(repository));
         }
+        results
     }
 
     fn launch(&self, claim: &Claim) -> Result<Outcome, CallError> {
@@ -642,6 +723,11 @@ impl Launcher {
         }
         outcome
     }
+}
+
+/// How long to wait before trying a failed checkout the `attempt`-th time again.
+fn checkout_retry_delay(attempt: usize) -> Duration {
+    CHECKOUT_RETRY[attempt.min(CHECKOUT_RETRY.len() - 1)]
 }
 
 fn validate(claim: &Claim, root: &Path) -> Result<()> {

@@ -16,6 +16,8 @@ struct FakeApi {
     cancel_at: Mutex<Option<&'static str>>,
     /// The plan the server sends when there is no prompt to deliver.
     checkout: Mutex<Option<CheckoutPlan>>,
+    /// Every checkout report received.
+    reports: Mutex<Vec<Vec<CheckoutResult>>>,
 }
 
 impl FakeApi {
@@ -29,6 +31,7 @@ impl FakeApi {
             fail_complete: Mutex::new(0),
             cancel_at: Mutex::new(None),
             checkout: Mutex::new(None),
+            reports: Mutex::new(Vec::new()),
         })
     }
 }
@@ -62,6 +65,11 @@ impl LaunchApi for FakeApi {
         // As the server: never next to a prompt being delivered.
         let checkout = if claim.state == "deliver" { None } else { checkout };
         Ok(Claimed { launch: Some(claim), checkout })
+    }
+
+    fn report_checkout(&self, results: &[CheckoutResult]) -> Result<(), CallError> {
+        self.reports.lock().unwrap().push(results.to_vec());
+        Ok(())
     }
 
     fn phase(&self, _launch_id: &str, phase: &str) -> Result<Option<String>, CallError> {
@@ -743,7 +751,7 @@ fn the_claim_declares_that_this_runtime_clones_and_reads_the_plan() {
     let api = HttpMailboxApi::new(&origin, Arc::new(|| Some(zeroize::Zeroizing::new("runtime-credential".to_string()))));
     let claimed = api.claim("incarnation-aaaaaaaaaaaa").unwrap().launch.unwrap();
     let (head, body) = server.join().unwrap();
-    assert!(head.contains(&"x-terminalx-cloud-workspace-runtime-capabilities: launch-clone-v1".to_string()), "{head:?}");
+    assert!(head.contains(&"x-terminalx-cloud-workspace-runtime-capabilities: launch-clone-v1,launch-checkout-v1".to_string()), "{head:?}");
     // The body stays exactly what a server from before this accepts.
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({ "v": 1, "storageIncarnationId": "incarnation-aaaaaaaaaaaa" }));
     assert_eq!(claimed.repositories[0].clone, Some(CloneSource { provider: "github".into() }));
@@ -1016,4 +1024,109 @@ fn the_claim_reads_a_checkout_plan_next_to_no_launch() {
     // A server from before this, and a plan this runtime cannot read.
     assert_eq!(serve(json!({ "v": 1, "launch": null })), Claimed::default());
     assert_eq!(serve(json!({ "v": 1, "launch": null, "checkout": { "repositories": "?" } })), Claimed::default());
+}
+
+#[test]
+fn a_failed_checkout_is_reported_to_the_server_and_tried_again_until_it_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let (late, app) = (to_clone(&root, "late", None), to_clone(&root, "app", Some("main")));
+    let api = FakeApi::new(None);
+    *api.checkout.lock().unwrap() = Some(plan(vec![late.clone(), app.clone()]));
+    let launcher = cloning(dir.path(), "workspace", &remote, api.clone(), Arc::new(FakeStarter::default()));
+
+    // One repository cannot be reached yet: the person is told which, and why.
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, true), "worth trying again");
+    let failed = CheckoutResult { path: late.path.clone(), state: "failed", category: Some("repository-clone-failed".into()) };
+    let ready = |repository: &Repository| CheckoutResult { path: repository.path.clone(), state: "ready", category: None };
+    assert_eq!(*api.reports.lock().unwrap(), [vec![failed.clone(), ready(&app)]]);
+    // Only what the server stores: a path, a state, a category. No output of Git.
+    let sent = serde_json::to_value(&api.reports.lock().unwrap()[0]).unwrap();
+    assert_eq!(sent, json!([{ "path": late.path, "state": "failed", "category": "repository-clone-failed" }, { "path": app.path, "state": "ready" }]));
+
+    // Still unreachable: reported again, for the repository still to do.
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, true));
+    assert_eq!(api.reports.lock().unwrap()[1], [failed]);
+
+    // Access is granted: the next try clones it, says so, and stops trying.
+    remotes(dir.path(), &["late"]);
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, false));
+    assert_eq!(api.reports.lock().unwrap()[2], [ready(&late)]);
+    assert_eq!(git(Path::new(&late.path), &["branch", "--show-current"]), WORK_BRANCH);
+    // Everything is set up: nothing more to do, nothing more to say.
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, false));
+    assert_eq!(api.reports.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn a_checkout_only_the_person_can_mend_is_reported_once_and_not_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = remotes(dir.path(), &["app"]);
+    let root = dir.path().join("workspace");
+    let app = to_clone(&root, "app", None);
+    // Files of someone's are already where the repository goes.
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(root.join("app").join("notes.txt"), "mine\n").unwrap();
+    let api = FakeApi::new(None);
+    *api.checkout.lock().unwrap() = Some(plan(vec![app.clone()]));
+    let launcher = cloning(dir.path(), "workspace", &remote, api.clone(), Arc::new(FakeStarter::default()));
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, false), "waiting will not move the files");
+    assert_eq!(api.reports.lock().unwrap()[0][0].category.as_deref(), Some("repository-path-occupied"));
+
+    // A plan the runtime refuses is reported too, and not retried.
+    let outside = Repository { path: dir.path().join("elsewhere").join("app").to_string_lossy().into_owned(), ..app.clone() };
+    let api = FakeApi::new(None);
+    *api.checkout.lock().unwrap() = Some(plan(vec![outside]));
+    let launcher = cloning(dir.path(), "other", &remote, api.clone(), Arc::new(FakeStarter::default()));
+    assert_eq!(launcher.pass_once().unwrap(), (Pass::None, false));
+    assert_eq!(api.reports.lock().unwrap()[0][0].category.as_deref(), Some("payload-invalid"));
+}
+
+#[test]
+fn retries_slow_down_to_half_an_hour_and_the_claim_names_both_capabilities() {
+    let delays: Vec<u64> = (0..7).map(|attempt| checkout_retry_delay(attempt).as_secs()).collect();
+    assert_eq!(delays, [60, 300, 900, 1800, 1800, 1800, 1800]);
+    assert_eq!(CLAIM_CAPABILITIES.split(',').collect::<Vec<_>>(), ["launch-clone-v1", "launch-checkout-v1"]);
+}
+
+#[test]
+fn the_checkout_report_goes_to_its_route_and_an_older_server_is_not_an_error() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let serve = |status: &'static str| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).unwrap();
+            let reply = "{\"v\":1}";
+            write!(stream, "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+            (first, String::from_utf8(body).unwrap())
+        });
+        let api = HttpMailboxApi::new(&origin, Arc::new(|| Some(zeroize::Zeroizing::new("runtime-credential".to_string()))));
+        let result = api.report_checkout(&[CheckoutResult { path: "/var/lib/terminalx/workspace/app".into(), state: "failed", category: Some("repository-access-denied".into()) }]);
+        let (first, body) = server.join().unwrap();
+        (result, first, body)
+    };
+    let (result, first, body) = serve("200 OK");
+    assert!(result.is_ok());
+    assert!(first.starts_with("POST /v1/cloud-workspace-bootstrap/launch-intent/checkout "), "{first}");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({ "v": 1, "repositories": [{ "path": "/var/lib/terminalx/workspace/app", "state": "failed", "category": "repository-access-denied" }] }));
+    assert!(serve("404 Not Found").0.is_ok(), "a server from before the report");
+    assert!(serve("503 Service Unavailable").0.is_err());
 }

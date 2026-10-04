@@ -455,9 +455,21 @@ disk was replaced.
   branch back and never clones again a checkout they removed.
 - A replaced disk has neither checkout nor record, so it is cloned again.
   The first prompt is not: its intent is settled.
-- No agent is started and nothing is reported to the server. A repository
-  that fails is logged and tried again on the next boot; the others are
-  still set up.
+- No agent is started. A repository that fails does not hold up the
+  others.
+- The runtime tells the server what became of each repository it worked on
+  (`POST …/launch-intent/checkout`): its path, `ready` or `failed`, and the
+  failure's category. Git's own output stays in the runtime's log. The
+  server stores it by repository name and shows it with the workspace, so a
+  failed clone reaches the person (the console's machine row).
+- A failure that may pass (access not granted yet, the network, a full
+  disk) is tried again by the runtime itself, after 1, 5, 15 and then every
+  30 minutes: it claims again and works on what is still missing. Nothing
+  runs between tries, so the workspace can still go idle. Files already at
+  the path, an empty repository and a refused plan are not retried: only a
+  person can mend those.
+- The claim declares `launch-checkout-v1` next to `launch-clone-v1`. The
+  server sends the plan only to a runtime that does.
 - It counts as work while it runs, like a launch, so idle suspend does not
   cut a clone short. The same checks apply to the plan as to a launch.
 
