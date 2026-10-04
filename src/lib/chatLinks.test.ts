@@ -4,6 +4,7 @@ import { openBrowserTab } from "@/lib/browser";
 import { editorLinkContext, getEditors, openFile } from "@/lib/editors";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { openChatLink, parseChatLink } from "./chatLinks";
+import { setPrefs } from "./prefs";
 
 vi.mock("@/lib/api", () => ({ fs: { inspectPath: vi.fn(), openPath: vi.fn() } }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
@@ -27,7 +28,10 @@ const info = (patch: Partial<LocalPathInfo> = {}): LocalPathInfo => ({
   ...patch,
 });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  setPrefs({ linkBrowser: "terminalx" });
+});
 
 describe("chat link parsing", () => {
   it.each([
@@ -59,6 +63,20 @@ describe("chat link parsing", () => {
 });
 
 describe("chat link routing", () => {
+  it("opens only the system browser when selected", async () => {
+    setPrefs({ linkBrowser: "system" });
+    await openChatLink(parseChatLink("https://example.test/a?q=1#x"), context);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith("https://example.test/a?q=1#x");
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("opens nothing before a browser is chosen in ask mode", async () => {
+    setPrefs({ linkBrowser: "ask" });
+    await openChatLink(parseChatLink("https://example.test"), context);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
   it("opens web URLs in the captured session workspace", async () => {
     const destination = parseChatLink("https://example.test/a?q=1#x");
     await openChatLink(destination, context);

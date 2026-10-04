@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { openFile } from "@/lib/editors";
+import { setPrefs } from "@/lib/prefs";
 import { Markdown } from "./Markdown";
 
 vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "light" }) }));
@@ -17,6 +18,7 @@ const textFile = (path: string, rel: string): LocalPathInfo => ({ path, root: pa
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setPrefs({ linkBrowser: "terminalx" });
   vi.mocked(fs.inspectPath).mockImplementation(async (_base, path) => path.startsWith("/")
     ? textFile(path, path.split("/").pop()!)
     : ({ path: `/workspace/${path}`, root: "/workspace", rel: path, kind: "file", text: true }));
@@ -24,6 +26,18 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("rendered chat links", () => {
+  it("offers the chooser for Markdown links and autolinks in ask mode", async () => {
+    setPrefs({ linkBrowser: "ask" });
+    render(<Markdown text={'[site](https://example.test)\n\n<https://example.test/auto>'} linkContext={context} />);
+    for (const name of ["site", "https://example.test/auto"]) {
+      fireEvent.click(await screen.findByRole("link", { name }));
+      const chooser = await screen.findByRole("dialog", { name: "Open website link" });
+      expect(openBrowserTab).not.toHaveBeenCalled();
+      fireEvent.keyDown(chooser, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+  });
+
   it("routes Markdown links and rendered autolinks through the same captured context", async () => {
     render(<Markdown text={'[source](src/index.ts:12:3)\n\n<http://localhost:4173/path?q=1#result>'} linkContext={context} />);
     fireEvent.click(await screen.findByRole("link", { name: "source" }));

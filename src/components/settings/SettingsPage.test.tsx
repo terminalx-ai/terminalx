@@ -1,10 +1,25 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 
 afterEach(cleanup);
+
+describe("Website links", () => {
+  it("offers all three browser modes and can turn the chooser back on", () => {
+    setPrefs({ linkBrowser: "system" });
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    const choices = within(screen.getByRole("radiogroup", { name: "Website links" })).getAllByRole("radio");
+    expect(choices.map((choice) => choice.textContent)).toEqual(["Ask every time", "System Browser", "TerminalX Browser"]);
+    for (const [index, value] of [[2, "terminalx"], [1, "system"], [0, "ask"]] as const) {
+      fireEvent.click(choices[index]);
+      expect(getPrefs().linkBrowser).toBe(value);
+      expect(choices[index].getAttribute("aria-checked")).toBe("true");
+    }
+  });
+});
 
 describe("Settings dismissal", () => {
   it("offers Close and keeps Back working", () => {
