@@ -718,6 +718,35 @@ typed into the CLI's composer and not sent. The ring exists only in the
 runtime's memory: it is gone when the tab is removed, and when the runtime
 process ends (a stop, a restart).
 
+**A person's own terminal after a stop and a wake.** A stop revokes every
+attachment, and the wake issues the app that stayed open a new attachment
+and device. With an API that sends `installationKey` on each attachment
+(asked for with the runtime capability `attachment-installation-v1`; the
+same key at every mint for one person's client installation), a runtime
+process that survived the stop (a frozen container) gives the terminal back
+to the person who controlled it, on their new device, without `pty.control`.
+All of this must hold, for shells and agent terminals alike:
+
+- the same person (`userId`, supplied by the API) and the same installation
+  key; the key is never compared without the person;
+- the old device has no connection left (with two, both must end; a view
+  that was already watching is then told `pty.control: you`);
+- the person may still type: a manager, or a driver who may approve, and for
+  an agent's terminal nobody else holds the tab's lease. Otherwise the view
+  reads `other`, exactly what its writes would be told;
+- it happens on attach, on the shell list, and on a key or a resize from
+  that person, never on a `report` write: what a terminal says by itself
+  moves nothing.
+
+Nothing else moves control by itself: another person, the same person's
+other installation, a controller whose access was revoked (that clears the
+controller; sharing again does not restore it), or any link without a key
+(an older API): they watch until `pty.control`. A writer's `seq` is counted
+per person and installation key (per device without one), so the open app
+continues with the next number and a write it resends is answered, not
+typed again. Coming back is not activity and claims no lease. A runtime
+that restarted has no controller to give back.
+
 Nothing new is stored. Output is kept only in the runtime's memory, and
 keystrokes go from the desktop to the runtime as `pty.write` over the same
 end-to-end encrypted relay channel as shell input: not through the API
