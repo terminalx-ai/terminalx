@@ -236,7 +236,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
     mocked.cloudWorkspaceSuspend.mockResolvedValue(snapshot("suspend") as never);
     const { onDone } = renderDialog(item("ready"), "stop", clean);
-    expect(screen.getByTestId("cloud-lifecycle-summary").textContent).toMatch(/Everything is kept/);
+    expect(screen.getByTestId("cloud-lifecycle-summary").textContent).toMatch(/Kept: the files in the workspace/);
     expect(screen.queryByTestId("cloud-lifecycle-facts")).toBeNull();
     fireEvent.click(button(/Stop workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
@@ -250,7 +250,9 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     renderDialog(item("ready"), "stop", clean);
     // Nothing is claimed before the server has answered.
     expect(undo()).toBe("Resume at any time.");
-    await waitFor(() => expect(undo()).toMatch(/Boat starts the machine again from its disk \(a cold boot\).*programs and terminals that are running now do not/));
+    await waitFor(() => expect(undo()).toMatch(/Boat starts the machine again \(a cold boot\): the files in the workspace come back.*programs and terminals that are running now do not, and what was installed or written outside the workspace may not/));
+    // Nothing is promised about the whole disk: Boat keeps only part of it.
+    expect(undo()).not.toMatch(/repositories and conversations come back|from its disk/);
     cleanup();
 
     // A provider that freezes the machine: a warm reconnect.

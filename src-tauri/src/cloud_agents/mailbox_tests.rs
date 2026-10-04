@@ -8,10 +8,15 @@ use super::super::{checkpoints, crypto, AgentOps, AgentTabInfo, CloudAgents, Dec
 use super::*;
 use crate::store::index::TabStatus;
 
+/// An image as it reached the agent: media type, base64, name.
+type SentImage = (String, String, Option<String>);
+
 #[derive(Default)]
 struct FakeOps {
     busy: Mutex<bool>,
     sent: Mutex<Vec<String>>,
+    /// The images of each sent message: (media type, base64, name).
+    images: Mutex<Vec<Vec<SentImage>>>,
     stops: Mutex<u32>,
     pending: Mutex<Vec<String>>,
     decisions: Mutex<Vec<(String, String)>>,
@@ -51,6 +56,10 @@ impl AgentOps for FakeOps {
         self.sent.lock().unwrap().push(text.into());
         *self.busy.lock().unwrap() = true;
         Ok(())
+    }
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> anyhow::Result<()> {
+        self.images.lock().unwrap().push(images.into_iter().map(|image| (image.media_type, image.data, image.name)).collect());
+        self.send(session_id, tab_id, text)
     }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
@@ -819,4 +828,120 @@ fn a_command_is_never_steered_into_a_running_turn() {
     let queued = handle(&h.agents, &as_actor(lease(&h.agents, "send-1", "send", json!({ "v": 1, "text": "/model sonnet" })), "bob", "driver", true));
     assert_eq!(queued.outcome, "applied");
     assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
+}
+
+/// PRO-22: the sender uploads an image first; the message names it.
+fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
+    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), true).unwrap();
+}
+
+#[test]
+fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed() {
+    let h = harness();
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload(&h.agents, "u1", "attach-0002", b"def");
+    let body = json!({ "v": 1, "text": "what is in these?", "images": [{ "id": "attach-0001", "name": "shot.png" }, { "id": "attach-0002" }] });
+    let first = lease(&h.agents, "c1", "send", body);
+    let receipt = handle(&h.agents, &first);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["what is in these?"]);
+    let images = h.ops.images.lock().unwrap().clone();
+    assert_eq!(images, vec![vec![("image/png".to_string(), "YWJj".to_string(), Some("shot.png".to_string())), ("image/png".to_string(), "ZGVm".to_string(), Some("shot.png".to_string()))]]);
+    assert!(h.agents.attachments.load("u1", &["attach-0001".into()]).is_err(), "typed: the upload is removed");
+    // A redelivery answers from the receipt: nothing is typed again, with or without its images.
+    assert_eq!(handle(&h.agents, &Lease { lease_token: "token-2".into(), redelivery: true, ..first }), receipt);
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
+    // Images alone are a message, as in a local tab.
+    *h.ops.busy.lock().unwrap() = false;
+    upload(&h.agents, "u1", "attach-0003", b"ghi");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "images": [{ "id": "attach-0003" }] }))).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
+}
+
+#[test]
+fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
+    let h = harness();
+    upload(&h.agents, "u-alice", "attach-0001", b"abc");
+    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false).unwrap();
+    // Someone else's upload, one never completed, one never uploaded, a malformed list, and a steer.
+    for (id, kind, body) in [
+        ("c1", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
+        ("c2", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0002" }] })),
+        ("c3", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-9999" }] })),
+    ] {
+        let lease = lease(&h.agents, id, kind, body);
+        let receipt = handle(&h.agents, &lease);
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(ATTACHMENT_MISSING)), "{id}");
+        assert!(open_receipt(&h.agents, &lease, &receipt)["message"].as_str().unwrap().starts_with("Not sent: an image"));
+    }
+    for (id, kind, body) in [
+        ("c4", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "../../etc/passwd" }] })),
+        ("c5", "steer", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
+        ("c6", "send", json!({ "v": 1, "images": [] })),
+    ] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, kind, body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.ops.settings.lock().unwrap().is_empty());
+    assert!(h.agents.attachments.load("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
+}
+
+#[test]
+fn a_queued_message_keeps_its_images_until_it_is_typed_or_dropped() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload(&h.agents, "u1", "attach-0002", b"def");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "first", "images": [{ "id": "attach-0001" }] }))).outcome, "applied");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "text": "second", "images": [{ "id": "attach-0002" }] }))).outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    // Across a restart, the queue still names the upload and the upload is still there.
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["first"]);
+    assert_eq!(h.ops.images.lock().unwrap()[0][0].1, "YWJj");
+    assert!(agents.attachments.load("u1", &["attach-0001".into()]).is_err());
+    // A stop drops the second, and its upload with it.
+    assert_eq!(handle(&agents, &lease(&agents, "c3", "stop", json!({ "v": 1 }))).outcome, "applied");
+    assert!(agents.attachments.load("u1", &["attach-0002".into()]).is_err());
+    assert_eq!(h.ops.sent.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "look at this", "images": [{ "id": "attach-0001" }] })));
+    h.agents.attachments.remove(&["attach-0001".into()]);
+    *h.ops.busy.lock().unwrap() = false;
+    h.agents.nudge_follow_ups("tab-1");
+    h.agents.dispatch_follow_ups();
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("its images are no longer on the workspace")));
+    assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+}
+
+/// Review of #309: a refused message must not leave its uploads behind, or
+/// retries fill the store until nobody can attach.
+#[test]
+fn a_refused_message_gives_up_its_senders_uploads_and_nobody_elses() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver", "canApprove": false }, { "userId": "bob", "role": "driver", "canApprove": false }]));
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    upload(&h.agents, "bob", "attach-0002", b"def");
+    // A PRO-88 refusal of alice's message, which names her upload and bob's.
+    let body = json!({ "v": 1, "text": "/model opus", "images": [{ "id": "attach-0001" }, { "id": "attach-0002" }] });
+    let receipt = handle(&h.agents, &as_actor(lease(&h.agents, "c1", "send", body), "alice", "driver", false));
+    assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("slash-command-forbidden")));
+    assert!(h.agents.attachments.load("alice", &["attach-0001".into()]).is_err(), "her upload goes with her refused message");
+    assert!(h.agents.attachments.load("bob", &["attach-0002".into()]).is_ok(), "his stays");
+    // The same attachment sent again under the same id is a fresh upload and goes through.
+    upload(&h.agents, "alice", "attach-0001", b"abc");
+    let again = json!({ "v": 1, "text": "what is this?", "images": [{ "id": "attach-0001" }] });
+    assert_eq!(handle(&h.agents, &as_actor(lease(&h.agents, "c2", "send", again), "alice", "driver", false)).outcome, "applied");
+    assert_eq!(h.ops.images.lock().unwrap().len(), 1);
 }

@@ -75,6 +75,8 @@ vi.mock("@/components/chat/Composer", () => ({
       <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
       {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
+      {/* A message with one attached image; a failed send keeps the draft, as the composer does. */}
+      <button onClick={() => void Promise.resolve(props.onSend(props.draft, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }])).then(() => props.onDraftChange(""), () => undefined)}>Send with image</button>
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
       {/* What the `@` list would hold for "login". */}
       {props.files && (
@@ -247,8 +249,10 @@ class FakeRuntime implements WorkspaceTransport {
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
   /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
   files: { path: string; name: string; score: number }[] | null = null;
-  private composer(): ("composer/1" | "composer/2")[] {
-    return [...(this.commands ? (["composer/1"] as const) : []), ...(this.files ? (["composer/2"] as const) : [])];
+  /** PRO-22: whether the runtime takes images (`composer/3`). */
+  images = false;
+  private composer(): ("composer/1" | "composer/2" | "composer/3")[] {
+    return [...(this.commands ? (["composer/1"] as const) : []), ...(this.files ? (["composer/2"] as const) : []), ...(this.images ? (["composer/3"] as const) : [])];
   }
   /** PRO-30: what `collab.state` answers on a runtime that granted `collab/1`. */
   collab: { you: Record<string, unknown>; participants: unknown[]; leases: unknown[] } | null = null;
@@ -291,6 +295,8 @@ class FakeRuntime implements WorkspaceTransport {
         return ok(this.commands);
       case "session.files":
         return ok({ files: this.files });
+      case "session.attach":
+        return ok({ attachmentId: params.attachmentId, size: 3, complete: params.last });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -694,6 +700,56 @@ describe("cloud session actions", () => {
     await waitFor(() => expect(screen.queryByTestId("find-files")).toBeNull());
     expect(activate).not.toHaveBeenCalled();
     expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: an image is uploaded to the runtime, then the message names it", async () => {
+    runtime.images = true;
+    await openConnected();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "what is this?" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "send")).toBeTruthy());
+    const attach = runtime.methods("session.attach").map((frame) => frame.params as Record<string, unknown>);
+    expect(attach).toEqual([expect.objectContaining({ sessionId: "s-1", tabId: "t-1", mediaType: "image/png", name: "shot.png", offset: 0, data: "YWJj", last: true })]);
+    expect(enqueued.find((entry) => entry.kind === "send")!.payload).toEqual({ text: "what is this?", images: [{ id: attach[0]!.attachmentId, mediaType: "image/png", name: "shot.png" }] });
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: a runtime that takes no images says so, and the message is not sent without them", async () => {
+    await openConnected();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "what is this?" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(screen.getAllByRole("note").some((note) => note.textContent?.startsWith("Images need a newer workspace runtime"))).toBe(true));
+    expect(enqueued).toEqual([]);
+    expect(runtime.methods("session.attach")).toEqual([]);
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("what is this?");
+  });
+
+  it("PRO-22: images to a stopped workspace start it once and keep the message in the composer", async () => {
+    runtime.images = true;
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "cached question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    selectCloudSession(KEY);
+    render(wrap(<CloudSessionHost sessionKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    fireEvent.change(await screen.findByLabelText("Prompt"), { target: { value: "what is this?" } });
+    for (let attempt = 0; attempt < 2; attempt++) fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(screen.getAllByRole("note").some((note) => note.textContent?.startsWith("Starting the workspace: images are uploaded straight to it"))).toBe(true));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(1));
+    expect(activate).toHaveBeenCalledWith("wake");
+    expect(enqueued).toEqual([]);
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("what is this?");
+  });
+
+  it("PRO-22: a view-only reader's images go nowhere and wake nothing", async () => {
+    runtime.images = true;
+    setCatalog(workspaceItem("ready", "participate"));
+    await openConnected("participate");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await act(async () => undefined);
+    expect(runtime.methods("session.attach")).toEqual([]);
+    expect(enqueued).toEqual([]);
+    expect(activate).not.toHaveBeenCalled();
   });
 
   it("PRO-22: a runtime from before composer/2 offers no file list", async () => {

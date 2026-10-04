@@ -142,7 +142,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           {saved && <span data-testid="cloud-last-saved"> {saved}</span>}
         </div>
       )}
-      {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} />}
+      {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} manage={state.state === "connected" && state.authority === "manage"} />}
       {error && <p className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open: {error}</p>}
       {!member ? (
         <Centered>
