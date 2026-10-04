@@ -311,6 +311,13 @@ struct PendingAuth {
     started_at: Instant,
 }
 
+/// What the Keychain held for the account session.
+enum Stored {
+    Session(Option<Box<DesktopSession>>),
+    /// Something is stored, and it does not decode or is not a valid session.
+    Unusable(anyhow::Error),
+}
+
 #[derive(Default)]
 struct Inner {
     loaded: bool,
@@ -1159,8 +1166,17 @@ impl AccountManager {
         match stored {
             // Nothing changes the session before it is loaded; if something
             // did, that is newer than what was stored.
-            Ok(session) if inner.revision == 0 => inner.session = session,
-            Ok(_) => {}
+            Ok(Stored::Session(session)) if inner.revision == 0 => inner.session = session.map(|session| *session),
+            Ok(Stored::Session(_)) => {}
+            // The Keychain answered, and what it holds is not a session this
+            // app can use. It will be the same on every launch, so it is not
+            // "unreadable for now": nobody is signed in.
+            Ok(Stored::Unusable(error)) => {
+                log::warn!("the saved TerminalX account session is not usable: {error:#}");
+                inner.last_error = Some("The saved TerminalX account session could not be used. Sign in again.".into());
+            }
+            // The Keychain did not answer (locked, access denied): there may
+            // well be a session, and nothing is known about who is here.
             Err(error) => {
                 log::warn!("could not read TerminalX account session from Keychain: {error:#}");
                 inner.session_unreadable = true;
@@ -1200,16 +1216,20 @@ impl AccountManager {
     }
 
     /// Callers hold `store_gate` and not the account lock.
-    fn load_session(&self) -> Result<Option<DesktopSession>> {
+    /// `Err` only when the Keychain itself could not be read.
+    fn load_session(&self) -> Result<Stored> {
         let Some(bytes) = self.secrets().get(self.service()?, KEYCHAIN_ACCOUNT).context("read account session from Keychain")? else {
-            return Ok(None);
+            return Ok(Stored::Session(None));
         };
         let bytes = Zeroizing::new(bytes);
-        let session = serde_json::from_slice(bytes.as_slice())
-            .context("decode account session from Keychain")?;
-        normalize_session(session)
-            .map(Some)
-            .map_err(anyhow::Error::from)
+        let session = match serde_json::from_slice(bytes.as_slice()) {
+            Ok(session) => session,
+            Err(error) => return Ok(Stored::Unusable(anyhow::Error::from(error).context("decode account session from Keychain"))),
+        };
+        Ok(match normalize_session(session) {
+            Ok(session) => Stored::Session(Some(Box::new(session))),
+            Err(error) => Stored::Unusable(anyhow::Error::from(error)),
+        })
     }
 
     /// Callers hold `store_gate` and not the account lock.
@@ -1670,6 +1690,71 @@ mod tests {
         assert_eq!(session.access_token, "access");
         assert_eq!(session.cloud.display_name.as_deref(), Some("Owner"));
         assert_eq!(session.cloud.active_org_name.as_deref(), Some("TerminalX"));
+    }
+
+    /// A Keychain that cannot be read: locked, or access denied.
+    struct RefusingSecrets;
+
+    impl SecretStore for RefusingSecrets {
+        fn get(&self, _service: &str, _account: &str) -> Result<Option<Vec<u8>>> {
+            anyhow::bail!("the user denied access to the keychain item")
+        }
+
+        fn set(&self, _service: &str, _account: &str, _secret: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _service: &str, _account: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn only_a_keychain_that_cannot_be_read_is_unreadable_and_a_sign_in_or_sign_out_clears_it() {
+        // The Keychain refuses the read at launch: nothing is known about who is here.
+        let manager = AccountManager::default();
+        manager.use_secrets_for_test(Arc::new(RefusingSecrets));
+        manager.ensure_loaded();
+        let status = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!((status["state"].as_str(), status["sessionUnreadable"].as_bool()), (Some("signed-out"), Some(true)));
+
+        // A sign-in is the person's own word on who is here.
+        let saved = signed_in("org-a").inner.lock().unwrap().session.clone().unwrap();
+        let generation = manager.inner.lock().unwrap().generation;
+        manager.inner.lock().unwrap().signing_in = true;
+        assert!(manager.apply_exchange(generation, Ok(saved)));
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["sessionUnreadable"], false);
+        assert!(!manager.inner.lock().unwrap().session_unreadable);
+
+        // So is a sign-out, including one made while it was unreadable.
+        let refused = AccountManager::default();
+        refused.use_secrets_for_test(Arc::new(RefusingSecrets));
+        refused.ensure_loaded();
+        assert!(refused.inner.lock().unwrap().session_unreadable);
+        let _ = refused.end_session();
+        let status = serde_json::to_value(refused.snapshot()).unwrap();
+        assert_eq!((status["state"].as_str(), status["sessionUnreadable"].as_bool()), (Some("signed-out"), Some(false)));
+    }
+
+    #[test]
+    fn a_stored_session_that_does_not_decode_is_signed_out_not_unreadable() {
+        // It fails the same way on every launch, so it must not hold anything back for ever.
+        for stored in [&b"not json at all"[..], &b"{\"cloud\":{}}"[..], &b"{}"[..]] {
+            let store = MemorySecrets::default();
+            store.set(TEST_SERVICE, KEYCHAIN_ACCOUNT, stored).unwrap();
+            let manager = AccountManager::default();
+            manager.use_secrets_for_test(Arc::new(store));
+            manager.ensure_loaded();
+            let status = serde_json::to_value(manager.snapshot()).unwrap();
+            assert_eq!((status["state"].as_str(), status["sessionUnreadable"].as_bool()), (Some("signed-out"), Some(false)), "{}", String::from_utf8_lossy(stored));
+            assert!(status["lastError"].as_str().unwrap().contains("could not be used"));
+        }
+        // Nothing stored at all: a clean signed-out with no error.
+        let manager = AccountManager::default();
+        manager.use_secrets_for_test(Arc::new(MemorySecrets::default()));
+        manager.ensure_loaded();
+        let status = serde_json::to_value(manager.snapshot()).unwrap();
+        assert_eq!((status["sessionUnreadable"].as_bool(), status["lastError"].is_null()), (Some(false), true));
     }
 
     #[test]

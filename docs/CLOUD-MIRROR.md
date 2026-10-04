@@ -327,15 +327,23 @@ Whose the mirrors are is recorded as a hash in `cloud-mirrors/owner`. The
 owner is the account's own id (the user and cloud profile), not the email,
 which can change or be reused.
 
-- **Not knowing is not a sign-out.** When the saved session cannot be read
-  (a Keychain failure at launch), the account status says so
-  (`sessionUnreadable`) and nothing is removed. Syncing stops until the
-  account is known again. A signed-out status that only carries an error (a
-  sign-in that timed out) is a real signed-out.
-- **An owner file from before the id.** It holds the hash of the email. The
-  claim is given the email too, only for this: a file that holds it for the
-  same person is rewritten to the account id and their mirrors are kept. A
-  file that holds anyone else's is another account's, as before.
+- **Not knowing is not a sign-out, for a while.** When the Keychain cannot
+  be read at launch (locked, access denied), the account status says so
+  (`sessionUnreadable`) and nothing is removed at once. But the app cannot
+  find out whether access was revoked meanwhile, so the mirrors are not kept
+  for ever in that state: they are removed on the **third launch** that
+  finds the session unreadable, or **24 hours** after the first, whichever
+  comes first. The first such launch is recorded in
+  `cloud-mirrors/unreadable.json`; a successful sign-in clears it.
+- **A stored session that does not decode is a sign-out.** It fails the same
+  way on every launch, so it is not "unreadable for now": nobody is signed
+  in, and the mirrors are removed as at any sign-out.
+- **An owner file from before the id.** It holds a bare hash of the email
+  (files written now start with `v2:`). The claim is given the email too,
+  only for this: a bare file that holds it for the same person is rewritten
+  to the account id and their mirrors are kept. That window has an end: a
+  bare file older than **14 days** is nobody's, whoever presents the email.
+  A file that holds anyone else's is another account's, as before.
 - **No sync without a confirmed owner.** A workspace that connects syncs its
   mirror only after the claim for the signed-in account has succeeded. If
   the claim fails, nothing is read into the mirror; it is tried again the

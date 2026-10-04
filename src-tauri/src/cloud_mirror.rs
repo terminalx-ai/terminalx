@@ -458,7 +458,7 @@ impl Mirror {
         let home = self.dir.ancestors().nth(3).ok_or_else(|| anyhow!("no home directory"))?.to_path_buf();
         claim_owner(&home, account, None)?;
         crate::store::ensure_dir(home.join(DIR))?;
-        crate::store::write_atomic(&home.join(DIR).join(OWNER), owner_hash(account).as_bytes())?;
+        crate::store::write_atomic(&home.join(DIR).join(OWNER), owner_record(account).as_bytes())?;
         self.enable()
     }
 
@@ -1074,6 +1074,31 @@ fn owner_hash(account: &str) -> String {
     Sha256::digest(account.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The owner file's content for an account id. The prefix tells it from a
+/// file written before the id was used, which holds a bare hash of the email.
+fn owner_record(account: &str) -> String {
+    format!("{OWNER_V2}{}", owner_hash(account))
+}
+
+const OWNER_V2: &str = "v2:";
+/// A bare (email-keyed) owner file is honoured for this long after it was
+/// written, then it is nobody's: the window in which presenting an email
+/// can claim a mirror has an end.
+const LEGACY_OWNER_WINDOW: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+const UNREADABLE: &str = "unreadable.json";
+/// How long mirrors are kept while the saved session cannot be read: until
+/// the third launch that finds it so, or a day after the first, whichever
+/// comes first. Then they are removed, as at a sign-out.
+pub const UNREADABLE_LAUNCHES: u32 = 3;
+pub const UNREADABLE_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Unreadable {
+    first_at_ms: u64,
+    launches: u32,
+}
+
 /// Say which account is using the app. Mirrors that are not this account's
 /// are removed, as at sign-out: ones made under another account (a sign-out
 /// while the app was closed, a direct switch of account), and ones found
@@ -1083,17 +1108,25 @@ fn owner_hash(account: &str) -> String {
 /// `account` is the account's own id (the user and cloud profile), which
 /// does not change with the address. `legacy` is what an owner file written
 /// before that was keyed on, the email: a file that still holds it for the
-/// same person is rewritten to the id, and their mirrors are kept.
+/// same person, and is not older than [`LEGACY_OWNER_WINDOW`], is rewritten
+/// to the id, and their mirrors are kept.
 pub fn claim_owner(home: &Path, account: &str, legacy: Option<&str>) -> Result<usize> {
+    claim_owner_at(home, account, legacy, std::time::SystemTime::now())
+}
+
+fn claim_owner_at(home: &Path, account: &str, legacy: Option<&str>, now: std::time::SystemTime) -> Result<usize> {
     let mirrors = existing(home);
     let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let file = home.join(DIR).join(OWNER);
-    let wanted = owner_hash(account);
+    let wanted = owner_record(account);
     let known = std::fs::read_to_string(&file).ok();
+    // Someone is known to be signed in: the session is readable again.
+    let _ = std::fs::remove_file(home.join(DIR).join(UNREADABLE));
     if known.as_deref() == Some(wanted.as_str()) {
         return Ok(0);
     }
-    if legacy.is_some_and(|email| !email.is_empty() && known.as_deref() == Some(owner_hash(email).as_str())) {
+    let recent = std::fs::metadata(&file).and_then(|meta| meta.modified()).is_ok_and(|written| now.duration_since(written).is_ok_and(|age| age <= LEGACY_OWNER_WINDOW));
+    if recent && legacy.is_some_and(|email| !email.is_empty() && known.as_deref() == Some(owner_hash(email).as_str())) {
         crate::store::write_atomic(&file, wanted.as_bytes())?;
         return Ok(0);
     }
@@ -1107,6 +1140,36 @@ pub fn claim_owner(home: &Path, account: &str, legacy: Option<&str>) -> Result<u
     if known.is_some() {
         crate::store::write_atomic(&file, wanted.as_bytes())?;
     }
+    Ok(purged)
+}
+
+/// The app started and could not read its saved session, so it does not
+/// know who is signed in. That is not a sign-out, and the mirrors are kept;
+/// but not for ever, because access may have been revoked meanwhile and the
+/// app cannot find out. Counted once per launch: on the
+/// [`UNREADABLE_LAUNCHES`]th launch in that state, or [`UNREADABLE_MS`] after
+/// the first, every mirror is removed. Returns how many were.
+pub fn note_unreadable(home: &Path, now_ms: u64) -> Result<usize> {
+    let mirrors = existing(home);
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let file = home.join(DIR).join(UNREADABLE);
+    if mirrors.is_empty() {
+        let _ = std::fs::remove_file(&file);
+        return Ok(0);
+    }
+    let mut mark: Unreadable = std::fs::read(&file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Unreadable { first_at_ms: now_ms, launches: 0 });
+    mark.launches = mark.launches.saturating_add(1);
+    if mark.launches < UNREADABLE_LAUNCHES && now_ms.saturating_sub(mark.first_at_ms) < UNREADABLE_MS {
+        crate::store::write_json(&file, &mark)?;
+        return Ok(0);
+    }
+    let mut purged = 0;
+    for (organization, workspace) in &mirrors {
+        Mirror::at(&home, organization, workspace)?.purge()?;
+        purged += 1;
+    }
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(home.join(DIR).join(OWNER));
     Ok(purged)
 }
 

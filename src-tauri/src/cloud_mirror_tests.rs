@@ -1029,36 +1029,116 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     assert!(Mirror::at(&other_home, "org-1", "workspace-2").unwrap().enable_as("").is_err());
 }
 
+/// An owner file as written before the owner was the account id: a bare hash of the email.
+fn write_legacy_owner(home: &Path, email: &str) {
+    std::fs::write(home.join("cloud-mirrors/owner"), owner_hash(email)).unwrap();
+}
+
 #[test]
 fn an_owner_file_keyed_on_the_email_is_migrated_for_the_same_person_only() {
     let mut f = Fixture::new();
-    // As written before the owner was the account id: the hash of the email.
-    f.mirror.enable_as("ada@example.com").unwrap();
+    f.mirror.enable_as("old-key").unwrap();
     f.remote_write("a.txt", "v1\n");
     f.sync().unwrap();
     let owner = f.home.join("cloud-mirrors/owner");
-    let by_email = std::fs::read_to_string(&owner).unwrap();
+    write_legacy_owner(&f.home, "ada@example.com");
 
     // The same person, now known by their account id: nothing is removed,
     // and the file is rewritten to the id.
     assert_eq!(claim_owner(&f.home, "account-id-of-ada", Some("ada@example.com")).unwrap(), 0);
     assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
-    let by_id = std::fs::read_to_string(&owner).unwrap();
-    assert_ne!(by_id, by_email);
+    assert!(std::fs::read_to_string(&owner).unwrap().starts_with("v2:"));
     // From then on the email no longer matters: a changed address keeps the mirrors.
     assert_eq!(claim_owner(&f.home, "account-id-of-ada", Some("ada@new.example")).unwrap(), 0);
     assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
-    // Someone else who has that address now does not inherit them.
+    // Someone else who has that address now does not inherit them: the
+    // migrated file no longer answers to an email at all.
     assert_eq!(claim_owner(&f.home, "account-id-of-bob", Some("ada@example.com")).unwrap(), 1);
     assert_eq!(f.local("a.txt"), None);
 
     // A file keyed on another person's email is not migrated: removed.
     let mut g = Fixture::new();
-    g.mirror.enable_as("carol@example.com").unwrap();
+    g.mirror.enable_as("old-key").unwrap();
     g.remote_write("a.txt", "v1\n");
     g.sync().unwrap();
+    write_legacy_owner(&g.home, "carol@example.com");
     assert_eq!(claim_owner(&g.home, "account-id-of-ada", Some("ada@example.com")).unwrap(), 1);
     assert_eq!(g.local("a.txt"), None);
     // An empty legacy value never matches anything.
     assert_eq!(claim_owner(&g.home, "account-id-of-dan", Some("")).unwrap(), 0);
+}
+
+#[test]
+fn the_email_keyed_owner_file_stops_being_honoured_after_two_weeks() {
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+    // Within the window the same person keeps their mirror.
+    let mut f = Fixture::new();
+    f.mirror.enable_as("old-key").unwrap();
+    f.remote_write("a.txt", "v1\n");
+    f.sync().unwrap();
+    write_legacy_owner(&f.home, "ada@example.com");
+    assert_eq!(claim_owner_at(&f.home, "account-id-of-ada", Some("ada@example.com"), now + day * 13).unwrap(), 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
+
+    // After it, a bare file is nobody's, whoever presents the email.
+    let mut g = Fixture::new();
+    g.mirror.enable_as("old-key").unwrap();
+    g.remote_write("a.txt", "v1\n");
+    g.sync().unwrap();
+    write_legacy_owner(&g.home, "ada@example.com");
+    assert_eq!(claim_owner_at(&g.home, "account-id-of-ada", Some("ada@example.com"), now + day * 15).unwrap(), 1);
+    assert_eq!(g.local("a.txt"), None);
+    // A file already keyed on the id has no such window.
+    let mut h = Fixture::new();
+    h.mirror.enable_as("account-id-of-ada").unwrap();
+    h.remote_write("a.txt", "v1\n");
+    h.sync().unwrap();
+    assert_eq!(claim_owner_at(&h.home, "account-id-of-ada", None, now + day * 400).unwrap(), 0);
+    assert_eq!(h.local("a.txt").as_deref(), Some("v1\n"));
+}
+
+#[test]
+fn mirrors_are_kept_only_for_a_bounded_time_while_the_saved_session_cannot_be_read() {
+    const HOUR: u64 = 60 * 60 * 1000;
+    let start = 1_800_000_000_000;
+    let fixture = || {
+        let mut f = Fixture::new();
+        f.mirror.enable_as("account-id-of-ada").unwrap();
+        f.remote_write("a.txt", "v1\n");
+        f.sync().unwrap();
+        f
+    };
+
+    // By launches: kept on the first and second, removed on the third.
+    let f = fixture();
+    assert_eq!(note_unreadable(&f.home, start).unwrap(), 0);
+    assert_eq!(note_unreadable(&f.home, start + HOUR).unwrap(), 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
+    assert_eq!(note_unreadable(&f.home, start + 2 * HOUR).unwrap(), 1);
+    assert_eq!(f.local("a.txt"), None);
+    assert!(existing(&f.home).is_empty());
+    assert!(!f.home.join("cloud-mirrors/unreadable.json").exists() && !f.home.join("cloud-mirrors/owner").exists());
+
+    // By time: the second launch comes a day after the first.
+    let g = fixture();
+    assert_eq!(note_unreadable(&g.home, start).unwrap(), 0);
+    assert_eq!(note_unreadable(&g.home, start + 24 * HOUR).unwrap(), 1);
+    assert_eq!(g.local("a.txt"), None);
+
+    // The session becomes readable again in between: the count starts over.
+    let h = fixture();
+    assert_eq!(note_unreadable(&h.home, start).unwrap(), 0);
+    assert_eq!(note_unreadable(&h.home, start + HOUR).unwrap(), 0);
+    assert_eq!(claim_owner(&h.home, "account-id-of-ada", None).unwrap(), 0);
+    assert!(!h.home.join("cloud-mirrors/unreadable.json").exists());
+    assert_eq!(note_unreadable(&h.home, start + 2 * HOUR).unwrap(), 0);
+    assert_eq!(h.local("a.txt").as_deref(), Some("v1\n"));
+
+    // With no mirror there is nothing to count or to remove.
+    let empty = tempfile::tempdir().unwrap();
+    for _ in 0..5 {
+        assert_eq!(note_unreadable(empty.path(), start).unwrap(), 0);
+    }
+    assert!(!empty.path().join("cloud-mirrors").exists());
 }

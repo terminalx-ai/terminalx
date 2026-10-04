@@ -3169,6 +3169,18 @@ pub async fn cloud_mirror_list() -> CmdResult<Vec<CloudMirrorRef>> {
     .map_err(err)?
 }
 
+/// The saved session could not be read at this launch. Mirrors are kept for
+/// a bounded time in that state, then removed. Returns how many were.
+#[tauri::command]
+pub async fn cloud_mirror_note_unreadable() -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0);
+        crate::cloud_mirror::note_unreadable(&store::root().map_err(err)?, now_ms).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// Remove what the mirror wrote. Returns the number of files removed.
 #[tauri::command]
 pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -> CmdResult<usize> {

@@ -331,6 +331,8 @@ let claimedOwner: string | null = null;
 /** The native side confirmed the mirrors on this computer are `claimedOwner`'s. */
 let ownerConfirmed = false;
 let claiming = 0;
+/** This run has already told the native side that the saved session could not be read. */
+let unreadableNoted = false;
 
 function stopAll() {
   for (const key of [...running.keys()]) {
@@ -352,9 +354,25 @@ function stopAll() {
 export async function claimCloudMirrorOwner(account: string | null | undefined, legacyEmail: string | null = null): Promise<void> {
   if (account === undefined) {
     // Unknown is not a sign-out: keep the files, stop reading into them.
+    // A claim still in flight is superseded, so it cannot confirm an owner
+    // when it resolves.
+    claiming += 1;
     claimedOwner = null;
     ownerConfirmed = false;
     stopAll();
+    // Kept, but not for ever: the native side counts launches in this state
+    // and removes the mirrors after a few, or a day. Counted once per run.
+    if (!unreadableNoted) {
+      unreadableNoted = true;
+      try {
+        if ((await api.cloudMirrorNoteUnreadable()) > 0) {
+          states.clear();
+          for (const listener of listeners) listener();
+        }
+      } catch {
+        unreadableNoted = false;
+      }
+    }
     return;
   }
   const owner = account ?? "";
@@ -388,6 +406,7 @@ export async function claimCloudMirrorOwner(account: string | null | undefined, 
 export function resetCloudMirrors(): void {
   claimedOwner = null;
   ownerConfirmed = false;
+  unreadableNoted = false;
   claiming += 1;
   connected.clear();
   for (const key of [...running.keys()]) stop(key);
