@@ -2607,3 +2607,136 @@ async fn an_application_that_speaks_first_is_never_heard_before_the_open_answer(
     assert_eq!(second["event"], "ports.data");
     assert_eq!(second["params"]["streamId"], first["result"]["streamId"]);
 }
+
+// ---- the open app comes back as a new device (a stop and a wake) ---------------
+
+/// A stop revokes every attachment, and the wake issues the app that stayed
+/// open a new attachment and a new device. To a runtime process that
+/// survived the stop (a frozen container) that is another device: it watches
+/// until it takes control, which always works for someone who may type, and
+/// the runtime knows none of its writers, so a writer that kept counting is
+/// told `conflict` (the client then starts a new one) and never typed blind.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_returning_app_is_a_new_device_that_takes_control_and_types_from_one() {
+    let f = fixture();
+    with_tab(&f);
+    shared(&f);
+    let pid = start_agent_cli(&f);
+    let (before, _before_events) = agent_person(&f.rpc, "device-before-stop", Authority::Manage, "admin").await;
+    let (bob, mut bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    let write = |pty: &str, writer: &str, seq: u64, data: &str| json!({ "ptyId": pty, "data": data, "seq": seq, "writerId": writer });
+
+    call(&f.rpc, &before, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &before, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &before, "pty.write", write(AGENT_TERMINAL, "open-app", 1, "echo one-$$\n")).await.unwrap();
+    call(&f.rpc, &before, "pty.write", write(AGENT_TERMINAL, "open-app", 2, "echo two-$$\n")).await.unwrap();
+    output_until(&mut bob_events, &format!("two-{pid}")).await;
+    let shell = call(&f.rpc, &before, "pty.create", json!({ "clientRequestId": "request-shell-before-stop" })).await.unwrap()["ptyId"].as_str().unwrap().to_string();
+    call(&f.rpc, &before, "pty.write", write(&shell, "open-app", 1, "true\n")).await.unwrap();
+    let typed = f.rpc.input_activity.load(Ordering::SeqCst);
+
+    f.rpc.disconnect(&before);
+    let (after, mut after_events) = agent_person(&f.rpc, "device-after-wake", Authority::Manage, "admin").await;
+    // Their own terminal, under a device the runtime has not seen: they watch.
+    let attached = call(&f.rpc, &after, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!((attached["control"].as_str(), attached["controllerId"].as_str()), (Some("other"), Some("admin")));
+    assert_eq!(call(&f.rpc, &after, "pty.list", json!({})).await.unwrap()["terminals"][0]["control"], "other");
+    // Nothing moves control but asking for it: not a key, not a size, and never what the terminal says by itself.
+    let mut focus_report = write(AGENT_TERMINAL, "reports", 1, "\x1b[I");
+    focus_report["report"] = json!(true);
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", focus_report).await), "not_controller");
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", write(AGENT_TERMINAL, "new", 1, "x")).await), "not_controller");
+    assert_eq!(code(call(&f.rpc, &after, "pty.resize", json!({ "ptyId": AGENT_TERMINAL, "cols": 50, "rows": 10 })).await), "not_controller");
+    assert_eq!(call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["controllerId"], "admin");
+
+    // "Take control" works whenever it is offered.
+    let taken = call(&f.rpc, &after, "pty.control", json!({ "ptyId": AGENT_TERMINAL, "cols": 90, "rows": 25 })).await.unwrap();
+    assert_eq!((taken["control"].as_str(), taken["cols"].as_u64()), (Some("you"), Some(90)));
+    // The writer that kept counting is refused, by number, and nothing is typed.
+    let refused = call(&f.rpc, &after, "pty.write", write(AGENT_TERMINAL, "open-app", 3, "echo three-$$\n")).await.unwrap_err();
+    assert_eq!(refused, ("conflict".to_string(), "expected seq 1".to_string()));
+    // A new writer, from 1: typed once.
+    assert_eq!(call(&f.rpc, &after, "pty.write", write(AGENT_TERMINAL, "after-wake", 1, "echo three-$$\n")).await.unwrap()["applied"], true);
+    let (seen, _) = output_until(&mut after_events, &format!("three-{pid}")).await;
+    assert_eq!(seen.matches(&format!("three-{pid}")).count(), 1, "{seen}");
+    // A shell is the same.
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", write(&shell, "open-app", 2, "true\n")).await), "conflict");
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", write(&shell, "after-wake", 1, "true\n")).await), "not_controller");
+    assert_eq!(call(&f.rpc, &after, "pty.control", json!({ "ptyId": shell })).await.unwrap()["control"], "you");
+    assert_eq!(call(&f.rpc, &after, "pty.write", write(&shell, "after-wake", 1, "true\n")).await.unwrap()["applied"], true);
+    // Only the two accepted writes were use of the workspace: no refusal, attach, list or control was.
+    assert_eq!(f.rpc.input_activity.load(Ordering::SeqCst), typed + 2);
+}
+
+/// Another person coming back after a stop never finds the terminal theirs,
+/// whoever they are: taking it is the explicit call, decided by the rules for typing.
+#[tokio::test(flavor = "multi_thread")]
+async fn nobody_elses_terminal_is_ever_taken_without_asking() {
+    let f = fixture();
+    with_tab(&f);
+    shared(&f);
+    let pid = start_agent_cli(&f);
+    let write = |writer: &str, seq: u64, data: &str| json!({ "ptyId": AGENT_TERMINAL, "data": data, "seq": seq, "writerId": writer });
+    let (alice, _alice_events) = agent_person(&f.rpc, "alice-desk-1", Authority::Participate, "alice").await;
+    let (bob, mut bob_events) = agent_person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &alice, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&f.rpc, &alice, "pty.write", write("alice", 1, "echo alice-$$\n")).await.unwrap();
+    output_until(&mut bob_events, &format!("alice-{pid}")).await;
+    f.rpc.disconnect(&alice);
+
+    let watching = |attached: Value| (attached["control"].as_str().map(str::to_string), attached["controllerId"].as_str().map(str::to_string));
+    let hers = (Some("other".to_string()), Some("alice".to_string()));
+    for (device, authority, user) in [("dave-desk", Authority::Participate, "dave"), ("admin-desk", Authority::Manage, "admin"), ("alice-laptop", Authority::Participate, "alice")] {
+        let (peer, _events) = agent_person(&f.rpc, device, authority, user).await;
+        assert_eq!(watching(call(&f.rpc, &peer, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()), hers, "{device}");
+        let refused = code(call(&f.rpc, &peer, "pty.write", write(device, 1, "x")).await);
+        // Alice holds the tab by having typed: others are refused for that, she for not controlling it here.
+        assert_eq!(refused, if user == "alice" { "not_controller" } else { "lease_held" }, "{device}");
+        assert_eq!(watching(call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()).1, hers.1, "{device}");
+    }
+    // A driver who may not take the tab is refused the explicit call too; nothing moved.
+    let (dave, _dave_events) = agent_person(&f.rpc, "dave-desk-2", Authority::Participate, "dave").await;
+    assert_eq!(code(call(&f.rpc, &dave, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await), "lease_held");
+    assert_eq!(call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["controllerId"], "alice");
+}
+
+/// A provider that boots the machine cold restarts the runtime: the new
+/// process knows no controller and no writer, and says so instead of typing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_runtime_starts_the_terminal_over_for_the_returning_device() {
+    let stopped = fixture();
+    with_tab(&stopped);
+    start_agent_cli(&stopped);
+    let (before, _before_events) = agent_person(&stopped.rpc, "device-before-stop", Authority::Manage, "admin").await;
+    let old = call(&stopped.rpc, &before, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&stopped.rpc, &before, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    call(&stopped.rpc, &before, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "true\n", "seq": 1, "writerId": "w" })).await.unwrap();
+    let old_epoch = old["epoch"].as_str().unwrap().to_string();
+    drop(stopped);
+
+    let f = fixture();
+    with_tab(&f);
+    let pid = start_agent_cli(&f);
+    let (after, mut events) = agent_person(&f.rpc, "device-after-wake", Authority::Manage, "admin").await;
+    // What the open app still holds from the old process is refused, never typed.
+    assert_eq!(
+        code(call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 2, "writerId": "w", "epoch": old_epoch })).await),
+        "not_found"
+    );
+    assert_eq!(
+        code(call(&f.rpc, &after, "pty.attach", json!({ "ptyId": AGENT_TERMINAL, "sinceOffset": 4, "runtimeGeneration": 7, "epoch": old_epoch })).await),
+        "cursor_expired"
+    );
+    let attached = call(&f.rpc, &after, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_ne!(attached["epoch"], old_epoch.as_str());
+    assert_eq!((attached["control"].as_str(), attached["controllerId"].clone()), (Some("none"), Value::Null), "nobody controls a new process's terminal");
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 1, "writerId": "new" })).await), "not_controller");
+    // The view takes control (nobody has it) and types from 1 with a new writer.
+    call(&f.rpc, &after, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap();
+    assert_eq!(code(call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 2, "writerId": "w" })).await), "conflict");
+    call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo woke-$$\n", "seq": 1, "writerId": "new" })).await.unwrap();
+    output_until(&mut events, &format!("woke-{pid}")).await;
+}
