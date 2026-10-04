@@ -133,7 +133,7 @@ already raised.
 ```text
 terminalx worktrees list [--project <project>] --json
 terminalx worktrees rename <path-or-name> --name <name> [--project <project>] --json
-terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes [--force] --json
 ```
 
 Renaming moves a TerminalX-managed worktree and renames its matching branch, using the same
