@@ -149,6 +149,13 @@ export function hideWebgl(term: Terminal) {
   trim();
 }
 
+/** Replace a stale GPU surface without touching xterm's buffers or its PTY. */
+export function recoverWebgl(term: Terminal) {
+  release(term);
+  if (isOnScreen(term)) acquire(term);
+  term.refresh(0, term.rows - 1);
+}
+
 /** The terminal is going away: its context is released now, not when it is collected. */
 export function dropWebgl(term: Terminal) {
   setOnScreen(term, false);

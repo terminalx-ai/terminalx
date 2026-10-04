@@ -1,7 +1,7 @@
-import { render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const webgl = vi.hoisted(() => ({ showWebgl: vi.fn(), hideWebgl: vi.fn() }));
+const webgl = vi.hoisted(() => ({ showWebgl: vi.fn(), hideWebgl: vi.fn(), recoverWebgl: vi.fn() }));
 vi.mock("@/lib/terminalWebgl", () => webgl);
 vi.mock("@/lib/api", () => ({ pty: {} }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -10,7 +10,7 @@ import { TerminalView } from "./TerminalView";
 import { disposeInstance, terminalCounters, type TerminalInstance } from "@/lib/terminal";
 
 function instance(): TerminalInstance {
-  const term = { options: {}, focus: vi.fn(), dispose: vi.fn(), cols: 80, rows: 24, buffer: { normal: { length: 0 }, alternate: { length: 0 } } };
+  const term = { options: {}, refresh: vi.fn(), focus: vi.fn(), dispose: vi.fn(), cols: 80, rows: 24, buffer: { normal: { length: 0 }, alternate: { length: 0 } } };
   return { el: document.createElement("div"), term, fit: {} } as never;
 }
 
@@ -42,4 +42,24 @@ describe("a terminal view", () => {
     expect(terminalCounters().instances).toBe(1);
     expect(inst.term.dispose).not.toHaveBeenCalled();
   });
+});
+
+it("recovers on focus without replacing the terminal or stealing input focus", () => {
+  vi.useFakeTimers();
+  const inst = instance();
+  const create = vi.fn(() => inst);
+  const view = render(<TerminalView id="p1" visible create={create} />);
+  act(() => vi.advanceTimersByTime(100));
+  vi.mocked(inst.term.focus).mockClear();
+  act(() => { window.dispatchEvent(new Event("focus")); vi.advanceTimersByTime(100); });
+  expect(webgl.recoverWebgl).toHaveBeenCalledWith(inst.term);
+  expect(inst.term.focus).not.toHaveBeenCalled();
+  expect(create).toHaveBeenCalledTimes(1);
+  fireEvent.click(view.getByRole("button", { name: "Redraw terminal" }));
+  expect(webgl.recoverWebgl).toHaveBeenCalledTimes(2);
+  view.unmount();
+  act(() => { window.dispatchEvent(new Event("focus")); vi.advanceTimersByTime(100); });
+  expect(webgl.recoverWebgl).toHaveBeenCalledTimes(2);
+  expect(inst.term.dispose).not.toHaveBeenCalled();
+  vi.useRealTimers();
 });

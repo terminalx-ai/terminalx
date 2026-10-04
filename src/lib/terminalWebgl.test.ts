@@ -32,6 +32,8 @@ function terminal() {
   const loseContext = vi.fn();
   const term = {
     element,
+    rows: 24,
+    refresh: vi.fn(),
     loadAddon: vi.fn(() => {
       // As the real addon: a 2D canvas for links first, then the WebGL one.
       const links = document.createElement("canvas");
@@ -190,4 +192,18 @@ describe("WebGL contexts", () => {
     expect(counters.rendererOf(term)).toBe("webgl");
     expect(counters.webglRefused()).toBe(false);
   });
+});
+
+it("replaces an apparently live surface on resume and repaints even with DOM fallback", async () => {
+  const { webgl, counters } = await load();
+  const { term } = terminal();
+  webgl.showWebgl(term);
+  webgl.recoverWebgl(term);
+  expect(addons.made[0].disposed).toBe(true);
+  expect(counters.rendererOf(term)).toBe("webgl");
+  expect((term as { refresh: unknown }).refresh).toHaveBeenCalledWith(0, 23);
+  addons.refuse = true;
+  webgl.recoverWebgl(term);
+  expect(counters.rendererOf(term)).toBe("dom");
+  expect((term as { refresh: unknown }).refresh).toHaveBeenCalledTimes(2);
 });

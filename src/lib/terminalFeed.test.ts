@@ -95,7 +95,7 @@ describe("a local pane's output", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("holds nothing back while the window is hidden, where the page's timers barely run", () => {
+  it("never acknowledges unparsed output across a long hidden period", () => {
     const { term, parse } = terminal();
     setOnScreen(term, true);
     const feed = feedLocalPane("p1", "a1", term);
@@ -103,11 +103,11 @@ describe("a local pane's output", () => {
     // Arrived and not yet parsed: with the window visible that is not acknowledged.
     expect(pty.ack).not.toHaveBeenCalled();
 
-    // The window is hidden: what has arrived is acknowledged there and then.
+    // Suspension cannot turn receipt into parsing: keep flow control engaged.
     hideWindow(true);
-    expect(reported()).toEqual([ACK_BYTES * 2]);
+    expect(reported()).toEqual([]);
     feed.data(new Uint8Array(ACK_BYTES));
-    expect(reported()).toEqual([ACK_BYTES * 2, ACK_BYTES * 3]);
+    expect(reported()).toEqual([]);
 
     // Shown again, and xterm catches up: nothing is acknowledged twice.
     hideWindow(false);
@@ -124,6 +124,8 @@ describe("a local pane's output", () => {
     feed.data(new Uint8Array(ACK_BYTES * 4));
     parse();
     feed.stop();
+    feed.data(new Uint8Array(ACK_BYTES));
+    parse();
     vi.advanceTimersByTime(HIDDEN_ACK_MS * 10);
     hideWindow(true);
     expect(pty.ack).not.toHaveBeenCalled();
