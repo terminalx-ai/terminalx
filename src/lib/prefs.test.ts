@@ -22,10 +22,10 @@ describe("permission mode preferences", () => {
 });
 
 describe("website browser preferences", () => {
-  it("defaults fresh preferences to the system browser without an explicit choice", async () => {
+  it("asks for a browser when no preference has been saved", async () => {
     const { getPrefs } = await import("./prefs");
 
-    expect(getPrefs()).toMatchObject({ linkBrowser: "system", linkBrowserChosen: false });
+    expect(getPrefs()).toMatchObject({ linkBrowser: "ask", linkBrowserChosen: false });
   });
 
   it("migrates a saved TerminalX default once and preserves unrelated preferences", async () => {
@@ -53,14 +53,14 @@ describe("website browser preferences", () => {
   it.each([
     { sounds: false },
     { linkBrowser: "system", sounds: false },
-  ])("keeps the system browser for older preferences %j", async (saved) => {
+  ])("honors an existing browser preference or asks when none was saved: %j", async (saved) => {
     localStorage.setItem("raccoon.prefs", JSON.stringify(saved));
     const { getPrefs } = await import("./prefs");
 
-    expect(getPrefs()).toMatchObject({ linkBrowser: "system", sounds: false });
+    expect(getPrefs()).toMatchObject({ linkBrowser: "linkBrowser" in saved ? saved.linkBrowser : "ask", sounds: false });
   });
 
-  it.each(["system", "terminalx"] as const)("preserves a recorded Settings choice of %s", async (linkBrowser) => {
+  it.each(["ask", "system", "terminalx"] as const)("preserves a recorded Settings choice of %s", async (linkBrowser) => {
     localStorage.setItem("raccoon.prefs", JSON.stringify({ linkBrowser, linkBrowserChosen: true }));
     const { getPrefs, setPrefs } = await import("./prefs");
     expect(getPrefs().linkBrowser).toBe(linkBrowser);
@@ -69,6 +69,14 @@ describe("website browser preferences", () => {
     vi.resetModules();
     const reloaded = await import("./prefs");
     expect(reloaded.getPrefs()).toMatchObject({ linkBrowser, linkBrowserChosen: true, sounds: false });
+  });
+
+  it.each(["ask", "system", "terminalx"] as const)("persists and reloads a remembered %s choice", async (linkBrowser) => {
+    const { setPrefs } = await import("./prefs");
+    setPrefs({ linkBrowser, linkBrowserChosen: true });
+    vi.resetModules();
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({ linkBrowser, linkBrowserChosen: true });
   });
 
   it("preserves a TerminalX opt-in after migrating and reloading", async () => {
@@ -90,10 +98,10 @@ describe("website browser preferences", () => {
     expect(getPrefs()).toMatchObject({ linkBrowser: "system", sounds: false });
   });
 
-  it("uses the system browser when saved preferences are malformed", async () => {
+  it("asks for a browser when saved preferences are malformed", async () => {
     localStorage.setItem("raccoon.prefs", "{");
     const { getPrefs } = await import("./prefs");
 
-    expect(getPrefs().linkBrowser).toBe("system");
+    expect(getPrefs().linkBrowser).toBe("ask");
   });
 });

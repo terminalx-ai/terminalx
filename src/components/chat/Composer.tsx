@@ -16,7 +16,9 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, offeredOn, prettyModelId, refreshModels, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
+import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
@@ -97,6 +99,7 @@ export function Composer({
   contextUsed,
   reportedModel,
   modelsAreLocal = true,
+  modelClient,
   contextMax,
   handoffs,
   disabledReason,
@@ -128,8 +131,10 @@ export function Composer({
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
   reportedModel?: string | null;
-  /** False when the tab runs on another machine (a cloud workspace): the local CLI's reading of an alias is not claimed for it. */
+  /** False for cloud: use modelClient, or aliases only until the workspace answers. */
   modelsAreLocal?: boolean;
+  /** The workspace that supplies cloud model choices, while connected. */
+  modelClient?: WorkspaceRpcClient | null;
   contextMax?: number;
   /** Next-step prompts offered after a turn lands (commit, PR, run). */
   handoffs?: { label: string; prompt: string }[];
@@ -146,13 +151,10 @@ export function Composer({
   canStop?: boolean;
   autoFocus?: boolean;
 }) {
-  const listed = useModels(tab.harness);
+  const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
   // What may be chosen here, plus what the tab is already on if that is not among them.
-  const models = useMemo(() => {
-    const offered = offeredOn(listed, modelsAreLocal);
-    return model && !offered.some((m) => m.id === model.id) ? [...offered, model] : offered;
-  }, [listed, modelsAreLocal, model?.id]);
+  const models = useMemo(() => model && !listed.some((m) => m.id === model.id) ? [...listed, model] : listed, [listed, model?.id]);
   const [caret, setCaret] = useState(0);
   const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
   const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
@@ -167,7 +169,7 @@ export function Composer({
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The model and permission pickers open on a click and an accessibility press too.
-  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
   // A file dropped from this computer can be mentioned only to an agent that runs here.
@@ -414,8 +416,8 @@ export function Composer({
   const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
   // An alias reads as the version it is running, once someone has said which.
-  const modelName = model ? runningModelName(model, reportedModel, modelsAreLocal) : tab.model ? prettyModelId(tab.model) : "Model";
-  const runs = model ? aliasRuns(model, reportedModel, modelsAreLocal) : null;
+  const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
+  const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
@@ -531,9 +533,9 @@ export function Composer({
                     {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
                     {group.models.map((m) => {
                       // The ticked alias says what this session reported; the rest, what the CLI listed.
-                      const note = m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models, modelsAreLocal);
+                      const note = m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
                       return (
-                        <DropdownMenuRadioItem key={m.id} value={m.id}>
+                        <DropdownMenuRadioItem key={m.id} value={m.id} disabled={!modelsAreLocal && !listed.some((choice) => choice.id === m.id)}>
                           {m.label}
                           {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
                         </DropdownMenuRadioItem>

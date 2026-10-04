@@ -9,6 +9,7 @@
 export async function runContinuationSmoke({ projectPath, reportPath, sourceProviders = ['claude', 'codex'], destinationProviders = ['claude', 'codex'] }) {
   const { api, agent, fs } = await import('/src/lib/api.ts');
   const { continuationPrompt, launchContinuation } = await import('/src/lib/continuation.ts');
+  const { getDraft } = await import('/src/lib/drafts.ts');
   const { upsertSession, selectSession, setActiveTab, getSessionStore } = await import('/src/lib/sessions.ts');
   const { getPrefs } = await import('/src/lib/prefs.ts');
   const results = [];
@@ -54,8 +55,11 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
       for (const provider of destinationProviders) for (const mode of ['focused', 'full']) {
         context = await agent.prepareContinuation(created.id, source.id);
         const count = (await api.listSessions()).find((s) => s.id === created.id).tabs.length;
+        const startedAt = Date.now();
         const result = await launchContinuation(context, provider, continuationPrompt(context, mode), () => {});
         assert(result.stage === 'delivered', `${sourceProvider} → ${provider} (${mode}): ${result.error}`);
+        const deliveryMs = Date.now() - startedAt;
+        assert(getDraft(result.tab.id) === '', 'Confirmed continuation leaves the destination composer empty');
         const events = await turnDone(created.id, result.tab.id);
         const entry = (await api.listSessions()).find((s) => s.id === created.id);
         const destination = entry.tabs.find((t) => t.id === result.tab.id);
@@ -69,7 +73,7 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
         const reply = events.filter((e) => e.payload.type === 'assistant_text').map((e) => e.payload.text).join('\n');
         assert(reply.includes(marker) && reply.includes('SHARED_WORKSPACE_109'), 'Agent actually read history and uncommitted workspace');
         assert((await fs.readText(context.transcriptPath)).content === before.content, 'Source transcript unchanged');
-        results.push({ sourceProvider, provider, mode, status: 'passed', sourceIdentity, destinationIdentity: destination.providerSessionId, cwd: entry.cwd, reply });
+        results.push({ sourceProvider, provider, mode, status: 'passed', deliveryMs, sourceIdentity, destinationIdentity: destination.providerSessionId, cwd: entry.cwd, reply });
         await report();
         // Only smoke destinations are stopped, after their turn has finished.
         await agent.stop(created.id, destination.id);

@@ -134,6 +134,8 @@ function makeClient() {
       const state = this.connection;
       return state.state === "connected" && (state.capabilities as readonly string[] | undefined ?? []).includes(capability);
     },
+    onState: () => () => {},
+    listRuntimeAgents: vi.fn(async (): Promise<import("@terminalx/portable/workspace").RuntimeAgent[]> => []),
     listAgentTabs: vi.fn(async () => liveTabs),
     onNotification: vi.fn((listener: (notification: { event: string; params: Record<string, unknown> }) => void) => {
       notificationListeners.add(listener);
@@ -249,6 +251,25 @@ describe("cloud agent tabs", () => {
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
     expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", mode: "bypassPermissions" });
+  });
+
+  it("offers pinned models from the workspace when creating a cloud tab", async () => {
+    const base = { efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
+    client.listRuntimeAgents.mockResolvedValue([{
+      id: "claude", name: "Claude Code", caps: {}, modes: [], defaultMode: "bypassPermissions",
+      models: [
+        { ...base, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true },
+        { ...base, id: "claude-opus-4-6", label: "Opus 4.6", isDefault: false },
+      ],
+    }]);
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    render(view(connected({ capabilities: ["session/1", "keys/1", "agents/1"] })));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect(await within(form).findByRole("option", { name: "Opus (latest · Opus 4.6)" })).toBeTruthy();
+    fireEvent.change(within(form).getByLabelText("Model"), { target: { value: "claude-opus-4-6" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
   });
 
   it("keeps two agent tabs' conversations and states apart", async () => {
