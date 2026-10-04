@@ -36,10 +36,14 @@ use tokio_util::sync::CancellationToken;
 pub const REQUEST_PREFIX: &str = "ports-";
 /// Local connections one forwarder carries at once.
 const MAX_LOCAL_CONNECTIONS: usize = 64;
-/// How long a new local connection is watched for an HTTP request head
-/// before it is carried as it is (a protocol where the server speaks first).
-const HOST_CHECK_WAIT: Duration = Duration::from_millis(400);
-const HOST_CHECK_BYTES: usize = 8 * 1024;
+/// How long a new local connection may say nothing before its stream is
+/// opened anyway, for a protocol where the server speaks first. What the
+/// client sends later is still judged before it is forwarded.
+const SILENT_OPEN: Duration = Duration::from_millis(400);
+/// The longest HTTP request head that is read to find its `Host`.
+const MAX_HEAD_BYTES: usize = 16 * 1024;
+/// A request head that stops arriving for this long ends the connection.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bytes read from the local connection per `ports.write` (the runtime
 /// accepts 64 KiB).
 const CHUNK: usize = 32 * 1024;
@@ -67,6 +71,8 @@ struct Listening {
 }
 
 struct Stream {
+    /// The workspace port, so stopping its forward ends it.
+    port: u16,
     to_local: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes from the runtime not yet written to the local side.
     queued: Arc<AtomicUsize>,
@@ -234,6 +240,12 @@ impl PortForwarder {
             if let Some(listening) = state.forwards.get(&port) {
                 return Ok(listening.forward.clone());
             }
+            // Read again under the lock that a disconnect takes to close
+            // everything: a forward made here cannot outlive it. (The
+            // listener is dropped on return.)
+            if !self.inner.ready.load(Ordering::SeqCst) {
+                return Err("cloud_port_not_connected".into());
+            }
             if state.scope.is_none() {
                 state.scope = scope;
             }
@@ -262,25 +274,57 @@ impl PortForwarder {
         Ok(forward)
     }
 
+    /// Stop forwarding `port`: the listener closes, and so does every
+    /// connection it was carrying.
     pub fn unforward(&self, port: u16) -> bool {
-        let Some(listening) = self.inner.state.lock().unwrap().forwards.remove(&port) else { return false };
-        listening.stop.cancel();
+        let closed: Vec<String> = {
+            let mut state = self.inner.state.lock().unwrap();
+            let Some(listening) = state.forwards.remove(&port) else { return false };
+            listening.stop.cancel();
+            let ids: Vec<String> = state.streams.iter().filter(|(_, stream)| stream.port == port).map(|(id, _)| id.clone()).collect();
+            for id in &ids {
+                if let Some(stream) = state.streams.remove(id) {
+                    stream.end.cancel();
+                }
+            }
+            ids
+        };
+        for stream_id in closed {
+            (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
+        }
         true
     }
 
     /// One local connection, carried as one stream.
+    ///
+    /// The client's first bytes are judged before any of them is forwarded,
+    /// whenever they arrive: an HTTP request that does not name this
+    /// loopback listener is refused (see [`judge`]). A client that says
+    /// nothing at first gets its stream anyway after [`SILENT_OPEN`], so a
+    /// protocol whose server speaks first works; what the client then sends
+    /// is still judged before it goes anywhere.
     async fn serve(&self, mut socket: TcpStream, port: u16, local_port: u16) {
         if !self.inner.ready.load(Ordering::SeqCst) {
             answer_and_close(&mut socket, &page("503 Service Unavailable", STOPPED)).await;
             return;
         }
-        // A web page elsewhere can aim a hostname of its own at 127.0.0.1
-        // (DNS rebinding) and read what the preview answers. Its requests
-        // carry that hostname: only this loopback address is served.
-        if foreign_host(&socket, local_port).await {
-            answer_and_close(&mut socket, &page("403 Forbidden", &format!("This preview is only served at http://127.0.0.1:{local_port}. The request named another host and was refused."))).await;
-            return;
+        let foreign = page("403 Forbidden", &format!("This preview is only served at http://127.0.0.1:{local_port}. The request named another host and was refused."));
+        let mut head = Vec::new();
+        let verdict = match tokio::time::timeout(SILENT_OPEN, judge(&mut socket, &mut head, local_port)).await {
+            Ok(verdict) => Some(verdict),
+            // Bytes have begun to arrive: they are judged before anything else happens.
+            Err(_) if !head.is_empty() => Some(judge(&mut socket, &mut head, local_port).await),
+            Err(_) => None,
+        };
+        match verdict {
+            Some(Verdict::Refuse) => {
+                answer_and_close(&mut socket, &foreign).await;
+                return;
+            }
+            Some(Verdict::Closed) => return,
+            Some(Verdict::Carry) | None => {}
         }
+        let judged = verdict.is_some();
         let request = self.id("open");
         let (answer, answered) = oneshot::channel();
         let epoch = {
@@ -304,38 +348,46 @@ impl PortForwarder {
             }
         };
         let Some(stream_id) = opened.get("streamId").and_then(Value::as_str).map(str::to_string) else { return };
-        let window = opened.get("window").and_then(Value::as_u64).map(|window| window as usize).filter(|window| *window >= CHUNK).unwrap_or(DEFAULT_WINDOW);
+        // The runtime names its window; it is never taken as larger than ours.
+        let window = opened.get("window").and_then(Value::as_u64).map(|window| window as usize).filter(|window| *window >= CHUNK).unwrap_or(DEFAULT_WINDOW).min(DEFAULT_WINDOW);
         let (to_local, mut from_runtime) = mpsc::unbounded_channel::<Vec<u8>>();
         let in_flight = Arc::new(AtomicUsize::new(0));
         let queued = Arc::new(AtomicUsize::new(0));
         let drained = Arc::new(Notify::new());
         let end = CancellationToken::new();
-        let ended_early = {
+        let registered = {
             let mut state = self.inner.state.lock().unwrap();
-            // The connection was lost between the answer and here: the
-            // stream died with it, and the local side just ends.
             if state.epoch != epoch {
+                // The connection was lost between the answer and here: the
+                // stream died with it, and the local side just ends.
+                None
+            } else if !state.forwards.contains_key(&port) {
+                // The forward was stopped meanwhile: the stream is given back.
+                state.early.remove(&stream_id);
+                Some(false)
+            } else {
+                // What the runtime sent before its answer was read.
+                let early = state.early.remove(&stream_id).unwrap_or_default();
+                for data in early.data {
+                    queued.fetch_add(data.len(), Ordering::SeqCst);
+                    let _ = to_local.send(data);
+                }
+                if early.closed {
+                    // The sender is dropped: what came is delivered, then the end.
+                    end.cancel();
+                } else {
+                    state.streams.insert(stream_id.clone(), Stream { port, to_local, queued: queued.clone(), in_flight: in_flight.clone(), drained: drained.clone(), end: end.clone() });
+                }
+                Some(true)
+            }
+        };
+        match registered {
+            None => return,
+            Some(false) => {
+                (self.inner.send)(json!({ "id": self.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
                 return;
             }
-            // What the runtime sent before its answer was read.
-            let early = state.early.remove(&stream_id).unwrap_or_default();
-            for data in early.data {
-                queued.fetch_add(data.len(), Ordering::SeqCst);
-                let _ = to_local.send(data);
-            }
-            if !early.closed {
-                state.streams.insert(stream_id.clone(), Stream { to_local, queued: queued.clone(), in_flight: in_flight.clone(), drained: drained.clone(), end: end.clone() });
-            }
-            // Otherwise the sender is dropped here: what came is delivered, then the end.
-            early.closed
-        };
-        if ended_early {
-            while let Some(data) = from_runtime.recv().await {
-                if socket.write_all(&data).await.is_err() {
-                    break;
-                }
-            }
-            return;
+            Some(true) => {}
         }
         let (mut reader, mut writer) = socket.into_split();
         let down = {
@@ -359,53 +411,84 @@ impl PortForwarder {
                     // Only what the local side has taken is acknowledged.
                     (forwarder.inner.send)(json!({ "id": forwarder.id("ack"), "method": "ports.ack", "params": { "streamId": stream_id, "bytes": data.len() } }));
                 }
-                let _ = writer.shutdown().await;
+                writer
             }
         };
         let up = {
             let (forwarder, stream_id, end) = (self.clone(), stream_id.clone(), end.clone());
             async move {
-                let mut buffer = vec![0u8; CHUNK];
-                loop {
-                    // Send only what the runtime has room for.
-                    loop {
-                        let freed = drained.notified();
-                        if in_flight.load(Ordering::SeqCst) + CHUNK <= window {
-                            break;
-                        }
-                        tokio::select! {
-                            _ = end.cancelled() => return,
-                            _ = freed => {}
+                // True when the client's first bytes turned out to be a request for another host.
+                let refused = async {
+                    // Judged bytes not yet sent on; read from the socket only once it is empty.
+                    let mut backlog = head;
+                    if !judged {
+                        let verdict = tokio::select! {
+                            _ = end.cancelled() => return false,
+                            verdict = judge(&mut reader, &mut backlog, local_port) => verdict,
+                        };
+                        match verdict {
+                            Verdict::Carry => {}
+                            Verdict::Refuse => return true,
+                            Verdict::Closed => return false,
                         }
                     }
-                    let read = tokio::select! {
-                        _ = end.cancelled() => return,
-                        read = reader.read(&mut buffer) => read,
-                    };
-                    match read {
-                        Ok(count) if count > 0 => {
-                            in_flight.fetch_add(count, Ordering::SeqCst);
-                            let frame = json!({
-                                "id": format!("{REQUEST_PREFIX}write-{stream_id}-{}", forwarder.inner.next.fetch_add(1, Ordering::Relaxed)),
-                                "method": "ports.write",
-                                "params": { "streamId": stream_id, "data": general_purpose::STANDARD.encode(&buffer[..count]) },
-                            });
-                            if !(forwarder.inner.send)(frame) {
+                    let mut buffer = vec![0u8; CHUNK];
+                    loop {
+                        // Send only what the runtime has room for.
+                        loop {
+                            let freed = drained.notified();
+                            if in_flight.load(Ordering::SeqCst) + CHUNK <= window {
                                 break;
                             }
+                            tokio::select! {
+                                _ = end.cancelled() => return false,
+                                _ = freed => {}
+                            }
                         }
-                        _ => break,
+                        let count = if backlog.is_empty() {
+                            let read = tokio::select! {
+                                _ = end.cancelled() => return false,
+                                read = reader.read(&mut buffer) => read,
+                            };
+                            match read {
+                                Ok(count) if count > 0 => count,
+                                _ => return false,
+                            }
+                        } else {
+                            let count = backlog.len().min(CHUNK);
+                            buffer[..count].copy_from_slice(&backlog[..count]);
+                            backlog.drain(..count);
+                            count
+                        };
+                        in_flight.fetch_add(count, Ordering::SeqCst);
+                        let frame = json!({
+                            "id": format!("{REQUEST_PREFIX}write-{stream_id}-{}", forwarder.inner.next.fetch_add(1, Ordering::Relaxed)),
+                            "method": "ports.write",
+                            "params": { "streamId": stream_id, "data": general_purpose::STANDARD.encode(&buffer[..count]) },
+                        });
+                        if !(forwarder.inner.send)(frame) {
+                            return false;
+                        }
                     }
                 }
+                .await;
                 // The local side is done: so is the stream.
                 if forwarder.inner.state.lock().unwrap().streams.remove(&stream_id).is_some() {
                     (forwarder.inner.send)(json!({ "id": forwarder.id("close"), "method": "ports.close", "params": { "streamId": stream_id } }));
                 }
                 end.cancel();
+                (reader, refused)
             }
         };
-        tokio::join!(down, up);
+        let (writer, (reader, refused)) = tokio::join!(down, up);
         self.inner.state.lock().unwrap().streams.remove(&stream_id);
+        if let Ok(mut socket) = reader.reunite(writer) {
+            if refused {
+                answer_and_close(&mut socket, &foreign).await;
+            } else {
+                let _ = socket.shutdown().await;
+            }
+        }
     }
 
     /// A message from the runtime. True when it was the forwarder's: an
@@ -554,72 +637,90 @@ fn bind(wanted: Option<u16>, exact: bool) -> Result<(TcpListener, bool), String>
     random().map(|listener| (listener, true))
 }
 
-/// Whether the connection opens with an HTTP request whose `Host` is not
-/// this loopback listener. Bytes are only peeked: whatever is there is
-/// carried untouched afterwards. A connection that sends nothing at first
-/// (the server speaks first) or does not look like HTTP is not judged.
-async fn foreign_host(socket: &TcpStream, local_port: u16) -> bool {
-    let mut buffer = vec![0u8; HOST_CHECK_BYTES];
-    let deadline = tokio::time::Instant::now() + HOST_CHECK_WAIT;
-    let mut seen = 0;
+/// What the client's first bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Not HTTP, or an HTTP request that names this loopback listener.
+    Carry,
+    /// An HTTP request that names another host, or none.
+    Refuse,
+    /// The client hung up, or stopped mid-request, before it could be told.
+    Closed,
+}
+
+/// Read the client's first bytes into `head` until they can be judged, and
+/// judge them. Nothing read here has been forwarded: on [`Verdict::Carry`]
+/// `head` holds every byte read, to be sent on first.
+///
+/// This is what stops DNS rebinding: a web page that points a hostname of
+/// its own at 127.0.0.1 has the browser send that hostname as `Host`, and
+/// such a request never reaches the workspace. It waits for the bytes
+/// however late they come (a browser may connect first and send later), so
+/// it cannot be outwaited. A caller may cancel it while `head` is still
+/// empty and call it again later.
+async fn judge<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, head: &mut Vec<u8>, local_port: u16) -> Verdict {
+    let mut buffer = [0u8; 4096];
     loop {
-        let peeked = match tokio::time::timeout_at(deadline, socket.peek(&mut buffer)).await {
-            Ok(Ok(count)) if count > 0 => count,
-            _ => return false,
-        };
-        let head = &buffer[..peeked];
-        if !looks_like_http(head) {
-            return false;
+        if let Some(verdict) = classify(head, local_port) {
+            return verdict;
         }
-        if let Some(allowed) = host_allowed(head, local_port) {
-            return !allowed;
+        if head.len() >= MAX_HEAD_BYTES {
+            return Verdict::Refuse;
         }
-        // No `Host` line yet: wait for more, unless the head is complete or nothing new came.
-        if head.windows(4).any(|window| window == b"\r\n\r\n") || peeked == buffer.len() {
-            return true;
+        // An empty head waits as long as the client stays silent; a request
+        // that has begun must keep coming.
+        let read = if head.is_empty() { Ok(reader.read(&mut buffer).await) } else { tokio::time::timeout(HEAD_TIMEOUT, reader.read(&mut buffer)).await };
+        match read {
+            Ok(Ok(count)) if count > 0 => head.extend_from_slice(&buffer[..count]),
+            _ => return Verdict::Closed,
         }
-        if peeked == seen {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-        }
-        seen = peeked;
     }
 }
 
-/// An HTTP/1.x request line start: a method token, then a space.
-fn looks_like_http(head: &[u8]) -> bool {
-    const METHODS: [&[u8]; 9] = [b"GET ", b"HEAD ", b"POST ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ", b"CONNECT ", b"TRACE "];
-    METHODS.iter().any(|method| head.starts_with(method) || (head.len() < method.len() && method.starts_with(head)))
+/// Judge `head` if it is enough to judge: `None` while more bytes are needed.
+fn classify(head: &[u8], local_port: u16) -> Option<Verdict> {
+    match request_line(head)? {
+        false => Some(Verdict::Carry),
+        true => {
+            // The whole head is needed: `Host` may be its last line.
+            let end = head.windows(4).position(|window| window == b"\r\n\r\n").map(|at| at + 2).or_else(|| head.windows(2).position(|window| window == b"\n\n").map(|at| at + 1))?;
+            Some(if names_this_listener(&head[..end], local_port) { Verdict::Carry } else { Verdict::Refuse })
+        }
+    }
 }
 
-/// `Some(true)` when the request's `Host` is this listener by a loopback
-/// name, `Some(false)` when it names anything else, `None` when no complete
-/// `Host` line has arrived yet.
-fn host_allowed(head: &[u8], local_port: u16) -> Option<bool> {
+/// Whether `head` starts with an HTTP request line, `<token> <target>
+/// HTTP/<version>`, whatever the method: `Some(true)` or `Some(false)` once
+/// that can be told, `None` while the first line is still arriving and could
+/// yet be one.
+fn request_line(head: &[u8]) -> Option<bool> {
+    // RFC 9110 token characters.
+    let token = |byte: u8| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte);
+    if head.is_empty() {
+        return None;
+    }
+    let Some(end) = head.iter().position(|byte| *byte == b'\n') else {
+        // No line end yet. It can still become a request line only if every
+        // byte so far fits one: a method, then printable characters.
+        let method_end = head.iter().position(|byte| *byte == b' ');
+        let method = &head[..method_end.unwrap_or(head.len())];
+        let rest = method_end.map_or(&[][..], |at| &head[at..]);
+        let plausible = method.iter().all(|byte| token(*byte)) && method.len() <= 64 && rest.iter().all(|byte| (0x20..0x7f).contains(byte) || *byte == b'\r');
+        return if plausible { None } else { Some(false) };
+    };
+    let line = head[..end].strip_suffix(b"\r").unwrap_or(&head[..end]);
+    let mut parts = line.split(|byte| *byte == b' ');
+    let (Some(method), Some(target), Some(version), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Some(false) };
+    Some(!method.is_empty() && method.iter().all(|byte| token(*byte)) && !target.is_empty() && version.starts_with(b"HTTP/"))
+}
+
+/// Whether a complete request head names this listener by a loopback name
+/// in every `Host` line it has, and has at least one.
+fn names_this_listener(head: &[u8], local_port: u16) -> bool {
     let text = String::from_utf8_lossy(head);
-    let mut lines = text.split("\r\n");
-    lines.next()?;
-    let complete = text.ends_with("\r\n");
-    let all: Vec<&str> = lines.collect();
-    for (index, line) in all.iter().enumerate() {
-        if line.is_empty() {
-            break;
-        }
-        let Some((name, value)) = line.split_once(':') else { continue };
-        if !name.trim().eq_ignore_ascii_case("host") {
-            continue;
-        }
-        // The last line may still be arriving.
-        if index + 1 == all.len() && !complete {
-            return None;
-        }
-        let value = value.trim().to_ascii_lowercase();
-        let port = local_port.to_string();
-        return Some(["127.0.0.1", "localhost", "[::1]"].iter().any(|host| value == format!("{host}:{port}")));
-    }
-    None
+    let port = local_port.to_string();
+    let mut hosts = text.split('\n').skip(1).filter_map(|line| line.trim_end_matches('\r').split_once(':')).filter(|(name, _)| name.trim().eq_ignore_ascii_case("host")).map(|(_, value)| value.trim().to_ascii_lowercase()).peekable();
+    hosts.peek().is_some() && hosts.all(|value| ["127.0.0.1", "localhost", "[::1]"].iter().any(|host| value == format!("{host}:{port}")))
 }
 
 #[cfg(test)]
@@ -748,8 +849,105 @@ mod tests {
         let _silent = connect(local).await;
         assert_eq!(next(&mut requests, "ports.open").await["params"], json!({ "port": 3000 }));
 
-        assert_eq!(host_allowed(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:80", 80), None, "the Host line is still arriving");
-        assert!(looks_like_http(b"GE") && !looks_like_http(b"SSH-2.0"));
+    }
+
+    #[test]
+    fn the_first_bytes_are_judged_as_http_by_shape_not_by_a_list_of_methods() {
+        let carry = Some(Verdict::Carry);
+        let refuse = Some(Verdict::Refuse);
+        // Any method token is a request, and needs a Host that is this listener.
+        for method in ["GET", "PROPFIND", "QUERY", "M-SEARCH", "x"] {
+            assert_eq!(classify(format!("{method} / HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n").as_bytes(), 80), carry, "{method}");
+            assert_eq!(classify(format!("{method} / HTTP/1.1\r\nHost: evil.example\r\n\r\n").as_bytes(), 80), refuse, "{method}");
+        }
+        assert_eq!(classify(b"GET / HTTP/1.0\r\n\r\n", 80), refuse, "no Host at all");
+        assert_eq!(classify(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 80), refuse);
+        assert_eq!(classify(b"GET / HTTP/1.1\nHost: localhost:80\n\n", 80), carry, "bare line feeds");
+        // Two Host lines: both must be this listener.
+        assert_eq!(classify(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:80\r\nHost: evil.example\r\n\r\n", 80), refuse);
+        assert_eq!(classify(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:81\r\n\r\n", 80), refuse, "another port is another origin");
+        // Still arriving: not judged, and so not forwarded, yet.
+        for partial in [&b""[..], b"G", b"PROPFIND /x", b"GET / HTTP/1.1\r\n", b"GET / HTTP/1.1\r\nHost: 127.0.0.1:80\r\n"] {
+            assert_eq!(classify(partial, 80), None, "{:?}", String::from_utf8_lossy(partial));
+        }
+        // Not HTTP: carried as it is.
+        for other in [&b"SSH-2.0-OpenSSH\r\n"[..], b"\x16\x03\x01\x02\x00", b"\x00\x00\x00\x08\x04\xd2\x16\x2f", b"HELO there\r\n", b"GET /\r\n"] {
+            assert_eq!(classify(other, 80), carry, "{:?}", String::from_utf8_lossy(other));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_that_comes_late_or_in_pieces_is_judged_before_any_of_it_is_forwarded() {
+        let (forwarder, mut requests) = forwarder();
+        let local = forwarder.forward(3000, None, false, None).await.unwrap().local_port;
+        // A browser can connect first and send later (a preconnect). The
+        // stream opens for a silent client, but its request is still judged.
+        let mut browser = connect(local).await;
+        let open = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({ "id": open["id"], "ok": true, "result": { "streamId": "port-1" } }));
+        tokio::time::sleep(SILENT_OPEN + Duration::from_millis(300)).await;
+        browser.write_all(b"GET /secret HTTP/1.1\r\nHost: attacker.example\r\n\r\n").await.unwrap();
+        let page = read_all(&mut browser).await;
+        assert!(page.starts_with("HTTP/1.1 403 "), "{page}");
+        // The stream is given back, and not one byte of the request went to the workspace.
+        let mut closed = false;
+        while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(500), requests.recv()).await {
+            assert_ne!(frame["method"], "ports.write", "a refused request was forwarded");
+            closed |= frame["method"] == "ports.close";
+        }
+        assert!(closed);
+
+        // In pieces, with the Host last: nothing is asked of the workspace until the head is whole.
+        let mut browser = connect(local).await;
+        browser.write_all(b"PROPFIND /dav HTTP/1.1\r\nDepth: 1\r\n").await.unwrap();
+        assert!(tokio::time::timeout(SILENT_OPEN + Duration::from_millis(300), requests.recv()).await.is_err(), "opened before the request was judged");
+        browser.write_all(b"Host: attacker.example\r\n\r\n").await.unwrap();
+        assert!(read_all(&mut browser).await.starts_with("HTTP/1.1 403 "));
+        assert!(requests.try_recv().is_err());
+
+        // The same late request for this listener is carried whole.
+        let mut browser = connect(local).await;
+        let open = next(&mut requests, "ports.open").await;
+        forwarder.on_message(&json!({ "id": open["id"], "ok": true, "result": { "streamId": "port-2" } }));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        browser.write_all(&get(local)).await.unwrap();
+        assert_eq!(next(&mut requests, "ports.write").await["params"], json!({ "streamId": "port-2", "data": b64(&get(local)) }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_a_forward_closes_its_connections_and_a_window_is_never_taken_as_larger_than_ours() {
+        let (forwarder, mut requests) = forwarder();
+        let local = forwarder.forward(3000, None, false, None).await.unwrap().local_port;
+        let mut browser = connect(local).await;
+        let open = next(&mut requests, "ports.open").await;
+        // A runtime that claims an enormous window.
+        forwarder.on_message(&json!({ "id": open["id"], "ok": true, "result": { "streamId": "port-1", "window": 1_000_000_000u64 } }));
+        let (mut reader, mut writer) = browser.split();
+        let upload = async {
+            let _ = writer.write_all(&vec![5u8; 4 * DEFAULT_WINDOW]).await;
+        };
+        let counted = async {
+            let mut sent = 0usize;
+            while let Ok(Some(frame)) = tokio::time::timeout(Duration::from_millis(1500), requests.recv()).await {
+                if frame["method"] == "ports.write" {
+                    sent += general_purpose::STANDARD.decode(frame["params"]["data"].as_str().unwrap()).unwrap().len();
+                }
+            }
+            sent
+        };
+        let sent = tokio::select! {
+            sent = counted => sent,
+            _ = async { upload.await; std::future::pending::<()>().await } => unreachable!(),
+        };
+        assert!(sent > 0 && sent <= DEFAULT_WINDOW, "{sent} bytes sent with nothing drained");
+
+        // Stop the forward: the open connection ends and its stream is closed.
+        assert!(forwarder.unforward(3000));
+        assert_eq!(next(&mut requests, "ports.close").await["params"], json!({ "streamId": "port-1" }));
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(20), reader.read_to_end(&mut rest)).await.expect("the connection is closed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, local)).await.is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
