@@ -316,6 +316,30 @@ pub(super) async fn dispatch(
     let result = match method {
         "sessions.summaries" => no_params(&params).and_then(|_| session_summaries()),
         "session.tail" => parse_params(params).and_then(|params| session_tail(manager, params)),
+        "session.workspaceDisposition" | "session.delete" => {
+            if let Err(error) = require_driver(device) { return Some(Err(error)); }
+            let p: SessionRemovalParams = match parse_params(params) { Ok(p) => p, Err(e) => return Some(Err(e)) };
+            let deleting = method == "session.delete";
+            let sessions = manager.sessions.get().cloned();
+            tokio::task::spawn_blocking(move || -> Result<Value> {
+                let session = index::get(&p.session_id)?;
+                if !deleting {
+                    return crate::session_ops::workspace_disposition(&session.project_path, &session.cwd)
+                        .map(|d| json!(d)).map_err(anyhow::Error::msg);
+                }
+                let sink = sink.context("app is unavailable")?;
+                let sessions = sessions.context("session manager is unavailable")?;
+                let stop = |s: &crate::store::index::SessionEntry| {
+                    for tab in &s.tabs { let _ = sessions.stop(&s.id, &tab.id); }
+                    let panes = sessions.terminals().session_pane_ids(&s.id, &[]);
+                    sessions.terminals().kill_all_and_wait(&panes, std::time::Duration::from_secs(5));
+                };
+                let deleted = crate::session_ops::delete_session_blocking(&*sink, &session.id,
+                    p.remove_worktree, crate::git::DirectDelete::Allowed, p.confirmed_unsafe, &stop).map_err(anyhow::Error::msg)?;
+                Ok(json!({ "deleted": deleted.sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                    "keptBranch": deleted.removal.kept_branch, "rescuedBranch": deleted.removal.rescued_branch }))
+            }).await.context("workspace operation failed").and_then(|result| result)
+        },
         "session.subscribe" => sink
             .as_ref()
             .context("app is unavailable")
@@ -351,6 +375,16 @@ pub(super) async fn dispatch(
         _ => return None,
     };
     Some(result)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionRemovalParams {
+    session_id: String,
+    #[serde(default)]
+    remove_worktree: bool,
+    #[serde(default)]
+    confirmed_unsafe: bool,
 }
 
 fn request_id(request: &Value) -> &str {

@@ -59,3 +59,21 @@ describe("the computer's name and unpairing", () => {
     await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).forgetPairing()).resolves.toBe(false);
   });
 });
+
+describe("workspace deletion safety", () => {
+  it("surfaces the host's safety rejection without deleting another session", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: false, refusal: { code: "unsafe", message: "Second confirmation required" } });
+    await expect(hostApi(request).deleteSession("s1", true)).rejects.toThrow("Second confirmation required");
+    expect(request).toHaveBeenCalledWith("session.delete", { sessionId: "s1", removeWorktree: true, confirmedUnsafe: false });
+  });
+
+  it("reads the shared disposition and sends unsafe acknowledgement only when explicitly given", async () => {
+    const disposition = { safe: false, sessions: 1, uncommitted: 2 };
+    const request = vi.fn().mockResolvedValue({ ok: true, value: disposition });
+    const api = hostApi(request);
+    expect(await api.workspaceDisposition("s1")).toEqual(disposition);
+    expect(request).toHaveBeenCalledWith("session.workspaceDisposition", { sessionId: "s1" });
+    await api.deleteSession("s1", true, true);
+    expect(request).toHaveBeenLastCalledWith("session.delete", { sessionId: "s1", removeWorktree: true, confirmedUnsafe: true });
+  });
+});

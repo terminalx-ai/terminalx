@@ -310,8 +310,8 @@ export const api = {
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
-  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
+  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean, confirmedUnsafe = false) =>
+    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch, confirmedUnsafe }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -328,12 +328,12 @@ export const api = {
     invoke<void>("set_session_archived", { sessionId, archived }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
-  deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
+  deleteSession: (sessionId: string, removeWorktree: boolean, confirmedUnsafe = false) =>
+    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree, confirmedUnsafe }),
   worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
   sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
-  removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
+  removeSessionWorktree: (sessionId: string, confirmedUnsafe = false) => invoke<SessionEntry>("remove_session_worktree", { sessionId, confirmedUnsafe }),
+  settleSession: (sessionId: string, action: "delete" | "relocate", confirmedUnsafe = false) => invoke<SettleReport>("settle_session", { sessionId, action, confirmedUnsafe }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses

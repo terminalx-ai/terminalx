@@ -437,10 +437,10 @@ export function updateCloudSession(row: CloudSessionRow, patch: RuntimeSessionPa
   });
 }
 
-/** Delete a session and its transcripts on the VM; a worktree it has goes with it, with every session in it. */
+/** Delete one session and its transcripts; workspace lifecycle is separate. */
 export function deleteCloudSession(row: CloudSessionRow): Promise<string[]> {
   return onRuntime(row, async (client) => {
-    const result = await client.deleteSession(row.sessionId, { removeWorktree: !!row.worktreeName });
+    const result = await client.deleteSession(row.sessionId);
     const deleted = result.deleted?.length ? result.deleted : [row.sessionId];
     applySession(row, null, deleted);
     return deleted;

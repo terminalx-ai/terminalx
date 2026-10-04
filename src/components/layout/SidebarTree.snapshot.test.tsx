@@ -35,12 +35,12 @@ const featurePath = "/repos/raccoon/.worktrees/feature";
 
 const baseWorkspace: Workspace = {
   path: projectPath, name: "raccoon", branch: "main", head: "abc1234", isMain: true, managed: false,
-  uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0,
+  uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0, state: "merged", sizeBytes: 4096,
 };
 const workspaces: Workspace[] = [
   baseWorkspace,
-  { ...baseWorkspace, path: featurePath, name: "quiet-amber-fox", branch: "feature/sidebar", isMain: false, managed: true, additions: 12, deletions: 3, unpushed: 1 },
-  { ...baseWorkspace, path: "/tmp/external", name: "external", branch: "hotfix", isMain: false, managed: false, deletions: 4, unpushed: 2 },
+  { ...baseWorkspace, path: featurePath, name: "quiet-amber-fox", branch: "feature/sidebar", isMain: false, managed: true, state: "uncommitted", additions: 12, deletions: 3, unpushed: 1 },
+  { ...baseWorkspace, path: "/tmp/external", name: "external", branch: "hotfix", isMain: false, managed: false, state: "unmerged", deletions: 4, unpushed: 2 },
 ];
 
 const tab = (id: string, patch: Partial<TabEntry>): TabEntry => ({

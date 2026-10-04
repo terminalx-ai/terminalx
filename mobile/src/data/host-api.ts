@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
+import type { WorkspaceDisposition } from "@terminalx/portable/workspace";
 import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
@@ -45,6 +46,18 @@ export class HostApi {
     if (!result.ok) return null;
     const value = result.value as { sessions?: unknown };
     return Array.isArray(value?.sessions) ? value.sessions.filter(isSessionSummary) : null;
+  }
+
+  async workspaceDisposition(sessionId: string): Promise<WorkspaceDisposition> {
+    const result = await this.connection.request<WorkspaceDisposition>("session.workspaceDisposition", { sessionId });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
+  }
+
+  async deleteSession(sessionId: string, removeWorktree = false, confirmedUnsafe = false): Promise<{ keptBranch?: string | null; rescuedBranch?: string | null }> {
+    const result = await this.connection.request<{ keptBranch?: string | null; rescuedBranch?: string | null }>("session.delete", { sessionId, removeWorktree, confirmedUnsafe });
+    if (!result.ok) throw new Error(result.refusal.message);
+    return result.value;
   }
 
   async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean } | null> {

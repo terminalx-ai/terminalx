@@ -103,6 +103,7 @@ pub const METHODS: &[Method] = &[
     method("session.update", "session/2", Manage, true),
     method("session.addTab", "session/2", Manage, true),
     method("session.delete", "session/2", Manage, true),
+    method("session.workspaceDisposition", "session/2", Manage, false),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
     // What the composer of an agent tab offers: read-only, and never more

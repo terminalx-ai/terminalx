@@ -15,6 +15,15 @@
 //   reconnect, and resync from a snapshot when the runtime generation moved.
 import { PortableRpcClient, type RpcCallResult, type RpcErrorData, type RpcResponse, type RpcWireRequest } from "./rpc";
 
+export interface WorkspaceDisposition {
+  exists: boolean; checked: boolean; isMain: boolean; branch: string | null;
+  uncommitted: number; unpushed: number; aheadOfBase: number | null;
+  defaultBranch: string | null; merged: boolean | null; pushed: boolean | null;
+  stashes: number; verificationError: string | null; safe: boolean;
+  sessions: number; sessionTitles: string[]; prChecked: boolean;
+  pr: { number: number; title: string; url: string; state: string; isDraft: boolean } | null;
+}
+
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
 /**
  * Namespace versions, as `src-tauri/src/remote/protocol.rs` `CAPABILITIES`.
@@ -49,6 +58,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.update": "session/2",
   "session.addTab": "session/2",
   "session.delete": "session/2",
+  "session.workspaceDisposition": "session/2",
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
@@ -407,7 +417,7 @@ export class WorkspaceRpcClient {
     if (MUTATING_METHODS.has(method) && typeof params.clientRequestId !== "string") {
       return this.mutate<T>(method, params);
     }
-    const result = await this.rpc.request<T>(method, params);
+    const result = await this.rpc.request<T>(method, params, method === "session.workspaceDisposition" ? 90_000 : undefined);
     return unwrap(method, result);
   }
 
@@ -418,7 +428,7 @@ export class WorkspaceRpcClient {
   async mutate<T = Record<string, unknown>>(method: string, params: Record<string, unknown>, clientRequestId = this.newRequestId()): Promise<T> {
     this.assertGranted(method);
     const request = { ...params, clientRequestId };
-    return this.resending(() => this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result)));
+    return this.resending(() => this.untilDropped(this.rpc.request<T>(method, request, method === "session.delete" ? 90_000 : undefined)).then((result) => unwrap(method, result)));
   }
 
   /**
@@ -750,13 +760,14 @@ export class WorkspaceRpcClient {
     return this.mutate("session.addTab", { sessionId, ...defined });
   }
 
-  /**
-   * Delete a session and its transcripts (`session/2`, manage only). With
-   * `removeWorktree`, its worktree goes too, with every session in it;
-   * `deleted` names them all.
-   */
-  deleteSession(sessionId: string, options: { removeWorktree?: boolean } = {}): Promise<{ sessionId: string; deleted: string[] }> {
-    return this.mutate("session.delete", { sessionId, ...(options.removeWorktree ? { removeWorktree: true } : {}) });
+  /** Read the same fresh safety check used by desktop workspace deletion. */
+  workspaceDisposition(sessionId: string): Promise<WorkspaceDisposition> {
+    return this.call("session.workspaceDisposition", { sessionId });
+  }
+
+  /** Delete only this session. Its workspace can go only if no other session uses it. */
+  deleteSession(sessionId: string, options: { removeWorktree?: boolean; confirmedUnsafe?: boolean } = {}): Promise<{ sessionId: string; deleted: string[]; keptBranch?: string | null; rescuedBranch?: string | null }> {
+    return this.mutate("session.delete", { sessionId, ...(options.removeWorktree ? { removeWorktree: true, confirmedUnsafe: options.confirmedUnsafe ?? false } : {}) });
   }
 
   /** The agents installed on the runtime, with their models, efforts and modes (`agents/1`). */

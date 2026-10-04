@@ -382,8 +382,8 @@ export async function setProjectLogo(path: string, source: string | null) {
 }
 
 /** Delete a workspace; the sessions that ran in it are removed with it. */
-export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const report = await api.deleteWorkspace(projectPath, path, deleteBranch);
+export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean, confirmedUnsafe = false) {
+  const report = await api.deleteWorkspace(projectPath, path, deleteBranch, confirmedUnsafe);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
@@ -449,15 +449,15 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
-export async function deleteSession(id: string, removeWorktree: boolean) {
-  const report = await api.deleteSession(id, removeWorktree);
-  // Siblings taken along with a removed worktree arrive as session_deleted events.
+export async function deleteSession(id: string, removeWorktree: boolean, confirmedUnsafe = false) {
+  const report = await api.deleteSession(id, removeWorktree, confirmedUnsafe);
+  // Session deletion always removes exactly one session.
   removeSessions([id]);
   return report;
 }
 
-export async function settleSession(id: string, action: "delete" | "relocate") {
-  const report = await api.settleSession(id, action);
+export async function settleSession(id: string, action: "delete" | "relocate", confirmedUnsafe = false) {
+  const report = await api.settleSession(id, action, confirmedUnsafe);
   upsertSession(report.session);
   return report;
 }

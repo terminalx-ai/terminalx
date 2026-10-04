@@ -234,7 +234,7 @@ function WorkspaceNode({
 
   return (
     <TreeNode label={displayName} expanded={expanded}>
-      <TreeRow level="group" selected={active} title={group.path}>
+      <TreeRow level="group" selected={active} title={`${group.path}${workspace?.branch ? ` · ${workspace.branch}` : ""}${workspace && !workspace.isMain && !workspace.managed ? " · Not created by TerminalX" : ""}`}>
         <TreeToggle expanded={expanded} label={displayName} onToggle={onToggle} className="ml-0.5" />
         {project.kind === "folder" ? <FolderOpen className="size-3 shrink-0" /> : <GitBranch className="size-3 shrink-0" />}
         {workspace ? (
@@ -287,6 +287,11 @@ function WorkspaceNode({
           </RowActions>
         ) : null}
       </TreeRow>
+      {workspace && (workspace.state || workspace.sizeBytes != null) ? <div className="ml-6 flex min-w-0 items-center gap-2 pr-2 pb-1 text-[10px] text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate font-mono" title={workspace.branch ?? "Detached HEAD"}>{workspace.branch ?? "Detached HEAD"}</span>
+        {workspace.state ? <span className="shrink-0" title="Local snapshot; refreshed from origin before deletion">{workspace.state}</span> : null}
+        {workspace.sizeBytes != null ? <span className="shrink-0 tabular-nums text-faint" title="Size on disk">{formatWorkspaceSize(workspace.sizeBytes)}</span> : null}
+      </div> : null}
       {renameError ? (
         <div role="alert" className="mx-6 mb-1 text-[11px] leading-tight text-destructive">
           {renameError}
@@ -500,9 +505,9 @@ function SessionMenu({ session }: { session: SessionEntry }) {
       <DropdownMenuItem onSelect={() => void forkSession(session.id, session.activeTab ?? session.tabs[0]?.id ?? "")} disabled={!session.tabs.length}>
         <GitFork /> Fork session
       </DropdownMenuItem>
-      {session.worktreeName && !session.worktreeRemoved ? (
+      {session.cwd !== session.projectPath && !session.worktreeRemoved ? (
         <DropdownMenuItem onSelect={() => openSettle(session.id)}>
-          <X /> Settle worktree…
+          <X /> Settle workspace…
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />
@@ -525,4 +530,11 @@ function toggleInSet(current: Set<string>, value: string) {
   if (next.has(value)) next.delete(value);
   else next.add(value);
   return next;
+}
+
+function formatWorkspaceSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }

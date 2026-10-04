@@ -188,7 +188,7 @@ export class HostConnection {
       });
     }
     if (!this.client) throw new Error("Host is disconnected");
-    return this.client.request<T>(method, params).then((result) => {
+    return this.client.request<T>(method, params, method === "session.delete" || method === "session.workspaceDisposition" ? 90_000 : 30_000).then((result) => {
       if (!result.ok && !this.refusedMethods.has(method)) {
         this.refusedMethods.add(method);
         this.log("warning", "Host refused a method", `${method}: ${result.refusal.code} · ${safeError(result.refusal.message)}`);

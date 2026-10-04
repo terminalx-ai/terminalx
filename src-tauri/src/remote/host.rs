@@ -65,6 +65,7 @@ const SLOW_METHODS: &[&str] = &[
     "session.close",
     // CS-12: removing a worktree, and the first read of Codex's model list.
     "session.delete",
+    "session.workspaceDisposition",
     "runtime.agents",
     "fs.search",
     // Lists every file of every repository.

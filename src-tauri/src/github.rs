@@ -122,6 +122,64 @@ fn prs_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]
     Ok(prs)
 }
 
+/// Minimal PR evidence for safe workspace removal. Branch names alone are
+/// insufficient: a branch can gain commits after a PR was merged or be reused.
+pub(crate) struct WorkspacePrEvidence {
+    pub number: u64, pub title: String, pub url: String, pub state: String,
+    pub is_draft: bool, pub base: String, pub head_oid: String, pub merge_oid: Option<String>,
+}
+
+// PR evidence is optional, but it must not leave the deletion dialog waiting
+// indefinitely on an unreachable host. Regular files avoid pipe backpressure.
+fn run_workspace_check(cwd: &Path, args: &[&str]) -> Result<String> {
+    use std::io::{Read, Seek};
+    use std::time::{Duration, Instant};
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    let mut command = gh()?;
+    command.current_dir(cwd).args(args).stdin(std::process::Stdio::null())
+        .stdout(stdout.try_clone()?).stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait()? { break status; }
+        if Instant::now() >= deadline {
+            #[cfg(unix)]
+            // SAFETY: this child was started in its own process group above.
+            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL); }
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("Pull request check timed out");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let mut text = String::new();
+    if !status.success() {
+        stderr.rewind()?;
+        stderr.read_to_string(&mut text)?;
+        bail!("Pull request check failed: {}", text.trim());
+    }
+    stdout.rewind()?;
+    stdout.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+pub(crate) fn workspace_prs(cwd: &Path, branch: &str) -> Result<Vec<WorkspacePrEvidence>> {
+    let out = run_workspace_check(cwd, &["pr", "list", "--head", branch, "--state", "all", "--json",
+        "number,title,url,state,isDraft,baseRefName,headRefOid,mergeCommit", "--limit", "100"])?;
+    let values: Vec<Value> = serde_json::from_str(&out)?;
+    let mut prs: Vec<_> = values.iter().map(|v| WorkspacePrEvidence {
+        number: v["number"].as_u64().unwrap_or_default(), title: v["title"].as_str().unwrap_or_default().into(),
+        url: v["url"].as_str().unwrap_or_default().into(), state: v["state"].as_str().unwrap_or_default().into(),
+        is_draft: v["isDraft"].as_bool().unwrap_or(false), base: v["baseRefName"].as_str().unwrap_or_default().into(),
+        head_oid: v["headRefOid"].as_str().unwrap_or_default().into(), merge_oid: v["mergeCommit"]["oid"].as_str().map(str::to_owned),
+    }).collect();
+    prs.sort_by(|a, b| (b.state == "OPEN").cmp(&(a.state == "OPEN")).then(b.number.cmp(&a.number)));
+    Ok(prs)
+}
+
 fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

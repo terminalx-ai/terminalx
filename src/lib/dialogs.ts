@@ -5,7 +5,7 @@ import { getPrefs } from "./prefs";
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
 interface State {
   settleFor: string | null;
-  workspaceDelete: { projectPath: string; path: string; name: string } | null;
+  workspaceDelete: { projectPath: string; path: string; name: string; sessionId?: string } | null;
   bypass: { harness: string; confirm: () => void } | null;
 }
 
@@ -37,6 +37,10 @@ export function closeSettle() {
 
 export function openWorkspaceDelete(projectPath: string, path: string, name: string) {
   set({ workspaceDelete: { projectPath, path, name } });
+}
+
+export function openSessionDelete(projectPath: string, path: string, name: string, sessionId: string) {
+  set({ workspaceDelete: { projectPath, path, name, sessionId } });
 }
 
 export function closeWorkspaceDelete() {

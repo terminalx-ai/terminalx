@@ -167,6 +167,21 @@ describe("complete navigation hierarchy", () => {
     expect(await screen.findByRole("treeitem", { name: "Conversation missing", selected: true })).toBeTruthy();
   });
 
+  it("lists an empty external worktree with state, size and New session here", async () => {
+    workspaces["/alpha"].push({ ...workspace("/tmp/by-hand"), name: "by-hand", branch: "feature/external", isMain: false, managed: false, state: "unmerged", sizeBytes: 2048 });
+    await act(async () => { await store.refreshWorkspaces("/alpha"); });
+    mount();
+    const row = screen.getByRole("treeitem", { name: "feature/external" });
+    expect(within(row).getByText("external")).toBeTruthy();
+    expect(within(row).getByText("unmerged")).toBeTruthy();
+    expect(within(row).getByText("2.0 KB")).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "New session in feature/external" }));
+    expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/tmp/by-hand");
+    const menu = within(row).getByRole("button", { name: "Workspace menu for feature/external" });
+    fireEvent.pointerDown(menu, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    expect(await screen.findByRole("menuitem", { name: "Delete workspace…" })).toBeTruthy();
+  });
+
   it("keeps legacy removed sessions distinct from the operational main checkout", () => {
     const relocated = { ...makeSession("relocated"), worktreeRemoved: true };
     const groups = groupProjectWorkspaces("/alpha", [workspace("/alpha")], [relocated], false);

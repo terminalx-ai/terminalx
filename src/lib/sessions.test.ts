@@ -115,7 +115,7 @@ describe("worktree deletion events", () => {
 
     await sessions.deleteWorkspace(projectPath, worktreePath, true);
 
-    expect(mocks.invoke).toHaveBeenCalledWith("delete_workspace", { projectPath, path: worktreePath, deleteBranch: true });
+    expect(mocks.invoke).toHaveBeenCalledWith("delete_workspace", { projectPath, path: worktreePath, deleteBranch: true, confirmedUnsafe: false });
     expect(sessions.getSessionStore().sessions.map((session) => session.id)).toEqual([other.id]);
     expect(sessions.getSessionStore().selectedSessionId).toBe(other.id);
     expect(sessions.getSessionStore().workspaces[projectPath]).toEqual([main]);

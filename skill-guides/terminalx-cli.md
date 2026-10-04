@@ -109,13 +109,21 @@ already raised.
 
 ```text
 terminalx worktrees list [--project <project>] --json
-terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes [--confirm-unsafe] [--keep-branch] --json
 ```
 
 Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
 running in the worktree and removes the sessions that ran there, transcripts included; the
-response lists their ids under `removedSessions`. The branch is retained. Inspect the
-worktree's uncommitted and unpushed counts from `worktrees list` before deleting it.
+response lists their ids under `removedSessions`. The local branch is deleted too unless
+`--keep-branch` is supplied. Without `--yes`, the command shows the affected session names
+and the safety check before making changes.
+
+The check fetches origin's default branch and requires a clean, merged workspace, including
+squash and rebase merges. Untracked files count; ignored files do not. Repository stashes
+are retained but require review because Git cannot reliably attribute them to a worktree.
+Unmerged work, unsaved files, stashes, or an unavailable check produce
+`safety_confirmation_required`. Review the warning before repeating with both `--yes` and
+`--confirm-unsafe`. A pushed branch alone is not evidence that its work has landed.
 
 ### Issues
 
@@ -263,6 +271,8 @@ JSON failures have this shape:
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
 - `confirmation_required`: inspect the target, then repeat the destructive command with
   `--yes` only when deletion is intended.
+- `safety_confirmation_required`: review the workspace warning, then add `--confirm-unsafe`
+  only when the loss or unverified state is explicitly accepted.
 - `request_lapsed`: refresh `permissions list`; never reuse the old request id.
 - `timeout`: the socket did not answer in time. Check `status` before retrying a mutating
   command, because it may already have completed.

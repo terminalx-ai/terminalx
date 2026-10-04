@@ -778,7 +778,9 @@ fn leftover_state(path: &Path) -> String {
 /// disposition counts them). After a direct delete the directory could not
 /// be checked, so such a branch is kept and named in the result, and a
 /// detached HEAD nothing else holds is given a branch of its own.
-pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
+/// Low-level removal primitive. User-facing removal must go through
+/// `workspaces::delete`, which enforces the shared clean-and-merged check.
+pub(crate) fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
     let mut removal = WorktreeRemoval::default();
     let mut removed_by_git = false;
@@ -817,7 +819,9 @@ pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Resu
         removal.kept_branch = Some(branch);
         return Ok(removal);
     }
-    let _ = run(project, &["branch", "-D", &branch]);
+    if run(project, &["branch", "-D", &branch]).is_err() {
+        removal.kept_branch = Some(branch);
+    }
     Ok(removal)
 }
 

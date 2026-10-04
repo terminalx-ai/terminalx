@@ -18,16 +18,9 @@ type WorkspaceCleanup = {
   onDelete: () => void;
 };
 
-/** Only a confirmed merged PR with no local-only work is a safe cleanup shortcut. */
+/** The same verified result used by the shared workspace removal dialog. */
 export function canDeleteMergedWorkspace(disposition: WorkspaceDisposition | null): boolean {
-  return !!(
-    disposition?.exists &&
-    !disposition.isMain &&
-    disposition.uncommitted === 0 &&
-    disposition.unpushed === 0 &&
-    disposition.prChecked &&
-    disposition.pr?.state === "MERGED"
-  );
+  return !!(disposition?.exists && !disposition.isMain && disposition.safe);
 }
 
 /** Readiness in one fixed order: state, then conflicts, then checks. */
@@ -61,7 +54,7 @@ export function PrPanel({
   busy: boolean;
   /** Offered when a PR from this branch has merged and a worktree remains. */
   onSettle?: () => void;
-  /** A managed workspace that can use the guarded workspace cleanup flow. */
+  /** A local workspace that can use the shared workspace cleanup flow. */
   workspace?: WorkspaceCleanup;
 }) {
   const source = useMemo(() => given ?? localGitSource(cwd ?? ""), [given, cwd]);
@@ -178,16 +171,14 @@ export function PrPanel({
       {error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
       {notice && <div role="status" className="mx-3 mt-2 rounded-md bg-well px-2 py-1 text-xs text-muted-foreground">{notice}</div>}
       {(workspace || onSettle) && merged && (
-        <div className="mx-3 mt-2 flex items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
+        <div className="mx-3 mt-2 flex flex-wrap items-center gap-2 rounded-md bg-merged/10 px-2 py-1.5 text-xs">
           <GitMerge className="size-3.5 shrink-0 text-merged" />
-          <span className="flex-1 text-foreground">This branch has been merged.</span>
+          <span className="flex-1 text-foreground">A pull request for this branch was merged.</span>
+          <span className="w-full text-muted-foreground">Settle keeps conversations. Delete workspace removes them.</span>
+          {onSettle && <Button size="xs" variant="outline" onClick={onSettle} title="Keep conversations and remove the workspace">Settle workspace</Button>}
           {canDelete ? (
             <Button size="xs" variant="outline" onClick={workspace?.onDelete}>
               Delete workspace
-            </Button>
-          ) : onSettle ? (
-            <Button size="xs" variant="outline" onClick={onSettle}>
-              Settle worktree
             </Button>
           ) : null}
         </div>

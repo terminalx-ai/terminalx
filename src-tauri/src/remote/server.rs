@@ -936,6 +936,11 @@ impl WorkspaceRpc {
             "session.update" => self.session_update(peer, params),
             "session.addTab" => self.session_add_tab(peer, params),
             "session.delete" => self.session_delete(peer, params),
+            "session.workspaceDisposition" => {
+                let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+                let disposition = crate::session_ops::workspace_disposition(&session.project_path, &session.cwd).map_err(RpcError::internal)?;
+                Ok(json!(disposition))
+            },
             "runtime.agents" => self.runtime_agents(),
             "session.nudge" => {
                 self.agents()?.poll.raise();
@@ -2177,7 +2182,7 @@ impl WorkspaceRpc {
     }
 
     /// `session/2`: delete a session, its transcripts and, when asked, its
-    /// worktree (with every session that ran in it). Its agents are stopped
+    /// worktree, only when no other session uses it. Its agents are stopped
     /// and its terminals closed first.
     fn session_delete(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
         let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
@@ -2195,11 +2200,11 @@ impl WorkspaceRpc {
             // nothing holds the directory.
             self.close_session_ptys_waiting(&HashSet::from([doomed.id.clone()]), Some(std::time::Duration::from_secs(5)));
         };
-        // A remote caller was shown nothing of what the worktree holds, so a
-        // directory git cannot remove is reported, never deleted directly.
-        let deleted = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, crate::git::DirectDelete::Never, &stop)
+        // Mobile and other RPC clients use the same check and explicit acknowledgement.
+        let deleted = crate::session_ops::delete_session_blocking(&*self.sink, &session.id, remove_worktree, crate::git::DirectDelete::Allowed, params.get("confirmedUnsafe").and_then(Value::as_bool).unwrap_or(false), &stop)
             .map_err(RpcError::internal)?;
         let kept_branch = deleted.removal.kept_branch;
+        let rescued_branch = deleted.removal.rescued_branch;
         let removed = deleted.sessions;
         let removed_ids: HashSet<String> = removed.iter().map(|session| session.id.clone()).collect();
         if let Some(agents) = self.agents.get() {
@@ -2213,7 +2218,7 @@ impl WorkspaceRpc {
         self.close_agent_ptys(removed.iter().flat_map(|session| &session.tabs).map(|tab| &tab.id));
         let mut deleted: Vec<String> = removed_ids.into_iter().collect();
         deleted.sort();
-        Ok(json!({ "sessionId": session.id, "deleted": deleted, "keptBranch": kept_branch }))
+        Ok(json!({ "sessionId": session.id, "deleted": deleted, "keptBranch": kept_branch, "rescuedBranch": rescued_branch }))
     }
 
     /// Close the terminals opened for sessions that are gone.

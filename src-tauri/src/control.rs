@@ -604,17 +604,6 @@ impl ControlService {
     }
 
     fn worktree_delete(&self, params: Value) -> Result<Value, ControlError> {
-        if !params
-            .get("confirmed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(ControlError::new(
-                "confirmation_required",
-                "Worktree deletion requires --yes.",
-                Some("Inspect worktrees list, then repeat with --yes only when deletion is intended.".into()),
-            ));
-        }
         let selector = required_string(&params, "worktree")?;
         let projects = selected_projects(optional_string(&params, "project"))?;
         let mut candidates = Vec::new();
@@ -644,27 +633,34 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        let affected = crate::session_ops::sessions_in_workspace(Path::new(&worktree.path))
-            .map_err(ControlError::internal)?;
-        // Agents, then the sessions' shells, each waited for, so nothing
-        // still holds the directory.
-        let mut shells = Vec::new();
-        for session in &affected {
-            for tab in &session.tabs {
-                let _ = self.manager.stop(&session.id, &tab.id);
-            }
-            shells.extend(self.manager.terminals().session_pane_ids(&session.id, &[]));
+        let confirmed_unsafe = params.get("confirmedUnsafe").and_then(Value::as_bool).unwrap_or(false);
+        let disposition = crate::session_ops::workspace_disposition(&project.path, &worktree.path).map_err(ControlError::internal)?;
+        if !params.get("confirmed").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(ControlError::new("confirmation_required",
+                format!("Delete {} and its sessions ({})? {}", worktree.path, disposition.session_titles.join(", "), disposition.warning()),
+                Some("Repeat with --yes to confirm workspace and session deletion.".into())));
         }
-        self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+        if !disposition.safe && !confirmed_unsafe {
+            return Err(ControlError::new("safety_confirmation_required", disposition.warning(),
+                Some("Review the warning, then repeat with --yes --confirm-unsafe to explicitly accept it.".into())));
+        }
+        // Ownership is locked while the shared backend stops and removes
+        // these sessions, so another session cannot attach during removal.
+        let stop = |session: &crate::store::index::SessionEntry| {
+            for tab in &session.tabs { let _ = self.manager.stop(&session.id, &tab.id); }
+            let shells = self.manager.terminals().session_pane_ids(&session.id, &[]);
+            self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+        };
         #[cfg(feature = "desktop")]
         let browser_key = crate::browser::control::canonical(&worktree.path);
-        // The CLI showed nothing of what the directory holds, so a worktree
-        // git cannot remove is reported rather than deleted directly.
+        // The same safety gate runs again at removal to catch changes since review.
         let (entries, removal) = crate::session_ops::delete_workspace_entries(
             &project.path,
             &worktree.path,
-            false,
-            crate::git::DirectDelete::Never,
+            !params.get("keepBranch").and_then(Value::as_bool).unwrap_or(false),
+            crate::git::DirectDelete::Allowed,
+            confirmed_unsafe,
+            &stop,
         )
         .map_err(ControlError::internal)?;
         // Only once the workspace is really gone: a delete that fails keeps it.
@@ -674,7 +670,7 @@ impl ControlService {
         }
         crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
-        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
+        Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch, "rescuedBranch": removal.rescued_branch}))
     }
 
     fn issues_list(&self, params: Value) -> Result<Value, ControlError> {

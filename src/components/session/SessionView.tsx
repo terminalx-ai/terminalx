@@ -43,9 +43,9 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { useAccount } from "@/lib/account";
 
-function managedWorkspaceFor(session: SessionEntry) {
-  if (!session.worktreeName || session.worktreeRemoved) return undefined;
-  return { projectPath: session.projectPath, name: session.worktreeName };
+function workspaceFor(session: SessionEntry) {
+  if (session.worktreeRemoved || session.cwd.replace(/\/+$/, "") === session.projectPath.replace(/\/+$/, "")) return undefined;
+  return { projectPath: session.projectPath, name: session.worktreeName ?? session.cwd.split("/").filter(Boolean).pop() ?? "Workspace" };
 }
 
 /** The right panel reads the active tab's log for the changes range. */
@@ -53,7 +53,7 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
   const project = useSessionStore().projects.find((p) => p.path === session.projectPath);
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
-  const workspace = managedWorkspaceFor(session);
+  const workspace = workspaceFor(session);
   return (
     <RightPanel
       cwd={session.cwd}
@@ -313,7 +313,7 @@ export function SessionView({
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
-  const workspace = managedWorkspaceFor(session);
+  const workspace = workspaceFor(session);
   // One action for local and cloud tabs, so a remapped shortcut switches either.
   useShortcut("session.toggleTerminalView", () => {
     if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, { remote: !local });

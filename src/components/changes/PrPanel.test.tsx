@@ -32,6 +32,7 @@ const mergedPr: PullRequest = {
 const cleanMerged: WorkspaceDisposition = {
   exists: true,
   checked: true,
+  safe: true, merged: true, pushed: true, defaultBranch: "main", stashes: 0, verificationError: null,
   isMain: false,
   branch: mergedPr.head,
   uncommitted: 0,
@@ -102,14 +103,14 @@ describe("merged workspace action", () => {
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd });
     });
-    expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Settle workspace" })).toBeTruthy();
   });
 
   it.each([
-    ["has uncommitted changes", { ...cleanMerged, uncommitted: 1 }],
-    ["has unpushed commits", { ...cleanMerged, unpushed: 1 }],
-    ["has no confirmed pull-request status", { ...cleanMerged, pr: null, prChecked: false }],
-    ["has an unknown pull-request state", { ...cleanMerged, pr: { ...cleanMerged.pr!, state: "UNKNOWN" } }],
+    ["has uncommitted changes", { ...cleanMerged, uncommitted: 1, safe: false }],
+    ["has unmerged commits", { ...cleanMerged, merged: false, safe: false }],
+    ["has stash entries", { ...cleanMerged, stashes: 1, safe: false }],
+    ["could not be verified", { ...cleanMerged, verificationError: "offline", safe: false }],
     ["is the main workspace", { ...cleanMerged, isMain: true }],
   ])("does not offer deletion when the workspace %s", async (_case, disposition) => {
     mockBackend(disposition);
@@ -125,7 +126,7 @@ describe("merged workspace action", () => {
       />,
     );
 
-    await screen.findByText("This branch has been merged.");
+    await screen.findByText("A pull request for this branch was merged.");
     await waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd });
     });

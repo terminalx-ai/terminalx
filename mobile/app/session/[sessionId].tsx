@@ -13,6 +13,7 @@ import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 import { conversationKey } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
+import { SessionDeleteButton } from "@mobile/ui/SessionDeleteButton";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
 import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
 import { useConversationState } from "@mobile/state/conversation-state";
@@ -43,7 +44,7 @@ export default function SessionScreen() {
   const conversation = summary ? agentConversations(summary).find((item) => item.id === tabId) : undefined;
   const available = !summary || !!conversation;
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
-    <Stack.Screen options={{ title: conversation?.label ?? params.title ?? "Session" }} />
+    <Stack.Screen options={{ title: conversation?.label ?? params.title ?? "Session", headerRight: summary ? () => <SessionDeleteButton key={`${app.activeHost!.id}:${sessionId}`} sessionId={sessionId} title={summary.title} onDeleted={() => router.replace("/(tabs)/sessions")} /> : undefined }} />
     {summary ? <>
       <Text numberOfLines={1} style={[styles.sessionContext, { color: palette.muted }]}>{summary.title}</Text>
       <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} />

@@ -36,13 +36,13 @@ export class PortableRpcClient {
     this.unsubscribe = transport.subscribe((response) => this.receive(response));
   }
 
-  request<T>(method: string, params?: unknown): Promise<RpcCallResult<T>> {
+  request<T>(method: string, params?: unknown, timeoutMs = this.timeoutMs): Promise<RpcCallResult<T>> {
     const id = `rpc-${Date.now()}-${++this.nextRequest}`;
     return new Promise<RpcCallResult<T>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`RPC timed out: ${method}`));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { resolve: (value) => resolve(value as RpcCallResult<T>), reject, timer });
       if (!this.transport.send({ id, method, ...(params === undefined ? {} : { params }) })) {
         clearTimeout(timer);

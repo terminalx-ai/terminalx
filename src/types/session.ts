@@ -93,6 +93,9 @@ export interface Workspace {
   ahead: number;
   /** Commits behind this checkout's configured upstream. */
   behind: number;
+  sizeBytes?: number;
+  /** Local snapshot; removal always fetches and verifies again. */
+  state?: string;
 }
 
 export interface WorkspacePr {
@@ -103,22 +106,8 @@ export interface WorkspacePr {
   isDraft: boolean;
 }
 
-export interface WorkspaceDisposition {
-  exists: boolean;
-  /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
-  checked: boolean;
-  isMain: boolean;
-  branch: string | null;
-  uncommitted: number;
-  unpushed: number;
-  aheadOfBase?: number | null;
-  pr?: WorkspacePr | null;
-  prChecked: boolean;
-  /** Sessions that ran here; deleting the workspace removes them and their transcripts. */
-  sessions: number;
-  /** Their titles, so the confirmation can name what goes. */
-  sessionTitles: string[];
-}
+/** Desktop, mobile and remote clients share the same safety result. */
+export type WorkspaceDisposition = import("@terminalx/portable/workspace").WorkspaceDisposition;
 
 export interface Capabilities {
   images: boolean;

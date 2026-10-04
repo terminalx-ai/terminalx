@@ -1005,7 +1005,7 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
     if (next && next !== row.title) void act(() => updateCloudSession(row, { title: next }));
   };
   const remove = async () => {
-    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace${row.worktreeName ? ", with its worktree" : ""}.`, {
+    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace. Other sessions and the workspace are kept.`, {
       title: "Delete session",
       kind: "warning",
       okLabel: "Delete",

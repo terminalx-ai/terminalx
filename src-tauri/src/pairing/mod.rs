@@ -1559,6 +1559,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "steerLease.queueInput",
         "chat.promoteToAgent",
         "session.send",
+        "session.workspaceDisposition",
+        "session.delete",
         "permission.respond",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
@@ -1584,6 +1586,10 @@ mod tests {
         assert!(allowed_method(DeviceScope::Driver, "session.send"));
         assert!(allowed_method(DeviceScope::Driver, "permission.respond"));
         assert!(!allowed_method(DeviceScope::Viewer, "permission.respond"));
+        assert!(allowed_method(DeviceScope::Driver, "session.delete"));
+        assert!(allowed_method(DeviceScope::Driver, "session.workspaceDisposition"));
+        assert!(!allowed_method(DeviceScope::Viewer, "session.delete"));
+        assert!(!allowed_method(DeviceScope::Viewer, "session.workspaceDisposition"));
         assert!(allowed_method(
             DeviceScope::Driver,
             "pairing.provisionRelay"

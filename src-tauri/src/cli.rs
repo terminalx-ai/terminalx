@@ -48,7 +48,7 @@ Usage:
   terminalx permissions allow REQUEST [--option OPTION] [--json]
   terminalx permissions deny REQUEST [--json]
   terminalx worktrees list [--project PROJECT] [--json]
-  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--confirm-unsafe] [--keep-branch] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
@@ -394,10 +394,12 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "delete" => {
             let project = tokens.option("--project")?;
             let confirmed = tokens.flag("--yes")?;
+            let confirmed_unsafe = tokens.flag("--confirm-unsafe")?;
+            let keep_branch = tokens.flag("--keep-branch")?;
             let worktree = tokens.required_front("worktree")?;
             rpc(
                 "worktrees.delete",
-                json!({"project": project, "worktree": worktree, "confirmed": confirmed}),
+                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "confirmedUnsafe": confirmed_unsafe, "keepBranch": keep_branch}),
                 tokens,
             )
         }
@@ -424,7 +426,7 @@ fn rpc(command: &str, params: Value, tokens: &mut Tokens) -> Result<Action, Cont
     Ok(Action::Rpc {
         command: command.into(),
         params,
-        timeout: Duration::from_secs(30),
+        timeout: Duration::from_secs(if command == "worktrees.delete" { 150 } else { 30 }),
     })
 }
 
@@ -608,6 +610,16 @@ mod tests {
         assert_eq!(command, "worktrees.delete");
         assert_eq!(params["confirmed"], true);
         assert_eq!(params["worktree"], "feature");
+        assert_eq!(params["confirmedUnsafe"], false);
+    }
+
+    #[test]
+    fn unsafe_workspace_confirmation_is_separate_from_yes() {
+        let parsed = parse(&args(&["worktrees", "delete", "feature", "--yes", "--confirm-unsafe", "--keep-branch"])).unwrap();
+        let Action::Rpc { params, .. } = parsed.action else { panic!("expected RPC") };
+        assert_eq!(params["confirmed"], true);
+        assert_eq!(params["confirmedUnsafe"], true);
+        assert_eq!(params["keepBranch"], true);
     }
 
     #[test]
