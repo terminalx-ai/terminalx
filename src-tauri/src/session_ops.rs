@@ -901,6 +901,40 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_with_an_initialised_submodule_can_be_removed_after_the_second_confirmation() {
+        let _home = crate::store::temp_home();
+        let (dir, _remote) = repo_with_remote();
+        let lib = tempfile::tempdir().unwrap();
+        git::run(lib.path(), &["init", "-q", "-b", "main"]).unwrap();
+        git::run(lib.path(), &["-c", "user.name=L", "-c", "user.email=l@example.com", "commit", "-q", "--allow-empty", "-m", "lib"]).unwrap();
+        git::run(dir.path(), &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.path().to_str().unwrap(), "lib"]).unwrap();
+        git::run(dir.path(), &["commit", "-q", "-m", "add lib"]).unwrap();
+        git::run(dir.path(), &["push", "-q", "origin", "main"]).unwrap();
+        let session = worktree_session(dir.path());
+        let cwd = Path::new(&session.cwd);
+        git::run(cwd, &["-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init"]).unwrap();
+        assert!(cwd.join("lib/.git").exists());
+
+        // Clean and merged, but what is inside a submodule cannot be checked:
+        // one confirmation is not enough, and the reason is said.
+        let mut single = request(&session, SessionsFate::Delete, Confirmation::Single, git::DirectDelete::Never);
+        single.fetch = crate::landed::Fetch::Fresh;
+        let error = remove_workspace(&sink(), &single, &|_| {}).unwrap_err();
+        assert!(error.starts_with(NEEDS_CONFIRMATION) && error.contains("submodule"), "{error}");
+        assert!(cwd.exists());
+
+        // Confirmed for what was shown, it goes. (Git itself refuses to
+        // remove a worktree with a submodule unless forced, which is what the
+        // confirmed path does.)
+        let shown = crate::landed::check(dir.path(), cwd, crate::landed::Fetch::Fresh).digest;
+        let mut confirmed = request(&session, SessionsFate::Delete, Confirmation::Shown(shown), git::DirectDelete::Never);
+        confirmed.fetch = crate::landed::Fetch::Fresh;
+        remove_workspace(&sink(), &confirmed, &|_| {}).unwrap();
+        assert!(!cwd.exists());
+        assert!(index::get(&session.id).is_err());
+    }
+
+    #[test]
     fn a_folder_that_is_not_on_disk_cannot_be_checked_and_needs_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let dir = repo();
