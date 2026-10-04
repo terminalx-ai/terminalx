@@ -91,6 +91,11 @@ pub struct Peer {
     /// The person the attachment belongs to (the API's `userId`); absent
     /// from an older API or a development link without it.
     pub user_id: Option<String>,
+    /// The API attachment the device was issued for: one per person and
+    /// client installation, and it keeps its id when the API issues it a new
+    /// device (every wake of a stopped workspace does). Absent on a link
+    /// that names none.
+    pub attachment_id: Option<String>,
     outbound: mpsc::UnboundedSender<(Value, usize)>,
     /// Terminal output bytes queued for this connection that its transport
     /// has not taken yet. Past [`MAX_QUEUED_OUTPUT`] a terminal stream is
@@ -134,6 +139,10 @@ impl Peer {
     }
 
     pub fn for_user(device_id: String, authority: Authority, user_id: Option<String>) -> (Arc<Self>, Notifications) {
+        Self::for_attachment(device_id, authority, user_id, None)
+    }
+
+    pub fn for_attachment(device_id: String, authority: Authority, user_id: Option<String>, attachment_id: Option<String>) -> (Arc<Self>, Notifications) {
         let (outbound, receiver) = mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let peer = Arc::new(Self {
@@ -141,6 +150,7 @@ impl Peer {
             device_id,
             authority,
             user_id: user_id.filter(|user| !user.is_empty()),
+            attachment_id: attachment_id.filter(|attachment| !attachment.is_empty()),
             outbound,
             queued: queued.clone(),
             granted: Mutex::new(None),
@@ -155,6 +165,24 @@ impl Peer {
     /// then hangs up.
     pub async fn closed(&self) {
         self.closed.notified().await
+    }
+
+    /// The person and installation behind this connection, when the link
+    /// names both: what stays the same when the API issues that installation
+    /// a new device.
+    fn installation(&self) -> Option<(&str, &str)> {
+        Some((self.user_id.as_deref()?, self.attachment_id.as_deref()?))
+    }
+
+    /// Whose numbered terminal writes these are. A writer keeps its count
+    /// when its installation comes back as a new device, so a resend is
+    /// still recognised and the next write is still the next one; a link
+    /// that names no installation counts per device, as before.
+    fn input_scope(&self) -> String {
+        match self.installation() {
+            Some((user, attachment)) => format!("installation:{user}:{attachment}"),
+            None => format!("device:{}", self.device_id),
+        }
     }
 
     fn granted(&self, capability: &str) -> bool {
@@ -207,6 +235,9 @@ struct PtyState {
     /// The controlling person and their attachment's authority, shown to
     /// everyone watching and re-checked when roles change.
     controller_user: Option<(Option<String>, Authority)>,
+    /// The controller's API attachment (its person's installation), when the
+    /// link named one: see [`WorkspaceRpc::resume_control`].
+    controller_attachment: Option<String>,
     ring: VecDeque<u8>,
     /// Byte offset one past the last byte ever written by the terminal.
     end: u64,
@@ -214,8 +245,9 @@ struct PtyState {
     exited_at: Option<Instant>,
     /// `pty.kill` was called; the entry goes once the exit is reported.
     closed: bool,
-    /// Last applied `pty.write` seq per (device, writer): a resend is
-    /// dropped and a gap is refused, so input is applied once and in order.
+    /// Last applied `pty.write` seq per ([`Peer::input_scope`], writer): a
+    /// resend is dropped and a gap is refused, so input is applied once and
+    /// in order.
     applied_seq: HashMap<(String, String), (u64, Instant)>,
     /// Accepted input, written by the terminal's own writer thread so a
     /// program that stops reading never stalls the connection.
@@ -643,6 +675,7 @@ impl WorkspaceRpc {
             }
             pty.controller = None;
             pty.controller_user = None;
+            pty.controller_attachment = None;
             for (subscription_id, subscriber) in &pty.subscribers {
                 subscriber.notify(
                     "pty.control",
@@ -1012,6 +1045,20 @@ impl WorkspaceRpc {
             }
         }
         self.drop_peer_subscriptions(peer);
+        // The same installation may already be back under its new device,
+        // watching a terminal this connection controlled: it is theirs now.
+        let connected = self.connected_devices();
+        if !connected.contains(&peer.device_id) {
+            let mut ptys = self.ptys.lock().unwrap();
+            for (pty_id, pty) in ptys.iter_mut().filter(|(_, pty)| !pty.closed && pty.controller.as_deref() == Some(peer.device_id.as_str())) {
+                let heirs: Vec<Arc<Peer>> = pty.subscribers.values().cloned().collect();
+                for heir in heirs {
+                    if !heir.hung_up() && self.resume_control(pty_id, pty, &heir, &connected) {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn drop_subscription(&self, id: &str, subscription: Subscription) {
@@ -1181,6 +1228,7 @@ impl WorkspaceRpc {
                     rows,
                     controller: None,
                     controller_user: None,
+                    controller_attachment: None,
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
@@ -1385,6 +1433,7 @@ impl WorkspaceRpc {
                     rows: p.rows,
                     controller: Some(peer.device_id.clone()),
                     controller_user: Some((peer.user_id.clone(), peer.authority)),
+                    controller_attachment: peer.attachment_id.clone(),
                     ring: VecDeque::new(),
                     end: 0,
                     exit: None,
@@ -1432,7 +1481,11 @@ impl WorkspaceRpc {
     /// Terminals of this runtime, oldest first; closed ones are gone.
     fn pty_list(&self, peer: &Peer) -> Result<Value, RpcError> {
         let scope = self.pty_session_scope(peer);
-        let ptys = self.ptys.lock().unwrap();
+        let connected = self.connected_devices();
+        let mut ptys = self.ptys.lock().unwrap();
+        for (pty_id, pty) in ptys.iter_mut().filter(|(_, pty)| !pty.closed) {
+            self.resume_control(pty_id, pty, peer, &connected);
+        }
         let mut listed: Vec<(u64, Value)> = ptys
             .iter()
             // An agent tab's terminal is reached from its tab, never listed as a shell.
@@ -1445,6 +1498,45 @@ impl WorkspaceRpc {
             "runtimeGeneration": self.generation(),
             "terminals": listed.into_iter().map(|(_, pty)| pty).collect::<Vec<_>>(),
         }))
+    }
+
+    /// The devices with a connection now. Read before the terminals are locked.
+    fn connected_devices(&self) -> HashSet<String> {
+        self.live_peers().into_iter().filter(|peer| !peer.hung_up()).map(|peer| peer.device_id.clone()).collect()
+    }
+
+    /// The controller's device is gone and `peer` is the same person on the
+    /// same installation under the device the API issued it since (a stopped
+    /// workspace's attachments are revoked, so every wake brings one): the
+    /// terminal is still theirs, and they are its controller again without
+    /// asking. Nothing else moves control without `pty.control`: not another
+    /// person, not another installation of the same person, not a controller
+    /// whose device is still connected, and not someone who may no longer
+    /// type into terminals. Called with the terminal's entry locked;
+    /// `connected` is [`Self::connected_devices`].
+    fn resume_control(&self, pty_id: &str, pty: &mut PtyState, peer: &Peer, connected: &HashSet<String>) -> bool {
+        let Some(controller) = pty.controller.as_deref() else { return false };
+        let Some((user, attachment)) = peer.installation() else { return false };
+        if controller == peer.device_id || connected.contains(controller) {
+            return false;
+        }
+        let same_person = pty.controller_user.as_ref().is_some_and(|(controller_user, _)| controller_user.as_deref() == Some(user));
+        if !same_person || pty.controller_attachment.as_deref() != Some(attachment) {
+            return false;
+        }
+        // The rule `revalidate_terminal_control` keeps: only someone who may type holds a terminal.
+        if !self.collab.access_for(peer.authority, peer.user_id.as_deref()).can_configure() {
+            return false;
+        }
+        pty.controller = Some(peer.device_id.clone());
+        pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+        // A stream this device already had open learns it; to everyone else nothing changed.
+        for (subscription_id, subscriber) in &pty.subscribers {
+            if subscriber.device_id == peer.device_id {
+                subscriber.notify("pty.control", json!({ "subscriptionId": subscription_id, "ptyId": pty_id, "control": "you", "controllerId": peer.user_id }));
+            }
+        }
+        true
     }
 
     /// A terminal addressed by exact id in this runtime process. A client
@@ -1483,9 +1575,10 @@ impl WorkspaceRpc {
         // Decided before the terminals are locked: it reads the tab's own
         // state, which a restarting CLI can hold for seconds.
         let refusal = agent.as_ref().and_then(|(session_id, tab_id)| self.agent_input_refusal(peer, session_id, tab_id));
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
-        let key = (peer.device_id.clone(), writer.to_string());
+        let key = (peer.input_scope(), writer.to_string());
         let applied = pty.applied_seq.get(&key).map(|(seq, _)| *seq).unwrap_or(0);
         // A resend of what was applied is answered, never typed again, even
         // after control moved or the program exited.
@@ -1504,7 +1597,7 @@ impl WorkspaceRpc {
         if agent.is_some() && !self.terminals.is_running(&pty_id) {
             return Err(RpcError::new("unavailable", "the agent is not running"));
         }
-        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) && !self.resume_control(&pty_id, pty, peer, &connected) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's input"));
         }
         if pty.input_pending.load(Ordering::SeqCst) + data.len() > MAX_PENDING_INPUT {
@@ -1583,10 +1676,11 @@ impl WorkspaceRpc {
                 return Err(refusal);
             }
         }
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let (pty_id, pty) = self.live_pty(&mut ptys, &params)?;
         // A viewer's window size never reshapes the controller's program.
-        if pty.controller.as_deref() != Some(peer.device_id.as_str()) {
+        if pty.controller.as_deref() != Some(peer.device_id.as_str()) && !self.resume_control(&pty_id, pty, peer, &connected) {
             return Err(RpcError::new("not_controller", "another device controls this terminal's size"));
         }
         if pty.exit.is_none() {
@@ -1628,6 +1722,7 @@ impl WorkspaceRpc {
         let changed = pty.controller.as_deref() != Some(peer.device_id.as_str());
         pty.controller = Some(peer.device_id.clone());
         pty.controller_user = Some((peer.user_id.clone(), peer.authority));
+        pty.controller_attachment = peer.attachment_id.clone();
         // Control first, so a device that just lost it takes the new size as
         // a viewer instead of ignoring it as its own.
         if changed {
@@ -1720,9 +1815,11 @@ impl WorkspaceRpc {
         self.agent_pty(peer, &params)?;
         let subscription_id = Self::subscription_id();
         let scope = self.pty_session_scope(peer);
+        let connected = self.connected_devices();
         let mut ptys = self.ptys.lock().unwrap();
         let pty_id = required_str(&params, "ptyId")?.to_string();
         let pty = ptys.get_mut(&pty_id).filter(|pty| !pty.closed).ok_or_else(|| RpcError::not_found("no such terminal"))?;
+        self.resume_control(&pty_id, pty, peer, &connected);
         let start = pty.start();
         let from = since.unwrap_or(start).clamp(start, pty.end);
         let skip = (from - start) as usize;

@@ -500,6 +500,96 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     await waitFor(() => expect(runtime.typed).toEqual(["y"]));
   });
 
+  describe("after a stop and a wake under the open app (B1)", () => {
+    const typeBeforeStop = async () => {
+      showTerminal();
+      await waitFor(() => expect(runtime.agent.control).toBe("you"));
+      act(() => xterm.type("a"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a"]));
+    };
+    const stopAndWake = async (kind: Parameters<FakeAgentRuntime["wokeAsNewDevice"]>[0], meanwhile: () => void = () => undefined) => {
+      await act(async () => runtime.emit({ state: "suspended" }));
+      runtime.wokeAsNewDevice(kind);
+      meanwhile();
+      await act(async () => runtime.connect());
+      await settle();
+    };
+    const notice = () => screen.queryByTestId("cloud-agent-terminal-notice");
+
+    it("is typed into again with no banner and no click when the runtime kept running", async () => {
+      await open();
+      await typeBeforeStop();
+      await stopAndWake("kept");
+      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+      expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+      act(() => xterm.type("b"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
+      expect(notice()).toBeNull();
+      // Nothing was taken again, and the wake itself typed nothing.
+      expect(runtime.methods("pty.control")).toHaveLength(1);
+      expect(runtime.reports).toEqual([]);
+      expect(activate).not.toHaveBeenCalled();
+    });
+
+    it("on a runtime that counts per device offers Take control, and it works: what is typed next arrives", async () => {
+      shared("manager");
+      await open();
+      await typeBeforeStop();
+      await stopAndWake("per-device");
+      await waitFor(() => expect(status()).toBe("You control this terminal from another window or device; you are watching here."));
+      // Offered, never taken by itself; a key before the click is not typed anywhere.
+      act(() => xterm.type("x"));
+      await settle();
+      expect(runtime.methods("pty.control")).toHaveLength(1);
+      expect(runtime.typed).toEqual(["a"]);
+      fireEvent.click(screen.getByRole("button", { name: "Take control" }));
+      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+      act(() => xterm.type("b"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
+      act(() => xterm.type("c"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b", "c"]));
+      expect(notice()).toBeNull();
+      // And again after another stop and wake: it does not stay broken.
+      await stopAndWake("per-device");
+      fireEvent.click(await screen.findByRole("button", { name: "Take control" }));
+      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+      act(() => xterm.type("d"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b", "c", "d"]));
+      expect(notice()).toBeNull();
+    });
+
+    it("takes the terminal of a machine that booted cold as it does on opening: nobody controls it", async () => {
+      await open();
+      await typeBeforeStop();
+      await stopAndWake("restarted");
+      await waitFor(() => expect(xterm.screen()).toBe("fresh screen\r\n"));
+      await waitFor(() => expect(runtime.agent.control).toBe("you"));
+      act(() => xterm.type("b"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
+      expect(notice()).toBeNull();
+    });
+
+    it("never takes it from someone else who took it meanwhile: that stays a click", async () => {
+      shared("manager");
+      await open();
+      await typeBeforeStop();
+      await stopAndWake("kept", () => {
+        runtime.agent.control = "other";
+        runtime.agent.controllerId = "u-alice";
+      });
+      await waitFor(() => expect(status()).toBe("Alice controls this terminal; you are watching."));
+      act(() => xterm.type("x"));
+      await settle();
+      expect(runtime.methods("pty.control")).toHaveLength(1);
+      expect(runtime.methods("pty.write")).toHaveLength(1);
+      expect(runtime.typed).toEqual(["a"]);
+      fireEvent.click(screen.getByRole("button", { name: "Take control" }));
+      await waitFor(() => expect(runtime.agent.controllerId).toBe("u-me"));
+      act(() => xterm.type("b"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
+    });
+  });
+
   it("starts an agent that is not running only when asked, and does not type the key that started it", async () => {
     runtime.tabs = [agentTab({ process: "exited" })];
     runtime.agent.running = false;

@@ -74,6 +74,14 @@ class FakeRuntime implements WorkspaceTransport {
   deliver(message: unknown) {
     for (const listener of this.messages) listener(message);
   }
+  /**
+   * The workspace stopped and woke: this client is a new device now. A
+   * runtime that counts writes per device (before it kept a writer's count
+   * across devices of one installation) knows none of its writers any more.
+   */
+  newDevice() {
+    this.applied.clear();
+  }
   typeOutput(text: string) {
     const offset = this.output.length;
     this.output += text;
@@ -243,6 +251,47 @@ describe("workspace RPC client", () => {
     expect(runtime.writes).toEqual(["q"]);
     const seqs = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => (frame.params as { seq: number }).seq);
     expect(seqs).toEqual([1, 1, 1], "a refusal does not spend the seq");
+    client.close();
+  });
+
+  it("types again after it became a new device to a runtime that counts writes per device", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "one\n");
+    await client.write("p1", "two\n");
+    // Stop and wake: the same client object, a new device on the runtime.
+    runtime.drop();
+    runtime.newDevice();
+    runtime.connect();
+    // The first key after the wake was refused, not applied: it is typed once, under a new writer.
+    await expect(client.write("p1", "three\n")).resolves.toBeUndefined();
+    await client.write("p1", "four\n");
+    expect(runtime.writes).toEqual(["one\n", "two\n", "three\n", "four\n"]);
+    const writes = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => frame.params as { seq: number; writerId: string });
+    expect(writes.map((write) => write.seq)).toEqual([1, 2, 3, 1, 2]);
+    expect(writes[3]!.writerId).not.toBe(writes[0]!.writerId);
+    expect(writes[4]!.writerId).toBe(writes[3]!.writerId);
+    client.close();
+  });
+
+  it("never types twice what may have landed before it became a new device", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "one\n");
+    // Sent, applied, and its answer lost with the connection; then the wake.
+    runtime.loseAnswers = true;
+    const doubtful = client.write("p1", "rm -rf build\n");
+    await settle();
+    runtime.drop();
+    runtime.newDevice();
+    runtime.connect();
+    await expect(doubtful).rejects.toMatchObject({ code: "conflict" });
+    expect(runtime.writes).toEqual(["one\n", "rm -rf build\n"]);
+    // It was reported, and what is typed next goes through.
+    await client.write("p1", "ls\n");
+    expect(runtime.writes).toEqual(["one\n", "rm -rf build\n", "ls\n"]);
     client.close();
   });
 

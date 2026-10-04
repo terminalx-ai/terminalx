@@ -692,6 +692,23 @@ Who may do what (checked on every call, against the latest member list):
 - **One controller**: input and size follow one device, as for shells
   (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
   A second viewer's window never resizes the program.
+- **A stop and a wake keep the controller.** A stop revokes every attachment,
+  and the wake issues each installation a new device under the same
+  attachment id. Where the runtime process survived the stop (a frozen
+  container), the person who controlled a terminal is its controller again
+  on their new device without asking, when all of this holds: the same
+  person, the same attachment (so the same installation), the old device no
+  longer connected, and they may still type. Nothing else moves control
+  without `pty.control`: not another person, not the same person's other
+  installation, not while the old device is connected. A writer's `seq` is
+  counted per person and attachment (per device on a link that names
+  neither), so the open app goes on with the next number, and a write it
+  resends is answered, not typed again. A runtime that restarted knows no
+  controller and no writer: the terminal starts over, as after any restart.
+  A desktop on a runtime older than this is told `conflict` for its first
+  write after the wake; it starts a new writer and types that write under
+  it when it was sent only once (so it cannot have been applied), and
+  reports it otherwise. Shells follow the same rules.
 - **Revocation** is the shells': a person who lost access has their
   connection closed and their streams ended; one who may no longer drive
   loses control, announced.
@@ -731,12 +748,18 @@ point) beside the shell terminals' but apart from them, and
   view starts over on the new process instead of ending.
 - **Looking never starts the agent.** With the CLI not running the view says
   so and offers "Start agent"; pressing a key does the same, and that key is
-  not typed into a CLI that is still starting.
+  not typed: it only starts the CLI and takes control. From the moment the
+  runtime reports the tab's process running, keys are sent, also while the
+  CLI is still drawing its first screen: the terminal holds them and the CLI
+  reads them once it is ready, as with a local tab.
 - **Control.** If nobody controls the terminal and this person may type, the
   view takes control at its own size when it opens. While someone else
   controls it, it shows their size and "<Name> controls this terminal; you
   are watching." with "Take control". The tab's lease bar sits above it as it
-  does above the chat.
+  does above the chat. After a stop and a wake the person's own terminal
+  comes back as theirs (see "A stop and a wake keep the controller"); on a
+  runtime older than that it reads "You control this terminal from another
+  window or device", and "Take control" takes it.
 - **Read-only** for a viewer, for a driver while someone else drives the tab,
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.

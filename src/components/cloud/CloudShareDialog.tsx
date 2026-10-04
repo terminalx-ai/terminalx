@@ -30,7 +30,8 @@ export function yourAccessText(
       return "Owner or admin of the organization (manages this workspace and who it is shared with)";
     case "driver":
       if (you.canManageShares || creator) return "Creator (you created this workspace: can send to agents, type in terminals, approve permissions and manage who it is shared with)";
-      return `Driver (can send to agents and type in terminals)${approves}`;
+      // Typing in a terminal (a shell, or an agent's own) needs the approval right too (PRO-88).
+      return you.canApprove ? `Driver (can send to agents and type in terminals)${approves}` : "Driver (can send to agents; typing in terminals also needs the right to approve permissions)";
     case "viewer":
       return `Viewer (can read everything, not send)${approves}`;
     case "none":
@@ -322,8 +323,8 @@ export function CloudShareDialog({
           <DialogTitle>{manages ? `Share ${name}` : "Who has access"}</DialogTitle>
           <DialogDescription>
             {manages
-              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents and type in terminals."
-              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents and type in terminals.`}
+              ? "People you share with see this workspace's agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions."
+              : `People with access to ${name} see its agent tabs, terminals, files and Git. Drivers can also send to agents, and type in terminals if they can approve permissions.`}
           </DialogDescription>
         </DialogHeader>
         {!listed && !loadError && <Loader2 className="size-4 animate-spin" />}

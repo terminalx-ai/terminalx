@@ -469,15 +469,22 @@ export class WorkspaceRpcClient {
   }
 
   private async sendInput(ptyId: string, input: PtyInput, data: string, report: boolean): Promise<void> {
-    const seq = input.seq + 1;
+    let seq = input.seq + 1;
+    /** This input was started over under a new writer once already. */
+    let restarted = false;
     for (;;) {
       const epoch = this.ptyEpochs.get(ptyId);
       if (epoch && this.state.state === "connected" && this.state.runtimeEpoch && this.state.runtimeEpoch !== epoch) {
         throw new WorkspaceRpcError("not_found", "the terminal's runtime restarted", "pty.write");
       }
+      /** How many times this write went out: more than once means an earlier copy may have been applied. */
+      let sends = 0;
       try {
         const params = { ptyId, data, seq, writerId: input.writerId, ...(epoch ? { epoch } : {}), ...(report ? { report: true } : {}) };
-        await this.resending(() => this.untilDropped(this.rpc.request("pty.write", params)).then((value) => unwrap("pty.write", value)));
+        await this.resending(() => {
+          sends++;
+          return this.untilDropped(this.rpc.request("pty.write", params)).then((value) => unwrap("pty.write", value));
+        });
         input.seq = seq;
         return;
       } catch (error) {
@@ -485,6 +492,23 @@ export class WorkspaceRpcClient {
           // The program is not reading yet: the runtime kept nothing, try the same seq again.
           await new Promise((resolve) => setTimeout(resolve, BACKPRESSURE_RETRY_MS));
           continue;
+        }
+        if (error instanceof WorkspaceRpcError && error.code === "conflict" && !this.closed) {
+          // The runtime does not know this writer at this number. A workspace
+          // that stopped and woke gives this client a new device, and a
+          // runtime older than the one that keeps a writer's count across
+          // that counts per device. This writer can never be right again, so
+          // later input goes under a new one, from 1.
+          input.reset();
+          // This write was refused, so it was not applied. Sent once, that is
+          // certain and it is typed under the new writer. Resent after a
+          // drop, an earlier copy may have landed: it is reported, never
+          // typed a second time.
+          if (sends === 1 && !restarted) {
+            restarted = true;
+            seq = 1;
+            continue;
+          }
         }
         if (!(error instanceof WorkspaceRpcError)) {
           // Unknown whether it landed; a fresh writer keeps later input from

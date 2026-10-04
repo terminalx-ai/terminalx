@@ -842,7 +842,9 @@ impl RelayHost {
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) = Peer::for_user(connection.relay_device_id.clone(), device.authority, device.user_id.clone());
+        // The attachment is the person's installation: it outlives the device the API issues it at every wake.
+        let (peer, mut notifications) =
+            Peer::for_attachment(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), Some(device.attachment_id.clone()));
         // Slow mutations (Git network calls, agent prompts) answer from their
         // own task, so this connection keeps reading, streaming and honouring
         // a revocation meanwhile. Everything else is answered in order, which
