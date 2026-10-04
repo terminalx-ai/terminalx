@@ -89,6 +89,25 @@ pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration, stop:
     }
 }
 
+/// Run `git <first>` with its output fed to `git <second>`, and return what
+/// the second prints. For the plumbing pairs git expects to be piped
+/// (`log -p | patch-id`).
+pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
+    use std::process::Stdio;
+    let mut source = git().current_dir(cwd).args(first).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().with_context(|| format!("git {}", first.join(" ")))?;
+    let feed = source.stdout.take().context("no pipe from git")?;
+    let out = git().current_dir(cwd).args(second).stdin(Stdio::from(feed)).output().with_context(|| format!("git {}", second.join(" ")));
+    let produced = source.wait()?;
+    let out = out?;
+    if !produced.success() {
+        bail!("git {}: exit {produced}", first.join(" "));
+    }
+    if !out.status.success() {
+        bail!("git {}: {}", second.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }

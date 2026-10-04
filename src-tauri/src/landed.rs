@@ -20,6 +20,12 @@
 //!    on the default branch (a squash merge), or the branch has no net
 //!    change at all.
 //!
+//! "Patch-equivalent" means the same change byte for byte. `git cherry`
+//! finds the candidates but compares patches with whitespace ignored, and a
+//! change of indentation alone can change what a Python or YAML file means.
+//! So every match is confirmed with `git patch-id --verbatim` before it
+//! counts.
+//!
 //! A merged pull request is not used as proof on its own: commits can be
 //! added to a branch after its pull request merged, and those would be lost.
 //!
@@ -144,12 +150,22 @@ fn count(cwd: &Path, args: &[&str]) -> Option<u32> {
 /// `WIP on <branch>: …` or `On <branch>: …` for every stash, and
 /// `(no branch)` in place of the name for one made on a detached HEAD. Those
 /// cannot be told apart by checkout, so a workspace with a detached HEAD
-/// counts every one of them: over-warning is the safe side.
-fn stashes_on(cwd: &Path, branch: Option<&str>) -> u32 {
-    let Ok(out) = git::run(cwd, &["stash", "list", "--format=%gs"]) else { return 0 };
+/// counts every one of them: over-warning is the safe side. `None` when the
+/// stash list cannot be read, which is not the same as "no stashes".
+fn stashes_on(cwd: &Path, branch: Option<&str>) -> Option<u32> {
+    let out = git::run(cwd, &["stash", "list", "--format=%gs"]).ok()?;
     let branch = branch.unwrap_or("(no branch)");
     let (wip, on) = (format!("WIP on {branch}:"), format!("On {branch}:"));
-    out.lines().filter(|line| line.starts_with(&wip) || line.starts_with(&on)).count() as u32
+    Some(out.lines().filter(|line| line.starts_with(&wip) || line.starts_with(&on)).count() as u32)
+}
+
+/// The exact patch ids (whitespace included) of the non-merge commits in
+/// `range`, or of the one commit `range` names with `-1`.
+fn verbatim_patch_ids(cwd: &Path, log_args: &[&str]) -> Option<std::collections::HashSet<String>> {
+    let mut first = vec!["log", "-p", "--no-merges", "--no-color", "--no-ext-diff", "--no-textconv"];
+    first.extend_from_slice(log_args);
+    let out = git::pipe(cwd, &first, &["patch-id", "--verbatim"]).ok()?;
+    Some(out.lines().filter_map(|line| line.split_whitespace().next().map(String::from)).collect())
 }
 
 /// How the work at HEAD got into `base`, if it did, and how many commits
@@ -167,13 +183,27 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     let cherry = git::run(cwd, &["cherry", base, "HEAD"]).ok()?;
     let merges = count(cwd, &["rev-list", "--count", "--merges", &format!("{base}..HEAD")])?;
     let unmerged = cherry.lines().filter(|line| line.starts_with('+')).count() as u32;
+    let merge_base = git::run(cwd, &["merge-base", base, "HEAD"]).ok()?.trim().to_string();
+    // What the base gained since the branch left it, as exact patches. Only
+    // worked out when `git cherry` found a candidate to confirm.
+    let upstream = std::cell::OnceCell::new();
+    let upstream = || upstream.get_or_init(|| if merge_base.is_empty() { None } else { verbatim_patch_ids(cwd, &[&format!("{merge_base}..{base}")]) }).clone();
     if unmerged == 0 && merges == 0 {
-        return Some((Some(MergedBy::Rebase), 0));
+        // Every commit has a look-alike upstream; each must be the same
+        // change exactly, not the same but for whitespace.
+        let ours = verbatim_patch_ids(cwd, &[&format!("{base}..HEAD")])?;
+        let theirs = upstream()?;
+        if ours.iter().all(|id| theirs.contains(id)) {
+            return Some((Some(MergedBy::Rebase), 0));
+        }
     }
+    // Nothing was told apart commit by commit: count them all as unmerged
+    // unless the whole-change comparison below says otherwise.
+    let ahead = count(cwd, &["rev-list", "--count", "--no-merges", &format!("{base}..HEAD")])?;
+    let unmerged = if unmerged == 0 && merges == 0 { ahead } else { unmerged };
     // What is reported when the whole-change comparison also fails: the
     // commits with no equivalent, or the merge commits that hid the change.
     let unmerged = unmerged.max(merges);
-    let merge_base = git::run(cwd, &["merge-base", base, "HEAD"]).ok()?.trim().to_string();
     if merge_base.is_empty() {
         return Some((None, unmerged));
     }
@@ -189,7 +219,13 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
     .ok()?;
     let as_one = git::run(cwd, &["cherry", base, squashed.trim()]).ok()?;
     if as_one.lines().next().is_some_and(|line| line.starts_with('-')) {
-        return Some((Some(MergedBy::Squash), 0));
+        // The same change exactly: a commit added after the squash that only
+        // re-indents a line still matches when whitespace is ignored.
+        let whole = verbatim_patch_ids(cwd, &["-1", squashed.trim()])?;
+        let theirs = upstream()?;
+        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) {
+            return Some((Some(MergedBy::Squash), 0));
+        }
     }
     Some((None, unmerged))
 }
@@ -245,15 +281,18 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     let branch = git::current_branch(path);
     let mut landed = Landed { checked: true, branch: branch.clone(), ..Default::default() };
 
-    let status = count_lines(path, &["status", "--porcelain", "--untracked-files=normal", "--"]);
-    landed.uncommitted = status.unwrap_or(0);
-    landed.stashes = stashes_on(path, branch.as_deref());
-    landed.clean = status == Some(0) && landed.stashes == 0;
-    landed.pushed = git::run(path, &["branch", "-r", "--contains", "HEAD"]).is_ok_and(|out| !out.trim().is_empty());
-
+    // The fetch can take many seconds. The working tree is read after it,
+    // so what is reported is the tree as it is when the answer is given.
     let (base, not_verified, fresh) = base_for(project, fetch);
     landed.not_verified = not_verified;
     landed.fresh = fresh;
+
+    let status = count_lines(path, &["status", "--porcelain", "--untracked-files=normal", "--"]);
+    let stashes = stashes_on(path, branch.as_deref());
+    landed.uncommitted = status.unwrap_or(0);
+    landed.stashes = stashes.unwrap_or(0);
+    landed.clean = status == Some(0) && stashes == Some(0);
+    landed.pushed = git::run(path, &["branch", "-r", "--contains", "HEAD"]).is_ok_and(|out| !out.trim().is_empty());
     if let Some(base) = &base {
         match merged_into(path, base) {
             Some((merged, unmerged)) => {
@@ -265,6 +304,8 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     }
     if status.is_none() {
         landed.not_verified = Some("Git could not read the working tree's status.".to_string());
+    } else if stashes.is_none() {
+        landed.not_verified = Some("Git could not read the stash list, so stashed work cannot be ruled out.".to_string());
     }
     landed.base = base;
     landed.safe = landed.clean && landed.merged.is_some() && landed.not_verified.is_none() && landed.fresh;
@@ -516,6 +557,77 @@ mod tests {
         // A workspace on a branch does not take the blame for it.
         let other = PathBuf::from(git::create_worktree(&f.project, "calm-teal-bee", Some("main")).unwrap().path);
         assert_eq!(check(&f.project, &other, Fetch::Fresh).stashes, 0);
+    }
+
+    /// Squash-merge the branch on the remote, as GitHub does.
+    fn squash_upstream(f: &Fixture, branch: &str) {
+        f.elsewhere(|other| {
+            sh(other, &["merge", "-q", "--squash", &format!("origin/{branch}")]);
+            sh(other, &["commit", "-q", "-m", "squashed (#1)"]);
+        });
+    }
+
+    #[test]
+    fn a_later_commit_that_only_reindents_a_line_is_not_covered_by_the_squash() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let branch = Fixture::branch("quiet-amber-fox");
+        commit(&wt, "job.py", "def run():\n    if ready:\n        start()\n    cleanup()\n");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        squash_upstream(&f, &branch);
+        // (A one-commit branch squashed is the same patch as that commit.)
+        assert!(check(&f.project, &wt, Fetch::Fresh).safe);
+
+        // Unpushed: `cleanup()` moves inside the `if`. Only indentation
+        // changed, and the program now does something else.
+        commit(&wt, "job.py", "def run():\n    if ready:\n        start()\n        cleanup()\n");
+        assert!(!sh(&wt, &["diff", "origin/main", "HEAD"]).is_empty());
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        assert_eq!(landed.merged, None, "{landed:?}");
+        assert!(!landed.safe && landed.unmerged_commits >= 1);
+    }
+
+    #[test]
+    fn a_later_commit_that_only_changes_whitespace_inside_a_line_is_not_covered() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let branch = Fixture::branch("quiet-amber-fox");
+        commit(&wt, "config.yaml", "name: a b\nargs: [x, y]\n");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        squash_upstream(&f, &branch);
+        // (A one-commit branch squashed is the same patch as that commit.)
+        assert!(check(&f.project, &wt, Fetch::Fresh).safe);
+
+        commit(&wt, "config.yaml", "name: a  b\nargs: [x,y]\n");
+        assert!(!sh(&wt, &["diff", "origin/main", "HEAD"]).is_empty());
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        assert_eq!(landed.merged, None, "{landed:?}");
+        assert!(!landed.safe);
+    }
+
+    #[test]
+    fn a_rebase_merged_commit_later_amended_with_an_indentation_change_is_not_merged() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let branch = Fixture::branch("quiet-amber-fox");
+        commit(&wt, "job.py", "def run():\n    if ready:\n        start()\n    cleanup()\n");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        f.elsewhere(|other| {
+            commit(other, "unrelated.txt", "main moved\n");
+            sh(other, &["cherry-pick", &format!("origin/{branch}")]);
+        });
+        assert_eq!(check(&f.project, &wt, Fetch::Fresh).merged, Some(MergedBy::Rebase));
+
+        // The commit is amended locally: same change but for indentation.
+        std::fs::write(wt.join("job.py"), "def run():\n    if ready:\n        start()\n        cleanup()\n").unwrap();
+        sh(&wt, &["commit", "-q", "-a", "--amend", "--no-edit"]);
+        // `git cherry` still calls it equivalent...
+        assert!(sh(&wt, &["cherry", "origin/main", "HEAD"]).lines().all(|line| line.starts_with('-')));
+        // ...and it is not.
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        assert_eq!(landed.merged, None, "{landed:?}");
+        assert!(!landed.safe);
+        assert_eq!(landed.unmerged_commits, 1);
     }
 
     #[test]
