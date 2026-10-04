@@ -162,3 +162,27 @@ stream ends.
    preview" in the built-in browser.
 
 The API and the relay need no change for private previews.
+
+## The desktop forwarder (`src-tauri/src/cloud_ports.rs`)
+
+One `PortForwarder` per workspace connection. Commands:
+`cloud_port_forward(connectionId, port, localPort?, exact?)`,
+`cloud_port_unforward`, `cloud_port_forwards`.
+
+- It binds `127.0.0.1` only. The wanted local port is the workspace's port
+  number; when taken, one of the next 20 or any free port is used and the
+  answer says `reassigned`. With `exact`, a taken port is refused
+  (`cloud_port_in_use`).
+- Forwarding the same port again returns the same forward. A forwarder's
+  listeners belong to its connection: another workspace asking for the same
+  local port is given another one.
+- Each accepted connection sends `ports.open` and becomes one stream. Its
+  requests carry ids starting `ports-`; their answers and every `ports.*`
+  notification are consumed natively and never reach the web view.
+- It never changes the connection's activation. On a connection that is not
+  live, `cloud_port_forward` answers `cloud_port_not_connected`, and an
+  existing listener answers a browser with a short `503` page saying the
+  workspace is stopped and that nothing was started. A refusal by the
+  runtime (`port_unreachable`, `forbidden`) is a short page too.
+- Streams end when the connection drops; listeners are closed when the
+  connection is detached or the account changes.

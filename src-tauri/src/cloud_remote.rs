@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use crate::account::{AccountManager, CloudScope};
 use crate::cloud_agent_client::CloudAgentClient;
 use crate::cloud_diagnostics::ConnectionCloseLog;
+use crate::cloud_ports::{Forward, PortForwarder};
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
 use crate::remote::client::{open_outcome, AttachSource, ClientEvent, ClientState, OpenOutcome, Supervisor};
 use crate::remote::protocol::Activation;
@@ -60,6 +61,8 @@ impl Identity {
 
 struct Attached {
     supervisor: Supervisor,
+    /// This connection's local port forwards (PRO-28).
+    ports: PortForwarder,
     /// None only for a debug-build attach by pairing code, which no account owns.
     identity: Option<Identity>,
 }
@@ -132,6 +135,7 @@ impl CloudRemote {
     fn detach(&self, connection_id: &str) {
         let attached = self.connections.lock().unwrap().remove(connection_id);
         if let Some(attached) = attached {
+            attached.ports.shutdown();
             attached.supervisor.stop();
         }
     }
@@ -184,6 +188,7 @@ impl CloudRemote {
         stopped
             .into_iter()
             .map(|(id, attached)| {
+                attached.ports.shutdown();
                 attached.supervisor.stop();
                 id
             })
@@ -197,7 +202,11 @@ impl CloudRemote {
         let connection_id = format!("cloud-{}", uuid::Uuid::new_v4().simple());
         let (events, mut receiver) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, activation, events);
-        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), identity: identity.clone() });
+        let ports = {
+            let supervisor = supervisor.clone();
+            PortForwarder::new(move |frame| supervisor.send(frame))
+        };
+        self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
         let app = app.clone();
         let id = connection_id.clone();
         let agents = self.agents.clone();
@@ -228,8 +237,15 @@ impl CloudRemote {
                         if keys_granted {
                             fetch_keys(&mut keys_request);
                         }
+                        // Port streams live and end with the connection.
+                        ports.set_connected(match &state {
+                            ClientState::Connected { capabilities, .. } => Some(capabilities.as_slice()),
+                            _ => None,
+                        });
                         RemoteEvent::State { connection_id: id.clone(), state }
                     }
+                    // The forwarder's own answers and port data stay native.
+                    ClientEvent::Message(message) if ports.on_message(&message) => continue,
                     ClientEvent::Message(message) => match intercept(&message) {
                         Intercept::KeysAnswer => {
                             if message.get("id").and_then(Value::as_str) == keys_request.as_deref() {
@@ -259,8 +275,21 @@ impl CloudRemote {
                 };
                 let _ = app.emit(EVENT, payload);
             }
+            ports.shutdown();
         });
         connection_id
+    }
+
+    /// The connection's port forwarder, under the same identity rule as
+    /// [`Self::supervisor`].
+    fn ports(&self, connection_id: &str) -> Result<PortForwarder, String> {
+        let scope = self.scope();
+        let connections = self.connections.lock().unwrap();
+        let attached = connections.get(connection_id).ok_or("cloud_remote_connection_unknown")?;
+        if attached.identity.as_ref().is_some_and(|identity| !identity.allowed_by(scope.as_ref())) {
+            return Err("cloud_remote_identity_changed".into());
+        }
+        Ok(attached.ports.clone())
     }
 
     fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
@@ -437,6 +466,25 @@ pub async fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, con
     Ok(())
 }
 
+/// Forward a port of the connection's workspace to this Mac's loopback
+/// (PRO-28). Never wakes the workspace: `cloud_port_not_connected` when the
+/// connection is not live. `local_port` taken and not `exact`: another is
+/// used and the answer says `reassigned`.
+#[tauri::command]
+pub async fn cloud_port_forward(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, port: u16, local_port: Option<u16>, exact: Option<bool>) -> Result<Forward, String> {
+    remote.ports(&connection_id)?.forward(port, local_port, exact.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn cloud_port_unforward(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, port: u16) -> Result<bool, String> {
+    Ok(remote.ports(&connection_id)?.unforward(port))
+}
+
+#[tauri::command]
+pub async fn cloud_port_forwards(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<Vec<Forward>, String> {
+    Ok(remote.ports(&connection_id)?.forwards())
+}
+
 /// Keep what `keys.get` answered, for the identity the connection was made for.
 fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, workspace_id: Option<&str>, message: Value) {
     let (Some(identity), Some(workspace_id)) = (identity.cloned(), workspace_id.map(str::to_string)) else { return };
@@ -611,7 +659,7 @@ mod intercept_tests {
         ));
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
         let (supervisor, mut frames) = Supervisor::connected_for_test();
-        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, identity: Some(made_in("org-a")) });
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
 
         store.block_writes();
         let refreshing = {
@@ -679,7 +727,7 @@ mod intercept_tests {
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
         let attach = |id: &str| {
             let (supervisor, frames) = Supervisor::connected_for_test();
-            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, identity: Some(made_in("org-a")) });
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
             frames
         };
         let _frames = attach("cloud-1");

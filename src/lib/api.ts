@@ -265,6 +265,16 @@ export const api = {
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
+   * docs/CLOUD-PREVIEWS.md). Never wakes the workspace: rejects with
+   * `cloud_port_not_connected` unless the connection is live. `reassigned` says
+   * the wanted local port was taken; `exact` refuses instead (`cloud_port_in_use`).
+   */
+  cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
+    invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
+  cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
+  cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -787,6 +797,13 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+}
+
+/** A workspace port reachable at `http://localhost:<localPort>` on this Mac. */
+export interface CloudPortForward {
+  port: number;
+  localPort: number;
+  reassigned: boolean;
 }
 
 export interface CloudWorkspacePreflight {
