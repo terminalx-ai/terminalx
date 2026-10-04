@@ -184,4 +184,20 @@ describe("mobile conversation navigation", () => {
     await select("claude"); expect(input().value).toBe("");
     expect(container.textContent).toContain("claude transcript");
   });
+
+  it("reads what it missed after a reconnect that was never shown, keeping what is on screen (PRO-50)", async () => {
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("claude transcript");
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
+    // Back from the home screen: the stage never left "connected", only the epoch moved.
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "claude transcript"), event("claude", "written while away", 2)], hasMore: false });
+    mocks.app = { ...mocks.app, connectionEpoch: 1 };
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).toContain("written while away");
+    expect(container.textContent).not.toContain("Session unavailable");
+  });
 });
