@@ -4,7 +4,9 @@ Browse, edit and search a cloud workspace's files from the desktop. The
 runtime (`terminalx-serve`) serves `fs/1` of `terminalx-workspace-rpc/1` over
 the relay E2EE channel (PRO-13); the desktop's existing file tree, editor and
 media viewer read and write through it. The checkout stays on the runtime:
-the desktop never mounts, syncs or caches it on disk.
+the desktop never mounts or caches it on disk. The one exception is the
+optional local mirror (PRO-25, docs/CLOUD-MIRROR.md), a one-way copy a
+person turns on per workspace.
 
 ## Runtime: `src-tauri/src/remote/files.rs`
 

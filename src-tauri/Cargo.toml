@@ -104,6 +104,8 @@ subtle = "2.6"
 zeroize = "1.8"
 toml = "0.9"
 url = "2"
+# Already in the tree through `url`: Unicode normalisation, for names that are one file on this disk.
+icu_normalizer = "2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [target.'cfg(unix)'.dependencies]
