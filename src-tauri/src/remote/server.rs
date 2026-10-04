@@ -73,7 +73,7 @@ const REPLAY_CHUNK: usize = 256 * 1024;
 const MAX_WRITERS: usize = 64;
 /// Methods a `participate` attachment could not call before PRO-30. With no
 /// member list from the API (an older API) they stay closed to it.
-const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control", "ports.open", "ports.write"];
+const SHARED_ONLY: &[&str] = &["keys.get", "pty.write", "pty.resize", "pty.control", "ports.list", "ports.open", "ports.write"];
 /// Longest session title `session.update` accepts, in characters.
 const MAX_TITLE_CHARS: usize = 200;
 /// Launch modes a tab may be given (`src/lib/models.ts` `PERMISSION_MODES`).
@@ -101,6 +101,8 @@ pub struct Peer {
     presence: Mutex<Presence>,
     /// Raised when the runtime closes the connection (access revoked).
     closed: tokio::sync::Notify,
+    /// Set once the connection has been disconnected from the runtime.
+    gone: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -144,6 +146,7 @@ impl Peer {
             granted: Mutex::new(None),
             presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
             closed: tokio::sync::Notify::new(),
+            gone: std::sync::atomic::AtomicBool::new(false),
         });
         (peer, Notifications { receiver, queued })
     }
@@ -160,6 +163,17 @@ impl Peer {
 
     pub(super) fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The connection is over: it was disconnected, or nothing reads what is
+    /// sent to it any more.
+    pub(super) fn hung_up(&self) -> bool {
+        self.gone.load(Ordering::SeqCst) || self.outbound.is_closed()
+    }
+
+    /// Send `value` in order with this connection's notifications.
+    fn deliver(&self, value: Value) {
+        let _ = self.outbound.send((value, 0));
     }
 
     pub(super) fn notify(&self, event: &str, params: Value) {
@@ -813,7 +827,7 @@ impl WorkspaceRpc {
         let needed = match method {
             "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
             // Bytes sent to a port are input to whatever listens there.
-            "ports.open" | "ports.write" => Role::Driver,
+            "ports.list" | "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
             _ => Role::Viewer,
         };
@@ -829,7 +843,7 @@ impl WorkspaceRpc {
         // A port is held to the terminal's rule (PRO-28): what listens on
         // the workspace's loopback includes debuggers and notebooks, which
         // run anything as the workspace's user for whoever connects.
-        if matches!(method, "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
+        if matches!(method, "ports.list" | "ports.open" | "ports.write") && access.can_drive() && !access.can_configure() {
             return Err(RpcError::forbidden(format!("{method} needs the right to approve permissions: a local port can be a debugger or a notebook that runs anything"))
                 .with_data(json!({ "role": access.role, "needs": "canApprove", "reason": "approval-required" })));
         }
@@ -844,10 +858,29 @@ impl WorkspaceRpc {
         Err(RpcError::forbidden(format!("{method} needs {what}")).with_data(json!({ "role": access.role })))
     }
 
+    /// Whether `peer` may open ports now: the dispatcher's checks, read again.
+    fn may_use_ports(&self, peer: &Peer) -> bool {
+        let spec = protocol::find_method("ports.open").expect("ports.open is a method");
+        let authority = self.authority(peer);
+        authority >= spec.authority && (authority != Authority::Participate || self.authorize_participant(peer, spec).is_ok())
+    }
+
+    /// Answer `ports.open` in order with the connection's notifications, and
+    /// only then let the stream's data flow: an application that speaks
+    /// first can never be heard before the client knows the stream's id.
+    pub async fn answer_port_open(self: &Arc<Self>, peer: &Arc<Peer>, request: &Value) {
+        let response = self.handle(peer, request).await;
+        let stream_id = response.pointer("/result/streamId").and_then(Value::as_str).map(str::to_string);
+        peer.deliver(response);
+        if let Some(stream_id) = stream_id {
+            self.ports.start(peer, &stream_id);
+        }
+    }
+
     async fn execute(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
         // Sockets, not blocking work: answered on the async runtime.
         if method.starts_with("ports.") {
-            return self.ports.handle(peer, method, params).await;
+            return self.ports.handle(peer, method, params, &|| self.may_use_ports(peer)).await;
         }
         let rpc = self.clone();
         let peer = peer.clone();
@@ -967,6 +1000,8 @@ impl WorkspaceRpc {
     /// Drop everything a closed connection subscribed to.
     pub fn disconnect(&self, peer: &Peer) {
         self.files.disconnect(peer.id);
+        // Before its streams are ended, so an open still connecting sees it.
+        peer.gone.store(true, Ordering::SeqCst);
         self.ports.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {

@@ -49,6 +49,13 @@ const CHUNK: usize = 32 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// An application that takes nothing for this long ends its stream.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Opens one connection may have in flight (each holds a connect attempt).
+const MAX_OPENS_IN_FLIGHT: usize = 8;
+/// A stream nothing has crossed for this long is ended. Long enough for a
+/// development server's reload socket, which is quiet between edits.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Bytes one stream may carry in its life, both directions together.
+const LIFETIME_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Bytes sent toward a connection that it has not acknowledged yet.
 #[derive(Default)]
@@ -69,14 +76,58 @@ struct Stream {
     freed: Notify,
     peer_window: Arc<Window>,
     cancel: CancellationToken,
+    /// Raised once the `ports.open` answer is on its way to the client:
+    /// nothing is read from the application before, so no data can reach
+    /// the client for a stream id it has not been told.
+    started: Notify,
+    /// Bytes carried so far, both directions.
+    carried: AtomicU64,
+    /// When something last crossed, in milliseconds since the stream opened.
+    last_activity: AtomicU64,
+    opened: std::time::Instant,
+}
+
+impl Stream {
+    /// Count `bytes` carried. False once the stream has carried its lifetime's worth.
+    fn carry(&self, bytes: usize) -> bool {
+        self.last_activity.store(self.opened.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.carried.fetch_add(bytes as u64, Ordering::Relaxed) + bytes as u64 <= LIFETIME_BYTES
+    }
+
+    fn idle_for(&self) -> Duration {
+        self.opened.elapsed().saturating_sub(Duration::from_millis(self.last_activity.load(Ordering::Relaxed)))
+    }
+}
+
+/// One open in flight, counted until it settles either way.
+struct Opening<'a> {
+    ports: &'a Ports,
+    peer_id: u64,
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        let mut opening = self.ports.opening.lock().unwrap();
+        if let Some(count) = opening.get_mut(&self.peer_id) {
+            *count -= 1;
+            if *count == 0 {
+                opening.remove(&self.peer_id);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct Ports {
     streams: Mutex<HashMap<String, Arc<Stream>>>,
     windows: Mutex<HashMap<u64, Arc<Window>>>,
+    opening: Mutex<HashMap<u64, usize>>,
     next: AtomicU64,
 }
+
+/// Whether the caller may still open ports, read again at the moment a
+/// stream would be registered.
+pub type Allowed<'a> = &'a (dyn Fn() -> bool + Sync);
 
 fn unreachable_port(port: u16) -> RpcError {
     RpcError::new("port_unreachable", format!("nothing in the workspace is listening on port {port}"))
@@ -87,10 +138,10 @@ fn stream_id(params: &Value) -> Result<&str, RpcError> {
 }
 
 impl Ports {
-    pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, RpcError> {
+    pub async fn handle(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
         match method {
             "ports.list" => Ok(self.list(peer)),
-            "ports.open" => self.open(peer, &params).await,
+            "ports.open" => self.open(peer, &params, allowed).await,
             "ports.write" => self.write(peer, &params),
             "ports.ack" => self.ack(peer, &params),
             "ports.close" => {
@@ -122,7 +173,14 @@ impl Ports {
         })
     }
 
-    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value) -> Result<Value, RpcError> {
+    /// Let a stream's data flow: its `ports.open` answer is on its way.
+    pub fn start(&self, peer: &Peer, stream_id: &str) {
+        if let Some(stream) = self.owned(peer, stream_id) {
+            stream.started.notify_one();
+        }
+    }
+
+    async fn open(self: &Arc<Self>, peer: &Arc<Peer>, params: &Value, allowed: Allowed<'_>) -> Result<Value, RpcError> {
         let port = params
             .get("port")
             .and_then(Value::as_u64)
@@ -130,6 +188,15 @@ impl Ports {
             .filter(|port| *port != 0)
             .ok_or_else(|| RpcError::invalid("port must be between 1 and 65535"))?;
         self.check_room(peer.id())?;
+        let _opening = {
+            let mut opening = self.opening.lock().unwrap();
+            let count = opening.entry(peer.id()).or_default();
+            if *count >= MAX_OPENS_IN_FLIGHT {
+                return Err(RpcError::new("backpressure", "too many ports are being opened at once"));
+            }
+            *count += 1;
+            Opening { ports: self, peer_id: peer.id() }
+        };
         // Loopback only, IPv4 then IPv6: where a development server listens.
         let mut socket = None;
         for address in [SocketAddr::from((Ipv4Addr::LOCALHOST, port)), SocketAddr::from((Ipv6Addr::LOCALHOST, port))] {
@@ -142,8 +209,17 @@ impl Ports {
         let _ = socket.set_nodelay(true);
         let (input, pending) = mpsc::unbounded_channel();
         let stream = {
-            // Checked again under the lock: opens race each other.
+            // Checked again under the lock: opens race each other, and the
+            // connection may have closed or lost the right while this one
+            // was connecting. `disconnect` and `revoke` take the same lock,
+            // so a stream is either refused here or ended by them.
             let mut streams = self.streams.lock().unwrap();
+            if peer.hung_up() {
+                return Err(RpcError::new("unavailable", "the connection closed"));
+            }
+            if !allowed() {
+                return Err(RpcError::forbidden("ports.open is no longer allowed for this connection"));
+            }
             Self::room(&streams, peer.id())?;
             let peer_window = self.windows.lock().unwrap().entry(peer.id()).or_default().clone();
             let stream = Arc::new(Stream {
@@ -156,6 +232,10 @@ impl Ports {
                 freed: Notify::new(),
                 peer_window,
                 cancel: CancellationToken::new(),
+                started: Notify::new(),
+                carried: AtomicU64::new(0),
+                last_activity: AtomicU64::new(0),
+                opened: std::time::Instant::now(),
             });
             streams.insert(stream.id.clone(), stream.clone());
             stream
@@ -163,6 +243,8 @@ impl Ports {
         let (reader, writer) = socket.into_split();
         tokio::spawn(self.clone().read(stream.clone(), peer.clone(), reader));
         tokio::spawn(self.clone().feed(stream.clone(), peer.clone(), writer, pending));
+        // Who opened what, never what was carried.
+        log::info!("port stream {}: {} opened port {port}", stream.id, peer.user_id.as_deref().unwrap_or("an attachment with no person"));
         Ok(json!({ "streamId": stream.id, "port": port, "window": STREAM_WINDOW, "maxWriteBytes": MAX_WRITE_BYTES }))
     }
 
@@ -219,37 +301,83 @@ impl Ports {
 
     /// Application → client.
     async fn read(self: Arc<Self>, stream: Arc<Stream>, peer: Arc<Peer>, mut reader: tokio::net::tcp::OwnedReadHalf) {
+        tokio::select! {
+            _ = stream.cancel.cancelled() => return,
+            _ = stream.started.notified() => {}
+        }
         let mut buffer = vec![0u8; CHUNK];
         let reason = loop {
-            // Read only what the client has room for.
+            // Read only what the client has room for. The connection's share
+            // is reserved before reading, so streams reading at once cannot
+            // overshoot it together.
             loop {
                 let stream_freed = stream.freed.notified();
                 let peer_freed = stream.peer_window.freed.notified();
-                if stream.unacked.load(Ordering::SeqCst) + CHUNK <= STREAM_WINDOW && stream.peer_window.unacked.load(Ordering::SeqCst) + CHUNK <= PEER_WINDOW {
+                if stream.unacked.load(Ordering::SeqCst) + CHUNK <= STREAM_WINDOW && reserve(&stream.peer_window.unacked, CHUNK, PEER_WINDOW) {
                     break;
                 }
                 tokio::select! {
                     _ = stream.cancel.cancelled() => return,
                     _ = stream_freed => {}
                     _ = peer_freed => {}
+                    // Look again: nobody may be left to free anything.
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+                if peer.hung_up() {
+                    self.end(&stream, None);
+                    return;
                 }
             }
-            let read = tokio::select! {
-                _ = stream.cancel.cancelled() => return,
-                read = reader.read(&mut buffer) => read,
+            let read = loop {
+                tokio::select! {
+                    _ = stream.cancel.cancelled() => {
+                        release(&stream.peer_window.unacked, CHUNK);
+                        return;
+                    }
+                    read = tokio::time::timeout(Duration::from_secs(30), reader.read(&mut buffer)) => match read {
+                        Ok(read) => break Some(read),
+                        // Quiet: still worth keeping?
+                        Err(_) if peer.hung_up() => break None,
+                        Err(_) if stream.idle_for() >= IDLE_TIMEOUT => break Some(Err(std::io::ErrorKind::TimedOut.into())),
+                        Err(_) => {}
+                    },
+                }
+            };
+            let Some(read) = read else {
+                // The connection is gone: there is nobody to tell.
+                release(&stream.peer_window.unacked, CHUNK);
+                self.end(&stream, None);
+                return;
             };
             match read {
-                Ok(0) => break "eof",
+                Ok(0) => {
+                    release(&stream.peer_window.unacked, CHUNK);
+                    break "eof";
+                }
                 Ok(count) => {
+                    // Only what was read stays reserved.
+                    release(&stream.peer_window.unacked, CHUNK - count);
+                    stream.peer_window.freed.notify_waiters();
+                    if peer.hung_up() {
+                        release(&stream.peer_window.unacked, count);
+                        self.end(&stream, None);
+                        return;
+                    }
+                    if !stream.carry(count) {
+                        release(&stream.peer_window.unacked, count);
+                        break "limit";
+                    }
                     stream.unacked.fetch_add(count, Ordering::SeqCst);
-                    stream.peer_window.unacked.fetch_add(count, Ordering::SeqCst);
                     peer.notify_sized(
                         "ports.data",
                         json!({ "streamId": stream.id, "data": general_purpose::STANDARD.encode(&buffer[..count]) }),
                         count,
                     );
                 }
-                Err(_) => break "error",
+                Err(error) => {
+                    release(&stream.peer_window.unacked, CHUNK);
+                    break if error.kind() == std::io::ErrorKind::TimedOut { "idle" } else { "error" };
+                }
             }
         };
         self.end(&stream, Some((&peer, reason)));
@@ -272,6 +400,10 @@ impl Ports {
             }
             stream.pending_input.fetch_sub(bytes.len(), Ordering::SeqCst);
             peer.notify("ports.drained", json!({ "streamId": stream.id, "bytes": bytes.len() }));
+            if !stream.carry(bytes.len()) {
+                self.end(&stream, Some((&peer, "limit")));
+                break;
+            }
         }
         let _ = writer.shutdown().await;
     }
@@ -316,6 +448,11 @@ impl Ports {
     pub(super) fn open_streams(&self) -> usize {
         self.streams.lock().unwrap().len()
     }
+}
+
+/// Add `bytes` to `counter` if that keeps it within `limit`.
+fn reserve(counter: &AtomicUsize, bytes: usize, limit: usize) -> bool {
+    counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| (current + bytes <= limit).then_some(current + bytes)).is_ok()
 }
 
 /// Take up to `bytes` off `counter`; returns how much was taken.
@@ -394,6 +531,16 @@ mod tests {
                   2: 000080FE00000000FF005450B6AD1DFE:0050 00000000000000000000000000000000:0000 0A 0 0 0\n";
         assert_eq!(parse_listeners(v6), vec![5001, 8081]);
         assert!(parse_listeners("garbage\nmore garbage").is_empty());
+    }
+
+    #[test]
+    fn a_connections_window_is_reserved_not_raced_for() {
+        let window = AtomicUsize::new(0);
+        // 32 streams asking at once get exactly what fits.
+        let granted = (0..MAX_STREAMS_PER_PEER).filter(|_| reserve(&window, CHUNK, PEER_WINDOW)).count();
+        assert_eq!(granted, PEER_WINDOW / CHUNK);
+        assert_eq!(window.load(Ordering::SeqCst), PEER_WINDOW);
+        assert!(!reserve(&window, 1, PEER_WINDOW));
     }
 
     #[test]

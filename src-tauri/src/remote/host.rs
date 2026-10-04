@@ -43,8 +43,6 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Answered from their own task (see `serve_connection`).
 const SLOW_METHODS: &[&str] = &[
-    // Connecting to a port that does not answer takes seconds.
-    "ports.open",
     "git.push",
     "git.pull",
     "git.fetch",
@@ -883,6 +881,14 @@ impl RelayHost {
                                 let request: Value = serde_json::from_slice(&plaintext)?;
                                 let response = match request["method"].as_str() {
                                     Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
+                                    // Connecting can take seconds, so from its own
+                                    // task; answered in order with the stream's data.
+                                    Some("ports.open") => {
+                                        let rpc = self.rpc.clone();
+                                        let peer = peer.clone();
+                                        tokio::spawn(async move { rpc.answer_port_open(&peer, &request).await });
+                                        continue;
+                                    }
                                     Some(method) if SLOW_METHODS.contains(&method) => {
                                         let rpc = self.rpc.clone();
                                         let peer = peer.clone();

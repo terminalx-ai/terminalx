@@ -27,7 +27,7 @@ expiry and revocation.
 
 | | none | viewer | driver | driver who may approve | manager |
 | --- | --- | --- | --- | --- | --- |
-| See which ports listen (`ports.list`) | | yes | yes | yes | yes |
+| See which ports listen (`ports.list`) | | | | yes | yes |
 | Open a preview (`ports.open`, `ports.write`) | | | | yes | yes |
 
 Opening a preview needs exactly what typing into a terminal needs (PRO-88):
@@ -36,7 +36,10 @@ workspace's loopback is not only web pages: a debugger port or a notebook
 server runs anything as the workspace's user for whoever connects. Someone
 who may use a terminal could already reach every local port from there, so
 this grants them nothing new; a plain driver or a viewer could not, and
-still cannot. A refusal says so (`reason: "approval-required"`).
+still cannot. A refusal says so (`reason: "approval-required"`). The list of
+listening ports follows the same rule: it names every loopback listener in
+the machine, system services included, which is of use only to someone who
+may connect to them.
 
 The role is read on every call from the member list the API sends the
 runtime (PRO-30). With an API that sends no member list, a `participate`
@@ -112,8 +115,8 @@ not grant it.
 | `ports.close` | `{ streamId }` → `{}`. |
 
 Notifications: `ports.data { streamId, data }`, `ports.drained { streamId,
-bytes }`, `ports.closed { streamId, reason }` with `eof`, `error` or
-`revoked`.
+bytes }`, `ports.closed { streamId, reason }` with `eof`, `error`, `revoked`,
+`idle` or `limit`.
 
 A stream is a TCP connection, so HTTP, WebSockets and server-sent events all
 work without the runtime knowing about them.
@@ -130,8 +133,18 @@ terminals and sessions with it. So port data is paced end to end:
 - Toward the application, the client keeps at most 256 KiB that
   `ports.drained` has not covered. A write beyond that is refused with
   `backpressure`, never buffered.
-- A connection holds at most 32 streams, the runtime 128.
+- A connection holds at most 32 streams, the runtime 128, and at most 8
+  opens are in flight per connection.
 - An application that takes nothing for 30 seconds loses its stream.
+- A stream nothing has crossed for 30 minutes ends (`reason: "idle"`), and
+  one that has carried 8 GiB ends (`reason: "limit"`).
+
+The `ports.open` answer travels in the same ordered queue as the stream's
+data, and nothing is read from the application until the answer is on its
+way: an application that speaks first is never heard before the client knows
+the stream's id. An open that finishes after its connection closed or lost
+the right to open makes no stream. Each open is logged with who and which
+port, never with what was carried.
 
 Half-closed connections are not modelled: when either side closes, the
 stream ends.
