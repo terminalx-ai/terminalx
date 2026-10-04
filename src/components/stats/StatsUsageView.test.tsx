@@ -102,6 +102,7 @@ describe("StatsUsageView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh local analytics" }));
     await screen.findByRole("alert");
     expect(screen.getByText("12.7B")).toBeTruthy();
+    expect(screen.getByText(/Saved usage — could not refresh/)).toBeTruthy();
     expect(screen.getByText(/ · Updated /).textContent).toBe(timestamp);
     expect(screen.getByRole("status").textContent).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -174,4 +175,27 @@ describe("StatsUsageView", () => {
     expect(await screen.findByText(/Activity history could not be loaded/)).toBeTruthy();
     expect(screen.getByText("7")).toBeTruthy();
   });
+  it("shows one ownership notice, stale saved counters, independent usage and retry recovery", async () => {
+    const notice = "Another TerminalX runtime is using activity history. Quit the other runtime, then select Retry.";
+    const conflict = saved({ activityError: notice, activity: snapshot.app });
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(conflict);
+    vi.mocked(api.statsUsageRefresh).mockResolvedValue(conflict);
+    render(<StatsUsageView />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(""));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert").textContent).toContain(notice);
+    expect(screen.getByText(/Saved activity — could not refresh/)).toBeTruthy();
+    expect(screen.getByText("12.7B")).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(api.statsUsageRefresh).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe(""));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    vi.mocked(api.statsUsageSnapshot).mockResolvedValue(saved());
+    vi.mocked(api.statsUsageRefresh).mockResolvedValue(saved());
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.queryByText(/Saved activity — could not refresh/)).toBeNull();
+  });
+
 });

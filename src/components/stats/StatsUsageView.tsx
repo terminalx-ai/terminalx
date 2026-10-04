@@ -25,10 +25,11 @@ import { statsUsageStore } from "@/lib/statsUsageStore";
 const LEVELS = ["bg-veil-raised", "bg-muted-foreground/25", "bg-muted-foreground/45", "bg-muted-foreground/70", "bg-foreground/85"];
 
 export function StatsUsageView() {
-  const { snapshot, activity: currentActivity, refreshing: loading, error, initialized } = useSyncExternalStore(
+  const { snapshot, activity: currentActivity, refreshing: loading, error, activityError, initialized } = useSyncExternalStore(
     statsUsageStore.subscribe, statsUsageStore.getSnapshot,
   );
   const activity = currentActivity ?? snapshot?.app;
+  const activityNotice = activityError ?? activity?.accountingError;
   const load = statsUsageStore.refresh;
   useEffect(() => { void load(); }, [load]);
 
@@ -58,15 +59,20 @@ export function StatsUsageView() {
           </WithTooltip>
         </header>
 
-        {error && (
+        {(error || activityNotice) && (
           <div role="alert" className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            <p>Could not read local usage: {error}</p>
+            {error && <p>Could not refresh local usage: {error}</p>}
+            {activityNotice && <p>{activityNotice}</p>}
             <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>
           </div>
         )}
         {(activity || snapshot) && (
           <section className="mt-6 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5">
-            {activity && <ActivityContents activity={activity} />}
+            {activity && <>
+              {(activityError || (error && !currentActivity)) && <p className="mb-3 text-xs text-muted-foreground">Saved activity — could not refresh; values may be out of date.</p>}
+              <ActivityContents activity={activity} />
+            </>}
+            {snapshot && error && <p className="mt-4 text-xs text-muted-foreground">Saved usage — could not refresh; values may be out of date.</p>}
             {snapshot && <StatsContents snapshot={snapshot} />}
           </section>
         )}
@@ -105,13 +111,6 @@ function ActivityContents({ activity }: { activity: AppStats }) {
         <p className="mt-2 px-1 text-[11px] leading-relaxed text-faint">
           Earlier activity is recovered from surviving local history. Deleted history and unrecorded work cannot be fully reconstructed.
         </p>
-        {activity.accountingError && (
-          <div role="alert" className="mt-3 flex max-w-2xl flex-wrap items-center gap-2 px-1 text-xs text-destructive">
-            <span>{activity.accountingError}</span>
-            <Button variant="outline" size="sm" onClick={() => void statsUsageStore.refresh()}>Retry</Button>
-          </div>
-        )}
-
     </>
   );
 }
