@@ -446,8 +446,24 @@ impl Mirror {
         Ok(self.status_of(self.record()?.as_ref()))
     }
 
+    /// Turn the mirror on for `account`, and record that the mirrors on this
+    /// computer are that account's. Without this a mirror made after the
+    /// app's launch would have no owner, and the next account to arrive
+    /// would inherit it. Mirrors of anyone else are removed first.
+    pub fn enable_as(&self, account: &str) -> Result<Status> {
+        if account.is_empty() {
+            bail!("sign in to turn on a local mirror");
+        }
+        self.guard()?;
+        let home = self.dir.ancestors().nth(3).ok_or_else(|| anyhow!("no home directory"))?.to_path_buf();
+        claim_owner(&home, account)?;
+        crate::store::ensure_dir(home.join(DIR))?;
+        crate::store::write_atomic(&home.join(DIR).join(OWNER), owner_hash(account).as_bytes())?;
+        self.enable()
+    }
+
     /// Turn the mirror on. Nothing is copied until a sync publishes.
-    pub fn enable(&self) -> Result<Status> {
+    fn enable(&self) -> Result<Status> {
         self.guard()?;
         crate::store::ensure_dir(self.dir.clone())?;
         crate::store::ensure_dir(self.files())?;
@@ -485,6 +501,45 @@ impl Mirror {
         record.enabled = false;
         self.save(&record)?;
         Ok(self.status_of(Some(&record)))
+    }
+
+    /// Remove the mirrored copy because the person may no longer have it
+    /// (access revoked, signed out, another account, the workspace deleted).
+    /// By the record only: every file the mirror wrote, its staging, journal
+    /// and record. A mirrored file the person edited is their work: it is
+    /// moved to `exports/<time>/`, not deleted. Files they added themselves
+    /// and their earlier exports stay.
+    pub fn purge(&self) -> Result<usize> {
+        let Some(record) = self.record()? else { return Ok(0) };
+        let exports = self.dir.join(EXPORTS).join(now_ms().to_string());
+        let mut removed = 0;
+        for (path, owned) in &record.owned {
+            // A path behind a link is not followed; the record goes regardless.
+            let Ok(target) = self.local_path_unchecked(path) else { continue };
+            let Ok(meta) = std::fs::symlink_metadata(&target) else { continue };
+            if meta.is_dir() {
+                continue;
+            }
+            let edited = meta.is_file() && signature(&meta) != owned.local && etag_of_file(&target).is_ok_and(|etag| etag != owned.etag);
+            if edited {
+                let kept = exports.join(path);
+                if let Some(parent) = kept.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&target, &kept).with_context(|| format!("keep the edited {path}"))?;
+            }
+            if std::fs::remove_file(&target).is_ok() {
+                removed += 1;
+            }
+            self.prune_empty_parents(&target);
+        }
+        let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
+        let _ = std::fs::remove_file(self.dir.join(JOURNAL));
+        std::fs::remove_file(self.dir.join(RECORD)).context("remove the mirror's record")?;
+        // Gone entirely when nothing of the person's is left in it.
+        let _ = std::fs::remove_dir(self.files());
+        let _ = std::fs::remove_dir(&self.dir);
+        Ok(removed)
     }
 
     /// Where `relative` lives in the mirror. Refuses a path through a
@@ -982,6 +1037,68 @@ impl Mirror {
         self.save(&record)?;
         Ok(Resolved { paths: diverged.len(), exported_to })
     }
+}
+
+/// Every mirror on this computer, as `(organization id, workspace id)`.
+/// Linked directories are not looked into.
+pub fn existing(home: &Path) -> Vec<(String, String)> {
+    let real_dirs = |dir: &Path| -> Vec<(String, PathBuf)> {
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path()))
+            .filter(|(name, _)| valid_id(name))
+            .collect()
+    };
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let mirrors = home.join(DIR);
+    if std::fs::symlink_metadata(&mirrors).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for (organization, dir) in real_dirs(&mirrors) {
+        for (workspace, dir) in real_dirs(&dir) {
+            if dir.join(RECORD).is_file() {
+                found.push((organization.clone(), workspace));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+const OWNER: &str = "owner";
+
+fn owner_hash(account: &str) -> String {
+    Sha256::digest(account.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Say which account is using the app. Mirrors that are not this account's
+/// are removed, as at sign-out: ones made under another account (a sign-out
+/// while the app was closed, a direct switch of account), and ones found
+/// with no owner recorded at all, which nobody here can vouch for. Returns
+/// how many mirrors were removed. The owner is kept as a hash.
+pub fn claim_owner(home: &Path, account: &str) -> Result<usize> {
+    let mirrors = existing(home);
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let file = home.join(DIR).join(OWNER);
+    let wanted = owner_hash(account);
+    let known = std::fs::read_to_string(&file).ok();
+    if known.as_deref() == Some(wanted.as_str()) {
+        return Ok(0);
+    }
+    let mut purged = 0;
+    for (organization, workspace) in &mirrors {
+        Mirror::at(&home, organization, workspace)?.purge()?;
+        purged += 1;
+    }
+    // Nothing is created for someone who has no mirror: `enable_as` writes
+    // the owner with the first one.
+    if known.is_some() {
+        crate::store::write_atomic(&file, wanted.as_bytes())?;
+    }
+    Ok(purged)
 }
 
 /// Is `path` inside the directory that holds every mirror? A mirror is for

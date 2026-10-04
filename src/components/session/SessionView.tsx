@@ -41,6 +41,7 @@ import { useRowMenu } from "@/components/ui/useRowMenu";
 import { lastSavedText } from "@/lib/cloudLifecycle";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
+import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { useAccount } from "@/lib/account";
 
 function managedWorkspaceFor(session: SessionEntry) {
@@ -174,6 +175,7 @@ function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /*
   const menu = useRowMenu();
   const [request, setRequest] = useState<LifecycleRequest | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
+  const [mirror, setMirror] = useState(false);
   const { status } = useAccount();
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
@@ -203,6 +205,13 @@ function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /*
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
             {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
+            {item && !cloud.locked && (
+              <>
+                <DropdownMenuSeparator />
+                <CloudMirrorMenuItem onSelect={() => setMirror(true)} />
+              </>
+            )}
             {diagnosticsOffered && (
               <>
                 {item && <DropdownMenuSeparator />}
@@ -224,6 +233,8 @@ function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /*
       )}
       {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
+      {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
+      {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
       {/* One connection chip (is it live) and one role chip (what this person may do); a locked session has no connection to report. */}
       {!cloud.locked && (
         <span

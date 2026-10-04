@@ -49,6 +49,7 @@ import {
 } from "@/lib/cloudCatalog";
 import { NEW_SESSION_ADMIN_REASON, NEW_WORKSPACE_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
+import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText, purgeNoticeText } from "@/lib/cloudLifecycle";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -133,6 +134,8 @@ export function CloudSections({ onOpenAccount }: { onOpenAccount?: () => void })
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [adding, setAdding] = useState<AddDialog | null>(null);
   useEffect(() => bootCloudSessions(), []);
+  // A local mirror (PRO-25) follows connections other surfaces open; it opens none.
+  useEffect(() => bootCloudMirrors(), []);
   if (!orgs.length) return null;
   return (
     <>

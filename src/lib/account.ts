@@ -8,6 +8,7 @@ import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConne
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
 import { forgetOtherSetups, forgetSetups } from "@/lib/organizationSetup";
+import { claimCloudMirrorOwner, purgeCloudMirrors } from "@/lib/cloudMirror";
 import { dropCollabIn, resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
@@ -66,6 +67,17 @@ function applyStatus(status: AccountStatus) {
   // Signing out here (not a launch that finds nobody signed in) forgets the
   // setup records: they name organizations and hold a prepared prompt.
   if (state.status.state === "signed-in" && status.state === "signed-out") forgetOtherSetups(null);
+  // Local mirrors of cloud workspaces (PRO-25) go with the access to them:
+  // all of them at sign-out, an organization's when the person leaves it.
+  // Whoever is signed in now owns the mirrors on this computer. One made
+  // under another account, or left by a sign-out while the app was closed,
+  // is removed when this account (or nobody) is first reported.
+  void claimCloudMirrorOwner(status.state === "signed-in" ? (status.identity?.email ?? "") : null);
+  if (state.status.state === "signed-in" && status.state === "signed-out") void purgeCloudMirrors(() => false);
+  else {
+    const left = new Set(leftMemberships(state.status, status));
+    if (left.size > 0) void purgeCloudMirrors((orgId) => !left.has(orgId));
+  }
   followUser(status);
   set({ status, ready: true });
   scheduleRefresh(status);

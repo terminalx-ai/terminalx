@@ -812,7 +812,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…"]);
   });
 
   // PRO-38: the organization's diagnostics, from where the session runs.
@@ -835,7 +835,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Cloud diagnostics…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…", "Cloud diagnostics…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Cloud diagnostics/ }));
     const dialog = await screen.findByTestId("cloud-diagnostics-dialog");
     expect(within(dialog).getByText("Cloud diagnostics · Acme")).toBeTruthy();
@@ -1836,6 +1836,8 @@ describe("sharing states found in the live two-user test", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual([
       "Who has access…2",
       "Only this workspace's creator or an organization owner or admin can stop, archive or delete it",
+      // A viewer can read the files, so they can mirror them (PRO-25).
+      "Local mirror…",
     ]);
     expect(within(menu).queryByRole("menuitem", { name: /^(Stop|Archive|Delete)/ })).toBeNull();
     cleanup();
@@ -1860,6 +1862,7 @@ describe("sharing states found in the live two-user test", () => {
       "Stop",
       "Archive… (stops compute, deleted after 30 days)",
       "Delete…",
+      "Local mirror…",
     ]);
   });
 

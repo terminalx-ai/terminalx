@@ -91,6 +91,9 @@ describe("a role changed elsewhere (an owner demotes this admin)", () => {
         if (roles instanceof Error) throw roles;
         return { status: as(roles.role), fresh: roles.fresh ?? true };
       }
+      // The local-mirror housekeeping an account change triggers is local: it asks no server and is refused for no role.
+      if (command === "cloud_mirror_list") return [];
+      if (command.startsWith("cloud_mirror_")) return 0;
       throw { code: "organization_admin_required", status: 403 };
     });
   const roleCalls = () => mocks.invoke.mock.calls.filter(([command]) => command === "account_refresh_roles").map(([, args]) => args);
