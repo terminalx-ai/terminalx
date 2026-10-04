@@ -447,6 +447,7 @@ const FAILURES: Record<string, string> = {
   "repository-sync-failed": "A repository could not be switched to its branch.",
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
+  "agent-model-unavailable": "The chosen Claude model is not available in this workspace. Choose a model listed by the workspace's Claude CLI.",
   "agent-sign-in-required": `The agent isn't connected for this organization, so the first prompt was not sent. An owner or admin can connect it in ${AGENT_LOGIN_PLACE}.`,
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",

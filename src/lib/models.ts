@@ -117,7 +117,7 @@ export function modelOptionText(m: ModelInfo, all: ModelInfo[], here = true): st
  */
 export function offeredOn(models: ModelInfo[], here: boolean): ModelInfo[] {
   if (here) return models;
-  return models.filter((m) => m.alias || !models.some((x) => x.harness === m.harness && x.alias));
+  return models.filter((m) => m.alias || (m.harness !== "claude" && !models.some((x) => x.harness === m.harness && x.alias)));
 }
 
 /**

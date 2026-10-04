@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
-import type { AgentTabInfo, PtyControl, RuntimeSession, WorkspaceConnectionState, WorkspaceTransport } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, PtyControl, RuntimeAgent, RuntimeSession, WorkspaceConnectionState, WorkspaceTransport } from "@terminalx/portable/workspace";
 import type { TerminalInstance } from "@/lib/terminal";
 
 /**
@@ -39,6 +39,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   up = false;
   sent: RpcWireRequest[] = [];
   capabilities = [...AGENT_PTY_CAPABILITIES];
+  agents: RuntimeAgent[] = [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }];
   generation = 3;
   epoch = "e1";
   tabs: AgentTabInfo[] = [agentTab()];
@@ -185,7 +186,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
       case "notes.list":
         return ok({ notes: [], more: false });
       case "runtime.agents":
-        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }] });
+        return ok({ agents: this.agents });
       case "pty.list":
         // An agent's own terminal is never listed as a shell.
         return ok({ epoch: this.epoch, terminals: [] });

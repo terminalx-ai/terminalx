@@ -1479,6 +1479,58 @@ fn installed_agents() -> Vec<crate::harness::HarnessInfo> {
         .collect()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_model_validation_covers_session_creation_new_tabs_and_configuration() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(),
+        Arc::new(crate::sink::NoObserver),
+        Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(),
+        Arc::new(Default::default()),
+        Arc::new(Default::default()),
+        crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    f.rpc.set_offered_for_tests(installed_agents());
+    let ops = crate::cloud_agents::ManagerOps { manager, root: f.root.to_string_lossy().into_owned() };
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap();
+    f.rpc.set_agents(agents);
+    let session = seed_session(&f.root, "Existing", None);
+    let (peer, _events) = Peer::new("desktop".into(), Authority::Manage);
+    let tab_id = &session.tabs[0].id;
+    crate::harness::claude::models::with_test_models(json!({ "response": { "models": [{ "value": "opus", "resolvedModel": "claude-opus-5" }] } }), || {
+        for result in [
+            f.rpc.session_create(json!({ "agent": "claude", "model": "claude-opus-9" })),
+            f.rpc.session_add_tab(&peer, json!({ "sessionId": session.id, "agent": "claude", "model": "claude-opus-9" })),
+            f.rpc.session_configure(&peer, json!({ "sessionId": session.id, "tabId": tab_id, "model": "claude-opus-9", "effort": "low", "mode": "plan" })),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "invalid_params");
+            assert!(error.message.contains("Claude model 'claude-opus-9' is not available"));
+        }
+        assert_eq!(index::load().unwrap().len(), 1);
+        let unchanged = index::get(&session.id).unwrap();
+        assert_eq!(unchanged.tabs.len(), 1);
+        assert_eq!(unchanged.tabs[0].model, "opus");
+        assert_eq!(unchanged.tabs[0].effort, None);
+        assert_eq!(unchanged.tabs[0].permission_mode, session.tabs[0].permission_mode);
+
+        for model in ["", "opus", "claude-opus-5"] {
+            f.rpc.session_create(json!({ "agent": "claude", "model": model })).unwrap();
+            f.rpc.session_add_tab(&peer, json!({ "sessionId": session.id, "agent": "claude", "model": model })).unwrap();
+            f.rpc.session_configure(&peer, json!({ "sessionId": session.id, "tabId": tab_id, "model": model })).unwrap();
+        }
+        // Claude's list says nothing about other harnesses.
+        f.rpc.session_add_tab(&peer, json!({ "sessionId": session.id, "agent": "codex", "model": "custom-model" })).unwrap();
+    });
+    // A stand-in must not enforce an allowlist.
+    f.rpc.session_create(json!({ "agent": "claude", "model": "claude-opus-9" })).unwrap();
+    f.rpc.session_add_tab(&peer, json!({ "sessionId": session.id, "agent": "claude", "model": "claude-opus-9" })).unwrap();
+    f.rpc.session_configure(&peer, json!({ "sessionId": session.id, "tabId": tab_id, "model": "claude-opus-9" })).unwrap();
+}
+
 async fn hello_with(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, want: &[&str]) -> (Arc<Peer>, Notifications) {
     let (peer, events) = Peer::new(device.into(), authority);
     call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": want })).await.unwrap();
