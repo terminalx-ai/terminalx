@@ -183,11 +183,12 @@ export const api = {
   /**
    * Archive or delete every cloud workspace of `organizationId`. It cannot be
    * cancelled; call it only after an explicit confirmation, with the
-   * organization and the context revision that confirmation was given for.
-   * Nothing is sent if either is no longer current.
+   * organization and the context revision that confirmation was given for,
+   * and the preview it showed. Nothing is sent if the organization or context
+   * is no longer current, or the workspaces are no longer the ones counted.
    */
-  cloudTeardownRequest: (organizationId: string, contextRevision: string, disposition: "archive" | "destroy") =>
-    invoke<CloudTeardown>("cloud_teardown_request", { organizationId, contextRevision, disposition }),
+  cloudTeardownRequest: (organizationId: string, contextRevision: string, disposition: "archive" | "destroy", confirmed: { expectedWorkspaces: number; previewToken: string }) =>
+    invoke<CloudTeardown>("cloud_teardown_request", { organizationId, contextRevision, disposition, confirmed }),
   /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
   cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
     invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
@@ -475,8 +476,11 @@ export interface CloudTeardownResource {
 export interface CloudTeardownPreview {
   organizationId: string;
   workspaces: number;
-  privateWorkspaces: number;
+  /** Private workspaces created by someone other than the caller. */
+  othersPrivateWorkspaces: number;
   archivedWorkspaces: number;
+  /** Names exactly the set counted; it goes back with the request. */
+  token: string;
 }
 
 /** An organization-wide cloud teardown: what was asked, the deadline, and what still blocks completion. */

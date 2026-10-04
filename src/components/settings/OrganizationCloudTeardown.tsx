@@ -20,14 +20,19 @@ export function teardownErrorMessage(code: string): string {
       return "The request may or may not have gone through. Refresh to see whether the shutdown started before trying again.";
     case "cloud_workspace_unavailable":
       return "This server does not offer an organization-wide shutdown.";
+    case "cloud_teardown_preview_changed":
+      return "The organization's workspaces changed after the count was shown, so nothing was sent. Open the confirmation again to see the current count.";
+    case "cloud_teardown_in_progress":
+      return "A shutdown is already running for this organization.";
     default:
-      return `The shutdown could not be read or started (${code || "unknown"}). Nothing was changed unless a refresh shows otherwise.`;
+      return "The shutdown could not be read or started. Nothing was changed unless a refresh shows otherwise.";
   }
 }
 
-const KINDS: Record<string, string> = { workspace: "Workspace", "session-runtime": "Session runtime", "build-template": "Build template" };
-/** The server's state words, in the app's own. An unknown one is shown as it comes. */
-const STATES: Record<string, string> = {
+/** The server's resource kinds (saas `CloudProviderResource.kind`), in the app's words. */
+const KINDS: Record<string, string> = { workspace: "Workspace", runtime: "Session runtime", build: "Runtime build or template", "legacy-operation": "Earlier operation" };
+/** The server's state words per kind, in the app's own. An unknown one is shown as it comes. */
+const MACHINE_STATES: Record<string, string> = {
   ready: "running",
   suspended: "stopped",
   archived: "archived",
@@ -36,10 +41,22 @@ const STATES: Record<string, string> = {
   deleting: "being deleted",
   destroyed: "released",
 };
+const BUILD_STATES: Record<string, string> = {
+  queued: "waiting to build",
+  running: "building",
+  succeeded: "built",
+  failed: "failed",
+  active: "in use",
+  "organization-active": "in use",
+  retired: "retired",
+  archived: "archived",
+};
+const OPERATION_STATES: Record<string, string> = { queued: "waiting", running: "in progress", "cancel-requested": "being cancelled", succeeded: "finished", failed: "failed", canceled: "cancelled" };
+const STATES: Record<string, Record<string, string>> = { workspace: MACHINE_STATES, runtime: MACHINE_STATES, build: BUILD_STATES, "legacy-operation": OPERATION_STATES };
 
 /** What a teardown would take, in one sentence, private workspaces named as such. */
 export function teardownPreviewText(preview: CloudTeardownPreview, organizationName: string): string {
-  const { workspaces, privateWorkspaces, archivedWorkspaces } = preview;
+  const { workspaces, othersPrivateWorkspaces: privateWorkspaces, archivedWorkspaces } = preview;
   if (workspaces === 0) return `${organizationName} has no cloud workspaces now. A shutdown still blocks new ones until it finishes.`;
   const count = `${workspaces} cloud workspace${workspaces === 1 ? "" : "s"}`;
   const hidden =
@@ -55,7 +72,7 @@ export function teardownResourceText(resource: CloudTeardownResource, now = Date
   const kind = KINDS[resource.kind] ?? resource.kind;
   const when = resource.deleteAfter ? `, deleted ${deadlineText(resource.deleteAfter, now)}` : "";
   const cleanup = resource.cleanupRequired ? ", cleanup unresolved" : "";
-  return `${cloudProviderName(resource.provider)} · ${kind} ${resource.id}: ${STATES[resource.state] ?? resource.state}${when}${cleanup}`;
+  return `${cloudProviderName(resource.provider)} · ${kind} ${resource.id}: ${STATES[resource.kind]?.[resource.state] ?? resource.state}${when}${cleanup}`;
 }
 
 /**
@@ -101,6 +118,16 @@ export function OrganizationCloudTeardown({
   const [disposition, setDisposition] = useState<Disposition>("archive");
   const [typed, setTyped] = useState("");
   const loadSeq = useRef(0);
+  const sending = useRef(false);
+
+  /** Close the confirmation and forget what was typed and counted for it. */
+  const voidConfirmation = useCallback(() => {
+    setConfirming(null);
+    setPreview(null);
+    setPreviewError(null);
+    setDisposition("archive");
+    setTyped("");
+  }, []);
 
   const load = useCallback(async () => {
     const current = ++loadSeq.current;
@@ -119,26 +146,28 @@ export function OrganizationCloudTeardown({
       if (code === "organization_admin_required" || code === "forbidden") setRefused(true);
       else setError(teardownErrorMessage(code));
     } finally {
-      if (current === loadSeq.current) setLoading(false);
+      if (current === loadSeq.current) {
+        setLoading(false);
+        // What the confirmation was opened against may no longer hold (a
+        // shutdown may have started, or changed): it is void. In particular
+        // a name typed to archive never carries over to "delete now".
+        voidConfirmation();
+      }
     }
-  }, [organizationId]);
+  }, [organizationId, voidConfirmation]);
 
   useEffect(() => {
     setTeardown(null);
     setLoaded(false);
     setRefused(false);
     // A confirmation opened for another organization or context is void.
-    setConfirming(null);
-    setPreview(null);
-    setPreviewError(null);
-    setDisposition("archive");
-    setTyped("");
+    voidConfirmation();
     // The account already says this is a member: skip a request the server refuses.
     if (!member && organizationId) void load();
     return () => {
       loadSeq.current += 1;
     };
-  }, [contextRevision, organizationId, member, load]);
+  }, [contextRevision, organizationId, member, load, voidConfirmation]);
 
   if (member || refused || !organizationId) return null;
 
@@ -169,25 +198,32 @@ export function OrganizationCloudTeardown({
         setPreviewError(
           code === "account_context_changed"
             ? teardownErrorMessage(code)
-            : `The number of workspaces this would take could not be read (${code || "unknown"}), so it cannot be started from here.`,
+            : "The number of workspaces this would take could not be read, so it cannot be started from here.",
         );
       });
   };
 
   const start = async () => {
-    if (!confirming || !preview || !nameMatches) return;
+    // One request per confirmation: a second click while the first is out does nothing.
+    if (busy || sending.current || !confirming || !preview || !nameMatches) return;
+    sending.current = true;
     setBusy(true);
     setError(null);
     try {
-      // For the organization and context the confirmation was opened at, not whatever is active now.
-      setTeardown(await api.cloudTeardownRequest(confirming.organizationId, confirming.contextRevision, chosen));
-      setConfirming(null);
-      setPreview(null);
-      setDisposition("archive");
-      setTyped("");
+      // For the organization and context the confirmation was opened at, and for exactly the workspaces it counted.
+      const started = await api.cloudTeardownRequest(confirming.organizationId, confirming.contextRevision, chosen, { expectedWorkspaces: preview.workspaces, previewToken: preview.token });
+      voidConfirmation();
+      setTeardown(started);
     } catch (e) {
-      setError(teardownErrorMessage(errorCode(e)));
+      const code = errorCode(e);
+      // Whatever came of it, this confirmation is spent: the next attempt
+      // starts from a fresh count and a freshly typed name.
+      voidConfirmation();
+      setError(teardownErrorMessage(code));
+      // The outcome is not known: read what the server holds now.
+      if (code === "cloud_workspace_request_outcome_unknown") await load().then(() => setError(teardownErrorMessage(code)));
     } finally {
+      sending.current = false;
       setBusy(false);
     }
   };
@@ -247,7 +283,7 @@ export function OrganizationCloudTeardown({
           {notWorkspaces.length > 0 && (
             <p className="mt-1 flex items-start gap-1.5 text-muted-foreground">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
-              <span>The shutdown removes workspaces only. Session runtimes and build templates are removed from their own screens, and it does not finish until they are.</span>
+              <span>The shutdown removes workspaces only. Session runtimes, runtime builds and build templates are removed from their own screens, and it does not finish until they are.</span>
             </p>
           )}
         </div>

@@ -90,7 +90,17 @@ cleanup as a single workspace's archive and delete.
   (`account_context_changed`) if the active organization or the context
   changed since it was opened, so a name typed for one organization never
   tears down another; the page also drops an open confirmation when either
-  changes. A pending archive can only be escalated to deleting now. The section
+  changes. The count shown is the count acted on: the request carries the
+  preview's count and token, the native side reads the preview again just
+  before sending and sends nothing if it differs, and the server refuses
+  (`cloud_teardown_preview_changed`) a teardown of any other set. A
+  confirmation is spent by one attempt and void after every read of the
+  status (Refresh included): a name typed to archive never carries over to
+  "Delete every workspace", which always needs its own count and its own
+  freshly typed name. After an outcome that is not known the status is read
+  at once. Resources are named with the server's own kinds (`workspace`,
+  `runtime`, `build`, `legacy-operation`) and their states in the app's
+  words; one it does not know is shown as it comes. A pending archive can only be escalated to deleting now. The section
   shows the deadline, what still remains at the providers (with each
   resource's own deadline and whether its cleanup is unresolved), that
   session runtimes and build templates are not removed by it, and released
@@ -181,7 +191,9 @@ and a stopped workspace's disk is not known.
 - `src/components/settings/OrganizationCloudTeardown.test.tsx`,
   `ProviderControls.test.tsx`: nothing is sent without a disposition and the
   typed name; the count shown, private workspaces included; a context change
-  while the confirmation is open; escalation only; what remains; a finished
+  while the confirmation is open; an archive with an unknown outcome leaves
+  no armed delete; Refresh voids the confirmation; one request for a double
+  click; the server's real resource kinds; escalation only; what remains; a finished
   teardown; a member; an unknown outcome; archive on disconnect and its
   deadline.
 - `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: what a resume

@@ -530,17 +530,19 @@ pub async fn cloud_teardown_preview(
 
 /// Archive or destroy every cloud workspace of `organization_id`. Only after
 /// the person confirmed it: it cannot be undone. Refused, with nothing sent,
-/// if that is no longer the active organization or the account context is
-/// not the one the confirmation was given at.
+/// if that is no longer the active organization, the account context is not
+/// the one the confirmation was given at, or the organization's workspaces
+/// are no longer the ones `confirmed` counted.
 #[tauri::command]
 pub async fn cloud_teardown_request(
     organization_id: String,
     context_revision: String,
     disposition: crate::cloud_workspaces::TeardownDisposition,
+    confirmed: crate::cloud_workspaces::ConfirmedTeardown,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::CloudTeardown, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
-        .request_teardown(&organization_id, &context_revision, disposition))
+        .request_teardown(&organization_id, &context_revision, disposition, &confirmed))
 }
 
 #[tauri::command]
