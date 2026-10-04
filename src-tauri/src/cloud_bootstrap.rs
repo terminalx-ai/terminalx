@@ -57,7 +57,10 @@ pub const TOKEN_PATH_ENV: &str = "TERMINALX_CLOUD_WORKSPACE_BOOTSTRAP_TOKEN_PATH
 /// `environment-template-v1` asks for the checkout plan of a workspace pinned
 /// to an Environment version (`cloud_environment`); on its own it never
 /// brings stored credentials.
-pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1";
+/// `attachment-installation-v1` asks for `installationKey` on each attachment:
+/// what stays the same when a person's installation is issued a new
+/// attachment and device (`remote::server`, `resume_control`).
+pub const CAPABILITIES: &str = "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1,attachment-installation-v1";
 const CAPABILITIES_HEADER: &str = "x-terminalx-cloud-workspace-runtime-capabilities";
 pub(crate) const VERSION_HEADER: &str = "x-terminalx-cloud-workspace-runtime-version";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

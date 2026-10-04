@@ -89,6 +89,35 @@ pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration, stop:
     }
 }
 
+/// Run `git <first>` with its output fed to `git <second>`, and return what
+/// the second prints. For the plumbing pairs git expects to be piped
+/// (`log -p | patch-id`).
+pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
+    use std::process::Stdio;
+    let mut source = git().current_dir(cwd).args(first).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().with_context(|| format!("git {}", first.join(" ")))?;
+    let feed = source.stdout.take().context("no pipe from git")?;
+    let out = git().current_dir(cwd).args(second).stdin(Stdio::from(feed)).output().with_context(|| format!("git {}", second.join(" ")));
+    let produced = source.wait()?;
+    let out = out?;
+    if !produced.success() {
+        bail!("git {}: exit {produced}", first.join(" "));
+    }
+    if !out.status.success() {
+        bail!("git {}: {}", second.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run git with extra environment variables.
+pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -406,6 +435,49 @@ pub fn resolve_base(project: &Path, requested: Option<&str>) -> Result<String> {
     Ok("HEAD".into())
 }
 
+/// Creation-time provenance; this does not describe later branch updates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeBase {
+    pub commit: String,
+    pub fetched: bool,
+    pub warning: Option<String>,
+}
+
+const WORKTREE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Refresh only the default remote-tracking ref, independent of configured
+/// fetch refspecs. Never update a local branch or the project's checkout.
+fn fetch_worktree_base(project: &Path, requested: Option<&str>, timeout: std::time::Duration) -> (bool, Option<String>) {
+    if requested.is_some_and(|r| !r.is_empty()) || !run_ok(project, &["remote", "get-url", "origin"]) {
+        return (false, None);
+    }
+    let result = match default_branch(project) {
+        Some(branch) => run_within(
+            project,
+            &[
+                "-c", "credential.interactive=false", "fetch", "--no-tags", "--no-recurse-submodules",
+                "--no-write-fetch-head", "--refmap=", "origin", &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+            ],
+            timeout,
+            &|| false,
+        ),
+        None => Err(RunError::Failed("default branch is unknown".into())),
+    };
+    match result {
+        Ok(()) => (true, None),
+        Err(error) => {
+            let reason = match error {
+                RunError::TimedOut => "fetch timed out".to_string(),
+                RunError::Stopped => "fetch stopped".to_string(),
+                RunError::Failed(message) => message,
+                RunError::Spawn(error) => error.to_string(),
+            };
+            (false, Some(format!("Could not fetch origin's default branch ({reason}). This worktree was created from a local ref and may be out of date.")))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatedWorktree {
@@ -415,6 +487,7 @@ pub struct CreatedWorktree {
     pub base: String,
     /// Tree id of the base commit, the first turn's changes baseline.
     pub base_tree: String,
+    pub worktree_base: Option<WorktreeBase>,
 }
 
 /// A path as an argument for `git`, which takes strings. A checkout under a
@@ -425,9 +498,14 @@ fn arg(path: &Path) -> Result<&str> {
 }
 
 pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result<CreatedWorktree> {
+    create_worktree_with_timeout(project, name, base, WORKTREE_FETCH_TIMEOUT)
+}
+
+fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, timeout: std::time::Duration) -> Result<CreatedWorktree> {
     if !crate::names::is_worktree_name(name) && name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
         bail!("bad worktree name");
     }
+    let (fetched, warning) = fetch_worktree_base(project, base, timeout);
     let base = resolve_base(project, base)?;
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
@@ -435,7 +513,11 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
-    Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree })
+    let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    Ok(CreatedWorktree {
+        name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree,
+        worktree_base: Some(WorktreeBase { commit, fetched, warning }),
+    })
 }
 
 /// Move a TerminalX-managed worktree and rename its matching branch. The
@@ -461,7 +543,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
     }
     if old_name == name {
         let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
-        return Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base: "HEAD".into(), base_tree });
+        return Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base: "HEAD".into(), base_tree, worktree_base: None });
     }
     let destination = worktree_path(&project, name);
     if destination.exists() {
@@ -483,6 +565,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
         branch: new_branch,
         base: "HEAD".into(),
         base_tree,
+        worktree_base: None,
     })
 }
 
@@ -634,6 +717,7 @@ pub struct WorktreeRemoval {
 /// Where the managed worktree `name` lives. The guard keys on shape: a direct
 /// child of the worktree root or nothing, so an empty name can never resolve
 /// to the project itself and a name with a separator can never climb out.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn managed_worktree_path(project: &Path, name: &str) -> Result<PathBuf> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
         bail!("refusing to remove: bad worktree name");
@@ -751,7 +835,7 @@ pub fn rescue_detached(project: &Path, name: &str, commit: &str) -> Option<Strin
 }
 
 /// What a removal that failed left behind, in words for the person.
-fn leftover_state(path: &Path) -> String {
+pub fn leftover_state(path: &Path) -> String {
     if std::fs::symlink_metadata(path).is_err() {
         return "The directory is gone.".into();
     }
@@ -778,6 +862,12 @@ fn leftover_state(path: &Path) -> String {
 /// disposition counts them). After a direct delete the directory could not
 /// be checked, so such a branch is kept and named in the result, and a
 /// detached HEAD nothing else holds is given a branch of its own.
+///
+/// Workspaces are removed by path through `workspaces::delete`, which shares
+/// this function's guards and rules. Removing by name is for a managed
+/// worktree no session points at; nothing in the app does that yet, so
+/// outside tests this has no caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn remove_worktree(project: &Path, name: &str, direct: DirectDelete) -> Result<WorktreeRemoval> {
     let path = managed_worktree_path(project, name)?;
     let mut removal = WorktreeRemoval::default();
@@ -1009,6 +1099,106 @@ mod tests {
         let ws = work_status(p);
         assert!(ws.is_repo && ws.dirty);
         assert_eq!(ws.branch.as_deref(), Some("main"));
+    }
+
+    fn stale_clone() -> (tempfile::TempDir, tempfile::TempDir) {
+        let remote = repo();
+        let local = tempfile::tempdir().unwrap();
+        run(local.path(), &["clone", "-q", arg(remote.path()).unwrap(), "."]).unwrap();
+        std::fs::write(remote.path().join("a.txt"), "latest remote content\n").unwrap();
+        run(remote.path(), &["commit", "-qam", "advance remote"]).unwrap();
+        (remote, local)
+    }
+
+    #[test]
+    fn worktree_fetches_latest_default_without_touching_checkout() {
+        let _home = crate::store::temp_home();
+        let (remote, local) = stale_clone();
+        let p = local.path();
+        let old = head_commit(p).unwrap();
+        // Even an unusual fetch mapping must not update local branches.
+        run(p, &["config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"]).unwrap();
+        std::fs::write(p.join("a.txt"), "local edits\n").unwrap();
+        run(p, &["add", "a.txt"]).unwrap();
+        let index = run(p, &["diff", "--cached"]).unwrap();
+        let wt = create_worktree(p, "fresh-base", None).unwrap();
+        assert_eq!(head_commit(Path::new(&wt.path)), head_commit(remote.path()));
+        assert_eq!(wt.base_tree, head_tree(remote.path()).unwrap());
+        let provenance = wt.worktree_base.unwrap();
+        assert!(provenance.fetched);
+        assert!(provenance.warning.is_none());
+        assert_eq!(Some(provenance.commit), head_commit(remote.path()));
+        assert_eq!(head_commit(p).unwrap(), old);
+        assert_eq!(run(p, &["diff", "--cached"]).unwrap(), index);
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "local edits\n");
+    }
+
+    #[test]
+    fn worktree_fetches_custom_default_with_missing_tracking_ref() {
+        let _home = crate::store::temp_home();
+        let (remote, local) = stale_clone();
+        run(remote.path(), &["branch", "-m", "main", "trunk"]).unwrap();
+        run(local.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]).unwrap();
+        let wt = create_worktree(local.path(), "custom-default", None).unwrap();
+        assert_eq!(wt.base, "origin/trunk");
+        assert_eq!(head_commit(Path::new(&wt.path)), head_commit(remote.path()));
+        assert!(wt.worktree_base.unwrap().fetched);
+    }
+
+    #[test]
+    fn worktree_failed_fetch_uses_local_ref_and_warns() {
+        let _home = crate::store::temp_home();
+        let (remote, local) = stale_clone();
+        let old = head_commit(local.path());
+        drop(remote);
+        let wt = create_worktree(local.path(), "offline-base", None).unwrap();
+        assert_eq!(head_commit(Path::new(&wt.path)), old);
+        assert_eq!(wt.base, "origin/main");
+        let provenance = wt.worktree_base.unwrap();
+        assert!(!provenance.fetched);
+        assert!(provenance.warning.unwrap().contains("may be out of date"));
+    }
+
+    #[test]
+    fn worktree_without_remote_uses_local_default_without_warning() {
+        let _home = crate::store::temp_home();
+        let local = repo();
+        let wt = create_worktree(local.path(), "local-base", None).unwrap();
+        assert_eq!(head_commit(Path::new(&wt.path)), head_commit(local.path()));
+        assert_eq!(wt.base, "main");
+        let provenance = wt.worktree_base.unwrap();
+        assert!(!provenance.fetched);
+        assert!(provenance.warning.is_none());
+    }
+
+    #[test]
+    fn worktree_explicit_base_skips_fetch() {
+        let _home = crate::store::temp_home();
+        let (_remote, local) = stale_clone();
+        let old = head_commit(local.path());
+        let wt = create_worktree(local.path(), "explicit-base", Some("origin/main")).unwrap();
+        assert_eq!(head_commit(Path::new(&wt.path)), old);
+        assert_eq!(run(local.path(), &["rev-parse", "origin/main"]).unwrap().trim(), old.unwrap());
+        let provenance = wt.worktree_base.unwrap();
+        assert!(!provenance.fetched);
+        assert!(provenance.warning.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_fetch_timeout_still_creates_and_warns() {
+        let _home = crate::store::temp_home();
+        let (_remote, local) = stale_clone();
+        // A real Git transport that stalls, including a child process.
+        run(local.path(), &["config", "remote.origin.url", "ext::sh -c sleep% 30"]).unwrap();
+        run(local.path(), &["config", "protocol.ext.allow", "always"]).unwrap();
+        let start = std::time::Instant::now();
+        let wt = create_worktree_with_timeout(local.path(), "timeout-base", None, std::time::Duration::from_millis(100)).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(head_commit(Path::new(&wt.path)), head_commit(local.path()));
+        let provenance = wt.worktree_base.unwrap();
+        assert!(!provenance.fetched);
+        assert!(provenance.warning.unwrap().contains("fetch timed out"));
     }
 
     #[test]

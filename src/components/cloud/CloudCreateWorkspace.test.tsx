@@ -25,7 +25,7 @@ vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   useModels: (harness: string) =>
     harness === "claude"
-      ? [{ id: "sonnet", label: "Sonnet", harness: "claude", efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]
+      ? [{ id: "sonnet", label: "Sonnet", harness: "claude", alias: true, efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]
       : [],
 }));
 

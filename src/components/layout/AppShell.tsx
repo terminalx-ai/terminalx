@@ -26,8 +26,7 @@ import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
 import { BypassDialog } from "@/components/session/BypassDialog";
-import { SettleDialog } from "@/components/session/SettleDialog";
-import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
@@ -37,6 +36,7 @@ import { bootAccount } from "@/lib/account";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootPairing } from "@/lib/pairing";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
+import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 
@@ -86,6 +86,7 @@ export function AppShell() {
     bootCloudCatalog();
     void bootPairing();
     void bootTerminalPerf();
+    void bootCloudControl();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -151,8 +152,7 @@ export function AppShell() {
       <BypassDialog />
       <CloudShareDialogHost />
       <NewCloudWorkspaceDialogHost />
-      <SettleDialog />
-      <WorkspaceDeleteDialog />
+      <WorkspaceRemoveDialog />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>

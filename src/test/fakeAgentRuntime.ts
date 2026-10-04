@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { RpcWireRequest } from "@terminalx/portable/rpc";
-import type { AgentTabInfo, PtyControl, RuntimeSession, WorkspaceConnectionState, WorkspaceTransport } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, PtyControl, RuntimeAgent, RuntimeSession, WorkspaceConnectionState, WorkspaceTransport } from "@terminalx/portable/workspace";
 import type { TerminalInstance } from "@/lib/terminal";
 
 /**
@@ -39,6 +39,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   up = false;
   sent: RpcWireRequest[] = [];
   capabilities = [...AGENT_PTY_CAPABILITIES];
+  agents: RuntimeAgent[] = [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }];
   generation = 3;
   epoch = "e1";
   tabs: AgentTabInfo[] = [agentTab()];
@@ -69,6 +70,31 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   private states = new Set<(state: WorkspaceConnectionState) => void>();
   private subscription = 0;
   private ptySubscription: string | null = null;
+  /** The last numbered write applied per writer: a resend is answered, a gap is refused (`conflict`). */
+  private applied = new Map<string, number>();
+  /** A numbered write was refused for its number (`conflict`). */
+  conflicts = 0;
+
+  /**
+   * The workspace stopped and woke: every attachment was revoked, so this
+   * desktop is a new device to the runtime, while the app (and its client)
+   * stayed open. Call between the `suspended` state and the next `connect`.
+   *
+   * - `"frozen"`: the runtime process survived the stop (a frozen
+   *   container). It counts writes and control per device, so the controller
+   *   is "another device" and it knows none of this client's writers.
+   * - `"restarted"`: the machine booted cold: a new runtime process, a new
+   *   CLI and screen, nobody controlling it.
+   */
+  wokeAsNewDevice(runtime: "frozen" | "restarted") {
+    this.applied.clear();
+    if (runtime === "frozen") {
+      if (this.agent.control === "you") this.agent.control = "other";
+      return;
+    }
+    this.epoch = `${this.epoch}+`;
+    this.agent = { control: "none", controllerId: null, cols: 120, rows: 30, screen: "fresh screen\r\n", running: true };
+  }
 
   send(frame: RpcWireRequest): boolean {
     if (!this.up) return false;
@@ -185,7 +211,7 @@ export class FakeAgentRuntime implements WorkspaceTransport {
       case "notes.list":
         return ok({ notes: [], more: false });
       case "runtime.agents":
-        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: {}, models: [], modes: [], defaultMode: "bypassPermissions" }] });
+        return ok({ agents: this.agents });
       case "pty.list":
         // An agent's own terminal is never listed as a shell.
         return ok({ epoch: this.epoch, terminals: [] });
@@ -216,7 +242,17 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         const refused = this.inputRefusal(frame.id);
         if (refused) return refused;
         if (!this.agent.running) return refusal(frame.id, "unavailable");
+        if (params.epoch !== undefined && params.epoch !== this.epoch) return refusal(frame.id, "not_found");
+        const writer = String(params.writerId ?? "");
+        const applied = this.applied.get(writer) ?? 0;
+        const seq = Number(params.seq);
+        if (seq <= applied) return ok({ applied: false, seq: applied });
+        if (seq !== applied + 1) {
+          this.conflicts++;
+          return refusal(frame.id, "conflict");
+        }
         if (this.agent.control !== "you") return refusal(frame.id, "not_controller");
+        this.applied.set(writer, seq);
         if (params.report === true) this.reports.push(String(params.data));
         else this.typed.push(String(params.data));
         return ok({ applied: true, seq: params.seq });

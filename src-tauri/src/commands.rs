@@ -1,7 +1,7 @@
 //! Tauri commands. Thin: validate, call a module, map the error to a string.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
@@ -12,10 +12,7 @@ use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
-use crate::session_ops::{
-    available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
-    rename_workspace_entries, sessions_in_workspace,
-};
+use crate::session_ops::{available_worktree_name, rename_workspace_entries, sessions_in_workspace};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -1339,68 +1336,37 @@ pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
     .map_err(err)
 }
 
+/// The sessions a workspace removal deleted or moved, and what became of
+/// its branch.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DeleteSessionReport {
-    /// The worktree's branch, when it was kept because it holds commits
+pub struct WorkspaceRemoveReport {
+    pub sessions: Vec<SessionEntry>,
+    /// The workspace's branch, when it was kept because it holds commits
     /// nothing else has.
     pub kept_branch: Option<String>,
     /// A branch made to keep a detached HEAD's commits reachable.
     pub rescued_branch: Option<String>,
 }
 
-impl From<git::WorktreeRemoval> for DeleteSessionReport {
-    fn from(removal: git::WorktreeRemoval) -> Self {
-        Self { kept_branch: removal.kept_branch, rescued_branch: removal.rescued_branch }
-    }
-}
-
-/// A settled session, and what became of its worktree's branch.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SettleReport {
-    pub session: SessionEntry,
-    pub kept_branch: Option<String>,
-    pub rescued_branch: Option<String>,
-}
-
-/// The sessions a workspace delete removed, and what became of its branch.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceDeleteReport {
-    pub sessions: Vec<SessionEntry>,
-    pub kept_branch: Option<String>,
-    pub rescued_branch: Option<String>,
-}
-
-/// Remove the worktree a session is being settled out of. It is removed by
-/// name only when the session's checkout really is the managed path for
-/// that name; a checkout elsewhere that is still on disk is an error, and
-/// one that is already gone leaves nothing to remove.
-fn remove_settled_worktree(s: &SessionEntry, name: &str, direct: git::DirectDelete) -> CmdResult<git::WorktreeRemoval> {
-    use crate::session_ops::WorktreeTarget;
-    match crate::session_ops::worktree_target(s, name)? {
-        WorktreeTarget::Managed(name) => git::remove_worktree(Path::new(&s.project_path), &name, direct).map_err(err),
-        WorktreeTarget::ElsewhereOnDisk => Err(crate::session_ops::elsewhere_error(s)),
-        WorktreeTarget::ElsewhereGone => Ok(git::WorktreeRemoval::default()),
-    }
-}
-
-/// Delete a session, its logs, attachments and its worktree. Removing the
-/// worktree takes every session that ran in it along, since a checkout that
-/// no longer exists has nothing left for them to run in. A worktree that
-/// cannot be removed fails the delete and keeps the sessions.
+/// Delete one session, its logs and attachments. Its workspace stays, and so
+/// does every other session: a workspace is removed with `remove_workspace`.
 #[tauri::command]
-pub async fn delete_session(app: AppHandle, session_id: String, remove_worktree: bool) -> CmdResult<DeleteSessionReport> {
+pub async fn delete_session(app: AppHandle, session_id: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-        // The sidebar showed what the worktree holds and got a confirmation.
-        crate::session_ops::delete_session_blocking(&app, &session_id, remove_worktree, git::DirectDelete::Allowed, &stop)
-            .map(|deleted| DeleteSessionReport::from(deleted.removal))
+        crate::session_ops::delete_session_blocking(&app, &session_id, &stop).map(|_| ())
     })
     .await
     .map_err(err)?
+}
+
+/// The workspace this session could take along when it is deleted: its
+/// worktree, when no other session runs there. `None` otherwise.
+#[tauri::command]
+pub async fn sole_workspace_of(session_id: String) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || crate::session_ops::sole_workspace_of(&session_id)).await.map_err(err)?
 }
 
 // ------------------------------------------------------------------ harnesses
@@ -1463,80 +1429,36 @@ pub async fn sessions_sharing_worktree(session_id: String) -> CmdResult<Vec<Stri
     .map_err(err)?
 }
 
-/// Remove a session's worktree, retaining its origin while moving future work
-/// to the project root.
+/// Keep a session's worktree on disk but run the session in the project
+/// itself from now on. (Settling by removing the worktree is
+/// `remove_workspace` with the sessions kept.)
 #[tauri::command]
-pub async fn remove_session_worktree(app: AppHandle, session_id: String) -> CmdResult<SessionEntry> {
+pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let s = index::get(&session_id).map_err(err)?;
-        let name = s.worktree_name.clone().ok_or("session has no worktree")?;
-        let attached = sessions_in_workspace(Path::new(&s.cwd))?;
-        stop_sessions_and_wait(&state, &attached);
-        // Nothing in the app calls this after showing what the worktree
-        // holds, so it never deletes directly or drops a branch with commits.
-        let removal = remove_settled_worktree(&s, &name, git::DirectDelete::Never)?;
-        if let Some(branch) = removal.kept_branch {
-            log::warn!("kept branch {branch}: it holds commits nothing else has");
+        if s.worktree_name.is_none() {
+            return Err("session has no worktree".to_string());
         }
-        let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
-        notify_workspace_settled(&app, &s.project_path, &moved);
-        moved
-            .into_iter()
-            .find(|entry| entry.id == session_id)
-            .ok_or_else(|| "session disappeared while removing its worktree".into())
-    })
-    .await
-    .map_err(err)?
-}
-
-/// Settle a worktree session once its work has landed: `delete` removes the
-/// worktree and records its provenance, while `relocate` leaves it on disk;
-/// both move future work to the project root and stop any agent first.
-#[tauri::command]
-pub async fn settle_session(app: AppHandle, session_id: String, action: String) -> CmdResult<SettleReport> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<crate::AppState>();
-        let s = index::get(&session_id).map_err(err)?;
-        let name = s.worktree_name.clone().ok_or("session has no worktree")?;
-        let mut removal = git::WorktreeRemoval::default();
-        let out = match action.as_str() {
-            "delete" => {
-                let attached = sessions_in_workspace(Path::new(&s.cwd))?;
-                stop_sessions_and_wait(&state, &attached);
-                // The settle dialog showed what the worktree holds.
-                removal = remove_settled_worktree(&s, &name, git::DirectDelete::Allowed)?;
-                let moved = mark_workspace_sessions_removed(&s.project_path, &attached)?;
-                notify_workspace_settled(&app, &s.project_path, &moved);
-                moved
-                    .into_iter()
-                    .find(|entry| entry.id == session_id)
-                    .ok_or_else(|| "session disappeared while settling its worktree".to_string())?
+        for tab in &s.tabs {
+            kill_tab(&state, &s.id, &tab.id);
+        }
+        let branch = git::current_branch(Path::new(&s.project_path));
+        let out = index::update_session(&session_id, |s| {
+            s.cwd = s.project_path.clone();
+            s.worktree_name = None;
+            s.worktree_removed = false;
+            s.removed_workspace = None;
+            s.branch = branch.clone();
+            s.base_ref = None;
+            for t in &mut s.tabs {
+                t.status = TabStatus::Idle;
             }
-            "relocate" => {
-                for tab in &s.tabs {
-                    kill_tab(&state, &s.id, &tab.id);
-                }
-                let branch = git::current_branch(Path::new(&s.project_path));
-                let out = index::update_session(&session_id, |s| {
-                    s.cwd = s.project_path.clone();
-                    s.worktree_name = None;
-                    s.worktree_removed = false;
-                    s.removed_workspace = None;
-                    s.branch = branch.clone();
-                    s.base_ref = None;
-                    for t in &mut s.tabs {
-                        t.status = TabStatus::Idle;
-                    }
-                    Ok(s.clone())
-                })
-                .map_err(err)?;
-                let _ = app.emit("session_updated", &out);
-                out
-            }
-            other => return Err(format!("unknown settle action {other}")),
-        };
-        Ok(SettleReport { session: out, kept_branch: removal.kept_branch, rescued_branch: removal.rescued_branch })
+            Ok(s.clone())
+        })
+        .map_err(err)?;
+        let _ = app.emit("session_updated", &out);
+        Ok(out)
     })
     .await
     .map_err(err)?
@@ -1568,6 +1490,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             worktree_name: None,
             branch: src.branch.clone(),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: src.issue.clone(),
@@ -1590,6 +1513,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             entry.worktree_name = Some(wt.name);
             entry.branch = Some(wt.branch);
             entry.base_ref = Some(wt.base_tree);
+            entry.worktree_base = wt.worktree_base;
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
         if let Ok(dir) = store::sessions_dir() {
@@ -2165,6 +2089,131 @@ pub fn terminal_perf_reply(id: String, result: serde_json::Value) {
     crate::terminal_perf::reply(&id, result);
 }
 
+/// Whether the person lets the command line use cloud workspaces (PRO-40).
+#[tauri::command]
+pub fn cloud_control_setting() -> bool {
+    crate::cloud_control::enabled()
+}
+
+/// What became of a request to change the switch: what it is now and, when
+/// it did not turn on, why (`declined`, `backoff:<seconds>`, `busy`, `expired`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudControlSettingChange {
+    enabled: bool,
+    refused: Option<String>,
+}
+
+/// Turn the switch on or off. Turning it on asks the person in a native
+/// dialog first, which neither the window nor computer use can answer.
+#[tauri::command]
+pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<CloudControlSettingChange, String> {
+    if enabled && !crate::cloud_control::enabled() {
+        let answer = cloud_control_question(
+            app,
+            "Let agents in local sessions control cloud workspaces?".to_string(),
+            "Any agent running in a local session will be able to list your organizations' cloud workspaces, read their conversations and send messages to running ones. Starting, stopping or creating a workspace will still ask you each time.".to_string(),
+            "Turn on".to_string(),
+        )
+        .await;
+        if answer != crate::cloud_control::Answer::Accepted {
+            return Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: Some(answer.wire()) });
+        }
+    }
+    crate::cloud_control::set_enabled(enabled)?;
+    Ok(CloudControlSettingChange { enabled: crate::cloud_control::enabled(), refused: None })
+}
+
+/// Ask the person about a cloud request that came from the command line.
+/// Answers `accepted`, `declined`, `expired` (not answered in time),
+/// `busy` (another question is on screen) or `backoff:<seconds>` (they
+/// refused or left one unanswered a moment ago and are not asked again yet).
+#[tauri::command]
+pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label: String) -> String {
+    let message = format!("A terminalx command (run by you or by an agent in a local session) asks to {what}");
+    cloud_control_question(app, "Cloud workspace request".to_string(), message, ok_label).await.wire()
+}
+
+/// One native question, one at a time.
+///
+/// - **Only the agree button agrees.** The dialog has three buttons (see
+///   [`cloud_control_buttons`]): "Refuse" first and default, so Return
+///   refuses; the agree button; and "Close", which is where the platform
+///   reports every dismissal (Escape, the window's close box). Anything but
+///   the agree button is a refusal.
+/// - **It expires.** The caller is answered after [`QUESTION_TTL`] whether or
+///   not the person has answered. An expired request is dropped: the dialog
+///   may still be on screen (it cannot be closed from here), and pressing
+///   anything on it later does nothing. No other question is shown until it
+///   is gone, and the back-off starts when it expired.
+/// - Computer-use actions are refused for as long as the dialog is on screen.
+///
+/// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
+async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+    // Kept short and on one line: the label comes from this app, but never trust its length.
+    let ok_label: String = ok_label.chars().filter(|c| !c.is_control()).take(40).collect();
+    if let Err(answer) = question_begin(std::time::Instant::now()) {
+        return answer;
+    }
+    let message = format!("{message}\n\nIf this is not answered within {} seconds the request is dropped, and answering later does nothing.", QUESTION_TTL.as_secs());
+    let agree = ok_label.clone();
+    let mut dialog = tauri::async_runtime::spawn_blocking(move || {
+        let _open = Confirming::begin();
+        let pressed = app
+            .dialog()
+            .message(message)
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(cloud_control_buttons(&ok_label))
+            .blocking_show_with_result();
+        cloud_control_agreed(&pressed, &agree)
+    });
+    match tokio::time::timeout(QUESTION_TTL, &mut dialog).await {
+        Ok(pressed) => question_answered(pressed.unwrap_or(false), std::time::Instant::now()),
+        Err(_) => {
+            let answer = question_expired(std::time::Instant::now());
+            // The dialog is still up. Wait for it to go, ignoring what was pressed.
+            tauri::async_runtime::spawn(async move {
+                let _ = dialog.await;
+                question_closed();
+            });
+            answer
+        }
+    }
+}
+
+const CLOUD_CONTROL_REFUSE: &str = "Refuse";
+const CLOUD_CONTROL_CLOSE: &str = "Close";
+
+/// The question's buttons. Which slot each label sits in matters, because
+/// the dialog layer reports a dismissal as its *cancel* slot and then renames
+/// the result to that slot's label (tauri-plugin-dialog `desktop.rs`: rfd
+/// answers `Cancel` for Escape and the close box on Linux and Windows):
+///
+/// - yes: "Refuse" (first, so it is the default and Return refuses);
+/// - no: the agree label;
+/// - cancel: "Close". A dismissal lands here and nowhere else.
+///
+/// With two buttons the agree label would have to take the cancel slot, and
+/// every dismissal would come back as agreement.
+fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
+/// Whether the dialog's result is the explicit agree button, and nothing else.
+fn cloud_control_agreed(pressed: &tauri_plugin_dialog::MessageDialogResult, agree: &str) -> bool {
+    matches!(pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label)
+        if label == agree && label != CLOUD_CONTROL_REFUSE && label != CLOUD_CONTROL_CLOSE)
+}
+
+/// The window's answer to a `cloud_control_request` event (PRO-40).
+#[tauri::command]
+pub fn cloud_control_reply(id: String, result: serde_json::Value) {
+    crate::cloud_control::reply(&id, result);
+}
+
 // ------------------------------------------------------------------ files & editor
 
 #[tauri::command]
@@ -2393,6 +2442,80 @@ pub fn github_repo(project_path: String) -> Option<String> {
 
 #[cfg(test)]
 mod command_tests {
+    #[test]
+    fn only_the_agree_button_agrees_to_a_cloud_request() {
+        use tauri_plugin_dialog::MessageDialogResult;
+        assert!(super::cloud_control_agreed(&MessageDialogResult::Custom("Resume and send".into()), "Resume and send"));
+        // Everything else is a refusal: the Refuse button, a dismissal, and any result this code does not expect.
+        for pressed in [
+            MessageDialogResult::Custom("Refuse".into()),
+            MessageDialogResult::Custom("Something else".into()),
+            MessageDialogResult::Custom(String::new()),
+            MessageDialogResult::Cancel,
+            MessageDialogResult::No,
+            MessageDialogResult::Ok,
+            MessageDialogResult::Yes,
+        ] {
+            assert!(!super::cloud_control_agreed(&pressed, "Resume and send"), "{pressed:?}");
+        }
+        // A caller cannot make "Refuse" or "Close" the agree button.
+        assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom("Refuse".into()), "Refuse"));
+        assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom("Close".into()), "Close"));
+    }
+
+    /// What the platform's dialog answered, before the dialog layer renames it.
+    #[derive(Clone, Copy, Debug)]
+    enum Native {
+        Yes,
+        No,
+        Ok,
+        Cancel,
+    }
+
+    /// The renaming tauri-plugin-dialog 2.7.3 applies to a native result
+    /// (`desktop.rs`, `show_message_dialog`), for the button sets used here.
+    /// On Linux and Windows the platform never names a custom button itself,
+    /// so this table is what decides which label a click or a dismissal
+    /// becomes.
+    fn as_the_dialog_layer_reports(native: Native, buttons: &tauri_plugin_dialog::MessageDialogButtons) -> tauri_plugin_dialog::MessageDialogResult {
+        use tauri_plugin_dialog::{MessageDialogButtons as Buttons, MessageDialogResult as Result};
+        match (native, buttons) {
+            (Native::Ok, Buttons::OkCancelCustom(ok, _)) => Result::Custom(ok.clone()),
+            (Native::Cancel, Buttons::OkCancelCustom(_, cancel)) => Result::Custom(cancel.clone()),
+            (Native::Yes, Buttons::YesNoCancelCustom(yes, _, _)) => Result::Custom(yes.clone()),
+            (Native::No, Buttons::YesNoCancelCustom(_, no, _)) => Result::Custom(no.clone()),
+            (Native::Cancel, Buttons::YesNoCancelCustom(_, _, cancel)) => Result::Custom(cancel.clone()),
+            (Native::Yes, _) => Result::Yes,
+            (Native::No, _) => Result::No,
+            (Native::Ok, _) => Result::Ok,
+            (Native::Cancel, _) => Result::Cancel,
+        }
+    }
+
+    #[test]
+    fn a_dismissal_of_the_cloud_question_never_agrees_on_any_platform() {
+        use tauri_plugin_dialog::MessageDialogButtons;
+        let agree = "Resume and send";
+        let buttons = super::cloud_control_buttons(agree);
+        // The button set itself: Refuse first (the default), the agree label in the "no" slot, and a
+        // third button whose only job is to be where a dismissal lands.
+        assert!(matches!(&buttons, MessageDialogButtons::YesNoCancelCustom(yes, no, cancel) if yes == "Refuse" && no == agree && cancel == "Close"));
+        let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), agree);
+        // Escape, the close box, an aborted modal: the platform says Cancel. That is not agreement.
+        assert!(!agreed(Native::Cancel));
+        // The default button (Return) refuses.
+        assert!(!agreed(Native::Yes));
+        // A result the button set does not have is not agreement either.
+        assert!(!agreed(Native::Ok));
+        // Only a click on the agree button is.
+        assert!(agreed(Native::No));
+
+        // Why three buttons: with two, the agree label has to sit in the cancel slot, and the same
+        // dismissal comes back named as the agree button. This is the bug the review found.
+        let two = MessageDialogButtons::OkCancelCustom("Refuse".into(), agree.into());
+        assert!(super::cloud_control_agreed(&as_the_dialog_layer_reports(Native::Cancel, &two), agree));
+    }
+
     use std::path::Path;
     use std::process::Command;
 
@@ -2420,7 +2543,7 @@ mod command_tests {
         assert!(text.contains("the service refuses while a workspace still uses the login"));
     }
     use crate::session_ops::{
-        create_session_entry, delete_workspace_entries, new_tab_entry, notify_workspace_deleted,
+        create_session_entry, new_tab_entry, notify_workspace_deleted,
         validate_session_target,
     };
 
@@ -2676,14 +2799,7 @@ mod command_tests {
         std::fs::create_dir_all(&attachments).unwrap();
         std::fs::write(attachments.join("shot.png"), b"png").unwrap();
 
-        let removed = delete_workspace_entries(
-            project.to_str().unwrap(),
-            worktree.to_str().unwrap(),
-            true,
-            crate::git::DirectDelete::Allowed,
-        )
-        .unwrap()
-        .0;
+        let removed = remove_for_test(&project, &worktree);
 
         assert!(!worktree.exists());
         assert_eq!(crate::workspaces::list(&project).unwrap().len(), 1);
@@ -2701,6 +2817,23 @@ mod command_tests {
         assert!(remaining[0].removed_workspace.is_none());
     }
 
+    /// Delete a workspace as the dialog does after the second confirmation
+    /// (these repositories have no remote, so nothing verifies as merged).
+    fn remove_for_test(project: &Path, worktree: &Path) -> Vec<crate::store::index::SessionEntry> {
+        let sink = crate::sink::BroadcastSink::new(16);
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: project.to_str().unwrap(),
+            path: worktree.to_str().unwrap(),
+            sessions: crate::session_ops::SessionsFate::Delete,
+            delete_branch: true,
+            confirmation: crate::session_ops::Confirmation::Forced,
+            expected_sessions: None,
+            direct: crate::git::DirectDelete::Allowed,
+            fetch: crate::landed::Fetch::Skip,
+        };
+        crate::session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap().sessions
+    }
+
     #[test]
     fn deleting_a_workspace_without_sessions_removes_it_immediately() {
         let _home = crate::store::temp_home();
@@ -2714,14 +2847,7 @@ mod command_tests {
         git(&project, &["commit", "-q", "--allow-empty", "-m", "initial"]);
         git(&project, &["worktree", "add", "-q", "-b", "feature/empty", worktree.to_str().unwrap()]);
 
-        let moved = delete_workspace_entries(
-            project.to_str().unwrap(),
-            worktree.to_str().unwrap(),
-            true,
-            crate::git::DirectDelete::Allowed,
-        )
-        .unwrap()
-        .0;
+        let moved = remove_for_test(&project, &worktree);
 
         assert!(moved.is_empty());
         assert!(!worktree.exists());
@@ -2758,6 +2884,7 @@ mod command_tests {
             worktree_name: Some("gone".into()),
             branch: Some("feature/gone".into()),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
@@ -2835,6 +2962,13 @@ pub async fn list_workspaces(project_path: String) -> CmdResult<Vec<crate::works
     tauri::async_runtime::spawn_blocking(move || crate::workspaces::list(Path::new(&project_path)).map_err(err)).await.map_err(err)?
 }
 
+/// What a workspace takes on disk. Asked for one workspace at a time, after
+/// the list is shown, because walking a large checkout takes a while.
+#[tauri::command]
+pub async fn workspace_size(project_path: String, path: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::workspaces::size(Path::new(&project_path), Path::new(&path)).map_err(err)).await.map_err(err)?
+}
+
 /// Resolve the name shown before a new worktree-backed session is created.
 /// Supplying a requested name applies the same sanitising and collision rules
 /// as creation, so the preview is normally the name that lands on disk.
@@ -2866,11 +3000,21 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
 /// What deleting a workspace would cost: the git state of its tree plus how
 /// many sessions (and transcripts) would go with it.
 #[tauri::command]
-pub async fn workspace_disposition(project_path: String, path: String) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
+pub async fn workspace_disposition(project_path: String, path: String, fetch: Option<bool>) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut disposition = crate::workspaces::disposition(Path::new(&project_path), Path::new(&path));
+        // The fetch is for the dialog that is about to delete the workspace,
+        // which asks for it. Everything else that reads the disposition (the
+        // pull request panel does so every 30 seconds) stays off the network
+        // and gets no clean-and-merged verdict at all.
+        // A folder that is not on disk gets a verdict too ("cannot be
+        // checked"), so the dialog can ask about it rather than wave it through.
+        if fetch == Some(true) && !disposition.is_main {
+            disposition.landed = Some(crate::landed::check(Path::new(&project_path), Path::new(&path), crate::landed::Fetch::Fresh));
+        }
         let sessions = sessions_in_workspace(Path::new(&path))?;
         disposition.sessions = sessions.len();
+        disposition.session_ids = sessions.iter().map(|session| session.id.clone()).collect();
         disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
         Ok(disposition)
     })
@@ -2878,37 +3022,49 @@ pub async fn workspace_disposition(project_path: String, path: String) -> CmdRes
     .map_err(err)?
 }
 
-fn mark_workspace_sessions_removed(project_path: &str, affected: &[SessionEntry]) -> CmdResult<Vec<SessionEntry>> {
-    let project = std::fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
-    let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
-    let branch = git::current_branch(&project);
-    index::update(|sessions| {
-        let mut moved = Vec::new();
-        for session in sessions {
-            if affected_ids.contains(&session.id) {
-                index::mark_workspace_removed(session, branch.clone());
-                session.modified = index::now();
-                moved.push(session.clone());
-            }
-        }
-        Ok(moved)
-    })
-    .map_err(err)
-}
-
-/// Remove a worktree and, with it, the sessions that lived there.
+/// Remove a workspace: the one command behind the workspace menu, the right
+/// panel, settling, and the session delete that takes its workspace along.
+///
+/// `keep_sessions` is settling: the conversations stay and move to the
+/// project root. Otherwise the sessions in the workspace are deleted with
+/// it. `expected_sessions` are the ones the dialog named; if the workspace
+/// holds any other set by now, nothing is removed.
+///
+/// The clean-and-merged check runs again here. A workspace that is not safe
+/// is removed only with `confirmed_digest`: the digest of the check the
+/// person saw when they gave the second confirmation. If the workspace has
+/// changed since, it no longer matches and nothing is removed.
 #[tauri::command]
-pub async fn delete_workspace(app: AppHandle, project_path: String, path: String, delete_branch: bool) -> CmdResult<WorkspaceDeleteReport> {
+pub async fn remove_workspace(
+    app: AppHandle,
+    project_path: String,
+    path: String,
+    keep_sessions: bool,
+    delete_branch: bool,
+    confirmed_digest: Option<String>,
+    expected_sessions: Vec<String>,
+) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let affected = sessions_in_workspace(Path::new(&path))?;
-        stop_sessions_and_wait(&state, &affected);
         let browser_key = crate::browser::control::canonical(&path);
-        let (removed, removal) = delete_workspace_entries(&project_path, &path, delete_branch, git::DirectDelete::Allowed)?;
-        // Only once the workspace is really gone: a delete that fails keeps it.
+        // Deleting a directory git cannot remove is itself a risk the person
+        // has to have confirmed.
+        let direct = if confirmed_digest.is_some() { git::DirectDelete::Allowed } else { git::DirectDelete::Never };
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: &project_path,
+            path: &path,
+            sessions: if keep_sessions { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
+            delete_branch,
+            confirmation: confirmed_digest.map(crate::session_ops::Confirmation::Shown).unwrap_or(crate::session_ops::Confirmation::Single),
+            expected_sessions: Some(&expected_sessions),
+            direct,
+            fetch: crate::landed::Fetch::Fresh,
+        };
+        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+        let removed = crate::session_ops::remove_workspace(&app, &request, &stop)?;
+        // Only once the workspace is really gone: a removal that fails keeps it.
         state.browser.forget_workspace(&browser_key);
-        notify_workspace_deleted(&app, &project_path, &removed);
-        Ok(WorkspaceDeleteReport { sessions: removed, kept_branch: removal.kept_branch, rescued_branch: removal.rescued_branch })
+        Ok(WorkspaceRemoveReport { sessions: removed.sessions, kept_branch: removed.removal.kept_branch, rescued_branch: removed.removal.rescued_branch })
     })
     .await
     .map_err(err)?

@@ -19,10 +19,7 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   WorkStatus,
-  WorktreeDisposition,
-  DeleteSessionReport,
-  SettleReport,
-  WorkspaceDeleteReport,
+  WorkspaceRemoveReport,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -153,6 +150,21 @@ export interface WorkspaceRename {
   sessions: SessionEntry[];
 }
 
+/** How a workspace is removed. */
+export interface WorkspaceRemoveOptions {
+  /** Settling: the conversations stay and move to the project. */
+  keepSessions: boolean;
+  deleteBranch: boolean;
+  /**
+   * The second confirmation, as the digest of the check the person saw when
+   * they gave it. Null for a single confirmation, which is enough only for a
+   * workspace found clean and merged.
+   */
+  confirmedDigest: string | null;
+  /** The sessions the person was told are in the workspace; the removal is refused if that changed. */
+  expectedSessions: string[];
+}
+
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
@@ -278,6 +290,18 @@ export const api = {
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
+   * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
+   * Never wakes the workspace: rejects with `cloud_port_not_connected` unless the
+   * connection is live. `reassigned` says the named local port was taken; `exact`
+   * refuses instead (`cloud_port_in_use`). The forward closes when the workspace
+   * stops, access goes or the active organization changes.
+   */
+  cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
+    invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
+  cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
+  cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -309,9 +333,17 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
-  workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
-  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<WorkspaceDeleteReport>("delete_workspace", { projectPath, path, deleteBranch }),
+  workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
+  /**
+   * What a workspace holds. With `fetch`, the default branch is fetched and
+   * the clean-and-merged check is made too (`landed`); that is for the
+   * dialog about to delete it. Without it, nothing touches the network.
+   */
+  workspaceDisposition: (projectPath: string, path: string, options: { fetch?: boolean } = {}) =>
+    invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path, fetch: options.fetch ?? false }),
+  /** Remove a workspace through the one checked path. */
+  removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
+    invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -328,12 +360,12 @@ export const api = {
     invoke<void>("set_session_archived", { sessionId, archived }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
-  deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<DeleteSessionReport>("delete_session", { sessionId, removeWorktree }),
-  worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
-  sessionsSharingWorktree: (sessionId: string) => invoke<string[]>("sessions_sharing_worktree", { sessionId }),
-  removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SettleReport>("settle_session", { sessionId, action }),
+  /** Delete one session; its workspace and every other session stay. */
+  deleteSession: (sessionId: string) => invoke<void>("delete_session", { sessionId }),
+  /** The workspace this session could take along: its worktree, when no other session runs there. */
+  soleWorkspaceOf: (sessionId: string) => invoke<string | null>("sole_workspace_of", { sessionId }),
+  /** Keep the worktree on disk but run the session in the project itself from now on. */
+  relocateSession: (sessionId: string) => invoke<SessionEntry>("relocate_session", { sessionId }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
@@ -404,6 +436,8 @@ export interface AccountStatus {
   multiOrg?: boolean;
   /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
   catalogFeed?: boolean;
+  /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
+  memberWorkspaces?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
@@ -838,6 +872,13 @@ export interface CloudWorkspaceLaunchInput {
   effort?: string | null;
   mode?: string | null;
   prompt?: string | null;
+}
+
+/** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
+export interface CloudPortForward {
+  port: number;
+  localPort: number;
+  reassigned: boolean;
 }
 
 export interface CloudWorkspacePreflight {
@@ -1585,6 +1626,10 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
     else this.unlisten = unlisten;
   }
 
+  get id(): string | null {
+    return this.connectionId;
+  }
+
   bind(connectionId: string): void {
     this.connectionId = connectionId;
     const early = this.early;
@@ -1644,6 +1689,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
+  /** The native connection's id, for calls that act on it (port forwards); null until attached. */
+  connectionId?: () => string | null;
   /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
   activate(activation: Activation): Promise<void>;
   close(): void;
@@ -1703,6 +1750,7 @@ async function adopt(
   const connection: CloudWorkspaceConnection = {
     target,
     client,
+    connectionId: () => transport.id,
     activate: (next) => transport.activate(next),
     close: () => {
       if (connections.get(key) === self) connections.delete(key);

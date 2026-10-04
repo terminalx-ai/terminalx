@@ -137,6 +137,8 @@ pub struct SessionEntry {
     /// Base the worktree forked from, for the first turn's changes baseline.
     #[serde(default)]
     pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<crate::git::WorktreeBase>,
     #[serde(default)]
     pub worktree_removed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -278,6 +280,7 @@ mod tests {
             worktree_name: None,
             branch: None,
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

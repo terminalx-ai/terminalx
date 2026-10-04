@@ -221,6 +221,7 @@ describe("phases", () => {
 
   it("explains failures and measures the launch", () => {
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "agent-unavailable" }) } }))).toMatch(/not installed/);
+    expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "agent-model-unavailable" }) } }))).toMatch(/Claude model is not available/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "runtime-interrupted" }) } }))).toMatch(/may not have been sent/);
     expect(failureMessage(snapshot({ workspace: { launch: launch("failed", { category: "repository-clone-failed" }) } }))).toMatch(/could not be cloned/);
     // Each clone failure says what failed; only a refusal by GitHub points at GitHub access.

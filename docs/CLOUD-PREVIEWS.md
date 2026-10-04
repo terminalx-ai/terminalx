@@ -1,7 +1,7 @@
 # Cloud previews and forwarded ports (PRO-28)
 
 An application started in a cloud workspace (a dev server on port 3000, say)
-is reached from the desktop as `http://localhost:<port>`. The desktop listens
+is reached from the desktop as `http://127.0.0.1:<port>`. The desktop listens
 on its own loopback and carries each connection to the workspace over the
 connection it already holds: the relay tunnel, end-to-end encrypted, attached
 with the person's own device.
@@ -59,8 +59,45 @@ authenticates the traffic is the workspace connection underneath:
 3. the runtime checked the device token inside the E2EE handshake;
 4. the runtime checks the person's role on every `ports.*` call.
 
-The desktop listener binds loopback only. Other programs running as the same
-user on that Mac can reach it, as with any local development server.
+### What a loopback listener exposes
+
+Stated plainly, because "localhost" is not private to one program:
+
+- **Other programs on this Mac.** Anything running as the same user can
+  connect to the listener while the preview is open.
+- **Web pages in the person's browser.** Any page can make the browser send
+  requests to a loopback port. It cannot read the answers of another
+  origin, but with DNS rebinding a page points a hostname of its own at
+  `127.0.0.1` and then can. The forwarder refuses that: an HTTP request
+  whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>` gets a `403`
+  and never reaches the workspace. The client's first bytes are judged
+  before any of them is forwarded, however late they come (a browser may
+  connect first and send its request later), and anything shaped like
+  `<method> <target> HTTP/<version>` is a request, whatever the method. A
+  request with no `Host` is refused too. That includes HTTP/2 with prior
+  knowledge over plain TCP (`PRI * HTTP/2.0`, as plaintext gRPC clients
+  send): it has no `Host` line to judge, so such a client cannot use a
+  forward. HTTP/1.1, an upgrade from it, and TLS are unaffected. Bytes that are not HTTP (a
+  database protocol, TLS) are carried as they are; a page cannot make a
+  browser speak those to a preview and read the answer. A page can still
+  send blind requests (for example a form post) to a preview whose port it
+  can guess: they carry a loopback `Host` and are indistinguishable from
+  the person's own.
+- **Cookies.** Browsers scope cookies by host, not by port. A preview
+  served at `127.0.0.1` can read and set cookies of everything else the
+  person uses at `127.0.0.1`, and the other way round. A workspace is code
+  the person chose to run, but a workspace that turns hostile sees those
+  cookies.
+
+What is done about it: the local port is random by default (not the
+workspace's number, which a page could guess), the listener never shares a
+port with another program, the `Host` check above, and previews close with
+the connection. What is not done: a hostname per workspace (for example
+`<workspace>.preview.localhost`), which would give each preview its own
+cookie jar and origin. That is a decision for the owner; it needs the
+preview address to be a name rather than `127.0.0.1`, and a browser that
+resolves `*.localhost` to loopback (Safari and Chrome do, not every tool
+does).
 
 ## Never public
 
@@ -78,9 +115,9 @@ no previews, and nothing about a preview can start one:
 - Opening a preview does not use the `wake` activation. On a suspended
   workspace the desktop says the workspace is stopped and offers the same
   explicit "Start workspace" action as everywhere else.
-- A local listener that is still open when the workspace stops refuses
-  connections with a short page saying so. It does not reconnect with
-  `wake`, and it never resumes compute because a browser tab reloaded.
+- When the workspace stops, its local listeners close. A browser tab that
+  reloads gets "connection refused", and nothing is resumed. The preview is
+  not revived when the workspace runs again: the person opens it again.
 - An open connection counts as use of the workspace, as any attached client
   does. A preview adds no activity signal of its own.
 
@@ -97,9 +134,10 @@ Every stream belongs to one connection and ends with it.
 | New runtime generation | The relay fences the old generation. |
 | Desktop quits or disconnects | The connection closes; the runtime ends its streams. |
 
-The desktop closes its local listeners when the connection goes, and shows
-the forward as unavailable. Nothing is stored on the server, so there is no
-route table to clean up.
+The desktop closes its local listeners in every one of these cases, and
+also when the active organization changes. They are not kept for a
+connection that might return. Nothing is stored on the server, so there is
+no route table to clean up.
 
 ## The protocol: `ports/1`
 
@@ -153,12 +191,78 @@ stream ends.
 
 1. Runtime: `ports/1` in `terminalx-serve` (this document, `remote/ports.rs`).
 2. Desktop, native: the local forwarder. One listener per (workspace, port)
-   on `127.0.0.1`; the same local port when it is free, otherwise the next
-   free one, with the reassignment shown; an optional "exact port only"
-   setting that refuses instead. A listener is bound to one workspace and is
-   never reused for another.
+   on `127.0.0.1`, on a random free port by default. A listener is bound to
+   one workspace and is never reused for another.
 3. Desktop, interface: a Ports panel in the cloud session (listening ports,
    open previews, states: starting, unavailable, stopped), and "Open
    preview" in the built-in browser.
 
 The API and the relay need no change for private previews.
+
+## The desktop forwarder (`src-tauri/src/cloud_ports.rs`)
+
+One `PortForwarder` per workspace connection. Commands:
+`cloud_port_forward(connectionId, port, localPort?, exact?)`,
+`cloud_port_unforward`, `cloud_port_forwards`.
+
+- It binds `127.0.0.1` only, **without address reuse**. With `SO_REUSEADDR`
+  (which a plain listener sets) macOS lets a loopback bind succeed while
+  another program listens on the wildcard address of the same port, and the
+  new socket takes that program's loopback traffic. Before using a named
+  port it also checks that nothing listens on it on the IPv4 wildcard, IPv6
+  loopback or the IPv6 wildcard.
+- The local port is a random free one. A caller may name one (`localPort`);
+  when any program has it, a random one is used and the answer says
+  `reassigned`, or with `exact` the forward is refused (`cloud_port_in_use`).
+- Forwarding the same port again returns the same forward. A forwarder's
+  listeners belong to its connection.
+- Each accepted connection has its first bytes judged (the `Host` rule
+  above) before `ports.open` is sent. A client that says nothing for 400 ms
+  gets its stream anyway, so a protocol whose server speaks first works;
+  what it sends later is still judged before any of it is forwarded, and a
+  refused request ends the stream. Each connection becomes one stream. Requests carry ids starting `ports-`;
+  their answers and every `ports.*` notification are consumed natively and
+  never reach the web view. They are sent under the same identity rule as
+  the web view's frames: nothing goes out for an identity that is no longer
+  current, a pending sign-out included.
+- It never changes the connection's activation. `cloud_port_forward` on a
+  connection that is not live answers `cloud_port_not_connected`.
+- Listeners and streams close when the connection stops being live for any
+  reason, when it is detached, when the account changes and when the active
+  organization changes. Nothing reopens by itself.
+- A refusal by the runtime is a short plain-text page in the forwarder's own
+  words, sent with `nosniff`; the runtime's text and codes are not echoed.
+- Stopping a forward closes the connections it was carrying.
+- Limits: 64 local connections per forwarder; the runtime's window is never
+  taken as larger than 256 KiB; a runtime that sends more than two windows
+  without waiting for acknowledgements has its stream ended rather than
+  buffered.
+
+## The Ports panel (`src/components/cloud/CloudPorts.tsx`)
+
+A "Ports" tab in the cloud workspace view.
+
+- It lists what listens in the workspace (`ports.list`) and the forwards
+  that are open, and refreshes every 5 seconds while it is on screen and the
+  window is visible. It reads nothing while hidden. What the runtime lists
+  is checked before it is shown: whole numbers from 1 to 65535, at most 256.
+- "Open preview" forwards the port to a random free port on this Mac and
+  opens `http://127.0.0.1:<port>` in the system browser. The address is
+  `127.0.0.1`, not `localhost`: the listener is IPv4 only, and `localhost`
+  could reach another program listening on IPv6 loopback at that port. An
+  open forward shows its address and a Stop button.
+- "Same port number as the workspace" asks for the workspace's own port
+  number on this Mac, and refuses when any program has it.
+- A port can be opened by number when the runtime cannot list listeners or
+  the application is not up yet.
+- The panel says what a preview exposes: other programs on this Mac can
+  connect while it is open, and it shares cookies with anything else used
+  at `127.0.0.1`.
+- States: stopped or not connected ("Looking here never starts it", nothing
+  is asked of the workspace, and the forwards shown are cleared because
+  they are closed); a runtime without `ports/1`; someone who may not use a
+  terminal, with the reason, and no call to the runtime.
+
+Previews open in the system browser because the built-in browser is not
+available in cloud sessions today (its pages are grouped by a local working
+directory, which a cloud session does not have).

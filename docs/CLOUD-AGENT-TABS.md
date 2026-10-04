@@ -226,6 +226,18 @@ the next `send` (the harness resumes the provider session).
 A cloud tab's composer offers what a local tab's does, from the runtime
 instead of from this computer.
 
+- **Models** (`runtime.agents`, `agents/1`, `src/lib/cloudModels.ts`): the
+  workspace CLI supplies the composer, new-tab form, new-session form, and
+  recovery picker. Claude aliases carry the VM's `resolved` version; pinned
+  versions come from that same list. Pickers share one reading per live
+  connection and refresh it when opened. A disconnect discards that reading.
+  Creating a workspace, choosing a stopped workspace, or configuring through
+  the mailbox offline offers aliases only, without a desktop-resolved version.
+  Reading models never wakes compute. The runtime rejects unlisted Claude
+  ids before creating a session/tab, configuring settings, applying mailbox
+  settings, or launching an intent. This check applies only to a CLI answer
+  (including a last good answer), never to the built-in fallback.
+
 - **Slash commands** (`session.commands { sessionId, tabId }`, read-only,
   `src/lib/cloudComposer.ts`): what the tab's CLI lists in the session's
   directory, exactly as `list_slash_commands` does for a local tab (Claude

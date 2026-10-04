@@ -254,8 +254,8 @@ fn assert_healthy(vm: &Vm, server: &FakeServer, output: &Output) {
     assert_eq!(stored["relayHostId"], json!(hosts[0]));
     assert_eq!(ready["cloudWorkspace"]["relayHostId"], json!(hosts[0]));
     assert!(state.versions.iter().all(|version| version == &state.versions[0]) && !state.versions.is_empty());
-    assert!(state.capabilities.iter().all(|capabilities| capabilities == "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1"));
-    assert_eq!(ready["cloudWorkspace"]["capabilities"], json!(["organization-access-v1", "agent-grants-v1", "github-broker-v1", "quiesce-v1", "environment-template-v1", "collaboration-v1"]));
+    assert!(state.capabilities.iter().all(|capabilities| capabilities == "organization-access-v1,agent-grants-v1,github-broker-v1,quiesce-v1,environment-template-v1,collaboration-v1,attachment-installation-v1"));
+    assert_eq!(ready["cloudWorkspace"]["capabilities"], json!(["organization-access-v1", "agent-grants-v1", "github-broker-v1", "quiesce-v1", "environment-template-v1", "collaboration-v1", "attachment-installation-v1"]));
 }
 
 const STEPS: &[&str] = &[

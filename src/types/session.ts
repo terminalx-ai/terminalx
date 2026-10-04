@@ -42,6 +42,7 @@ export interface SessionEntry {
   worktreeName?: string | null;
   branch?: string | null;
   baseRef?: string | null;
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   issue?: IssueRef | null;
@@ -93,7 +94,12 @@ export interface Workspace {
   ahead: number;
   /** Commits behind this checkout's configured upstream. */
   behind: number;
+  /** As known locally, without a fetch. */
+  state?: WorkspaceState;
 }
+
+/** A workspace's state in one word. */
+export type WorkspaceState = "clean" | "uncommitted" | "unmerged" | "merged" | "unknown";
 
 export interface WorkspacePr {
   number: number;
@@ -101,6 +107,34 @@ export interface WorkspacePr {
   url: string;
   state: "OPEN" | "MERGED" | "CLOSED" | string;
   isDraft: boolean;
+}
+
+/** The clean-and-merged check made before a workspace is deleted. */
+export interface Landed {
+  /** The directory is a working tree of this project, so it could be read. */
+  checked: boolean;
+  branch: string | null;
+  /** The commit HEAD is at. */
+  head: string | null;
+  /** What the branch was compared with, e.g. `origin/main`. */
+  base: string | null;
+  uncommitted: number;
+  /** Stash entries made on this branch. */
+  stashes: number;
+  clean: boolean;
+  merged: "ancestor" | "rebase" | "squash" | "noChanges" | null;
+  unmergedCommits: number;
+  pushed: boolean;
+  /** The default branch was fetched for this check. */
+  fresh: boolean;
+  /** Why "merged" could not be established for certain; null when it was. */
+  notVerified: string | null;
+  /** Clean, merged and verified: one confirmation is enough. */
+  safe: boolean;
+  /** What deleting would lose, in plain words; empty when it is safe. */
+  losses: string[];
+  /** Stands for exactly what this check found; a second confirmation is given for one digest. */
+  digest: string;
 }
 
 export interface WorkspaceDisposition {
@@ -118,6 +152,10 @@ export interface WorkspaceDisposition {
   sessions: number;
   /** Their titles, so the confirmation can name what goes. */
   sessionTitles: string[];
+  /** Their ids, in the same order: what the removal is told to expect. */
+  sessionIds: string[];
+  /** Whether the work is clean and merged into the default branch. Only present when the check was asked for with a fetch. */
+  landed?: Landed | null;
 }
 
 export interface Capabilities {
@@ -191,19 +229,13 @@ export interface WorktreeDisposition {
   branch: string | null;
 }
 
-export interface DeleteSessionReport {
-  /** The worktree's branch, when it was kept because it holds commits nothing else has. */
+/** What a workspace removal did: the sessions it deleted or moved, and what became of the branch. */
+export interface WorkspaceRemoveReport {
+  sessions: SessionEntry[];
+  /** The workspace's branch, when it was kept because it holds commits nothing else has. */
   keptBranch: string | null;
   /** A branch made to keep a detached HEAD's commits reachable. */
   rescuedBranch: string | null;
-}
-
-export interface SettleReport extends DeleteSessionReport {
-  session: SessionEntry;
-}
-
-export interface WorkspaceDeleteReport extends DeleteSessionReport {
-  sessions: SessionEntry[];
 }
 
 export function sessionStatus(s: SessionEntry): TabStatus {

@@ -60,6 +60,7 @@ import {
   closeCloudWorkspaceTerminal,
   cloudSessionStatus,
   deleteCloudSession,
+  NEEDS_SECOND_CONFIRMATION,
   updateCloudSession,
   useCloudWorkspaceSessions,
   type CloudSessionRow,
@@ -1005,7 +1006,7 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
     if (next && next !== row.title) void act(() => updateCloudSession(row, { title: next }));
   };
   const remove = async () => {
-    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace${row.worktreeName ? ", with its worktree" : ""}.`, {
+    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace.${row.worktreeName ? " Its worktree goes with it when no other session uses it." : ""}`, {
       title: "Delete session",
       kind: "warning",
       okLabel: "Delete",
@@ -1013,7 +1014,22 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
     }).catch(() => false);
     if (!yes) return;
     await act(async () => {
-      await deleteCloudSession(row);
+      try {
+        await deleteCloudSession(row);
+      } catch (refused) {
+        // The runtime found the worktree not clean and merged: say what
+        // would be lost and ask the second time before trying again.
+        const reason = errorMessage(refused);
+        if (!reason.includes(NEEDS_SECOND_CONFIRMATION)) throw refused;
+        const sure = await ask(`${reason}\n\nNothing was deleted. Delete "${row.title}" and its worktree anyway?`, {
+          title: "Delete anyway?",
+          kind: "warning",
+          okLabel: "Delete anyway",
+          cancelLabel: "Cancel",
+        }).catch(() => false);
+        if (!sure) return;
+        await deleteCloudSession(row, { confirmedUnsafe: true });
+      }
       // Read at the time of the action, not of the render.
       if (getSessionStore().selectedSessionId === row.key) selectSession(null);
     });

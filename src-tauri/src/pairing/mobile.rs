@@ -32,6 +32,10 @@ const ATTACHMENT_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 const ATTACHMENT_COUNT_LIMIT: usize = 8;
 const NOTIFICATION_LIMIT: usize = 512;
 const TAIL_EVENT_LIMIT: usize = 5_000;
+// Reserve 2 MiB of the wire limit for encryption (nonce, tag and header),
+// WebSocket framing and buffered control frames, then undo base64's 4/3 expansion.
+// This caps the entire serialized RPC response at 6 MiB, including its envelope.
+const TAIL_RESPONSE_BYTES_LIMIT: usize = (super::PAIRING_MESSAGE_BYTES_LIMIT - 2 * 1024 * 1024) / 4 * 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,7 +319,7 @@ pub(super) async fn dispatch(
     let sink = manager.sink.get().cloned();
     let result = match method {
         "sessions.summaries" => no_params(&params).and_then(|_| session_summaries()),
-        "session.tail" => parse_params(params).and_then(|params| session_tail(manager, params)),
+        "session.tail" => parse_params(params).and_then(|params| session_tail(manager, request_id(request), params)),
         "session.subscribe" => sink
             .as_ref()
             .context("app is unavailable")
@@ -357,7 +361,7 @@ fn request_id(request: &Value) -> &str {
     request.get("id").and_then(Value::as_str).unwrap_or("")
 }
 
-fn success_response(id: &str, result: Value) -> Value {
+pub(super) fn success_response(id: &str, result: Value) -> Value {
     json!({ "id": id, "ok": true, "result": result, "_meta": { "runtimeId": "desktop" } })
 }
 
@@ -440,41 +444,80 @@ struct SessionTailParams {
     limit: usize,
 }
 
-fn session_tail(manager: &PairingManager, params: SessionTailParams) -> Result<Value> {
+fn session_tail(manager: &PairingManager, request_id: &str, params: SessionTailParams) -> Result<Value> {
     validate_session_tab(&params.session_id, &params.tab_id)?;
     if !(1..=20).contains(&params.limit) {
         bail!("tail limit must be between 1 and 20 turns");
     }
     let session_manager = sessions(manager)?;
     let path = store::log_path(&params.session_id, &params.tab_id)?;
-    let (mut events, has_more) = read_event_tail(&path, params.before, params.limit)?;
+    let byte_limit = tail_event_byte_limit(request_id)?;
+    let (mut events, mut has_more) = read_event_tail(&path, params.before, params.limit, byte_limit)?;
     if params.before.is_none() {
+        let count = events.len();
         session_manager.reconcile_lapsed_events(&params.session_id, &params.tab_id, &mut events)?;
+        if events.len() != count {
+            // Reconciliation appends persisted decisions. Bound the final suffix too,
+            // so those events cannot push a full page over the byte or event limit.
+            let (bounded, trimmed) = select_event_tail(events.into_iter().rev().map(Ok), None, usize::MAX, byte_limit)?;
+            events = bounded;
+            has_more |= trimmed;
+        }
     }
     Ok(json!({ "events": events, "hasMore": has_more }))
 }
 
-fn read_event_tail(path: &Path, before: Option<u64>, turn_limit: usize) -> Result<(Vec<AgentEvent>, bool)> {
+fn tail_event_byte_limit(request_id: &str) -> Result<usize> {
+    // `false` is longer than `true`; count the request id after JSON escaping too.
+    let envelope = success_response(request_id, json!({ "events": [], "hasMore": false }));
+    TAIL_RESPONSE_BYTES_LIMIT.checked_sub(serde_json::to_vec(&envelope)?.len())
+        .context("transcript request envelope is too large")
+}
+
+fn read_event_tail(path: &Path, before: Option<u64>, turn_limit: usize, byte_limit: usize) -> Result<(Vec<AgentEvent>, bool)> {
     let mut lines = match summaries::TailLines::open_unbounded(path) {
         Ok(lines) => lines,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
         Err(error) => return Err(error.into()),
     };
+    select_event_tail(std::iter::from_fn(|| next_tail_event(&mut lines).transpose()), before, turn_limit, byte_limit)
+}
+
+/// Read newest first and return a contiguous suffix in sequence order. Limits may split a turn;
+/// the first returned sequence remains the exclusive `before` cursor for the
+/// next page. Never skip or truncate an event to make a page fit.
+fn select_event_tail(
+    source: impl IntoIterator<Item = Result<AgentEvent>>,
+    before: Option<u64>,
+    turn_limit: usize,
+    byte_limit: usize,
+) -> Result<(Vec<AgentEvent>, bool)> {
     let mut events = Vec::new();
     let mut turns = 0usize;
     let mut has_more = false;
-    while let Some(event) = next_tail_event(&mut lines)? {
+    let mut bytes = 0usize;
+    for event in source {
+        let event = event?;
         if before.is_some_and(|before| event.seq >= before) {
             continue;
         }
+        if turns >= turn_limit || events.len() >= TAIL_EVENT_LIMIT {
+            has_more = true;
+            break;
+        }
+        let event_bytes = serde_json::to_vec(&event)?.len() + usize::from(!events.is_empty());
+        if bytes + event_bytes > byte_limit {
+            if events.is_empty() {
+                bail!("Transcript event {} is too large to load on mobile. Open this conversation on your Mac.", event.seq);
+            }
+            has_more = true;
+            break;
+        }
+        bytes += event_bytes;
         let is_prompt = matches!(event.payload, Payload::UserMessage { .. });
         events.push(event);
         if is_prompt {
             turns += 1;
-        }
-        if turns >= turn_limit || events.len() >= TAIL_EVENT_LIMIT {
-            has_more = next_tail_event(&mut lines)?.is_some();
-            break;
         }
     }
     events.reverse();
@@ -488,26 +531,6 @@ fn next_tail_event(lines: &mut summaries::TailLines) -> Result<Option<AgentEvent
             return Ok(Some(event));
         }
     }
-}
-
-#[cfg(test)]
-fn event_tail(events: Vec<AgentEvent>, turn_limit: usize) -> (Vec<AgentEvent>, bool) {
-    if events.is_empty() {
-        return (events, false);
-    }
-    let mut turns = 0usize;
-    let mut start = 0usize;
-    for (index, event) in events.iter().enumerate().rev() {
-        if matches!(event.payload, Payload::UserMessage { .. }) {
-            turns += 1;
-            if turns == turn_limit {
-                start = index;
-                break;
-            }
-        }
-    }
-    let has_more = start > 0;
-    (events.into_iter().skip(start).collect(), has_more)
 }
 
 #[derive(Deserialize)]
@@ -1136,9 +1159,172 @@ mod tests {
             prompt(5),
             event(6, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }),
         ];
-        let (tail, has_more) = event_tail(events, 2);
+        let (tail, has_more) = select_event_tail(events.into_iter().rev().map(Ok), None, 2, tail_event_byte_limit("test").unwrap()).unwrap();
         assert!(has_more);
         assert_eq!(tail.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+    }
+
+    fn tail_log(events: &[AgentEvent]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for event in events {
+            serde_json::to_writer(&mut file, event).unwrap();
+            writeln!(file).unwrap();
+        }
+        file
+    }
+
+    fn output(seq: u64, text: String) -> AgentEvent {
+        event(seq, Payload::ToolCallCompleted { call_id: format!("call-{seq}"), result: crate::events::ToolResult { text, ..Default::default() } })
+    }
+
+    #[test]
+    fn tail_counts_serialized_utf8_and_json_escapes_at_the_exact_boundary() {
+        let events = vec![prompt(1), output(2, "🦝\n\"\\".repeat(100)), output(3, "tail".into())];
+        let file = tail_log(&events);
+        let budget = serde_json::to_vec(&events[1]).unwrap().len() + 1 + serde_json::to_vec(&events[2]).unwrap().len();
+        let (page, more) = read_event_tail(file.path(), None, 20, budget).unwrap();
+        assert_eq!(page.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(more);
+        let (page, more) = read_event_tail(file.path(), None, 20, budget - 1).unwrap();
+        assert_eq!(page.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![3]);
+        assert!(more);
+        let (page, more) = read_event_tail(file.path(), Some(2), 20, budget).unwrap();
+        assert_eq!(page[0].seq, 1);
+        assert!(!more);
+        let (page, more) = read_event_tail(file.path(), Some(1), 20, budget).unwrap();
+        assert!(page.is_empty());
+        assert!(!more);
+    }
+
+    #[test]
+    fn tail_budget_includes_the_complete_rpc_envelope() {
+        let id = "\"\n🦝".repeat(20);
+        let budget = tail_event_byte_limit(&id).unwrap();
+        let overhead = serde_json::to_vec(&output(1, String::new())).unwrap().len();
+        let file = tail_log(&[output(1, "x".repeat(budget - overhead))]);
+        let (page, more) = read_event_tail(file.path(), None, 20, budget).unwrap();
+        assert!(!more);
+        assert_eq!(success_response(&id, json!({ "events": page, "hasMore": more })).to_string().len(), TAIL_RESPONSE_BYTES_LIMIT);
+        assert!(read_event_tail(file.path(), None, 20, budget - 1).is_err());
+    }
+
+    #[test]
+    fn tail_refuses_a_single_oversized_event_without_skipping_it() {
+        let events = vec![prompt(1), output(2, "large private tool result".repeat(100)), prompt(3)];
+        let file = tail_log(&events);
+        let (page, more) = read_event_tail(file.path(), None, 20, 1024).unwrap();
+        assert_eq!(page[0].seq, 3);
+        assert!(more);
+        let error = read_event_tail(file.path(), Some(3), 20, 1024).unwrap_err().to_string();
+        assert!(error.contains("event 2 is too large"));
+        assert!(error.contains("Open this conversation on your Mac"));
+        assert!(!error.contains("private tool result"));
+        let (page, more) = read_event_tail(file.path(), Some(2), 20, 1024).unwrap();
+        assert_eq!(page[0].seq, 1);
+        assert!(!more);
+        let file = tail_log(&events[..2]);
+        assert!(read_event_tail(file.path(), None, 20, 1024).is_err());
+    }
+
+    #[test]
+    fn tail_event_limit_can_split_a_single_turn_without_losing_the_prompt() {
+        let events: Vec<_> = std::iter::once(prompt(1))
+            .chain((2..=TAIL_EVENT_LIMIT as u64 + 1).map(|seq| output(seq, String::new())))
+            .collect();
+        let file = tail_log(&events);
+        let budget = tail_event_byte_limit("test").unwrap();
+        let (page, more) = read_event_tail(file.path(), None, 20, budget).unwrap();
+        assert_eq!(page.len(), TAIL_EVENT_LIMIT);
+        assert_eq!(page[0].seq, 2);
+        assert!(more);
+        let (page, more) = read_event_tail(file.path(), Some(2), 20, budget).unwrap();
+        assert_eq!(page[0].seq, 1);
+        assert!(!more);
+    }
+
+    #[test]
+    fn tail_ignores_invalid_lines_and_handles_empty_or_missing_logs() {
+        use std::io::Write;
+        let mut file = tail_log(&[prompt(1)]);
+        writeln!(file, "not an event").unwrap();
+        writeln!(file, "{{\"partial\":").unwrap();
+        let (page, more) = read_event_tail(file.path(), None, 1, 1024).unwrap();
+        assert_eq!(page[0].seq, 1);
+        assert!(!more);
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        let (page, more) = read_event_tail(empty.path(), None, 20, 1024).unwrap();
+        assert!(page.is_empty() && !more);
+        let missing = empty.path().to_owned();
+        drop(empty);
+        let (page, more) = read_event_tail(&missing, None, 20, 1024).unwrap();
+        assert!(page.is_empty() && !more);
+    }
+
+    #[test]
+    fn tail_rebounds_events_appended_by_permission_reconciliation() {
+        let mut events = vec![prompt(1), output(2, "result".into())];
+        let budget = serde_json::to_vec(&events[0]).unwrap().len() + 1 + serde_json::to_vec(&events[1]).unwrap().len();
+        events.push(event(3, Payload::PermissionDecided { request_id: "request".into(), tool_use_id: Some("tool".into()), allowed: false, label: "Lapsed".into(), automatic: true }));
+        let (page, more) = select_event_tail(events.into_iter().rev().map(Ok), None, usize::MAX, budget).unwrap();
+        assert!(more);
+        assert_eq!(page.last().unwrap().seq, 3);
+        // All returned sequences still form a suffix, so the next cursor cannot
+        // jump over an event displaced by the appended decision.
+        assert_eq!(page.iter().map(|event| event.seq).collect::<Vec<_>>(), (page[0].seq..=3).collect::<Vec<_>>());
+        assert!(serde_json::to_vec(&page).unwrap().len() <= budget + 2);
+    }
+
+    #[tokio::test]
+    async fn large_history_pages_fit_the_encrypted_websocket_and_preserve_every_cursor() {
+        use super::super::{crypto::{begin_e2ee_session, E2eeClientHandshake, HostKeypair, PayloadKind}, pairing_websocket_config, send_encrypted_text};
+        use futures_util::StreamExt;
+        use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
+        // A single turn, larger than both the plaintext and the 10 MiB wire
+        // limits. Turn limits alone cannot bound it.
+        let events: Vec<_> = std::iter::once(prompt(1))
+            .chain((2..=16).map(|seq| output(seq, "x".repeat(1024 * 1024))))
+            .collect();
+        let file = tail_log(&events);
+        let id = "\"\n🦝".repeat(20);
+        let budget = tail_event_byte_limit(&id).unwrap();
+        let key = HostKeypair::from_secret([7; 32]);
+        let handshake = E2eeClientHandshake::new(&key.public_key_b64(), "direct", None).unwrap();
+        let (ready, mut host) = begin_e2ee_session(&key, handshake.hello().clone(), "direct", None).unwrap();
+        let mut phone = handshake.accept_ready(&serde_json::to_string(&ready).unwrap()).unwrap();
+        let (host_io, phone_io) = tokio::io::duplex(64 * 1024);
+        let mut host_socket = WebSocketStream::from_raw_socket(host_io, Role::Server, Some(pairing_websocket_config())).await;
+        let mut phone_socket = WebSocketStream::from_raw_socket(phone_io, Role::Client, Some(pairing_websocket_config())).await;
+        let mut before = None;
+        let mut seen = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (page, more) = read_event_tail(file.path(), before, 20, budget).unwrap();
+            assert!(!page.is_empty());
+            assert!(page.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+            assert!(page.iter().all(|event| before.is_none_or(|cursor| event.seq < cursor)));
+            before = Some(page[0].seq);
+            seen.extend(page.iter().rev().map(|event| event.seq));
+            let response = success_response(&id, json!({ "events": page, "hasMore": more })).to_string();
+            assert!(response.len() <= TAIL_RESPONSE_BYTES_LIMIT);
+            let (sent, received) = tokio::join!(send_encrypted_text(&mut host_socket, &mut host, &response), phone_socket.next());
+            sent.unwrap();
+            let text = received.unwrap().unwrap().into_text().unwrap();
+            assert!(text.len() < super::super::PAIRING_MESSAGE_BYTES_LIMIT);
+            let frame = general_purpose::STANDARD.decode(text.as_bytes()).unwrap();
+            assert_eq!(phone.open(&frame, PayloadKind::Text).unwrap(), response.as_bytes());
+            pages += 1;
+            if !more { break; }
+        }
+        assert!(pages > 1);
+        assert_eq!(seen, (1..=16).rev().collect::<Vec<_>>());
+        // The same encrypted connection remains usable after all the pages.
+        let response = success_response("status", json!({ "ready": true })).to_string();
+        let (sent, received) = tokio::join!(send_encrypted_text(&mut host_socket, &mut host, &response), phone_socket.next());
+        sent.unwrap();
+        let text = received.unwrap().unwrap().into_text().unwrap();
+        assert_eq!(phone.open(&general_purpose::STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap(), response.as_bytes());
     }
 
     #[test]
