@@ -20,6 +20,13 @@ export interface ComputePolicy {
    * nor sent.
    */
   maxRunningWorkspacesPerMember?: number | null;
+  /**
+   * How many workspaces one person may create in an hour and in a day
+   * (PRO-73), whatever became of them. Null: the service's default
+   * (`createBudgetDefaults`). Undefined: the server does not have the setting.
+   */
+  maxCreatesPerMemberPerHour?: number | null;
+  maxCreatesPerMemberPerDay?: number | null;
   maxIdleSuspendMinutes: number | null;
   allowedMachineClasses: Record<string, string[]>;
   allowedLocations: Record<string, string[]>;
@@ -48,13 +55,15 @@ export interface ComputePolicyView {
    * limit".
    */
   runningWorkspaceCeiling: number | null;
+  /** What applies where the policy's create budget is not set (PRO-73); null from a server without it. */
+  createBudgetDefaults: { perHour: number; perDay: number } | null;
   contextRevision: string;
 }
 
 export type ComputePolicyEdit = Pick<
   ComputePolicy,
   "maxWorkspaces" | "maxRunningWorkspaces" | "maxIdleSuspendMinutes" | "allowedMachineClasses" | "allowedLocations"
-> & { expectedVersion: number; maxRunningWorkspacesPerMember?: number | null };
+> & { expectedVersion: number; maxRunningWorkspacesPerMember?: number | null; maxCreatesPerMemberPerHour?: number | null; maxCreatesPerMemberPerDay?: number | null };
 
 export type ComputeAlertCode =
   | "provisioning-paused"
@@ -163,6 +172,8 @@ export function normalizePolicyView(value: unknown): ComputePolicyView {
       maxWorkspaces: number(policy.maxWorkspaces) ?? 1,
       maxRunningWorkspaces: number(policy.maxRunningWorkspaces),
       ...("maxRunningWorkspacesPerMember" in policy ? { maxRunningWorkspacesPerMember: number(policy.maxRunningWorkspacesPerMember) } : {}),
+      ...("maxCreatesPerMemberPerHour" in policy ? { maxCreatesPerMemberPerHour: number(policy.maxCreatesPerMemberPerHour) } : {}),
+      ...("maxCreatesPerMemberPerDay" in policy ? { maxCreatesPerMemberPerDay: number(policy.maxCreatesPerMemberPerDay) } : {}),
       maxIdleSuspendMinutes: number(policy.maxIdleSuspendMinutes),
       allowedMachineClasses: allowList(policy.allowedMachineClasses),
       allowedLocations: allowList(policy.allowedLocations),
@@ -177,6 +188,10 @@ export function normalizePolicyView(value: unknown): ComputePolicyView {
     counts: { workspaces: number(value.counts.workspaces) ?? 0, running: number(value.counts.running) ?? 0 },
     workspaceCeiling: number(value.workspaceCeiling) ?? Math.max(number(policy.maxWorkspaces) ?? 1, 1),
     runningWorkspaceCeiling: number(value.runningWorkspaceCeiling),
+    createBudgetDefaults:
+      isObject(value.createBudgetDefaults) && typeof value.createBudgetDefaults.perHour === "number" && typeof value.createBudgetDefaults.perDay === "number"
+        ? { perHour: value.createBudgetDefaults.perHour, perDay: value.createBudgetDefaults.perDay }
+        : null,
     contextRevision: typeof value.contextRevision === "string" ? value.contextRevision : "",
   };
 }

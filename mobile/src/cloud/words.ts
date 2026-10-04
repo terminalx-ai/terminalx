@@ -44,6 +44,7 @@ const CODES: Record<string, string> = {
   cloud_workspace_share_forbidden: "Only organization admins and the workspace's creator can change who it is shared with.",
   // PRO-73: a workspace is managed by its creator and by organization owners and admins.
   cloud_workspace_manager_required: "Only this workspace's creator or an organization owner or admin can do that.",
+  cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later.",
   cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours first.",
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows.",
   cloud_workspace_share_not_found: "That share was already removed.",

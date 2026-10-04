@@ -35,6 +35,7 @@ const view = (overrides: Partial<ComputePolicyView> = {}, policy: Partial<Comput
   counts: { workspaces: 3, running: 2 },
   workspaceCeiling: 10,
   runningWorkspaceCeiling: null,
+  createBudgetDefaults: null,
   contextRevision: "rev-1",
   ...overrides,
 });
@@ -271,4 +272,43 @@ it("tells a member what the cap per person is", async () => {
   api.policy.mockResolvedValue(view({ canEdit: false }, { maxRunningWorkspacesPerMember: 1 }));
   render(<OrganizationCompute contextRevision="account-1" />);
   expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can have 1 of their own workspace running at once.");
+});
+
+it("sets and validates how many workspaces one person may create per hour and per day (PRO-73)", async () => {
+  api.policy.mockResolvedValue(view({ createBudgetDefaults: { perHour: 10, perDay: 20 } }, { maxCreatesPerMemberPerHour: null, maxCreatesPerMemberPerDay: null }));
+  api.updatePolicy.mockResolvedValue(view({ createBudgetDefaults: { perHour: 10, perDay: 20 } }, { version: 4, maxCreatesPerMemberPerHour: 5, maxCreatesPerMemberPerDay: 40 }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  const perHour = (await screen.findByLabelText("Maximum workspaces one person may create per hour")) as HTMLInputElement;
+  const perDay = screen.getByLabelText("Maximum workspaces one person may create per day") as HTMLInputElement;
+  // Blank is the service's default, which the field names.
+  expect([perHour.value, perHour.placeholder, perDay.value, perDay.placeholder]).toEqual(["", "10 (default)", "", "20 (default)"]);
+  const save = () => screen.getByRole("button", { name: "Save limits" }) as HTMLButtonElement;
+  // A day cannot allow fewer than one of its hours; nor is zero or text a number.
+  fireEvent.change(perHour, { target: { value: "30" } });
+  fireEvent.change(perDay, { target: { value: "20" } });
+  expect(save().disabled).toBe(true);
+  fireEvent.change(perHour, { target: { value: "0" } });
+  expect(save().disabled).toBe(true);
+  fireEvent.change(perHour, { target: { value: "5" } });
+  fireEvent.change(perDay, { target: { value: "40" } });
+  expect(save().disabled).toBe(false);
+  fireEvent.click(save());
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalledWith(expect.objectContaining({ maxCreatesPerMemberPerHour: 5, maxCreatesPerMemberPerDay: 40 }), "rev-1"));
+});
+
+it("neither shows nor sends the create budget to a server that does not have it, and tells a member what it is where it does", async () => {
+  api.updatePolicy.mockResolvedValue(view({}, { version: 4 }));
+  const { unmount } = render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Maximum workspaces");
+  expect(screen.queryByLabelText("Maximum workspaces one person may create per hour")).toBeNull();
+  fireEvent.change(screen.getByLabelText("Maximum workspaces"), { target: { value: "5" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+  await waitFor(() => expect(api.updatePolicy).toHaveBeenCalled());
+  expect(api.updatePolicy.mock.calls[0][0]).not.toHaveProperty("maxCreatesPerMemberPerHour");
+  expect(api.updatePolicy.mock.calls[0][0]).not.toHaveProperty("maxCreatesPerMemberPerDay");
+  unmount();
+
+  api.policy.mockResolvedValue(view({ canEdit: false, createBudgetDefaults: { perHour: 10, perDay: 20 } }, { maxCreatesPerMemberPerHour: 3, maxCreatesPerMemberPerDay: null }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can create 3 workspaces an hour and 20 a day.");
 });

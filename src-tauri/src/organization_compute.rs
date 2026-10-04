@@ -207,12 +207,12 @@ impl OrganizationComputeService {
             "allowedMachineClasses",
             "allowedLocations",
         ];
-        // PRO-73: the per-member running cap is optional. A server from
-        // before it rejects an unknown key, so the webview sends it only to
-        // one that reported the field.
-        const OPTIONAL: &str = "maxRunningWorkspacesPerMember";
+        // PRO-73: the per-person fields are optional. A server from before
+        // them rejects an unknown key, so the webview sends each only to a
+        // server that reported it.
+        const OPTIONAL: [&str; 3] = ["maxRunningWorkspacesPerMember", "maxCreatesPerMemberPerHour", "maxCreatesPerMemberPerDay"];
         let object = policy.as_object().ok_or_else(|| OrganizationComputeError::local("cloud_workspace_request_invalid"))?;
-        let required = object.len() - usize::from(object.contains_key(OPTIONAL));
+        let required = object.len() - OPTIONAL.iter().filter(|key| object.contains_key(**key)).count();
         if required != KEYS.len() || !KEYS.iter().all(|key| object.contains_key(*key)) {
             return Err(OrganizationComputeError::local("cloud_workspace_request_invalid"));
         }
@@ -369,12 +369,14 @@ mod tests {
         for cap in [json!(1), Value::Null] {
             let policy = json!({
                 "expectedVersion": 2, "maxWorkspaces": 4, "maxRunningWorkspaces": null, "maxRunningWorkspacesPerMember": cap,
+                "maxCreatesPerMemberPerHour": 5, "maxCreatesPerMemberPerDay": null,
                 "maxIdleSuspendMinutes": 30, "allowedMachineClasses": {}, "allowedLocations": {}
             });
             let (base, server) = serve_once("200 OK", VIEW);
             service(&base).update_policy(&policy, &revision).unwrap();
             let request = server.join().unwrap();
             assert!(request.contains(&format!(r#""maxRunningWorkspacesPerMember":{cap}"#)), "{request}");
+            assert!(request.contains(r#""maxCreatesPerMemberPerHour":5"#) && request.contains(r#""maxCreatesPerMemberPerDay":null"#), "{request}");
         }
     }
 

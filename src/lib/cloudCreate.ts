@@ -391,6 +391,7 @@ const ROLE_REFUSED_WORKSPACE = roleRefusedMessage("create a cloud workspace");
 const MESSAGES: Record<string, string> = {
   cloud_workspace_quota_exceeded: "Your organization is at its cloud workspace limit. Suspend or delete a workspace, or ask an admin to raise the limit.",
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
+  cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later, or ask an owner or admin to raise the limit.",
   cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
   cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",

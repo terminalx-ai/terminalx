@@ -57,6 +57,7 @@ describe("a refusal for lack of role or membership", () => {
       expect(lifecycleErrorMessage(code)).toBe("Only an organization owner or admin can stop, resume, archive or delete a cloud workspace (your role changed).");
     // PRO-73: the refusal for a workspace names its creator too, and the cap per person says whose workspaces count.
     expect(lifecycleErrorMessage("cloud_workspace_manager_required")).toBe("Only this workspace's creator or an organization owner or admin can stop, resume, archive or delete it.");
+    expect(createErrorMessage("cloud_workspace_create_budget_exceeded")).toBe("You have created as many cloud workspaces as your organization allows one person for now. Try again later, or ask an owner or admin to raise the limit.");
     expect(lifecycleErrorMessage("cloud_workspace_member_concurrency_exceeded")).toBe("You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.");
       expect(createErrorMessage(code)).not.toContain(code);
     }
