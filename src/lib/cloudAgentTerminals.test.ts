@@ -126,6 +126,37 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
     expect(runtime.typed.join("")).toBe("lsab");
   });
 
+  it("leaves nothing of undelivered input in the view's hidden field, and never touches it for delivered input", async () => {
+    await attachAgentTerminal(WS, client, "t-1", base);
+    await takeControl(WS, client, ID, null);
+    getInstance(ID, cloudTerminalFactory(WS, ensureAgentTerminal(WS, "t-1"), base));
+    const field = xterm.term.textarea!;
+    // Delivered: the field is xterm's (a screen reader reads it); it empties at Return as always.
+    xterm.insert("ls");
+    await settle();
+    expect(runtime.typed.join("")).toBe("ls");
+    expect(field.value).toBe("ls");
+    xterm.pressReturn();
+    await settle();
+    // A gate that refuses: what was inserted is forgotten, so the next insertion does not carry it.
+    setCloudTerminalInputGate(ID, () => false);
+    xterm.insert("k");
+    await settle();
+    expect(field.value).toBe("");
+    setCloudTerminalInputGate(ID, null);
+    xterm.insert("pwd");
+    await settle();
+    expect(runtime.typed.join("")).toBe("ls\rpwd");
+    // A refusal by the runtime is the same.
+    xterm.pressReturn();
+    await settle();
+    runtime.controlledBy("other", "u-bob");
+    xterm.insert("x");
+    await settle();
+    expect(agentTerminalOf(WS, "t-1")?.inputError).toBe("not_controller");
+    expect(field.value).toBe("");
+  });
+
   it("shows a refusal on the terminal instead of dropping it quietly", async () => {
     runtime.collab = { you: { userId: "u-me", role: "driver", canApprove: true }, participants: [], leases: [{ tabId: "t-1", holderId: "u-alice", acquiredAt: 1, expiresAt: Date.now() + 60_000 }] };
     await attachAgentTerminal(WS, client, "t-1", base);

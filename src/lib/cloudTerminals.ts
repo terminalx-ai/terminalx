@@ -268,11 +268,29 @@ export function quietCloudTerminals(workspace: string) {
   for (const terminal of [...(current?.terminals ?? []), ...(current?.agents ?? [])]) peekInstance(terminal.id)?.term.write(MODES_OFF);
 }
 
+/**
+ * Input that was not delivered leaves nothing behind in the view either.
+ * xterm keeps text that was inserted into its hidden input (by an
+ * accessibility tool, dictation or voice control, which set the field's whole
+ * value) until Return or a blur, and such a tool's next insertion hands xterm
+ * the old text together with the new: a key that only woke a stopped
+ * workspace would be typed into the agent with whatever is typed next. A key
+ * pressed on a keyboard never gets there; this covers the rest.
+ */
+function forgetUndelivered(id: string) {
+  const input = peekInstance(id)?.term.textarea;
+  if (input?.value) input.value = "";
+}
+
 function deliver(workspace: string, id: string, data: string) {
   const binding = bindings.get(id);
   const now = terminalOf(workspace, id);
-  if (!now || now.gone || now.exited) return;
+  if (!now || now.gone || now.exited) {
+    forgetUndelivered(id);
+    return;
+  }
   if (!binding) {
+    forgetUndelivered(id);
     patch(workspace, id, { inputError: "not connected" });
     return;
   }
@@ -281,7 +299,10 @@ function deliver(workspace: string, id: string, data: string) {
     .then(() => {
       if (terminalOf(workspace, id)?.inputError) patch(workspace, id, { inputError: null });
     })
-    .catch((error: unknown) => patch(workspace, id, { inputError: errorCode(error) }));
+    .catch((error: unknown) => {
+      forgetUndelivered(id);
+      patch(workspace, id, { inputError: errorCode(error) });
+    });
 }
 
 /**
@@ -299,7 +320,11 @@ export function typeIntoCloudTerminal(workspace: string, id: string, data: strin
   const run = async () => {
     // The gate of now: the view may have changed while earlier input waited.
     const allow = inputGates.get(id);
-    if (allow && !(await allow(data))) return;
+    if (allow && !(await allow(data))) {
+      // Dropped (stopped, watching, or the key that only wakes or starts): never kept, queued or sent later.
+      forgetUndelivered(id);
+      return;
+    }
     deliver(workspace, id, data);
   };
   const next = (inputChains.get(id) ?? Promise.resolve()).then(run).catch(() => undefined);

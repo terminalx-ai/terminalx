@@ -520,6 +520,42 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     };
     const notice = () => screen.queryByTestId("cloud-agent-terminal-notice");
 
+    it.each([
+      ["a key on a keyboard", (text: string) => xterm.type(text)],
+      ["text inserted by an accessibility tool, which leaves it in xterm's hidden field", (text: string) => xterm.insert(text)],
+    ])("the key that wakes a stopped workspace is never typed into the agent: %s (F1)", async (_how, press) => {
+      await open();
+      await typeBeforeStop();
+      const writesBefore = runtime.methods("pty.write").length;
+      setCatalog(workspaceItem("suspended"));
+      await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+      await act(async () => runtime.emit({ state: "suspended" }));
+      await waitFor(() => expect(status()).toBe("Stopped: the workspace is asleep. Typing here wakes it, as sending a message does."));
+      // Return, or `y`, would answer a waiting permission prompt: it wakes, once, and goes nowhere.
+      act(() => press("y"));
+      await waitFor(() => expect(activate).toHaveBeenCalledTimes(1));
+      act(() => press("k"));
+      await settle();
+      expect(activate).toHaveBeenCalledTimes(1);
+      expect(status()).toBe("Stopped: waking the workspace. The agent's terminal appears once it runs.");
+      expect(notice()).toBeNull();
+      expect(runtime.methods("pty.write")).toHaveLength(writesBefore);
+      expect(xterm.term.textarea!.value).toBe("");
+
+      // Live again, with the terminal still this person's (the runtime kept running).
+      await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+      setCatalog(workspaceItem("ready"));
+      await act(async () => runtime.connect());
+      await settle();
+      expect(runtime.typed).toEqual(["a"]);
+      // What is typed now arrives once, without the keys that woke it.
+      act(() => press("echo:after wake"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:after wake"]));
+      act(() => xterm.pressReturn());
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:after wake", "\r"]));
+      expect(notice()).toBeNull();
+    });
+
     it("says the terminal is theirs from another device and offers Take control, and it works: what is typed next arrives", async () => {
       shared("manager");
       await open();

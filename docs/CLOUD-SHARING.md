@@ -792,7 +792,14 @@ point) beside the shell terminals' but apart from them, and
 - **Looking never wakes compute.** On a stopped workspace the view says
   "Stopped" and asks the server for nothing. Typing there wakes the workspace
   once, the same single wake a send asks for (`wakeCloudWorkspaceOnce`); what
-  was typed while it slept is not kept or sent.
+  was typed while it slept is not kept or sent. That holds for every way
+  text gets in. Input the view drops (stopped, watching, the key that only
+  starts the agent) or that is refused is also removed from xterm's hidden
+  input field, where an accessibility tool, dictation or voice control leaves
+  what it inserted until Return or a blur and would otherwise hand it over
+  again with the next insertion. Input that was waiting out a dropped
+  connection is refused the moment the drop turns out to be a stop; it is
+  never sent after the wake. Cloud shells follow the same rules.
 - **It streams only while it shows.** Leaving the view or the tab detaches;
   coming back resumes after the last byte seen. After a runtime restart the
   view starts over on the new process instead of ending.

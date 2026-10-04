@@ -1034,6 +1034,15 @@ export class WorkspaceRpcClient {
         reject(new Error("Workspace runtime did not reconnect"));
       }, Math.max(0, withinMs));
       const stop = this.onState((state) => {
+        // The drop turned out to be a stop (or an end): what was waiting to
+        // be resent is refused now. It must never be sent when the workspace
+        // is woken later, least of all terminal input typed before the stop.
+        if (["suspended", "stopped", "updateRequired"].includes(state.state)) {
+          clearTimeout(timer);
+          queueMicrotask(stop);
+          reject(new Error(`Workspace runtime is ${state.state}`));
+          return;
+        }
         if (state.state !== "connected") return;
         clearTimeout(timer);
         queueMicrotask(stop);

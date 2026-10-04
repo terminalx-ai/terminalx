@@ -424,6 +424,40 @@ describe("workspace RPC client", () => {
     client.close();
   });
 
+  it("refuses input that was waiting out a drop once the drop is a stop, and never sends it after the wake", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "ls\n");
+    // The connection goes first (the stop revoked the attachment); a key lands in that moment.
+    runtime.drop();
+    const held = client.write("p1", "y\n");
+    const refused = expect(held).rejects.toThrow(/suspended/);
+    await settle();
+    // Then the client learns the workspace is stopped: the key is refused now, not kept for the reconnect.
+    for (const listener of (runtime as unknown as { states: Set<(state: WorkspaceConnectionState) => void> }).states) listener({ state: "suspended" });
+    await refused;
+    // Woken: nothing typed before the stop arrives, and what is typed now arrives once.
+    runtime.connect();
+    await settle();
+    await client.write("p1", "pwd\n");
+    expect(runtime.writes).toEqual(["ls\n", "pwd\n"]);
+    client.close();
+  });
+
+  it("still holds input through a drop that is only a drop", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.drop();
+    const held = client.write("p1", "ls\n");
+    await settle();
+    runtime.connect();
+    await expect(held).resolves.toBeUndefined();
+    expect(runtime.writes).toEqual(["ls\n"]);
+    client.close();
+  });
+
   it("fails input at once while the workspace is suspended rather than holding it", async () => {
     const runtime = new FakeRuntime();
     const client = new WorkspaceRpcClient(runtime, ids);
