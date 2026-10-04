@@ -13,14 +13,31 @@ negotiated as its own namespace (`collab/1`).
 
 ## Who may do what
 
+**Any member creates a cloud workspace and manages the ones they created
+(PRO-73).** "Manages" is stop, resume, archive, unarchive, delete, the access
+mode, shares, and the runtime-scope work below. Owners and admins manage
+every workspace, as before. The API reports whoever manages a workspace as
+its `manager`, so everything in the app that keys on that role (the lifecycle
+menu, visibility, sharing, adding tabs and terminals) follows by itself. The
+server says it has this rule with the capability
+`cloud.workspaces.member-managed.v1` (`status.memberWorkspaces`); against a
+server without it, creating stays with owners and admins and a creator who is
+a plain member is a `driver`, which is what the "against a server from before
+PRO-73" notes below describe. A new session a member starts only reuses or
+wakes a workspace they manage; with none of their own in the project it
+creates one (`planCloudStart`). The organization's limits apply to everyone,
+and an organization may also cap the running workspaces per person
+(Settings → Compute, "Running per person"; blank is no cap).
+
 Two things decide a connection's rights:
 
-- **Attachment authority** (PRO-13): `manage` for an organization admin's
-  desktop, `participate` for everyone else and every phone. Runtime-scope
+- **Attachment authority** (PRO-13): `manage` for the desktop of whoever
+  manages the workspace (an organization owner or admin, or its creator),
+  `participate` for everyone else and every phone. Runtime-scope
   work (create or kill terminals, file and Git writes, create, close or
   configure agent tabs, rotate the key) stays `manage`.
-- **Role** (per person, from the API): `manager` (owners and admins),
-  `driver` (the workspace's creator, and members shared as drivers), `viewer`
+- **Role** (per person, from the API): `manager` (owners and admins, and
+  the workspace's creator), `driver` (members shared as drivers), `viewer`
   (members shared as viewers), or `none` (any other member). `canApprove` is
   separate: managers and the creator always approve; a share says whether its
   person does. A viewer may approve.
@@ -78,7 +95,7 @@ change the mode back.
   read the tokens in the environment, edit the agent's settings files, or
   start an agent with other flags. Give `canApprove` to a driver only if
   they may do all of that.
-- **Manager** (organization owners and admins). Everything, plus the
+- **Manager** (organization owners and admins, and the workspace's creator). Everything, plus the
   runtime-scope work of a `manage` attachment (create and kill terminals,
   file and Git writes, tabs and sessions, the key) and other people's leases.
 
@@ -380,8 +397,9 @@ organization-visible. A workspace created from the sidebar starts private
   switches back to `private`; the server revokes every share with it.
 * Someone who cannot manage shares gets the same list titled "Who has
   access", with neutral copy.
-* Visibility is the API's owner-or-admin switch. A creator who is a plain
-  member (`you.role` is not `manager`) manages the shares of a workspace that
+* Visibility is for whoever manages the workspace. Against a server from
+  before PRO-73 a creator who is a plain member is not a manager
+  (`you.role` is not `manager`): they manage the shares of a workspace that
   is already organization-visible; "Share…" on their private workspace and
   "Make private again" are disabled with the reason.
 * The two calls of "make visible and share" can part ways. If the share is
