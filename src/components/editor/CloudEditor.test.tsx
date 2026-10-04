@@ -91,9 +91,17 @@ async function mount(rel = "src/main.rs") {
   return { ...rendered, entry };
 }
 
-/** The editor is shown (and follows the file) once it is ready. */
+/**
+ * The editor is shown once it is ready, and follows the file once it has
+ * subscribed to changes. The subscription is made in an effect that runs
+ * after the pane appears, so a test that makes "the agent" write must wait
+ * for both, or its notification can arrive before anyone is listening.
+ */
 async function ready(container: HTMLElement) {
-  await waitFor(() => expect(container.querySelector(".editor-pane:not(.hidden) .cm-editor")).not.toBeNull());
+  await waitFor(() => {
+    expect(container.querySelector(".editor-pane:not(.hidden) .cm-editor")).not.toBeNull();
+    expect(cloud.listeners.size).toBeGreaterThan(0);
+  });
 }
 
 function type(container: HTMLElement, text: string) {
@@ -122,6 +130,23 @@ describe("a cloud workspace file in the editor", () => {
     act(() => cloud.agentWrites("src/main.rs", "fn main() { agent2(); }\n"));
     await screen.findByText("This file changed on disk while you were editing.");
     expect(view(container).state.doc.toString()).toBe("fn main() { agent(); }\n// mine\n");
+  });
+
+  it("catches up on a change that landed before it began watching", async () => {
+    // The agent's edit lands after the file was read and before the editor
+    // has subscribed to changes, so its notification reaches no one.
+    const watch = cloud.watch;
+    let subscriptions = 0;
+    cloud.watch = (listener) => {
+      subscriptions += 1;
+      cloud.files.set("src/main.rs", { text: "fn main() { agent(); }\n", version: 2 });
+      return watch(listener);
+    };
+    const { container } = await mount();
+    // It was read as it was before the edit: the edit is not what was loaded.
+    expect(subscriptions).toBe(1);
+    await waitFor(() => expect(view(container).state.doc.toString()).toBe("fn main() { agent(); }\n"));
+    expect(screen.queryByText("This file changed on disk while you were editing.")).toBeNull();
   });
 
   it("never overwrites a concurrent edit without an explicit choice", async () => {
@@ -188,6 +213,12 @@ describe("a cloud workspace file in the editor", () => {
     await ready(container);
     const content = view(container).contentDOM;
     type(container, "// mine\n");
+
+    // The pane focuses its editor a frame after it is shown. Let that
+    // happen, then move the focus away, so "elsewhere" does not depend on
+    // whether the frame has run yet.
+    await waitFor(() => expect(content.contains(document.activeElement)).toBe(true));
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
 
     // Not this editor's keys while the focus is elsewhere.
     expect(fireEvent.keyDown(document.body, { key: "s", code: "KeyS", ctrlKey: true })).toBe(true);
