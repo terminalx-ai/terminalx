@@ -384,12 +384,15 @@ export function launchLatencyText(item: CloudWorkspaceListItem | CloudWorkspaceS
 
 // ---- Words -----------------------------------------------------------------
 
-// Offered only to an owner or admin: a refusal means the role this app held has changed.
+// Any member creates a workspace (PRO-73). This refusal comes only from a server from before
+// that rule, where the app offered it to an owner or admin: the role it held has changed.
 const ROLE_REFUSED_WORKSPACE = roleRefusedMessage("create a cloud workspace");
 
 const MESSAGES: Record<string, string> = {
   cloud_workspace_quota_exceeded: "Your organization is at its cloud workspace limit. Suspend or delete a workspace, or ask an admin to raise the limit.",
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
+  cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later, or ask an owner or admin to raise the limit.",
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
   cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",
   // Offered because the app still held an owner's or admin's role: it changed since.
@@ -447,6 +450,7 @@ const FAILURES: Record<string, string> = {
   "repository-sync-failed": "A repository could not be switched to its branch.",
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
+  "agent-model-unavailable": "The chosen Claude model is not available in this workspace. Choose a model listed by the workspace's Claude CLI.",
   "agent-sign-in-required": `The agent isn't connected for this organization, so the first prompt was not sent. An owner or admin can connect it in ${AGENT_LOGIN_PLACE}.`,
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",

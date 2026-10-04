@@ -505,7 +505,7 @@ export function refreshCloudCatalog(orgId: string | null = defaultOrgId(getAccou
       // The list is read every 30 s and names this person's role on every
       // workspace: a role changed by an owner shows here before the account
       // session is next renewed.
-      noteListedOrgRole(orgId, listedOrgManages(list.value), roleAsk);
+      noteListedOrgRole(orgId, listedOrgManages(list.value, getAccount().status.memberWorkspaces === true), roleAsk);
     } else {
       patchOrg(orgId, { error: errorText(list.reason) });
       // A list answers "not found" only to someone who is not a member of the
@@ -696,7 +696,7 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
         : mergeFeedDelta(state.orgs[orgId]?.workspaces ?? [], { ...entry, tombstones: entry.tombstones ?? [] }, feed.deletedWorkspaceIds ?? []);
       await take(orgId, list);
       if (state.owner !== owner) return;
-      noteListedOrgRole(orgId, listedOrgManages(list), requestedAt);
+      noteListedOrgRole(orgId, listedOrgManages(list, getAccount().status.memberWorkspaces === true), requestedAt);
     }
     // The cursor says "this desktop holds that catalog". Where part of it was
     // not taken it does not, so the next request reads the whole catalog again.
@@ -715,15 +715,23 @@ export function refreshCloudFeed(now: () => number = Date.now): Promise<void> {
 
 /**
  * What a workspace list says about this person's role in its organization:
- * true for an owner or admin (the API's `manager`, or a `manage` authority on
- * a server that does not report roles), false for a member, and null when the
- * list does not say (no workspaces, an older server, or rows that disagree).
+ * true for an owner or admin, false for a member, and null when the list
+ * does not say (no workspaces, an older server, or rows that disagree).
+ *
+ * Against a server from before PRO-73 the API's `manager` (or a `manage`
+ * authority where it reports no roles) is an owner or admin, so every row
+ * agrees one way or the other. With PRO-73 (`creatorsManage`) a member is
+ * the manager of the workspaces they created, so a `manager` row is no
+ * evidence of an organization role: only a row this person does not manage
+ * says something, namely that they are not an owner or admin (who manage
+ * every workspace they see).
  */
-export function listedOrgManages(list: Pick<CloudWorkspaceList, "workspaces">): boolean | null {
+export function listedOrgManages(list: Pick<CloudWorkspaceList, "workspaces">, creatorsManage = false): boolean | null {
   const signals = list.workspaces
     .map(({ workspace }) => (workspace.you ? workspace.you.role === "manager" : workspace.authority === "manage" ? true : workspace.authority === "participate" ? false : null))
     .filter((signal): signal is boolean => signal !== null);
   if (!signals.length) return null;
+  if (creatorsManage) return signals.some((signal) => !signal) ? false : null;
   const manages = signals[0];
   return signals.every((signal) => signal === manages) ? manages : null;
 }

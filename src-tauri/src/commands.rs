@@ -1568,6 +1568,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             worktree_name: None,
             branch: src.branch.clone(),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: src.issue.clone(),
@@ -1590,6 +1591,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             entry.worktree_name = Some(wt.name);
             entry.branch = Some(wt.branch);
             entry.base_ref = Some(wt.base_tree);
+            entry.worktree_base = wt.worktree_base;
         }
         // Copy the log, re-stamping envelopes so the new tab owns them.
         if let Ok(dir) = store::sessions_dir() {
@@ -2758,6 +2760,7 @@ mod command_tests {
             worktree_name: Some("gone".into()),
             branch: Some("feature/gone".into()),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

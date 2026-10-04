@@ -38,6 +38,8 @@ mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
 #[cfg(feature = "desktop")]
+mod cloud_ports;
+#[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
 mod agent_local_login;
@@ -362,6 +364,9 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            cloud_remote::cloud_port_forward,
+            cloud_remote::cloud_port_unforward,
+            cloud_remote::cloud_port_forwards,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,

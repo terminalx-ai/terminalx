@@ -12,7 +12,8 @@ import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -172,6 +173,7 @@ export function CloudAgentsView({
       </div>
       {creating && manage && (
         <NewAgentForm
+          client={workspaceState === "suspended" || workspaceState === "archived" ? null : client}
           onCancel={() => setCreating(false)}
           onCreate={async (params) => {
             setError(null);
@@ -330,7 +332,7 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
     signIn.reason === "token-expired"
       ? `The organization's ${agent} login has expired`
       : signIn.reason === "shared-use-policy"
-        ? `The organization's ${agent} login is limited to workspaces its owners and admins create`
+        ? `The organization's ${agent} login is limited to its owners and admins`
         : signIn.state === "not-connected"
           ? `${agent} isn't connected for this organization`
           : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;
@@ -395,20 +397,22 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
 }
 
 function NewAgentForm({
+  client,
   onCreate,
   onCancel,
 }: {
+  client: WorkspaceRpcClient | null;
   onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => Promise<void>;
   onCancel: () => void;
 }) {
   const [agent, setAgent] = useState("claude");
-  // Aliases only: this list is the desktop's, and the workspace's CLI may not run a version pinned from it.
-  const models = offeredOn(useModels(agent), false);
+  const { models, refresh } = usePickerModels(useModels(agent), true, client, agent);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
   const [busy, setBusy] = useState(false);
-  const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault);
+  const modelId = models.some((m) => m.id === model) ? model : "";
+  const chosen = models.find((m) => m.id === modelId) ?? models.find((m) => m.isDefault);
   const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
   return (
     <form
@@ -417,18 +421,18 @@ function NewAgentForm({
       onSubmit={(event) => {
         event.preventDefault();
         setBusy(true);
-        void onCreate({ agent, model: model || undefined, effort: effort || undefined, mode }).finally(() => setBusy(false));
+        void onCreate({ agent, model: modelId || undefined, effort: effort || undefined, mode }).finally(() => setBusy(false));
       }}
     >
       <select aria-label="Agent" className={select} value={agent} onChange={(e) => (setAgent(e.target.value), setModel(""), setEffort(""))}>
         <option value="claude">Claude</option>
         <option value="codex">Codex</option>
       </select>
-      <select aria-label="Model" className={select} value={model} onChange={(e) => setModel(e.target.value)}>
+      <select aria-label="Model" onFocus={refresh} onPointerDown={refresh} className={select} value={modelId} onChange={(e) => setModel(e.target.value)}>
         <option value="">Default model</option>
         {models.map((m) => (
           <option key={m.id} value={m.id}>
-            {modelOptionText(m, models, false)}
+            {modelOptionText(m, models)}
           </option>
         ))}
       </select>
@@ -714,6 +718,7 @@ function CloudAgentPane({
                   onSetMode={(mode) => configure({ mode })}
                   reportedModel={transcript.model}
                   modelsAreLocal={false}
+                  modelClient={sleeping || !connected ? null : client}
                   disabled={!!blocked}
                   settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
                   settingsNote={tab.settingsIgnored ? SETTINGS_IGNORED_REASON : tab.pendingConfig && mayConfigure ? SETTINGS_WITH_NEXT_MESSAGE : null}

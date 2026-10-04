@@ -170,6 +170,32 @@ afterEach(() => {
   sessions.selectSession(null);
 });
 
+describe("a member's new session only uses a workspace they manage (PRO-73)", () => {
+  const mine = { you: { role: "manager", canApprove: true, canManageShares: true }, authority: "manage" };
+  const shared = { you: { role: "driver", canApprove: false, canManageShares: false }, authority: "participate" };
+  const visible = { you: { role: "none", canApprove: false, canManageShares: false }, authority: "participate" };
+
+  it("creates a workspace of their own rather than adding a session to, or waking, someone else's", async () => {
+    // Running and shared with them as a driver; another only visible; another stopped.
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 50, ...shared }), item("other", { repositories: [api], accessMode: "organization", lastActivityAt: 40, ...visible }), item("asleep", { repositories: [api], accessMode: "organization", state: "suspended", lastActivityAt: 30, ...shared })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+  });
+
+  it("reuses their own running workspace, and wakes their own stopped one, whatever else is in the project", async () => {
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 90, ...shared }), item("own", { repositories: [api], lastActivityAt: 10, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:own` } });
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 90, ...shared }), item("own", { repositories: [api], state: "suspended", lastActivityAt: 10, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "wake", node: { key: `cloud:${ORG}:own` } });
+  });
+
+  it("follows the attachment the server would grant where it reports no role", async () => {
+    await place([item("theirs", { repositories: [api], accessMode: "organization", authority: "participate" })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    await place([item("managed", { repositories: [api], authority: "manage" })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse" });
+  });
+});
+
 describe("new session in a cloud project", () => {
   it("reuses the most recently active running workspace, with a worktree, and selects the new session", async () => {
     await place([item("old", { repositories: [api], lastActivityAt: 5 }), item("recent", { repositories: [api], lastActivityAt: 50 })]);
