@@ -31,6 +31,8 @@ pub struct Workspace {
     pub ahead: u32,
     /// Commits behind this checkout's configured upstream.
     pub behind: u32,
+    /// Clean, uncommitted, unmerged or merged, as known locally (no fetch).
+    pub state: crate::landed::State,
 }
 
 fn shortstat(cwd: &Path) -> (u32, u32) {
@@ -71,12 +73,15 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
             path: root.to_string_lossy().into_owned(),
             branch: None, head: None, is_main: true, managed: false,
             uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0,
+            state: crate::landed::State::Unknown,
         }]);
     }
     let managed_root = git::worktree_root(project);
     let managed_root = std::fs::canonicalize(&managed_root).unwrap_or(managed_root);
     let mut out = Vec::new();
     let entries = git::list_worktrees(project)?;
+    // Read once for the project, not once per worktree.
+    let context = crate::landed::list_context(&root);
     for (path, branch) in entries {
         let p = PathBuf::from(&path);
         let p = std::fs::canonicalize(&p).unwrap_or(p);
@@ -88,6 +93,15 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
         let branch = branch.or_else(|| git::current_branch(&p));
         let (additions, deletions) = shortstat(&p);
         let (ahead, behind) = git::upstream_counts(&p);
+        let changed = uncommitted(&p);
+        // The project's own checkout is never removed, so only whether it
+        // has uncommitted work is worth a word.
+        let head = git::head_commit(&p);
+        let state = if is_main {
+            if changed > 0 { crate::landed::State::Uncommitted } else { crate::landed::State::Clean }
+        } else {
+            crate::landed::state_in_list(&context, &p, branch.as_deref(), head.as_deref(), changed)
+        };
         out.push(Workspace {
             name: if is_main {
                 crate::store::projects::project_name(&root.to_string_lossy())
@@ -95,14 +109,15 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
                 p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone())
             },
             path: p.to_string_lossy().into_owned(),
-            head: git::head_commit(&p),
+            head,
             unpushed: unpushed(&p, branch.as_deref()),
             ahead,
             behind,
             branch,
             is_main,
             managed,
-            uncommitted: uncommitted(&p),
+            state,
+            uncommitted: changed,
             additions,
             deletions,
         });
@@ -189,6 +204,18 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
         }
     }
     d
+}
+
+/// What a workspace takes on disk, for the list. Only a checkout of this
+/// project is measured: its root or one of its worktrees. Symlinks are
+/// counted as links and never followed.
+pub fn size(project: &Path, path: &Path) -> Result<u64> {
+    let target = std::fs::canonicalize(path)?;
+    let known = git::list_worktrees(project)?.into_iter().any(|(worktree, _)| std::fs::canonicalize(worktree).is_ok_and(|p| p == target));
+    if !known {
+        anyhow::bail!("{} is not a workspace of this project", path.display());
+    }
+    Ok(git::size_on_disk(&target))
 }
 
 /// How a worktree is removed.
@@ -311,12 +338,40 @@ mod tests {
         assert_eq!(f.ahead, 0);
         assert_eq!(f.behind, 0);
         assert!(!f.managed);
+        assert_eq!(f.state, crate::landed::State::Uncommitted);
+        // The worktree was made inside the project here, so the project's
+        // own checkout sees it as an untracked folder.
+        assert_eq!(ws[0].state, crate::landed::State::Uncommitted);
         let d = disposition(p, &wt);
         assert_eq!(d.uncommitted, 1);
         assert!(!d.is_main);
         delete(p, &wt, DeleteOptions { delete_branch: true, direct: git::DirectDelete::Allowed, verified_head: None }).unwrap();
         assert_eq!(list(p).unwrap().len(), 1);
         assert!(delete(p, p, DeleteOptions { delete_branch: false, direct: git::DirectDelete::Allowed, verified_head: None }).is_err());
+    }
+
+    #[test]
+    fn size_is_measured_only_for_this_projects_workspaces() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("project");
+        std::fs::create_dir_all(&p).unwrap();
+        sh(&p, &["init", "-q", "-b", "main"]);
+        sh(&p, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        sh(&p, &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()]);
+        std::fs::write(wt.join("big.bin"), vec![1u8; 300 * 1024]).unwrap();
+        // A link out of the workspace is counted as a link, not followed.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("huge.bin"), vec![1u8; 4 * 1024 * 1024]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, wt.join("link")).unwrap();
+
+        let bytes = size(&p, &wt).unwrap();
+        assert!((300 * 1024..2 * 1024 * 1024).contains(&bytes), "{bytes}");
+        assert!(size(&p, &outside).is_err(), "not one of this project's workspaces");
+        assert!(size(&p, dir.path()).is_err());
     }
 
     #[test]

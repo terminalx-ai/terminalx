@@ -260,6 +260,34 @@ describe("complete navigation hierarchy", () => {
     expect(store.getSessionStore().selectedSessionId).toBe("one");
   });
 
+  it("lists a workspace with no sessions, with its state, its size and the actions to open or delete it", async () => {
+    const empty: Workspace = { ...workspace("/alpha/.raccoon/worktrees/idle-plum-wren"), name: "idle-plum-wren", branch: "raccoon/idle-plum-wren", isMain: false, managed: true, state: "merged" };
+    const byHand: Workspace = { ...workspace("/elsewhere/by-hand"), name: "by-hand", branch: "feature/by-hand", isMain: false, managed: false, state: "unmerged" };
+    workspaces["/alpha"] = [{ ...workspace("/alpha"), state: "clean" }, empty, byHand];
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, string>) => {
+      if (command === "list_workspaces") return [...workspaces[args!.projectPath]];
+      if (command === "workspace_size") return args!.path === empty.path ? 2_500_000_000 : 40_000_000;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => { await store.refreshWorkspaces("/alpha"); });
+    mount();
+
+    // No session runs in either worktree, and both are there.
+    const idle = screen.getByRole("treeitem", { name: "idle-plum-wren" });
+    expect(within(idle).queryByText(/^Session /)).toBeNull();
+    expect(within(idle).getByText("merged")).toBeTruthy();
+    expect(await within(idle).findByText("2.5 GB")).toBeTruthy();
+    expect(within(idle).getByRole("button", { name: "New session in idle-plum-wren" })).toBeTruthy();
+    expect(within(idle).getByRole("button", { name: "Workspace menu for idle-plum-wren" })).toBeTruthy();
+
+    // One made outside the app is listed too, and marked as such.
+    const external = screen.getByRole("treeitem", { name: "feature/by-hand" });
+    expect(within(external).getByText("external").getAttribute("title")).toBe("A worktree not created by TerminalX");
+    expect(within(external).getByText("unmerged")).toBeTruthy();
+    expect(await within(external).findByText("40 MB")).toBeTruthy();
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_size", { projectPath: "/alpha", path: empty.path });
+  });
+
   it("follows a renamed pre-session workspace and falls back to main after deletion", async () => {
     const managed = { ...workspace("/alpha/old"), name: "old", isMain: false, managed: true };
     workspaces["/alpha"].push(managed);

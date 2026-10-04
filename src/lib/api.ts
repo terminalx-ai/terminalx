@@ -333,6 +333,7 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
+  workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
   /**
    * What a workspace holds. With `fetch`, the default branch is fetched and
    * the clean-and-merged check is made too (`landed`); that is for the

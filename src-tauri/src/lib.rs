@@ -510,6 +510,7 @@ pub fn run() {
             commands::rename_workspace,
             commands::workspace_disposition,
             commands::remove_workspace,
+            commands::workspace_size,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,

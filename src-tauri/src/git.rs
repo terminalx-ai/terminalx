@@ -108,6 +108,16 @@ pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Run git with extra environment variables.
+pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let out = git().current_dir(cwd).args(args).envs(env.iter().copied()).output().with_context(|| format!("git {}", args.join(" ")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("git {}: {}", args.join(" "), if err.is_empty() { format!("exit {}", out.status) } else { err });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }

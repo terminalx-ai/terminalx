@@ -25,6 +25,7 @@ import {
   GroupTitle,
   ItemTitle,
   RowChip,
+  WorkspaceFacts,
   RowTime,
   ShellTabRow,
   StatusStripe,
@@ -54,6 +55,7 @@ import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { getPrefs } from "@/lib/prefs";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
+import { useWorkspaceSizes } from "@/lib/workspaceSizes";
 import {
   addTab,
   archiveSession,
@@ -142,6 +144,9 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
   const mobileDriven = useMobileDrivenTabs();
   const harnessNames = useMemo(() => new Map(store.harnesses.map((harness) => [harness.id, harness.name])), [store.harnesses]);
 
+  // Sizes arrive after the list: each is a walk of the whole checkout.
+  const sizes = useWorkspaceSizes(project.path, useMemo(() => (project.kind === "folder" ? [] : workspaces.map((workspace) => workspace.path)), [project.kind, workspaces]), expanded);
+
   const filter = useSidebarFilter();
   const groups = useMemo(
     () => groupProjectWorkspaces(project.path, workspaces, store.sessions, store.showArchived, store.selectedSessionId, filter.active ? filter.shows : undefined),
@@ -190,6 +195,7 @@ export function ProjectNavigation({ project, expanded }: { project: Project; exp
           tabViews={tabViews.views}
           mobileDriven={mobileDriven}
           harnessNames={harnessNames}
+          bytes={group.workspace ? sizes[group.workspace.path] : undefined}
         />
       ))}
     </TreeGroup>
@@ -208,7 +214,10 @@ function WorkspaceNode({
   tabViews,
   mobileDriven,
   harnessNames,
+  bytes,
 }: {
+  /** What the workspace takes on disk, once measured. */
+  bytes?: number;
   project: Project;
   group: WorkspaceGroup;
   expanded: boolean;
@@ -252,7 +261,8 @@ function WorkspaceNode({
         ) : (
           <GroupTitle label={displayName} onActivate={openWorkspace} />
         )}
-        <RowChip>{kind}</RowChip>
+        <RowChip title={kind === "external" ? "A worktree not created by TerminalX" : undefined}>{kind}</RowChip>
+        {workspace && project.kind !== "folder" ? <WorkspaceFacts state={workspace.state} bytes={bytes} /> : null}
         {workspace ? <DiffStats additions={workspace.additions} deletions={workspace.deletions} unpushed={workspace.unpushed} /> : null}
         {workspace ? (
           <RowActions>

@@ -92,9 +92,9 @@ pub enum Fetch {
     /// for many workspaces of the same project).
     #[cfg_attr(not(test), allow(dead_code))]
     JustFetched,
-    /// Use what is already known locally: for a view that refreshes often
-    /// and must not touch the network. Such a check never says "safe".
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Use what is already known locally: the quick state shown for every
+    /// workspace in a list, which must not wait on the network. Such a check
+    /// never says "safe".
     Skip,
 }
 
@@ -138,6 +138,23 @@ pub struct Landed {
     changes: u64,
 }
 
+/// A workspace's state in one word, for a list.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum State {
+    /// Nothing uncommitted and nothing of its own to merge.
+    Clean,
+    /// Uncommitted or untracked files, or a stash made on its branch.
+    Uncommitted,
+    /// Committed work that is not in the default branch.
+    Unmerged,
+    /// Its commits are in the default branch (by squash or rebase).
+    Merged,
+    /// It could not be read.
+    #[default]
+    Unknown,
+}
+
 impl Landed {
     fn describe_digest(&self) -> String {
         format!(
@@ -153,6 +170,25 @@ impl Landed {
             self.fresh,
             self.not_verified.as_deref().unwrap_or("-"),
         )
+    }
+
+    /// The one-word state. Uncommitted work comes first: it is what is lost
+    /// soonest. This is the local view (no fetch), so "unmerged" can lag a
+    /// merge that happened on the remote; the removal dialog fetches.
+    /// The list itself uses [`state_in_list`], which must agree with this.
+    #[cfg(test)]
+    pub fn state(&self) -> State {
+        if !self.checked {
+            State::Unknown
+        } else if !self.clean {
+            State::Uncommitted
+        } else {
+            match self.merged {
+                None => State::Unmerged,
+                Some(MergedBy::Squash | MergedBy::Rebase) => State::Merged,
+                Some(MergedBy::Ancestor | MergedBy::NoChanges) => State::Clean,
+            }
+        }
     }
 
     fn describe_losses(&self) -> Vec<String> {
@@ -193,10 +229,13 @@ fn count(cwd: &Path, args: &[&str]) -> Option<u32> {
 /// counts every one of them: over-warning is the safe side. `None` when the
 /// stash list cannot be read, which is not the same as "no stashes".
 fn stashes_on(cwd: &Path, branch: Option<&str>) -> Option<u32> {
-    let out = stash_list(cwd)?;
+    Some(stashes_in(&stash_list(cwd)?, branch))
+}
+
+fn stashes_in(stash_subjects: &str, branch: Option<&str>) -> u32 {
     let branch = branch.unwrap_or("(no branch)");
     let (wip, on) = (format!("WIP on {branch}:"), format!("On {branch}:"));
-    Some(out.lines().filter(|line| line.starts_with(&wip) || line.starts_with(&on)).count() as u32)
+    stash_subjects.lines().filter(|line| line.starts_with(&wip) || line.starts_with(&on)).count() as u32
 }
 
 #[cfg(test)]
@@ -350,10 +389,15 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         return Some((Some(MergedBy::NoChanges), 0));
     }
     // The whole branch as one commit on top of where it started; nothing
-    // refers to it, so it is an unreachable object git collects later.
-    let squashed = git::run(
+    // refers to it, so it is an unreachable object git collects later. The
+    // dates are fixed so the same branch always gives the same object: the
+    // check runs for every workspace in a list and must not add an object
+    // each time.
+    let epoch = "1970-01-01T00:00:00Z";
+    let squashed = git::run_env(
         cwd,
         &["-c", "user.name=TerminalX", "-c", "user.email=noreply@terminalx.invalid", "commit-tree", "HEAD^{tree}", "-p", &merge_base, "-m", "squash check"],
+        &[("GIT_AUTHOR_DATE", epoch), ("GIT_COMMITTER_DATE", epoch)],
     )
     .ok()?;
     let as_one = git::run(cwd, &["cherry", base, squashed.trim()]).ok()?;
@@ -382,6 +426,70 @@ fn known_default_branch(project: &Path) -> Option<String> {
         }
     }
     ["main", "master"].into_iter().find(|name| git::run(project, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok()).map(String::from)
+}
+
+/// What every workspace of one project shares when their states are worked
+/// out for a list: read once, not once per workspace.
+pub struct ListContext {
+    base: Option<String>,
+    base_commit: Option<String>,
+    /// The subjects of the project's stash entries (the stash is shared by
+    /// all its worktrees); `None` when they cannot be read.
+    stash_subjects: Option<String>,
+}
+
+pub fn list_context(project: &Path) -> ListContext {
+    let (base, _, _) = base_for(project, Fetch::Skip);
+    let base_commit = base.as_deref().and_then(|base| git::run(project, &["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]).ok()).map(|sha| sha.trim().to_string());
+    ListContext { base, base_commit, stash_subjects: stash_list(project) }
+}
+
+/// How a commit stands against a base commit never changes, so it is worked
+/// out once per pair. A list is redrawn on every change to any workspace,
+/// and this is the costly part of each row.
+fn merged_cache() -> &'static MergedCache {
+    static CACHE: std::sync::OnceLock<MergedCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// `(HEAD, base commit)` to how HEAD's work got into the base, if it did.
+type MergedCache = std::sync::Mutex<std::collections::HashMap<(String, String), Option<MergedBy>>>;
+
+/// A workspace's one-word state for a list: the same answer as
+/// [`check`]`(.., Fetch::Skip).state()`, from what the list already read
+/// (`head`, `uncommitted`) plus one cached comparison. It skips what a word
+/// does not need: whether the branch is pushed, and the files hidden from
+/// `git status`. Nothing is removed on the strength of it.
+pub fn state_in_list(context: &ListContext, path: &Path, branch: Option<&str>, head: Option<&str>, uncommitted: u32) -> State {
+    // Without its own `.git` the directory is not a checkout any more, and
+    // git would answer for whatever repository encloses it.
+    if std::fs::symlink_metadata(path.join(".git")).is_err() {
+        return State::Unknown;
+    }
+    let Some(stash_subjects) = &context.stash_subjects else { return State::Unknown };
+    if uncommitted > 0 || stashes_in(stash_subjects, branch) > 0 {
+        return State::Uncommitted;
+    }
+    let (Some(base), Some(base_commit), Some(head)) = (&context.base, &context.base_commit, head) else { return State::Unmerged };
+    let key = (head.to_string(), base_commit.clone());
+    let cached = merged_cache().lock().unwrap().get(&key).copied();
+    let merged = match cached {
+        Some(merged) => merged,
+        None => {
+            let Some((merged, _)) = merged_into(path, base) else { return State::Unknown };
+            let mut cache = merged_cache().lock().unwrap();
+            if cache.len() > 4096 {
+                cache.clear();
+            }
+            cache.insert(key, merged);
+            merged
+        }
+    };
+    match merged {
+        None => State::Unmerged,
+        Some(MergedBy::Squash | MergedBy::Rebase) => State::Merged,
+        Some(MergedBy::Ancestor | MergedBy::NoChanges) => State::Clean,
+    }
 }
 
 /// What a project's branches are compared with: `(base, not_verified,
@@ -440,7 +548,9 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     };
     landed.stashes = stashes.unwrap_or(0);
     landed.clean = status == Some(0) && stashes == Some(0);
-    landed.pushed = git::run(path, &["branch", "-r", "--contains", "HEAD"]).is_ok_and(|out| !out.trim().is_empty());
+    // Only the warning before a removal says whether the branch is pushed;
+    // a check that does not go to the network is not that.
+    landed.pushed = fetch != Fetch::Skip && git::run(path, &["branch", "-r", "--contains", "HEAD"]).is_ok_and(|out| !out.trim().is_empty());
     if let Some(base) = &base {
         match merged_into(path, base) {
             Some((merged, unmerged)) => {
@@ -1073,6 +1183,110 @@ mod tests {
         // A stash made on another branch is not this workspace's.
         let other = PathBuf::from(git::create_worktree(&f.project, "calm-teal-bee", Some("main")).unwrap().path);
         assert!(check(&f.project, &other, Fetch::Skip).clean);
+    }
+
+    #[test]
+    fn the_one_word_state_follows_the_check() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let state = |wt: &Path| check(&f.project, wt, Fetch::Skip).state();
+        assert_eq!(state(&wt), State::Clean);
+        std::fs::write(wt.join("new.txt"), "x").unwrap();
+        assert_eq!(state(&wt), State::Uncommitted);
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "work"]);
+        assert_eq!(state(&wt), State::Unmerged);
+
+        // Squash-merged on the remote: still "unmerged" locally until something fetches.
+        let branch = Fixture::branch("quiet-amber-fox");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        f.elsewhere(|other| {
+            sh(other, &["merge", "-q", "--squash", &format!("origin/{branch}")]);
+            sh(other, &["commit", "-q", "-m", "squashed"]);
+        });
+        assert_eq!(state(&wt), State::Unmerged);
+        sh(&f.project, &["fetch", "-q", "origin", "main"]);
+        assert_eq!(state(&wt), State::Merged);
+
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        assert_eq!(state(&wt), State::Unknown);
+    }
+
+    #[test]
+    fn the_state_in_a_list_agrees_with_the_full_check_at_every_step() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        let listed = |wt: &Path| {
+            let context = list_context(&f.project);
+            let uncommitted = sh(wt, &["status", "--porcelain", "--untracked-files=normal", "--"]).lines().count() as u32;
+            state_in_list(&context, wt, git::current_branch(wt).as_deref(), git::head_commit(wt).as_deref(), uncommitted)
+        };
+        let agree = |wt: &Path, expected: State| {
+            assert_eq!(listed(wt), expected);
+            assert_eq!(check(&f.project, wt, Fetch::Skip).state(), expected);
+            // Asked again, the cached answer is the same one.
+            assert_eq!(listed(wt), expected);
+        };
+        agree(&wt, State::Clean);
+        std::fs::write(wt.join("new.txt"), "x").unwrap();
+        agree(&wt, State::Uncommitted);
+        sh(&wt, &["stash", "push", "-q", "--include-untracked"]);
+        agree(&wt, State::Uncommitted);
+        sh(&wt, &["stash", "pop", "-q"]);
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "work"]);
+        agree(&wt, State::Unmerged);
+
+        // The base moves: the answer for the same HEAD is worked out again.
+        let branch = Fixture::branch("quiet-amber-fox");
+        sh(&wt, &["push", "-q", "origin", &branch]);
+        f.elsewhere(|other| {
+            sh(other, &["merge", "-q", "--squash", &format!("origin/{branch}")]);
+            sh(other, &["commit", "-q", "-m", "squashed"]);
+        });
+        agree(&wt, State::Unmerged);
+        sh(&f.project, &["fetch", "-q", "origin", "main"]);
+        agree(&wt, State::Merged);
+
+        std::fs::remove_file(wt.join(".git")).unwrap();
+        agree(&wt, State::Unknown);
+    }
+
+    /// Not a pass/fail test: prints what the state of 20 worktrees costs,
+    /// the full check against the list's shortcut. Run with
+    /// `cargo test measure_the_list -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_the_list_state_cost() {
+        let f = Fixture::new();
+        let worktrees: Vec<PathBuf> = (0..20).map(|i| f.worktree(&format!("wt-{i}"))).collect();
+        let time = |label: &str, work: &dyn Fn()| {
+            let start = std::time::Instant::now();
+            work();
+            println!("{label}: {:?}", start.elapsed());
+        };
+        let listed = || {
+            let context = list_context(&f.project);
+            for wt in &worktrees {
+                let head = git::head_commit(wt);
+                state_in_list(&context, wt, git::current_branch(wt).as_deref(), head.as_deref(), 0);
+            }
+        };
+        time("full check per worktree, 20 worktrees", &|| worktrees.iter().for_each(|wt| drop(check(&f.project, wt, Fetch::Skip))));
+        time("list shortcut, first time", &listed);
+        time("list shortcut, cached", &listed);
+    }
+
+    #[test]
+    fn checking_again_adds_no_objects() {
+        let f = Fixture::new();
+        let wt = f.worktree("quiet-amber-fox");
+        let objects = || sh(&f.project, &["count-objects"]);
+        check(&f.project, &wt, Fetch::Skip);
+        let after_first = objects();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        check(&f.project, &wt, Fetch::Skip);
+        assert_eq!(objects(), after_first, "the squash check reuses one object however often it runs");
     }
 
     #[test]
