@@ -384,6 +384,12 @@ impl Default for TurnTail {
 }
 
 impl TurnTail {
+    /// The last reply already delivered for this turn. A watcher closing a
+    /// turn uses it to complete an automation without publishing it again.
+    pub fn last_assistant_message(&self) -> Option<&str> {
+        self.said.as_deref()
+    }
+
     /// Note an assistant message from the transcript. `false` means this is a
     /// record the app has already published and the caller must drop it.
     pub fn observe(&mut self, text: &str) -> bool {

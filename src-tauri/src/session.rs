@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -327,10 +327,11 @@ pub struct TabRuntime {
 }
 
 impl TabRuntime {
-    /// A turn opens. Whatever the transcript last said was about a turn
-    /// before this one, and must not be read as this one's end.
+    /// A turn opens, starting a fresh activity clock. Whatever the transcript
+    /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
         self.turn_open = true;
+        self.last_activity = Instant::now();
         if let Engine::Cli(p) = &mut self.engine {
             p.transcript_turn = None;
         }
@@ -541,20 +542,25 @@ impl SessionManager {
     /// moment one cares to name, without waiting for it.
     fn watch_tabs(&self, patience: recovery::Patience, now: Instant, drawn_at: impl Fn(&str) -> Option<Instant>) {
         let tabs: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
-        for rt in tabs {
-            let mut rt = rt.lock().unwrap();
+        for rt_arc in tabs {
+            let mut rt = rt_arc.lock().unwrap();
             let (pane, ended) = match &rt.engine {
                 Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn == Some(tui::TurnMark::Ended)),
                 _ => (None, false),
             };
             let silent = now.saturating_duration_since(rt.last_activity);
             if rt.turn_open && ended && silent >= patience.settle {
+                let final_message = match &rt.engine {
+                    Engine::Cli(p) => p.turn_tail.last_assistant_message().map(str::to_owned),
+                    _ => None,
+                };
                 // Not `close_open_turn`: that one defers to the latch that
                 // keeps two closers from racing, and a turn a hook opened
                 // never reset it. Left to the latch, such a turn would not
                 // close here, and skipping the rest of the pass for it would
                 // leave the tab "Working" for good with no warning either.
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
+                self.after_turn_completed(&rt_arc, rt, final_message);
                 continue;
             }
             // Only a PTY-first tab has a pane; the other engines are judged
@@ -1075,7 +1081,6 @@ impl SessionManager {
         }
         rt.open_turn();
         rt.turn_started_at = Some(Instant::now());
-        rt.last_activity = Instant::now();
         self.set_status(&mut rt, TabStatus::InProgress);
         Ok(SendOutcome { queued: false, events })
     }
@@ -2263,14 +2268,11 @@ impl SessionManager {
                 self.settle_reply(&rt_arc, &tail, final_text.as_deref());
                 let mut rt = rt_arc.lock().unwrap();
                 rt.last_activity = Instant::now();
-                self.forget_tool_answers(&mut rt);
-                self.close_open_turn(&mut rt, TurnStatus::Ok, final_text);
-                drop(rt);
-                self.observer.automation_completed(
-                    &frame.session,
-                    &frame.tab,
-                    frame.payload["last_assistant_message"].as_str().map(String::from),
-                );
+                if rt.turn_open {
+                    self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
+                    self.after_turn_completed(&rt_arc, rt, final_text);
+                    return HookReply::default();
+                }
             }
             // Codex only: the reader pressed Escape in the TUI.
             "Interrupt" => {
@@ -2298,6 +2300,17 @@ impl SessionManager {
         }
         self.restart_if_due(&rt_arc, &frame.session, &frame.tab);
         HookReply::default()
+    }
+
+    /// Finish a Stop hook or a watcher-closed turn. Forget its answers while
+    /// still holding the tab lock, then release it before notifying automation
+    /// or scheduling a settings restart that may re-enter the tab.
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
+        self.forget_tool_answers(&mut rt);
+        let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        drop(rt);
+        self.observer.automation_completed(&session, &tab, final_message);
+        self.restart_if_due(rt_arc, &session, &tab);
     }
 
     /// A setting the CLI only reads at startup changed mid-turn: the restart

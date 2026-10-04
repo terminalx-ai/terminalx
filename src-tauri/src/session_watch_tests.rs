@@ -4,13 +4,13 @@
 //! The transcript is the recorded `interactive_session.jsonl`, written into
 //! the file the tab tails record by record.
 //!
-//! Nothing in these tests waits. The watcher takes the moment it judges from
+//! No test waits for a watcher deadline. The watcher takes the moment it judges from
 //! and the time each pane last drew as arguments, so the rig keeps a clock of
 //! its own that only moves when a test moves it, and reads the transcript on
 //! the test's thread instead of leaving it to the poll thread. A five-minute
 //! silence is `advance(PATIENCE.stall)`, and a machine too busy to schedule a
-//! thread for a second changes nothing. The one test that runs a real pane
-//! waits only for the pane to draw, never for an amount of time to pass.
+//! thread for a second changes nothing. Tests of a real pane or settings
+//! restart wait for their events, never for an amount of time to pass.
 use std::cell::Cell;
 use std::time::Duration;
 
@@ -26,6 +26,23 @@ const SESSION: &str = "watched-session";
 const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
+#[derive(Default)]
+struct Observer {
+    rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
+    completed: Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+impl SessionObserver for Observer {
+    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
+        let rt = self.rt.lock().unwrap().upgrade().unwrap();
+        let rt = rt.try_lock().expect("completion must release the tab lock before calling the observer");
+        if let Engine::Cli(p) = &rt.engine {
+            assert!(p.answered.is_empty(), "the turn's tool answers must be forgotten before notifying the observer");
+        }
+        self.completed.lock().unwrap().push((session.into(), tab.into(), message));
+    }
+}
+
 /// The fixture's first turn: everything up to the record that says it ended,
 /// and that record.
 fn first_turn() -> (String, String) {
@@ -37,6 +54,7 @@ fn first_turn() -> (String, String) {
 
 struct Rig {
     manager: SessionManager,
+    observer: Arc<Observer>,
     rt: Arc<Mutex<TabRuntime>>,
     tail: Arc<tui::Tail>,
     pane: String,
@@ -64,12 +82,13 @@ impl Rig {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(256));
+        let observer = Arc::new(Observer::default());
         // Through the constructor: the endpoint's fields are the hooks
         // module's business. Nothing here listens on it.
         let control = crate::hooks::prepare_control().unwrap();
         let manager = SessionManager::new(
             sink,
-            Arc::new(crate::sink::NoObserver),
+            observer.clone(),
             Arc::new(Host::new()),
             Arc::new(pty::Terminals::new()),
             Arc::new(Default::default()),
@@ -128,11 +147,12 @@ impl Rig {
             me: std::sync::Weak::new(),
         }));
         rt.lock().unwrap().me = Arc::downgrade(&rt);
+        *observer.rt.lock().unwrap() = Arc::downgrade(&rt);
         manager.tabs.lock().unwrap().insert(key_of(SESSION, TAB), rt.clone());
         // No `follow_transcript`: the poll thread would read the file
         // whenever it was next scheduled. `pump` is what it runs, and the rig
         // runs it itself, so a record is read exactly when a test appends it.
-        Rig { manager, rt, tail, pane, token, transcript, now: Cell::new(now), drew: Cell::new(None), _dir: dir, _home: home }
+        Rig { manager, observer, rt, tail, pane, token, transcript, now: Cell::new(now), drew: Cell::new(None), _dir: dir, _home: home }
     }
 
     /// Time passes, and nothing else happens.
@@ -227,6 +247,144 @@ impl Rig {
     }
 }
 
+/// A send opens the turn before the input thread types anything. Silence
+/// before that send must not make the new turn look stalled (#237).
+#[test]
+fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::of(kind, "");
+        let old = Instant::now() - PATIENCE.stall - MOMENT;
+        rig.rt.lock().unwrap().last_activity = old;
+        rig.drew.set(Some(old));
+        let prompt = PromptText { agent: "hello".into(), display: "hello".into() };
+        // The production send path, up to dispatching the input thread. Do
+        // not use `stamp`: the send itself must refresh the activity clock.
+        let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+        assert!(!queued);
+        rig.now.set(Instant::now());
+        rig.tick();
+        assert!(rig.turn_open());
+        assert_eq!(rig.status(), TabStatus::InProgress, "{kind:?}: a just-sent prompt is not stalled");
+        assert_eq!(rig.recovery(), None);
+
+        let sent_at = rig.rt.lock().unwrap().last_activity;
+        rig.now.set(sent_at + PATIENCE.stall - MOMENT);
+        rig.tick();
+        assert_eq!(rig.status(), TabStatus::InProgress);
+        assert_eq!(rig.recovery(), None);
+        assert!(!rig.kinds().iter().any(|k| k == "recovery"));
+
+        // If nothing ever follows the send, its own silence still times out.
+        rig.advance(MOMENT);
+        rig.tick();
+        assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+    }
+}
+
+#[test]
+fn the_watcher_completes_an_automation_with_the_last_assistant_message_once() {
+    let rig = Rig::new();
+    // Both turns in the recorded conversation, so the saved reply must be
+    // the last one ("second"), not the first assistant message ("pong").
+    rig.append(FIXTURE);
+    assert!(rig.observer.completed.lock().unwrap().is_empty());
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), Some("second".to_string()))]);
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert!(!rig.turn_open());
+    assert_eq!(rig.completed_turns(), 1);
+    let events = rig.events();
+    assert_eq!(events.iter().filter(|e| matches!(&e.payload, Payload::AssistantText { text, .. } if text == "second")).count(), 1);
+    assert!(events.iter().any(|e| matches!(&e.payload, Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, .. })));
+
+    rig.tick();
+    rig.hook("Stop", json!({ "last_assistant_message": "second" }));
+    assert_eq!(rig.completed_turns(), 1);
+    assert_eq!(rig.observer.completed.lock().unwrap().len(), 1, "a late hook must not complete the automation again");
+}
+
+#[test]
+fn the_watcher_can_complete_a_turn_without_an_assistant_message() {
+    let rig = Rig::new();
+    rig.hook("UserPromptSubmit", json!({ "prompt": "hello" }));
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert!(!rig.turn_open());
+    assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
+}
+
+#[test]
+fn a_stop_hook_still_notifies_automation_when_only_a_hook_opened_the_turn() {
+    let rig = Rig::new();
+    // Without the prompt's transcript record the close latch is still shut.
+    // Preserve Stop's notification even when that latch defers the boundary.
+    rig.hook("UserPromptSubmit", json!({ "prompt": "hello" }));
+    rig.hook("Stop", json!({}));
+    assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), None)]);
+}
+
+#[test]
+fn the_watcher_forgets_tool_answers_for_the_completed_turn() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.append(include_str!("harness/codex/fixtures/rollout.jsonl"));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.answered.insert(tool_key("Bash", &json!({ "command": "ls" })), true);
+        p.answered.insert(tool_key("Bash", &json!({ "command": "rm file" })), false);
+    }
+    assert!(rig.turn_open());
+    assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended));
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert!(!rig.turn_open());
+    let rt = rig.rt.lock().unwrap();
+    let Engine::Cli(p) = &rt.engine else { unreachable!() };
+    assert!(p.answered.is_empty(), "neither allowed nor denied answers carry into the next turn");
+}
+
+#[test]
+fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "watched", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.start_turn();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.restart_when_idle = true;
+        // Exercise the real restart through releasing the old CLI, then
+        // refuse a new process instead of launching an installed agent.
+        rt.stopping = true;
+    }
+    let (sent, restarted) = std::sync::mpsc::channel();
+    rig.manager.sink.listen("tab_status", Box::new(move |payload| {
+        let event: serde_json::Value = serde_json::from_str(payload).unwrap();
+        if event["status"] == "idle" {
+            let _ = sent.send(());
+        }
+    }));
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle - MOMENT);
+    rig.tick();
+    assert!(rig.turn_open());
+    assert!(restarted.try_recv().is_err(), "the pending restart must wait for the turn");
+    rig.advance(MOMENT);
+    rig.tick();
+    restarted.recv_timeout(Duration::from_secs(10)).expect("the watcher never ran the settings restart");
+    let rt = rig.rt.lock().unwrap();
+    assert!(matches!(rt.engine, Engine::None), "the restart released the old CLI");
+    assert!(!rt.turn_open);
+    assert_eq!(rt.status, TabStatus::Idle);
+    assert_eq!(rig.observer.completed.lock().unwrap().len(), 1);
+}
+
 /// A single step longer than the limit — a long build, a long generation —
 /// with the terminal drawing throughout is work, not a stall.
 #[test]
@@ -312,6 +470,7 @@ fn a_transcript_end_waits_out_the_hooks_before_the_watcher_closes_it() {
     rig.advance(PATIENCE.settle);
     rig.tick();
     assert_eq!(rig.completed_turns(), 1, "one turn, closed once");
+    assert_eq!(*rig.observer.completed.lock().unwrap(), [(SESSION.to_string(), TAB.to_string(), Some("pong".to_string()))]);
 }
 
 /// With no `Stop` hook at all, the watcher closes the turn once the hooks
