@@ -852,6 +852,15 @@ mod tests {
         assert!(landed.merged.is_some() && landed.safe, "{landed:?}");
     }
 
+    /// Commit what is in the index with plumbing. `git commit` asks a diff
+    /// whether there is anything to commit, and a diff told to ignore a
+    /// submodule may answer no when the submodule is all that changed.
+    fn commit_index(cwd: &Path, message: &str) {
+        let tree = sh(cwd, &["write-tree"]).trim().to_string();
+        let commit = sh(cwd, &["commit-tree", &tree, "-p", "HEAD", "-m", message]).trim().to_string();
+        sh(cwd, &["update-ref", "HEAD", &commit]);
+    }
+
     #[test]
     fn a_submodule_bump_hidden_by_ignore_all_is_not_no_changes() {
         let f = Fixture::new();
@@ -865,20 +874,24 @@ mod tests {
         let v1 = sh(&lib, &["rev-parse", "HEAD"]).trim().to_string();
         commit(&lib, "lib.txt", "v2\n");
 
-        // The project records it at v1, told to ignore it in every diff.
+        // The project records it at v1, told to ignore it in every diff. The
+        // commit a submodule is recorded at is written to the index directly:
+        // with `ignore = all`, newer git does not let `git add` stage it.
+        let lib_v2 = sh(&lib, &["rev-parse", "HEAD"]).trim().to_string();
         sh(&f.project, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", lib.to_str().unwrap(), "lib"]);
-        sh(&f.project.join("lib"), &["checkout", "-q", &v1]);
         sh(&f.project, &["config", "-f", ".gitmodules", "submodule.lib.ignore", "all"]);
-        sh(&f.project, &["add", "."]);
-        sh(&f.project, &["commit", "-q", "-m", "add lib at v1"]);
+        sh(&f.project, &["add", ".gitmodules"]);
+        sh(&f.project, &["update-index", "--cacheinfo", &format!("160000,{v1},lib")]);
+        commit_index(&f.project, "add lib at v1");
         sh(&f.project, &["push", "-q", "origin", "main"]);
+        assert_eq!(sh(&f.project, &["rev-parse", "HEAD:lib"]).trim(), v1);
 
         // In the workspace, an unpushed commit moves the submodule to v2.
         let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
         sh(&wt, &["-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init"]);
-        sh(&wt.join("lib"), &["checkout", "-q", "main"]);
-        sh(&wt, &["add", "lib"]);
-        sh(&wt, &["commit", "-q", "-m", "bump lib to v2"]);
+        sh(&wt, &["update-index", "--cacheinfo", &format!("160000,{lib_v2},lib")]);
+        commit_index(&wt, "bump lib to v2");
+        assert_eq!(sh(&wt, &["rev-parse", "HEAD:lib"]).trim(), lib_v2);
 
         // Git's own diff sees nothing, because it was told not to look...
         assert!(git::run(&wt, &["diff", "--quiet", "origin/main", "HEAD", "--"]).is_ok());
