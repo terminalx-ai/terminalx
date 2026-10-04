@@ -1,4 +1,5 @@
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
+import { leaseLive, type Participant, type TabLease } from "@terminalx/portable/workspaceCollab";
 import type { CloudRole } from "./api";
 import type { CloudLinkProblem } from "./link";
 import type { OutboxEntry } from "./outbox";
@@ -37,6 +38,15 @@ const CODES: Record<string, string> = {
   cloud_workspace_archived: "This workspace is archived.",
   cloud_workspace_rate_limited: "Too many requests just now. Try again in a moment.",
   cloud_workspace_agent_command_limit: "Too many messages are waiting for this workspace. Wait for the agent, or cancel one.",
+  cloud_workspace_share_redundant: "This person already has access as owner, admin or creator.",
+  cloud_workspace_share_requires_organization_access: "Make the workspace visible to the organization first.",
+  cloud_workspace_share_limit: "This workspace is already shared with the maximum number of people (64). Remove someone first.",
+  cloud_workspace_share_forbidden: "Only organization admins and the workspace's creator can change who it is shared with.",
+  cloud_workspace_share_not_found: "That share was already removed.",
+  organization_member_not_found: "This person is no longer a member of this organization.",
+  lease_cooldown: "You drove this tab moments ago; others get the first chance. Try again in two minutes.",
+  lease_held: "Someone else is driving this tab.",
+  forbidden: "Your role in this workspace does not allow that.",
   "tab-closed": "That agent tab was closed.",
   "request-not-pending": "That request was already answered.",
   "lease-held": "Someone else is driving this tab. Your message was not sent.",
@@ -78,9 +88,47 @@ export function accessText(access: "not-shared" | "deleted" | "gone"): { title: 
   return { title: "This workspace is no longer shared with you", detail: "What this phone kept of it was removed. Ask an organization admin or its creator if you need it again." };
 }
 
+type NameOf = (userId: string | null | undefined) => string;
+
+/** Who drives a tab, in words, and what this person may do about it. */
+export function leaseLine(lease: TabLease | null | undefined, selfId: string | null, role: CloudRole | null, now: number, nameOf: NameOf): { text: string; mine: boolean; heldByOther: boolean; canTake: boolean; canRelease: boolean; canTakeOver: boolean } {
+  const live = leaseLive(lease, now) ? lease : null;
+  const mine = !!live && live.holderId === selfId;
+  const heldByOther = !!live && !mine;
+  const drives = role === "manager" || role === "driver";
+  return {
+    text: mine ? "You are driving" : live ? `Driving: ${nameOf(live.holderId)}` : "No one is driving",
+    mine,
+    heldByOther,
+    canTake: drives && !live,
+    canRelease: mine,
+    canTakeOver: heldByOther && role === "manager",
+  };
+}
+
+const PRESENCE_SHOWN = 3;
+
+/** The other people here, each with what they are doing. */
+export function presenceLine(participants: Participant[], selfId: string | null, tabTitle: (tabId: string) => string | null, nameOf: NameOf): string | null {
+  const others = participants.filter((person) => person.userId !== selfId);
+  if (!others.length) return null;
+  // Whole names only: three people in full, the rest as a count, so the line never ends mid-name.
+  const shown = others.slice(0, PRESENCE_SHOWN).map((person) => {
+    const where = person.tabId ? tabTitle(person.tabId) : null;
+    return `${nameOf(person.userId)}${person.role === "viewer" ? " (viewing only)" : ""}${person.activity === "typing" ? " · typing" : ""}${where ? ` · on ${where}` : ""}`;
+  });
+  const more = others.length - shown.length;
+  return `Also here: ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
 /** What became of something this phone sent; null once there is nothing to say (it was applied). */
-export function outboxLine(entry: OutboxEntry, stopped = false): { tone: "idle" | "warn"; text: string } | null {
+export function outboxLine(entry: OutboxEntry, stopped = false, nameOf: NameOf = () => "Someone else"): { tone: "idle" | "warn"; text: string } | null {
   if (entry.state === "applied") return null;
+  if (entry.state === "rejected" && entry.category === "lease-held") {
+    const holder = entry.receipt?.holderId;
+    return { tone: "warn", text: `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving. Your message was not sent.` };
+  }
+  if (entry.state === "rejected" && entry.category === "access-revoked") return { tone: "warn", text: "Not sent: your access changed." };
   if (entry.state === "unsent") return { tone: "warn", text: stopped ? "Not sent. This workspace is stopped, and sending starts it." : "Not delivered yet. It is sent when the phone is back online." };
   if (entry.state === "queued") return { tone: "idle", text: entry.wake === "queued" || entry.wake === "in-progress" ? "Starting the workspace…" : entry.wake === "unavailable" ? "Waiting: the workspace could not be started." : "Sent. Waiting for the agent." };
   if (entry.state === "leased") return { tone: "idle", text: "Delivering…" };
