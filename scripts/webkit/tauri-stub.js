@@ -26,6 +26,11 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     cloud_agent_cache_load: { tabs: {} },
     cloud_agent_outbox: [],
     cloud_agent_checkpoints: [],
+    // Settings → Account → Agent logins (PRO-79): one connected, one revoked, one missing.
+    cloud_agent_logins: { credentials: [
+      { provider: "claude", authKind: "oauth-credentials-json", fingerprint: "sha256:ab", displayIdentity: "ada.lovelace@example.com", version: 2, updatedAt: now, state: "connected", sharedUse: "organization" },
+      { provider: "codex", authKind: "api-key", fingerprint: "sha256:cd", version: 1, updatedAt: now, state: "revoked", sharedUse: "organization" },
+    ] },
     list_automations: [],
     automations_list: [],
     automation_issue_states: [],

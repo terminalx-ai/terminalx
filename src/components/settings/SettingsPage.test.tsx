@@ -3,8 +3,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { DEFAULT_SETTINGS_TAB, SettingsPage } from "./SettingsPage";
+import { getPrefs } from "@/lib/prefs";
 
 afterEach(cleanup);
+
+it("records an explicit browser choice only when the Website links control is used", () => {
+  render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+  expect(getPrefs()).toMatchObject({ linkBrowser: "system", linkBrowserChosen: false });
+
+  fireEvent.click(screen.getByRole("radio", { name: "TerminalX Browser" }));
+  expect(getPrefs()).toMatchObject({ linkBrowser: "terminalx", linkBrowserChosen: true });
+  expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: "terminalx", linkBrowserChosen: true });
+
+  fireEvent.click(screen.getByRole("radio", { name: "System Browser" }));
+  expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ linkBrowser: "system", linkBrowserChosen: true });
+});
 
 describe("Settings dismissal", () => {
   it("offers Close and keeps Back working", () => {
