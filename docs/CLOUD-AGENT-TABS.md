@@ -438,6 +438,29 @@ project root. The runtime then:
   A desktop from before these categories shows the category itself in
   "The agent did not start (…)".
 
+### Repositories without a first prompt
+
+A workspace created without a first prompt (the web console's Launch dialog
+sends the repositories and no `launch`) has no intent, so there is nothing to
+deliver. The claim then carries a `checkout` plan: the same repositories and
+the workspace's own work branch. The same plan comes with a launch that has
+already settled, which covers a launch whose clone failed and a machine whose
+disk was replaced.
+
+- Each repository is set up once: cloned as above, then put on the work
+  branch. Its path is then written to `checkout.json` next to `launch.json`.
+- A path in that record is never touched again. A checkout that is already
+  there without a record (made by a launch, or by an older runtime) is
+  adopted as it is and recorded. So a later boot never switches a person's
+  branch back and never clones again a checkout they removed.
+- A replaced disk has neither checkout nor record, so it is cloned again.
+  The first prompt is not: its intent is settled.
+- No agent is started and nothing is reported to the server. A repository
+  that fails is logged and tried again on the next boot; the others are
+  still set up.
+- It counts as work while it runs, like a launch, so idle suspend does not
+  cut a clone short. The same checks apply to the plan as to a launch.
+
 **The GitHub token.** `launch.rs` never holds one. Git asks the credential
 helper `cloud_github` installs at boot (PRO-14), which gets a short-lived
 token from the API for this workspace's repositories only. The token is not
