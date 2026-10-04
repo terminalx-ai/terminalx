@@ -119,7 +119,8 @@ async function scan(target: CloudTarget, run: Running): Promise<void> {
     if (signal.aborted) return;
     const input = inputOf(manifest);
     run.manifest = input;
-    const skipped = { ...manifest.skipped };
+    const skipped: Record<string, number> = { ...manifest.skipped };
+    const sizes = new Map(manifest.entries.map((entry) => [entry.path, entry.size]));
     if (manifest.truncated) {
       publish(key, { phase: "failed", progress: null, skipped, error: "The workspace has more files than a mirror holds (50,000). Exclude folders in .terminalx-mirror-ignore." });
       return;
@@ -135,6 +136,8 @@ async function scan(target: CloudTarget, run: Running): Promise<void> {
     }
     const plan = await api.cloudMirrorPlan(orgId, workspaceId, input);
     if (signal.aborted) return;
+    // What this computer left out on top of what the workspace did.
+    for (const [reason, count] of Object.entries(plan.refused)) skipped[reason] = (skipped[reason] ?? 0) + count;
     if (plan.divergedTotal > 0) {
       publish(key, { phase: "diverged", progress: null, diverged: plan.diverged, divergedTotal: plan.divergedTotal, skipped, error: null });
       return;
@@ -147,9 +150,12 @@ async function scan(target: CloudTarget, run: Running): Promise<void> {
     let bytes = 0;
     publish(key, { phase: "syncing", diverged: [], divergedTotal: 0, skipped, error: null, progress: { files: 0, totalFiles: plan.fetch.length, bytes: 0, totalBytes: plan.fetchBytes } });
     for (const [index, path] of plan.fetch.entries()) {
-      const file = await readRemoteFile(run.client, path, { signal });
+      // No more than the manifest listed is read, and the native side
+      // refuses a file that is not exactly that long.
+      const size = sizes.get(path) ?? 0;
+      const file = await readRemoteFile(run.client, path, { signal, maxBytes: size });
       if (signal.aborted) return;
-      await api.cloudMirrorStage(orgId, workspaceId, path, base64(file.bytes), file.etag);
+      await api.cloudMirrorStage(orgId, workspaceId, path, base64(file.bytes), size, file.etag);
       etags[path] = file.etag;
       bytes += file.bytes.length;
       publish(key, { progress: { files: index + 1, totalFiles: plan.fetch.length, bytes, totalBytes: plan.fetchBytes } });
@@ -271,6 +277,34 @@ export async function resolveCloudMirror(target: CloudTarget, resolution: "disca
   const resolved = await api.cloudMirrorResolve(target.orgId, target.workspaceId, run.manifest, resolution);
   await scanNow(target, run);
   return resolved.exportedTo;
+}
+
+/**
+ * Remove the mirrored copy of every workspace `keep` does not vouch for:
+ * one the person lost access to, one that was deleted, or all of them at
+ * sign-out. Only what the mirror wrote goes; files the person added to the
+ * folder and the copies they kept when resolving stay. Connects to nothing.
+ */
+export async function purgeCloudMirrors(keep: (orgId: string, workspaceId: string) => boolean): Promise<void> {
+  let mirrors: { organizationId: string; workspaceId: string }[];
+  try {
+    mirrors = await api.cloudMirrorList();
+  } catch {
+    return;
+  }
+  if (!Array.isArray(mirrors)) return;
+  for (const { organizationId, workspaceId } of mirrors) {
+    if (keep(organizationId, workspaceId)) continue;
+    const key = cloudWorkspaceKey(organizationId, workspaceId);
+    stop(key);
+    try {
+      await api.cloudMirrorPurge(organizationId, workspaceId);
+    } catch {
+      continue;
+    }
+    states.delete(key);
+    for (const listener of listeners) listener();
+  }
 }
 
 /** For tests. */

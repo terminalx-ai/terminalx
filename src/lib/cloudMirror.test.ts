@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
     cloudMirrorStage: vi.fn(),
     cloudMirrorPublish: vi.fn(),
     cloudMirrorResolve: vi.fn(),
+    cloudMirrorList: vi.fn(),
+    cloudMirrorPurge: vi.fn(),
   },
   listeners: new Set<Listener>(),
   connected: new Map<string, unknown>(),
@@ -52,10 +54,11 @@ const manifest = (manifestId: string, paths: string[]) => ({
   repositories: [{ repo: ".", branch: "main", head: "a".repeat(40) }],
   entries: paths.map((path) => ({ path, size: 3, version: `${manifestId}-${path}`, executable: false })),
   totalBytes: paths.length * 3,
-  skipped: { secret: 1, excluded: 0, symlink: 0, unsupported: 0, tooLarge: 0 },
+  skipped: { secret: 1, toolConfig: 0, gitDirectory: 0, excluded: 0, symlink: 0, unsupported: 0, tooLarge: 0 },
   truncated: false,
 });
-const plan = (fetch: string[], patch: Record<string, unknown> = {}) => ({ fetch, fetchBytes: fetch.length * 3, remove: 0, unchanged: 0, diverged: [], divergedTotal: 0, refused: 0, upToDate: false, ...patch });
+const refused = { secret: 0, toolConfig: 0, gitDirectory: 0, collision: 0, tooLong: 0, invalid: 0 };
+const plan = (fetch: string[], patch: Record<string, unknown> = {}) => ({ fetch, fetchBytes: fetch.length * 3, remove: 0, unchanged: 0, diverged: [], divergedTotal: 0, refused, upToDate: false, ...patch });
 
 /** A workspace connects because someone opened it. Returns its disconnect. */
 function connect(rpc: unknown = client()): () => void {
@@ -116,7 +119,9 @@ describe("the local mirror's sync loop", () => {
     mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
     connect();
     await settle();
-    expect(mocks.api.cloudMirrorStage.mock.calls.map(([, , path, , etag]) => [path, etag])).toEqual([["a.ts", "etag-a.ts"], ["b.ts", "etag-b.ts"]]);
+    // Each file goes to the native side with the size the manifest listed, which it enforces.
+    expect(mocks.api.cloudMirrorStage.mock.calls.map(([, , path, , size, etag]) => [path, size, etag])).toEqual([["a.ts", 3, "etag-a.ts"], ["b.ts", 3, "etag-b.ts"]]);
+    expect(mocks.readRemoteFile.mock.calls.map(([, path, options]) => [path, options.maxBytes])).toEqual([["a.ts", 3], ["b.ts", 3]]);
     expect(mocks.api.cloudMirrorPublish).toHaveBeenCalledWith("org-1", "ws-1", expect.objectContaining({ manifestId: "m1" }), { "a.ts": "etag-a.ts", "b.ts": "etag-b.ts" });
     const state = mirror.cloudMirrorState(KEY);
     expect(state.phase).toBe("synced");
@@ -232,6 +237,41 @@ describe("the local mirror's sync loop", () => {
     expect(mirror.cloudMirrorState(KEY).phase).toBe("failed");
     expect(mirror.cloudMirrorState(KEY).error).toMatch(/more files/);
     expect(mocks.api.cloudMirrorPlan).toHaveBeenCalledTimes(plans);
+  });
+
+  it("adds what this computer left out to what the workspace left out", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
+    mocks.api.cloudMirrorPlan.mockResolvedValue(plan(["a.ts"], { refused: { ...refused, secret: 1, gitDirectory: 4, collision: 2 } }));
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).skipped).toMatchObject({ secret: 2, gitDirectory: 4, collision: 2, toolConfig: 0 });
+  });
+
+  it("removes the copy of a workspace the person can no longer open, and every copy at sign-out", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
+    mocks.api.cloudMirrorPurge.mockResolvedValue(2);
+    mocks.api.cloudMirrorList.mockResolvedValue([
+      { organizationId: "org-1", workspaceId: "ws-1" },
+      { organizationId: "org-1", workspaceId: "ws-kept" },
+      { organizationId: "org-2", workspaceId: "ws-other" },
+    ]);
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("synced");
+    // The organization's list no longer has ws-1 for this person (role none, or deleted).
+    await mirror.purgeCloudMirrors((orgId, workspaceId) => orgId !== "org-1" || workspaceId === "ws-kept");
+    expect(mocks.api.cloudMirrorPurge.mock.calls).toEqual([["org-1", "ws-1"]]);
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("off");
+    // Its loop is stopped: nothing more is read from that workspace.
+    const scans = mocks.readMirrorManifest.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(mirror.MIRROR_SCAN_MS * 3);
+    expect(mocks.readMirrorManifest).toHaveBeenCalledTimes(scans);
+
+    mocks.api.cloudMirrorPurge.mockClear();
+    await mirror.purgeCloudMirrors(() => false);
+    expect(mocks.api.cloudMirrorPurge.mock.calls.map(([, workspace]) => workspace)).toEqual(["ws-1", "ws-kept", "ws-other"]);
+    expect(mocks.retain).not.toHaveBeenCalled();
+    expect(mocks.wake).not.toHaveBeenCalled();
   });
 
   it("says a runtime from before mirrors cannot be mirrored, and asks it nothing", async () => {

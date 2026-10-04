@@ -2640,13 +2640,14 @@ pub async fn cloud_mirror_plan(organization_id: String, workspace_id: String, ma
     tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.plan(&manifest).map_err(err)).await.map_err(err)?
 }
 
-/// `relative` is workspace-relative; `data_b64` is the file as `fs.read` gave it.
+/// `relative` is workspace-relative; `data_b64` is the file as `fs.read` gave
+/// it; `size` is what the manifest listed for it.
 #[tauri::command]
-pub async fn cloud_mirror_stage(organization_id: String, workspace_id: String, relative: String, data_b64: String, etag: String) -> CmdResult<()> {
+pub async fn cloud_mirror_stage(organization_id: String, workspace_id: String, relative: String, data_b64: String, size: u64, etag: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         use base64::Engine as _;
         let bytes = base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes()).map_err(err)?;
-        cloud_mirror(&organization_id, &workspace_id)?.stage(&relative, &bytes, &etag).map_err(err)
+        cloud_mirror(&organization_id, &workspace_id)?.stage(&relative, &bytes, size, &etag).map_err(err)
     })
     .await
     .map_err(err)?
@@ -2670,4 +2671,29 @@ pub async fn cloud_mirror_resolve(
     resolution: crate::cloud_mirror::Resolution,
 ) -> CmdResult<crate::cloud_mirror::Resolved> {
     tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.resolve(&manifest, resolution).map_err(err)).await.map_err(err)?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMirrorRef {
+    organization_id: String,
+    workspace_id: String,
+}
+
+/// The mirrors on this computer, so the copy of a workspace the person can
+/// no longer open can be removed.
+#[tauri::command]
+pub async fn cloud_mirror_list() -> CmdResult<Vec<CloudMirrorRef>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let found = crate::cloud_mirror::existing(&store::root().map_err(err)?);
+        Ok(found.into_iter().map(|(organization_id, workspace_id)| CloudMirrorRef { organization_id, workspace_id }).collect())
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Remove what the mirror wrote. Returns the number of files removed.
+#[tauri::command]
+pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.purge().map_err(err)).await.map_err(err)?
 }

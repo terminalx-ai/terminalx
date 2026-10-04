@@ -338,8 +338,11 @@ export const api = {
     invoke<{ diverged: CloudMirrorDivergence[]; divergedTotal: number }>("cloud_mirror_check", { organizationId, workspaceId }),
   cloudMirrorPlan: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput) =>
     invoke<CloudMirrorPlan>("cloud_mirror_plan", { organizationId, workspaceId, manifest }),
-  cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, etag: string) =>
-    invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, etag }),
+  cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, size: number, etag: string) =>
+    invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, size, etag }),
+  cloudMirrorList: () => invoke<{ organizationId: string; workspaceId: string }[]>("cloud_mirror_list"),
+  /** Removes what the mirror wrote; files the person added and their exports stay. */
+  cloudMirrorPurge: (organizationId: string, workspaceId: string) => invoke<number>("cloud_mirror_purge", { organizationId, workspaceId }),
   cloudMirrorPublish: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, etags: Record<string, string>) =>
     invoke<CloudMirrorPublished>("cloud_mirror_publish", { organizationId, workspaceId, manifest, etags }),
   cloudMirrorResolve: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, resolution: "discard" | "export") =>
@@ -459,7 +462,8 @@ export interface CloudMirrorPlan {
   unchanged: number;
   diverged: CloudMirrorDivergence[];
   divergedTotal: number;
-  refused: number;
+  /** Listed by the workspace and left out on this computer, by reason. */
+  refused: { secret: number; toolConfig: number; gitDirectory: number; collision: number; tooLong: number; invalid: number };
   upToDate: boolean;
 }
 

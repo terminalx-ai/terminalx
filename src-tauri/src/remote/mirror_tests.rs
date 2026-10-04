@@ -218,3 +218,91 @@ async fn it_takes_no_path_and_needs_the_capability() {
     let without = peer(&f.rpc, Authority::Participate, &["fs/1"]).await;
     assert_eq!(call(&f.rpc, &without, "mirror.manifest", json!({})).await.unwrap_err(), "capability_not_granted");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_reached_through_a_linked_folder_is_never_listed() {
+    let f = fixture();
+    repository(&f.root);
+    write(&f.root, "d/f", "tracked\n");
+    write(&f.root, "d/config", "tracked\n");
+    write(&f.root, "keys/credentials", "tracked\n");
+    write(&f.root, "src/a.ts", "x\n");
+    git(&f.root, &["remote", "add", "origin", "https://user:token@example.com/acme/app.git"]);
+    git(&f.root, &["add", "-A"]);
+    git(&f.root, &["commit", "-qm", "files"]);
+    let outside = f.root.parent().unwrap().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("credentials"), "secret\n").unwrap();
+
+    // The index still names d/f, d/config and keys/credentials. The folders
+    // are now links: into Git's own directory, and out of the workspace.
+    std::fs::remove_dir_all(f.root.join("d")).unwrap();
+    std::os::unix::fs::symlink(".git", f.root.join("d")).unwrap();
+    std::fs::remove_dir_all(f.root.join("keys")).unwrap();
+    std::os::unix::fs::symlink(&outside, f.root.join("keys")).unwrap();
+    assert!(f.root.join("d/config").is_file(), "the link does lead to .git/config");
+
+    let viewer = peer(&f.rpc, Authority::Participate, &["mirror/1"]).await;
+    let manifest = call(&f.rpc, &viewer, "mirror.manifest", json!({})).await.unwrap();
+    assert_eq!(paths(&manifest), ["README.md", "src/a.ts"]);
+    // d/f, d/config and keys/credentials are behind a linked folder; the
+    // links `d` and `keys` themselves are listed by Git and skipped too.
+    assert_eq!(manifest["skipped"]["symlink"], 5);
+    assert!(!manifest.to_string().contains("token"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_git_directory_under_another_name_and_tool_configuration_are_left_out() {
+    let f = fixture();
+    repository(&f.root);
+    // The reproduced attack: a bare repository committed as ordinary files.
+    write(&f.root, "pkg/HEAD", "ref: refs/heads/main\n");
+    write(&f.root, "pkg/config", "[core]\n\tbare = false\n\tworktree = .\n\tfsmonitor = touch /tmp/owned\n");
+    write(&f.root, "pkg/objects/x", "x\n");
+    write(&f.root, "pkg/refs/x", "x\n");
+    write(&f.root, "pkg/README", "looks harmless\n");
+    // Tool configuration that runs commands by itself.
+    write(&f.root, ".claude/settings.json", "{\"hooks\":{}}\n");
+    write(&f.root, ".mcp.json", "{}\n");
+    write(&f.root, ".vscode/tasks.json", "{}\n");
+    write(&f.root, ".cargo/config.toml", "[build]\n");
+    write(&f.root, ".husky/pre-commit", "#!/bin/sh\n");
+    write(&f.root, "app/.codex/config.toml", "x\n");
+    // Ordinary files with similar names stay.
+    write(&f.root, "src/objects/a.ts", "x\n");
+    write(&f.root, "docs/HEAD.md", "x\n");
+    write(&f.root, "CLAUDE.md", "x\n");
+    git(&f.root, &["add", "-A"]);
+
+    let viewer = peer(&f.rpc, Authority::Participate, &["mirror/1"]).await;
+    let manifest = call(&f.rpc, &viewer, "mirror.manifest", json!({})).await.unwrap();
+    assert_eq!(paths(&manifest), ["CLAUDE.md", "README.md", "docs/HEAD.md", "src/objects/a.ts"]);
+    assert_eq!(manifest["skipped"]["gitDirectory"], 5);
+    assert_eq!(manifest["skipped"]["toolConfig"], 6);
+    assert!(!manifest.to_string().contains("fsmonitor"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runtimes_own_state_and_names_a_desktop_cannot_hold_are_left_out() {
+    let f = fixture();
+    repository(&f.root);
+    // A runtime wrongly configured to keep its state inside the workspace.
+    write(&f.root, "state/cloud-workspace/runtime.json", "{\"credential\":\"x\"}\n");
+    write(&f.root, "state/sessions/index.json", "{}\n");
+    #[cfg(unix)]
+    write(&f.root, "odd\\name.txt", "x\n");
+    write(&f.root, "ok.txt", "x\n");
+    let git = WorkspaceGit::new(f.root.clone(), Arc::new(crate::remote::files::WorkspaceFiles::new(f.root.clone())));
+    let mirror = WorkspaceMirror::with_protected(f.root.clone(), vec![f.root.join("state")]);
+    let manifest = mirror.manifest(&git, &json!({})).unwrap();
+    assert_eq!(paths(&manifest), ["README.md", "ok.txt"]);
+    assert_eq!(manifest["skipped"]["secret"], 2);
+    #[cfg(unix)]
+    assert_eq!(manifest["skipped"]["unsupported"], 1);
+
+    // As deployed: the state directory and the token caches are not in the workspace at all.
+    let state = crate::store::state_home_env().map(PathBuf::from);
+    assert!(state.is_none_or(|dir| !dir.starts_with(&f.root)));
+    assert!(!Path::new("/dev/shm").starts_with(&f.root));
+}

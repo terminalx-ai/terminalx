@@ -12,12 +12,20 @@
 //! - `journal.json`: a publish in progress;
 //! - `exports/<time>/`: local versions a person asked to keep before discarding.
 //!
+//! The workspace is not trusted (other people's agents run there). What it
+//! lists is checked again here, and "verified" below means intact in
+//! transit, never authentic or safe.
+//!
 //! Rules that always hold:
 //!
 //! - Nothing is written outside `files/` (and the mirror's own bookkeeping).
 //!   A path is refused if it is not plain relative components, names Git
-//!   metadata or a secret, or has a symbolic link for a parent inside the
-//!   mirror.
+//!   metadata, a secret or tool configuration that runs by itself, lies in
+//!   a folder Git would take for a repository's own directory, is too long
+//!   or deep for this disk, or has a symbolic link for a parent inside the
+//!   mirror. None of the mirror's own directories may be a link either.
+//! - No mirrored file is executable, and on macOS each one is quarantined.
+//! - A mirror is bounded: files, total bytes, depth, and free disk space.
 //! - Only paths the mirror wrote are ever removed.
 //! - A local change is never overwritten: a file the mirror wrote that was
 //!   edited or deleted, or a local file where the workspace now has one, is
@@ -25,9 +33,11 @@
 //!   only by `resolve` (discard, or export then discard), for exactly the
 //!   paths that were divergent then.
 //! - Each file appears whole or not at all (staged, then renamed). The tree
-//!   is not one transaction: a publish that dies leaves `journal.json`, and
-//!   the next plan fetches those paths again instead of calling them
-//!   divergent.
+//!   is not one transaction. A publish that fails records what it did move
+//!   and removes its journal; one that dies leaves `journal.json`, which the
+//!   next call consumes once: a journaled file whose content is what was
+//!   being written is adopted, anything else is left to the ordinary
+//!   divergence check. A journal never exempts a path from that check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +56,15 @@ const EXPORTS: &str = "exports";
 const MAX_LISTED: usize = 200;
 /// Largest file a mirror holds, `fs.read`'s limit.
 const MAX_FILE_BYTES: usize = 32 * 1024 * 1024;
+/// A mirror's bounds, enforced here whatever the workspace says of itself.
+pub const MAX_FILES: usize = 50_000;
+pub const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_DEPTH: usize = 32;
+/// What every common filesystem takes for one name, and macOS for a path.
+const MAX_NAME_BYTES: usize = 255;
+const MAX_PATH_BYTES: usize = 1024;
+/// Free space left on the disk after a sync, at least.
+const FREE_DISK_FLOOR: u64 = 1024 * 1024 * 1024;
 
 /// One file of the workspace's manifest (`mirror.manifest`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -106,7 +125,6 @@ struct Owned {
     version: String,
     etag: String,
     size: u64,
-    executable: bool,
     local: Signature,
 }
 
@@ -126,12 +144,42 @@ struct Record {
     discard: BTreeSet<String>,
 }
 
+/// One file a publish is about to put in place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Write {
+    etag: String,
+    version: String,
+}
+
+/// A publish in progress: enough to tell, after a crash, which of its files
+/// did arrive.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Journal {
     manifest_id: String,
-    paths: BTreeSet<String>,
+    #[serde(default)]
+    writes: BTreeMap<String, Write>,
+    #[serde(default)]
+    deletes: BTreeSet<String>,
 }
+
+/// Why this side left out a file the workspace listed.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Refused {
+    pub secret: usize,
+    pub tool_config: usize,
+    pub git_directory: usize,
+    /// One name with another on this disk (case, Unicode form), or a file where another entry needs a folder.
+    pub collision: usize,
+    /// A name, path or depth this disk or the mirror does not take.
+    pub too_long: usize,
+    /// Not a plain relative path.
+    pub invalid: usize,
+}
+
+
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -154,9 +202,8 @@ pub struct Plan {
     pub unchanged: usize,
     pub diverged: Vec<Divergence>,
     pub diverged_total: usize,
-    /// Left out here although the workspace listed them: a secret by name,
-    /// or a name that differs only by case from another on this disk.
-    pub refused: usize,
+    /// Left out here although the workspace listed them, by reason.
+    pub refused: Refused,
     pub up_to_date: bool,
 }
 
@@ -235,9 +282,8 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as u64).unwrap_or(0)
 }
 
-/// The relative path's components, or a refusal: plain names only, nothing
-/// reserved, nothing secret.
-fn components(relative: &str) -> Result<Vec<&str>> {
+/// The relative path's components, or a refusal: plain names only.
+fn lexical(relative: &str) -> Result<Vec<&str>> {
     if relative.is_empty() || relative.len() > 4096 || relative.contains(['\0', '\\']) {
         bail!("invalid path");
     }
@@ -246,13 +292,37 @@ fn components(relative: &str) -> Result<Vec<&str>> {
     if !parts.iter().all(plain) {
         bail!("the path is not workspace-relative");
     }
+    Ok(parts)
+}
+
+/// [`lexical`], and nothing a mirror never holds by its own name. (Whether
+/// it lies in a Git directory depends on the other paths: see `desired`.)
+fn components(relative: &str) -> Result<Vec<&str>> {
+    let parts = lexical(relative)?;
     if crate::mirror_rules::reserved(relative) {
         bail!("Git metadata is never mirrored");
     }
     if crate::mirror_rules::secret(relative) {
         bail!("a secret is never mirrored");
     }
+    if crate::mirror_rules::tool_config(relative) {
+        bail!("tool configuration that runs by itself is never mirrored");
+    }
+    if parts.len() > MAX_DEPTH || parts.iter().any(|part| part.len() > MAX_NAME_BYTES) {
+        bail!("the path is too long or too deep");
+    }
     Ok(parts)
+}
+
+/// What makes two names one file on a disk that folds case and Unicode form
+/// (APFS and NTFS do): composed, then lower case.
+fn fold(path: &str, case: bool) -> String {
+    let composed = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(path);
+    if case {
+        composed.to_lowercase()
+    } else {
+        composed.into_owned()
+    }
 }
 
 /// What is at a path inside the mirror.
@@ -269,7 +339,23 @@ impl Mirror {
         if !valid_id(organization_id) || !valid_id(workspace_id) {
             bail!("invalid workspace");
         }
+        // Canonical, so a link in the way of the home itself is resolved once, here.
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
         Ok(Self { dir: home.join(DIR).join(organization_id).join(workspace_id), organization_id: organization_id.into(), workspace_id: workspace_id.into() })
+    }
+
+    /// None of the mirror's own directories may be a symbolic link: a write
+    /// or a removal would follow it out of the mirror.
+    fn guard(&self) -> Result<()> {
+        let workspace = &self.dir;
+        let organization = workspace.parent().unwrap_or(workspace);
+        let mirrors = organization.parent().unwrap_or(organization);
+        for dir in [mirrors.to_path_buf(), organization.to_path_buf(), workspace.clone(), self.files(), self.dir.join(STAGING), self.dir.join(EXPORTS)] {
+            if std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                bail!("{} is a symbolic link; a mirror is never written through one", dir.display());
+            }
+        }
+        Ok(())
     }
 
     fn files(&self) -> PathBuf {
@@ -277,6 +363,7 @@ impl Mirror {
     }
 
     fn record(&self) -> Result<Option<Record>> {
+        self.guard()?;
         let bytes = match std::fs::read(self.dir.join(RECORD)) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -297,8 +384,37 @@ impl Mirror {
         crate::store::write_json(&self.dir.join(RECORD), record)
     }
 
-    fn journal(&self) -> BTreeSet<String> {
-        std::fs::read(self.dir.join(JOURNAL)).ok().and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok()).map(|journal| journal.paths).unwrap_or_default()
+    /// Consume the journal of a publish that died, once. A file it was
+    /// writing whose content is now what it was writing did arrive and is
+    /// adopted; a file it was removing that is gone is forgotten. Everything
+    /// else keeps its old record, so the ordinary divergence check decides.
+    fn recover(&self, record: &mut Record) -> Result<()> {
+        let path = self.dir.join(JOURNAL);
+        let Ok(bytes) = std::fs::read(&path) else { return Ok(()) };
+        if let Ok(journal) = serde_json::from_slice::<Journal>(&bytes) {
+            for (relative, write) in &journal.writes {
+                let Ok(Local::File(meta)) = self.look(relative) else { continue };
+                if etag_of_file(&self.local_path_unchecked(relative)?).is_ok_and(|etag| etag == write.etag) {
+                    record.owned.insert(relative.clone(), Owned { version: write.version.clone(), etag: write.etag.clone(), size: meta.len(), local: signature(&meta) });
+                }
+            }
+            for relative in &journal.deletes {
+                if matches!(self.look(relative), Ok(Local::Missing)) {
+                    record.owned.remove(relative);
+                }
+            }
+            self.save(record)?;
+        }
+        std::fs::remove_file(&path).context("remove the journal")?;
+        let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
+        Ok(())
+    }
+
+    /// The enabled record, with any journal of a dead publish consumed.
+    fn working_record(&self) -> Result<Record> {
+        let mut record = self.enabled_record()?;
+        self.recover(&mut record)?;
+        Ok(record)
     }
 
     fn status_of(&self, record: Option<&Record>) -> Status {
@@ -316,6 +432,7 @@ impl Mirror {
 
     /// Turn the mirror on. Nothing is copied until a sync publishes.
     pub fn enable(&self) -> Result<Status> {
+        self.guard()?;
         crate::store::ensure_dir(self.dir.clone())?;
         crate::store::ensure_dir(self.files())?;
         let mut record = self.record()?.unwrap_or(Record {
@@ -337,6 +454,7 @@ impl Mirror {
     pub fn disable(&self, remove_files: bool) -> Result<Status> {
         let Some(mut record) = self.record()? else { return self.status() };
         if remove_files {
+            self.guard()?;
             for name in [FILES, STAGING] {
                 match std::fs::remove_dir_all(self.dir.join(name)) {
                     Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error).context("remove the mirrored files"),
@@ -352,10 +470,45 @@ impl Mirror {
         Ok(self.status_of(Some(&record)))
     }
 
+    /// Remove the mirrored copy because the person may no longer have it
+    /// (access revoked, signed out, the workspace deleted). By the record
+    /// only: every file the mirror wrote, its staging, journal and record.
+    /// Files the person added themselves, and their exports, stay.
+    pub fn purge(&self) -> Result<usize> {
+        let Some(record) = self.record()? else { return Ok(0) };
+        let mut removed = 0;
+        for path in record.owned.keys() {
+            // A path behind a link is not followed; the record goes regardless.
+            let Ok(target) = self.local_path_unchecked(path) else { continue };
+            if std::fs::symlink_metadata(&target).is_ok_and(|meta| !meta.is_dir()) && std::fs::remove_file(&target).is_ok() {
+                removed += 1;
+            }
+            self.prune_empty_parents(&target);
+        }
+        let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
+        let _ = std::fs::remove_file(self.dir.join(JOURNAL));
+        std::fs::remove_file(self.dir.join(RECORD)).context("remove the mirror's record")?;
+        // Gone entirely when nothing of the person's is left in it.
+        let _ = std::fs::remove_dir(self.files());
+        let _ = std::fs::remove_dir(&self.dir);
+        Ok(removed)
+    }
+
     /// Where `relative` lives in the mirror. Refuses a path through a
     /// symbolic link: a link planted in the mirror must never redirect a write.
     fn local_path(&self, relative: &str) -> Result<PathBuf> {
-        let parts = components(relative)?;
+        components(relative)?;
+        self.local_path_unchecked(relative)
+    }
+
+    /// [`local_path`] for a path the mirror already wrote: only that it is
+    /// plain and reached through no link. Used to remove a file that today's
+    /// rules would no longer accept.
+    fn local_path_unchecked(&self, relative: &str) -> Result<PathBuf> {
+        let parts = lexical(relative)?;
+        if crate::mirror_rules::reserved(relative) {
+            bail!("Git metadata is never mirrored");
+        }
         let mut path = self.files();
         for part in &parts[..parts.len() - 1] {
             path.push(part);
@@ -369,8 +522,10 @@ impl Mirror {
         Ok(path)
     }
 
+    /// What is at `relative` now. Reading needs no more than a plain path
+    /// reached through no link; only writing is held to today's rules.
     fn look(&self, relative: &str) -> Result<Local> {
-        let path = self.local_path(relative)?;
+        let path = self.local_path_unchecked(relative)?;
         Ok(match std::fs::symlink_metadata(&path) {
             Err(_) => Local::Missing,
             Ok(meta) if meta.is_file() => Local::File(meta),
@@ -385,18 +540,17 @@ impl Mirror {
             Local::Other => Some("replaced"),
             Local::File(meta) if signature(&meta) == owned.local => None,
             // Touched: only a different content is a change.
-            Local::File(_) => (etag_of_file(&self.local_path(path)?)? != owned.etag).then_some("modified"),
+            Local::File(_) => (etag_of_file(&self.local_path_unchecked(path)?)? != owned.etag).then_some("modified"),
         })
     }
 
     /// Local changes to the files the mirror wrote, without asking the
     /// workspace anything.
     pub fn check(&self) -> Result<(Vec<Divergence>, usize)> {
-        let record = self.enabled_record()?;
-        let pending = self.journal();
+        let record = self.working_record()?;
         let mut diverged = Vec::new();
         for (path, owned) in &record.owned {
-            if pending.contains(path) || record.discard.contains(path) {
+            if record.discard.contains(path) {
                 continue;
             }
             if let Some(reason) = self.divergence_of(path, owned)? {
@@ -419,42 +573,85 @@ impl Mirror {
         folded
     }
 
-    /// The entries this mirror will hold, and how many were refused here.
-    fn desired<'a>(&self, manifest: &'a Manifest) -> Result<(BTreeMap<&'a str, &'a Entry>, usize)> {
+    /// The entries this mirror will hold, and what was refused here and why.
+    /// Nothing the workspace says about itself is taken on trust: the
+    /// counts, the sizes and the names are all bounded on this side.
+    fn desired<'a>(&self, manifest: &'a Manifest) -> Result<(BTreeMap<&'a str, &'a Entry>, Refused, bool)> {
         if manifest.truncated {
             bail!("the workspace has more files than a mirror holds");
         }
-        let fold = self.case_insensitive();
-        let mut seen = BTreeSet::new();
-        let mut desired = BTreeMap::new();
-        let mut refused = 0;
-        let mut sorted: Vec<&Entry> = manifest.entries.iter().collect();
-        sorted.sort_by(|a, b| a.path.cmp(&b.path));
-        for entry in sorted {
+        if manifest.entries.len() > MAX_FILES {
+            bail!("the workspace lists more files than a mirror holds ({MAX_FILES})");
+        }
+        let case = self.case_insensitive();
+        let root_bytes = self.files().as_os_str().len() + 1;
+        let mut refused = Refused::default();
+        // Lexically sound entries, in path order. A folder is a Git
+        // directory because of several of its files together, so that is
+        // decided over all of them before any one is accepted.
+        let mut sound: Vec<&Entry> = Vec::new();
+        let mut names = BTreeSet::new();
+        for entry in &manifest.entries {
             if entry.size as usize > MAX_FILE_BYTES {
                 bail!("the manifest lists a file larger than a mirror holds");
             }
-            if crate::mirror_rules::secret(&entry.path) {
-                refused += 1;
-                continue;
-            }
-            // Anything else that is not a plain relative path is a broken manifest.
-            components(&entry.path).with_context(|| format!("the manifest names {}", entry.path))?;
-            if fold && !seen.insert(entry.path.to_lowercase()) {
-                refused += 1;
-                continue;
-            }
-            if desired.insert(entry.path.as_str(), entry).is_some() {
+            if !names.insert(entry.path.as_str()) {
                 bail!("the manifest names {} twice", entry.path);
             }
+            if lexical(&entry.path).is_err() || crate::mirror_rules::reserved(&entry.path) {
+                refused.invalid += 1;
+            } else {
+                sound.push(entry);
+            }
         }
-        Ok((desired, refused))
+        sound.sort_by(|a, b| a.path.cmp(&b.path));
+        let git_directories = crate::mirror_rules::git_directories(sound.iter().map(|entry| entry.path.as_str()));
+
+        let mut desired = BTreeMap::new();
+        let mut files = BTreeSet::new();
+        let mut folders = BTreeSet::new();
+        let mut total = 0u64;
+        for entry in sound {
+            let path = entry.path.as_str();
+            let parts: Vec<&str> = path.split('/').collect();
+            if crate::mirror_rules::secret(path) {
+                refused.secret += 1;
+            } else if crate::mirror_rules::inside(path, &git_directories) {
+                refused.git_directory += 1;
+            } else if crate::mirror_rules::tool_config(path) {
+                refused.tool_config += 1;
+            } else if parts.len() > MAX_DEPTH || parts.iter().any(|part| part.len() > MAX_NAME_BYTES) || root_bytes + path.len() > MAX_PATH_BYTES {
+                refused.too_long += 1;
+            } else {
+                // One name on this disk with a file already accepted, or a
+                // file where an accepted entry needs a folder (or the
+                // reverse): the first in path order stays.
+                let key = fold(path, case);
+                let parents: Vec<String> = (1..parts.len()).map(|end| fold(&parts[..end].join("/"), case)).collect();
+                if files.contains(&key) || folders.contains(&key) || parents.iter().any(|parent| files.contains(parent)) {
+                    refused.collision += 1;
+                    continue;
+                }
+                total += entry.size;
+                if total > MAX_TOTAL_BYTES {
+                    bail!("the workspace's files are larger than a mirror holds ({} GB)", MAX_TOTAL_BYTES / (1024 * 1024 * 1024));
+                }
+                files.insert(key);
+                folders.extend(parents);
+                desired.insert(path, entry);
+            }
+        }
+        Ok((desired, refused, case))
     }
 
     fn plan_with(&self, record: &Record, manifest: &Manifest) -> Result<(Plan, Vec<Divergence>, Vec<String>)> {
-        let (desired, refused) = self.desired(manifest)?;
-        let pending = self.journal();
-        let forced = |path: &str| pending.contains(path) || record.discard.contains(path);
+        let (desired, refused, case) = self.desired(manifest)?;
+        let forced = |path: &str| record.discard.contains(path);
+        // Files of ours the workspace no longer lists, by the name this disk
+        // knows them under: a rename that only changes case or Unicode form
+        // leaves our own file where the new name goes, and that is not a
+        // local file in the way.
+        let leaving: BTreeSet<String> = record.owned.keys().filter(|path| !desired.contains_key(path.as_str())).map(|path| fold(path, case)).collect();
         let mut diverged = Vec::new();
         let mut fetch = Vec::new();
         let mut fetch_bytes = 0;
@@ -464,7 +661,7 @@ impl Mirror {
             let local_change = match owned {
                 Some(owned) if !forced(path) => self.divergence_of(path, owned)?,
                 Some(_) => None,
-                None if forced(path) => None,
+                None if forced(path) || leaving.contains(&fold(path, case)) => None,
                 None => match self.look(path)? {
                     Local::Missing => None,
                     _ => Some("in-the-way"),
@@ -474,8 +671,7 @@ impl Mirror {
                 diverged.push(Divergence { path: (*path).to_string(), reason });
                 continue;
             }
-            let current = owned.is_some_and(|owned| owned.version == entry.version && owned.executable == entry.executable);
-            if current && !forced(path) {
+            if owned.is_some_and(|owned| owned.version == entry.version) && !forced(path) {
                 unchanged += 1;
             } else {
                 fetch.push((*path).to_string());
@@ -487,7 +683,11 @@ impl Mirror {
             if desired.contains_key(path.as_str()) {
                 continue;
             }
-            match if forced(path) { None } else { self.divergence_of(path, owned)? } {
+            // A path the mirror once wrote and would refuse today (the rules
+            // grew): its record is dropped, and the file is removed only if
+            // it can still be reached safely.
+            let reachable = self.local_path_unchecked(path).is_ok();
+            match if forced(path) || !reachable { None } else { self.divergence_of(path, owned)? } {
                 // Gone on both sides: nothing to keep, nothing to remove.
                 Some("deleted") => remove.push(path.clone()),
                 Some(reason) => diverged.push(Divergence { path: path.clone(), reason }),
@@ -509,10 +709,18 @@ impl Mirror {
         Ok((plan, diverged, remove))
     }
 
-    /// What a sync to `manifest` would read, remove and refuse. Writes nothing.
+    /// What a sync to `manifest` would read, remove and refuse. A new sync
+    /// starts here: what an earlier one staged and never published is dropped.
     pub fn plan(&self, manifest: &Manifest) -> Result<Plan> {
-        let record = self.enabled_record()?;
-        Ok(self.plan_with(&record, manifest)?.0)
+        let record = self.working_record()?;
+        let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
+        let plan = self.plan_with(&record, manifest)?.0;
+        if let Some(free) = free_bytes(&self.dir) {
+            if free < plan.fetch_bytes.saturating_add(FREE_DISK_FLOOR) {
+                bail!("not enough free disk space for the mirror: {} MB to copy, {} MB free", plan.fetch_bytes / (1024 * 1024), free / (1024 * 1024));
+            }
+        }
+        Ok(plan)
     }
 
     fn staged(&self, relative: &str, etag: &str) -> PathBuf {
@@ -520,13 +728,18 @@ impl Mirror {
         self.dir.join(STAGING).join(format!("{name}.{etag}"))
     }
 
-    /// Keep one file read from the workspace, once its bytes match the hash
-    /// the workspace reported. Nothing in `files/` changes.
-    pub fn stage(&self, relative: &str, bytes: &[u8], reported_etag: &str) -> Result<()> {
+    /// Keep one file read from the workspace, once its bytes are as long as
+    /// the manifest said (`size`) and match the hash the workspace reported.
+    /// That shows the file arrived intact, not that it can be trusted.
+    /// Nothing in `files/` changes.
+    pub fn stage(&self, relative: &str, bytes: &[u8], size: u64, reported_etag: &str) -> Result<()> {
         self.enabled_record()?;
         components(relative)?;
         if bytes.len() > MAX_FILE_BYTES {
             bail!("the file is larger than a mirror holds");
+        }
+        if bytes.len() as u64 != size {
+            bail!("the file is not the size the workspace listed");
         }
         if reported_etag.len() != 32 || !reported_etag.bytes().all(|byte| byte.is_ascii_hexdigit()) || etag(bytes) != reported_etag.to_ascii_lowercase() {
             bail!("the file's content does not match its hash");
@@ -535,53 +748,81 @@ impl Mirror {
         crate::store::write_atomic(&self.staged(relative, &reported_etag.to_ascii_lowercase()), bytes)
     }
 
-    /// Put a sync in place: every staged file by rename, then remove what
-    /// the workspace no longer has, then commit the record. With any
-    /// divergence nothing is written.
+    /// Put a sync in place: remove what the workspace no longer has, then
+    /// every staged file by rename, then commit the record. With any
+    /// divergence nothing is written. A failure part of the way records what
+    /// was done, so no path is left outside the divergence check.
     pub fn publish(&self, manifest: &Manifest, etags: &BTreeMap<String, String>) -> Result<Published> {
-        let mut record = self.enabled_record()?;
+        let mut record = self.working_record()?;
         let (plan, diverged, remove) = self.plan_with(&record, manifest)?;
         if !diverged.is_empty() {
             return Ok(Published { status: self.status_of(Some(&record)), diverged: plan.diverged, diverged_total: plan.diverged_total, written: 0, removed: 0 });
         }
         let entries: BTreeMap<&str, &Entry> = manifest.entries.iter().map(|entry| (entry.path.as_str(), entry)).collect();
-        // Everything is here and verified before the first file moves.
+        // Everything is here, the size the workspace listed and intact,
+        // before the first file moves.
         let mut moves = Vec::new();
         for path in &plan.fetch {
+            let entry = entries[path.as_str()];
             let etag = etags.get(path).map(|etag| etag.to_ascii_lowercase()).ok_or_else(|| anyhow!("{path} was not read"))?;
             let staged = self.staged(path, &etag);
-            if etag_of_file(&staged).map_err(|_| anyhow!("{path} was not read"))? != etag {
+            let meta = std::fs::symlink_metadata(&staged).map_err(|_| anyhow!("{path} was not read"))?;
+            if !meta.is_file() || meta.len() != entry.size {
+                bail!("{path} is not the size the workspace listed");
+            }
+            if etag_of_file(&staged)? != etag {
                 bail!("{path} changed after it was read");
             }
-            moves.push((path.clone(), staged, etag));
+            // Resolved now: a path that cannot be written fails before anything moves.
+            moves.push((path.clone(), staged, etag, self.local_path(path)?));
         }
-        let journal = Journal { manifest_id: manifest.manifest_id.clone(), paths: plan.fetch.iter().chain(remove.iter()).cloned().collect() };
+        let journal = Journal {
+            manifest_id: manifest.manifest_id.clone(),
+            writes: moves.iter().map(|(path, _, etag, _)| (path.clone(), Write { etag: etag.clone(), version: entries[path.as_str()].version.clone() })).collect(),
+            deletes: remove.iter().cloned().collect(),
+        };
         crate::store::write_json(&self.dir.join(JOURNAL), &journal)?;
 
-        for (path, staged, etag) in &moves {
-            let entry = entries[path.as_str()];
-            let target = self.local_path(path)?;
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).with_context(|| format!("create the folder of {path}"))?;
+        let mut removed = 0;
+        let mut written = 0;
+        let applied = (|| -> Result<()> {
+            // Removals first: a rename that only changes case would
+            // otherwise delete the file just written under the new name.
+            for path in &remove {
+                if let Ok(target) = self.local_path_unchecked(path) {
+                    match std::fs::symlink_metadata(&target) {
+                        Ok(meta) if meta.is_dir() => bail!("a local folder is in the way at {path}; move it, then sync again"),
+                        Ok(_) => std::fs::remove_file(&target).with_context(|| format!("remove {path}"))?,
+                        Err(_) => {}
+                    }
+                    self.prune_empty_parents(&target);
+                }
+                record.owned.remove(path);
+                removed += 1;
             }
-            // A folder where a file belongs is never removed for it.
-            if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
-                bail!("a local folder is in the way at {path}; move it, then sync again");
+            for (path, staged, etag, target) in &moves {
+                let entry = entries[path.as_str()];
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| format!("create the folder of {path}"))?;
+                }
+                // A folder where a file belongs is never removed for it.
+                if std::fs::symlink_metadata(target).is_ok_and(|meta| meta.is_dir()) {
+                    bail!("a local folder is in the way at {path}; move it, then sync again");
+                }
+                seal(staged)?;
+                std::fs::rename(staged, target).with_context(|| format!("put {path} in place"))?;
+                let meta = std::fs::symlink_metadata(target)?;
+                record.owned.insert(path.clone(), Owned { version: entry.version.clone(), etag: etag.clone(), size: meta.len(), local: signature(&meta) });
+                written += 1;
             }
-            set_mode(staged, entry.executable)?;
-            std::fs::rename(staged, &target).with_context(|| format!("put {path} in place"))?;
-            let meta = std::fs::symlink_metadata(&target)?;
-            record.owned.insert(path.clone(), Owned { version: entry.version.clone(), etag: etag.clone(), size: meta.len(), executable: entry.executable, local: signature(&meta) });
-        }
-        for path in &remove {
-            let target = self.local_path(path)?;
-            match std::fs::symlink_metadata(&target) {
-                Ok(meta) if meta.is_dir() => bail!("a local folder is in the way at {path}; move it, then sync again"),
-                Ok(_) => std::fs::remove_file(&target).with_context(|| format!("remove {path}"))?,
-                Err(_) => {}
-            }
-            self.prune_empty_parents(&target);
-            record.owned.remove(path);
+            Ok(())
+        })();
+        if let Err(error) = applied {
+            // What did move is recorded as moved, and the journal goes: the
+            // next sync sees every path as it is, with nothing exempt.
+            self.save(&record)?;
+            let _ = std::fs::remove_file(self.dir.join(JOURNAL));
+            return Err(error);
         }
         record.discard.clear();
         record.revision = Some(Revision {
@@ -594,7 +835,7 @@ impl Mirror {
         self.save(&record)?;
         let _ = std::fs::remove_file(self.dir.join(JOURNAL));
         let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
-        Ok(Published { status: self.status_of(Some(&record)), diverged: Vec::new(), diverged_total: 0, written: moves.len(), removed: remove.len() })
+        Ok(Published { status: self.status_of(Some(&record)), diverged: Vec::new(), diverged_total: 0, written, removed })
     }
 
     /// Remove folders the last removal left empty, up to `files/`.
@@ -613,8 +854,14 @@ impl Mirror {
     /// will be replaced by the workspace's versions on the next sync. With
     /// `Export` their local versions are copied aside first.
     pub fn resolve(&self, manifest: &Manifest, resolution: Resolution) -> Result<Resolved> {
-        let mut record = self.enabled_record()?;
+        let mut record = self.working_record()?;
         let (_, diverged, _) = self.plan_with(&record, manifest)?;
+        for item in &diverged {
+            // A local folder is never discarded for a file.
+            if std::fs::symlink_metadata(self.local_path(&item.path)?).is_ok_and(|meta| meta.is_dir()) {
+                bail!("a local folder is in the way at {}; move it, then sync again", item.path);
+            }
+        }
         let mut exported_to = None;
         if resolution == Resolution::Export && !diverged.is_empty() {
             let destination = self.dir.join(EXPORTS).join(now_ms().to_string());
@@ -631,27 +878,106 @@ impl Mirror {
             }
             exported_to = Some(destination.to_string_lossy().into_owned());
         }
-        for item in &diverged {
-            // A local folder is never discarded for a file.
-            if matches!(self.look(&item.path)?, Local::Other) && std::fs::symlink_metadata(self.local_path(&item.path)?).is_ok_and(|meta| meta.is_dir()) {
-                bail!("a local folder is in the way at {}; move it, then sync again", item.path);
-            }
-            record.discard.insert(item.path.clone());
-        }
+        record.discard.extend(diverged.iter().map(|item| item.path.clone()));
         self.save(&record)?;
         Ok(Resolved { paths: diverged.len(), exported_to })
     }
 }
 
+/// Every mirror on this computer, as `(organization id, workspace id)`.
+/// Linked directories are not looked into.
+pub fn existing(home: &Path) -> Vec<(String, String)> {
+    let real_dirs = |dir: &Path| -> Vec<(String, PathBuf)> {
+        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry.path()))
+            .filter(|(name, _)| valid_id(name))
+            .collect()
+    };
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let mirrors = home.join(DIR);
+    if std::fs::symlink_metadata(&mirrors).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for (organization, dir) in real_dirs(&mirrors) {
+        for (workspace, dir) in real_dirs(&dir) {
+            if dir.join(RECORD).is_file() {
+                found.push((organization.clone(), workspace));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Is `path` inside the directory that holds every mirror? A mirror is for
+/// reading: it is never a project or an agent's working directory.
+pub fn holds(home: &Path, path: &Path) -> bool {
+    let mirrors = std::fs::canonicalize(home.join(DIR)).unwrap_or_else(|_| home.join(DIR));
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(mirrors)
+}
+
+/// Make a staged file what every mirrored file is: readable, never
+/// executable, and on macOS quarantined, so opening it from Finder goes
+/// through Gatekeeper like any download.
+fn seal(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).context("set the file's mode")?;
+    }
+    quarantine(path)
+}
+
+#[cfg(target_os = "macos")]
+const QUARANTINE: &str = "com.apple.quarantine";
+
+#[cfg(target_os = "macos")]
+fn quarantine(path: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let file = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let name = std::ffi::CString::new(QUARANTINE)?;
+    // The format Launch Services writes: flags (0081: downloaded, not yet
+    // approved), the time in hex, the agent's name.
+    let value = format!("0081;{:x};TerminalX;", now_ms() / 1000);
+    // SAFETY: both strings are NUL-terminated and `value` is valid for its length.
+    let result = unsafe { libc::setxattr(file.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0, libc::XATTR_NOFOLLOW) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("quarantine the mirrored file");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quarantine(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Bytes an unprivileged process may still write on the disk holding `path`.
 #[cfg(unix)]
-fn set_mode(path: &Path, executable: bool) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(if executable { 0o755 } else { 0o644 })).context("set the file's mode")
+fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a valid C string and `stats` is writable for one
+    // `statvfs`; it is read only after the call reports success.
+    let stats = unsafe {
+        if libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) != 0 {
+            return None;
+        }
+        stats.assume_init()
+    };
+    #[allow(clippy::unnecessary_cast)]
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _executable: bool) -> Result<()> {
-    Ok(())
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

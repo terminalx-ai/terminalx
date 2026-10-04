@@ -440,6 +440,8 @@ pub fn run() {
             commands::cloud_mirror_stage,
             commands::cloud_mirror_publish,
             commands::cloud_mirror_resolve,
+            commands::cloud_mirror_list,
+            commands::cloud_mirror_purge,
             commands::git_push,
             commands::git_pull,
             commands::git_discard,

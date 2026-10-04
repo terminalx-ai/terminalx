@@ -114,8 +114,14 @@ describe("the local mirror dialog", () => {
   });
 
   it("says what was left out and why a runtime cannot be mirrored", () => {
-    show({ phase: "synced", revision, skipped: { secret: 2, excluded: 0, symlink: 1, unsupported: 0, tooLarge: 0 } });
-    expect(screen.getByTestId("cloud-mirror-dialog").textContent).toContain("Left out: 2 secret files, 1 link.");
+    show({ phase: "synced", revision, skipped: { secret: 2, toolConfig: 3, gitDirectory: 5, collision: 1, tooLong: 0, invalid: 1, excluded: 0, symlink: 1, unsupported: 1, tooLarge: 0 } });
+    const text = screen.getByTestId("cloud-mirror-dialog").textContent ?? "";
+    expect(text).toContain("Not mirrored: 2 secret files, 3 tool settings that run commands (agent, editor and Git hook configuration), 5 inside a folder Git would treat as a repository");
+    expect(text).toContain("1 whose name is taken by another file on this disk, 1 link, 2 other.");
+    // The dialog says what the copy is, and when it goes away.
+    expect(text).toContain("treat them like a download");
+    expect(text).toContain("cannot be opened as a project or used by an agent here");
+    expect(text).toContain("removed from this computer if you lose access to the workspace, sign out, or the workspace is deleted");
     cleanup();
     show({ phase: "unsupported" });
     expect(screen.getByTestId("cloud-mirror-state").textContent).toContain("too old for a mirror");

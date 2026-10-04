@@ -20,6 +20,7 @@ import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
+import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -361,6 +362,10 @@ export async function ingestCloudList(
       createMemory,
     });
     tellConnections(workspaces, requestedAt);
+    // A local mirror (PRO-25) of a workspace this person can no longer open,
+    // or that is gone, is removed with the session lists above. Only this
+    // organization's mirrors are judged by this organization's list.
+    void purgeCloudMirrors((mirrorOrg, workspaceId) => mirrorOrg !== org || readable.has(workspaceId));
   }
   const notices = await purgeTombstones(tombstones, names);
   if (notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
