@@ -18,6 +18,20 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  legacy-runtime-probe:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test legacy AppImage diagnostic
+        run: python3 scripts/linux-runtime-probe.test.py
+
   check:
     runs-on: macos-latest
     timeout-minutes: 45
