@@ -66,9 +66,9 @@ struct Repo {
 }
 
 /// What one Git or `gh` process did.
-struct Ran {
-    ok: bool,
-    stdout: String,
+pub(super) struct Ran {
+    pub(super) ok: bool,
+    pub(super) stdout: String,
     stderr: String,
     timed_out: bool,
 }
@@ -166,7 +166,7 @@ fn failure_error(what: &str, text: &str, failure: Failure) -> RpcError {
     }
 }
 
-fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> {
+pub(super) fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
@@ -221,7 +221,7 @@ fn run_bounded(mut command: Command, timeout: Duration) -> std::io::Result<Ran> 
     }
 }
 
-fn git_command(dir: &Path) -> Command {
+pub(super) fn git_command(dir: &Path) -> Command {
     let mut command = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     command
         .current_dir(dir)
