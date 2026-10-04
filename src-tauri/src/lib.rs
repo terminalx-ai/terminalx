@@ -16,6 +16,7 @@ mod binpath;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
+mod mirror_rules;
 mod cloud_bootstrap;
 mod cloud_quiesce;
 mod cloud_resources;

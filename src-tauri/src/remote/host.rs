@@ -67,6 +67,8 @@ const SLOW_METHODS: &[&str] = &[
     "session.delete",
     "runtime.agents",
     "fs.search",
+    // Lists every file of every repository.
+    "mirror.manifest",
 ];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.

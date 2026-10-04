@@ -31,10 +31,12 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   composer's `@` list;
  * - `composer/3`: `session.attach`, an image uploaded in parts for the
  *   message that then names it.
+ * - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
+ *   into its local mirror of the workspace.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "mirror/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**

@@ -260,6 +260,7 @@ pub struct WorkspaceRpc {
     root: PathBuf,
     files: Arc<WorkspaceFiles>,
     git: WorkspaceGit,
+    mirror: super::mirror::WorkspaceMirror,
     /// The generation the relay host registered with; offsets and cursors
     /// are bound to it.
     generation: AtomicU64,
@@ -320,6 +321,7 @@ impl WorkspaceRpc {
         let files = Arc::new(WorkspaceFiles::new(root.clone()));
         let rpc = Arc::new(Self {
             git: WorkspaceGit::new(root.clone(), files.clone()),
+            mirror: super::mirror::WorkspaceMirror::new(root.clone()),
             files,
             root,
             generation: AtomicU64::new(generation),
@@ -850,6 +852,7 @@ impl WorkspaceRpc {
             "fs.search" => self.files.search(peer.id, &params),
             "fs.cancel" => self.files.cancel(peer.id, &params),
             "fs.watch" => self.fs_watch(peer, params),
+            "mirror.manifest" => self.mirror.manifest(&self.git, &params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
             "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
             git if git.starts_with("git.") => self
