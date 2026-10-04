@@ -378,9 +378,13 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   useEffect(() => {
     if (status !== "ready" || !source) return;
     if (source.watch) {
-      return source.watch((paths) => {
+      const stop = source.watch((paths) => {
         if (paths === null || paths.includes(entry.rel)) void checkForChange();
       });
+      // The file was read before this subscription existed. A change that
+      // landed in between was announced to no one, so look once now.
+      void checkForChange();
+      return stop;
     }
     if (!visible) return;
     const t = window.setInterval(() => void checkForChange(), 2000);
