@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { getTabLog } from "@/lib/agentEvents";
+import { WORKSPACE_STOPPED } from "@/lib/cloudAgentApi";
 import { getCloudAgents, loadCloudAgents, refreshFromCheckpoint, type CloudAgentTab } from "@/lib/cloudAgents";
 import {
   applyCloudSnapshot,
@@ -443,6 +444,9 @@ async function mayBeStopped(target: Target, state: WorkspaceConnectionState): Pr
   return cloudAsleep(state, item.workspace.state) || stopping(item) || item.workspace.state !== "ready";
 }
 
+/** The server refused a `wake: false` message: the workspace is not running, and nothing was stored. */
+const workspaceStopped = (error: unknown) => (error instanceof Error ? error.message : String(error)) === WORKSPACE_STOPPED;
+
 async function sendOnce(params: Params) {
   const target = resolveSession(required(params, "target"));
   const message = required(params, "text");
@@ -476,10 +480,25 @@ async function sendOnce(params: Params) {
   const lease = client && collab.available && you ? (collab.leases[tab.tabId] ?? null) : null;
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
-  // The message resumes a stopped workspace, which starts billing its compute.
-  if (await mayBeStopped(target, state)) await confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
-  await backend.send(tab.tabId, message, []);
+  // The message resumes a stopped workspace, which starts billing its compute.
+  const confirmResume = () => confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
+  if (getAccount().status.agentCommandWake === true) {
+    // The server decides (PRO-89): posted so that it starts nothing, a workspace that is not running refuses it
+    // and keeps nothing. No list read a moment ago can be stale. Only then is the person asked, and it is sent again.
+    try {
+      await backend.send(tab.tabId, message, [], { wake: false });
+    } catch (error) {
+      if (!workspaceStopped(error)) throw error;
+      void refreshCloudCatalog(target.orgId).catch(() => undefined);
+      await confirmResume();
+      await backend.send(tab.tabId, message, []);
+    }
+  } else {
+    // A server that does not know the option: go by the list, read again now.
+    if (await mayBeStopped(target, state)) await confirmResume();
+    await backend.send(tab.tabId, message, []);
+  }
   const entry = getCloudAgents(scope).outbox.find((candidate) => !before.has(candidate.clientCommandId) && candidate.tabId === tab.tabId);
   return {
     session: target.key,

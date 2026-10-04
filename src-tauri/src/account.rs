@@ -35,6 +35,10 @@ pub const MULTI_ORG_CAPABILITY: &str = "cloud.desktop.multi-org.v1";
 pub const CATALOG_FEED_CAPABILITY: &str = "cloud.desktop.catalog-feed.v1";
 /// Any member creates a cloud workspace and manages their own (PRO-73).
 pub const MEMBER_WORKSPACES_CAPABILITY: &str = "cloud.workspaces.member-managed.v1";
+/// Agent-command enqueue takes `wake: false` and refuses a workspace that is
+/// not running (`cloud_workspace_stopped`, PRO-89). An older server rejects
+/// the key, so it is sent only when this is offered.
+pub const AGENT_COMMAND_WAKE_CAPABILITY: &str = "cloud.workspaces.agent-command-wake.v1";
 
 const API_BASE_URL: &str = "https://login.terminalx.ai";
 /// Debug builds only: point the account service (and everything built on it,
@@ -111,6 +115,8 @@ pub struct AccountStatus {
     /// ones they created (PRO-73). Without it, creating stays with owners
     /// and admins, as that server enforces.
     member_workspaces: bool,
+    /// The server takes `wake: false` on an agent command (PRO-89).
+    agent_command_wake: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -1311,6 +1317,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
+        agent_command_wake: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(AGENT_COMMAND_WAKE_CAPABILITY) == Some(&true)),
     }
 }
 
@@ -1901,6 +1908,15 @@ mod tests {
         assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["memberWorkspaces"], true);
         manager.set_member_workspaces_for_test(false);
         assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["memberWorkspaces"], false);
+    }
+
+    #[test]
+    fn the_status_says_whether_the_server_takes_a_do_not_wake_command() {
+        let manager = signed_in("org-a");
+        // A server from before PRO-89 says nothing: `wake` is never sent to it.
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["agentCommandWake"], false);
+        manager.inner.lock().unwrap().session.as_mut().expect("signed in").capabilities.flags.insert(AGENT_COMMAND_WAKE_CAPABILITY.into(), true);
+        assert_eq!(serde_json::to_value(manager.snapshot()).unwrap()["agentCommandWake"], true);
     }
 
     #[test]

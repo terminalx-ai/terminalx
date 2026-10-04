@@ -112,9 +112,17 @@ export interface CachedTab {
   updatedAt: number;
 }
 
+/** The API's refusal of a `wake: false` command for a workspace that is not running. Nothing was stored. */
+export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
+
 export const cloudAgentApi = {
-  enqueue: (scope: CloudAgentScope, tabId: string, kind: OutboxKind, payload: OutboxPayload) =>
-    invoke<OutboxEntry>("cloud_agent_enqueue", { ...scope, tabId, kind, payload }),
+  /**
+   * `wake: false` (PRO-89, only for a server that takes it): nothing is
+   * started. For a workspace that is not running the command is not stored,
+   * here or there, and the call fails with `WORKSPACE_STOPPED`.
+   */
+  enqueue: (scope: CloudAgentScope, tabId: string, kind: OutboxKind, payload: OutboxPayload, options: { wake?: boolean } = {}) =>
+    invoke<OutboxEntry>("cloud_agent_enqueue", { ...scope, tabId, kind, payload, ...(options.wake === false ? { wake: false } : {}) }),
   outbox: (scope: CloudAgentScope, tabId?: string) => invoke<OutboxEntry[]>("cloud_agent_outbox", { ...scope, tabId: tabId ?? null }),
   outboxSync: (scope: CloudAgentScope) => invoke<OutboxEntry[]>("cloud_agent_outbox_sync", { ...scope }),
   cancel: (scope: CloudAgentScope, clientCommandId: string) => invoke<OutboxEntry>("cloud_agent_cancel", { ...scope, clientCommandId }),

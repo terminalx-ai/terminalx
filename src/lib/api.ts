@@ -473,6 +473,8 @@ export interface AccountStatus {
   catalogFeed?: boolean;
   /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
   memberWorkspaces?: boolean;
+  /** The server takes `wake: false` on an agent command and refuses a stopped workspace instead of starting it (`cloud.workspaces.agent-command-wake.v1`, PRO-89). */
+  agentCommandWake?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */

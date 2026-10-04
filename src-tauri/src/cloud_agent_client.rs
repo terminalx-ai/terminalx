@@ -345,11 +345,20 @@ struct Stored {
     updated_at: u64,
     #[serde(default)]
     error: Option<String>,
+    /// Posted with `wake: false` (PRO-89): the API starts nothing for it and
+    /// refuses a workspace that is not running. Kept so a resend after a
+    /// lost answer cannot start one either.
+    #[serde(default, skip_serializing_if = "is_false")]
+    no_wake: bool,
 }
+
+/// The API's refusal of a `wake: false` command for a workspace that is not
+/// running. It stored nothing.
+pub const WORKSPACE_STOPPED: &str = "cloud_workspace_stopped";
 
 impl Stored {
     fn envelope(&self) -> Value {
-        json!({
+        let mut envelope = json!({
             "v": 1,
             "clientCommandId": self.client_command_id,
             "tabId": self.tab_id,
@@ -357,7 +366,12 @@ impl Stored {
             "keyId": self.key_id,
             "iv": self.iv,
             "ciphertext": self.ciphertext,
-        })
+        });
+        // Only when asked for: an API that does not know the key rejects it.
+        if self.no_wake {
+            envelope["wake"] = json!(false);
+        }
+        envelope
     }
 
     fn pending(&self) -> bool {
@@ -392,6 +406,10 @@ pub struct Purged {
     /// Commands that never reached the runtime.
     pub unsent_commands: usize,
     pub cached_tabs: usize,
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 fn is_zero(count: &u32) -> bool {
@@ -640,7 +658,13 @@ impl CloudAgentClient {
     /// Encrypt a command, store its envelope, then hand it to the API. A
     /// command the API could not be asked about stays `unsent` and is resent
     /// by `outbox_sync`; it is never re-encrypted.
-    pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value) -> Result<OutboxEntry, String> {
+    ///
+    /// With `wake` false (the CLI, which must ask the person before starting
+    /// compute; only against an API that knows the option) nothing is
+    /// started: for a workspace that is not running the API stores nothing,
+    /// the entry is dropped here too and the error is [`WORKSPACE_STOPPED`],
+    /// so the caller can ask and send again.
+    pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value, wake: bool) -> Result<OutboxEntry, String> {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
         if !valid_id(tab_id) || !KINDS.contains(&kind) {
@@ -693,10 +717,18 @@ impl CloudAgentClient {
             created_at: now,
             updated_at: now,
             error: None,
+            no_wake: !wake,
         };
         // Durable before the network: a crash after the POST still resends it.
         self.edit_outbox(&dir, |entries| entries.push(stored.clone()))?;
-        self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".into())
+        let entry = self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".to_string())?;
+        if !wake && entry.state == "rejected" && entry.category.as_deref() == Some(WORKSPACE_STOPPED) {
+            // Nothing was stored there, so nothing is kept here: it was not sent.
+            let id = stored.client_command_id.clone();
+            self.edit_outbox(&dir, |entries| entries.retain(|entry| entry.client_command_id != id))?;
+            return Err(WORKSPACE_STOPPED.into());
+        }
+        Ok(entry)
     }
 
     /// POST a stored envelope if it is still unsent. `None` when it is not
@@ -1136,9 +1168,17 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + 
 }
 
 #[tauri::command]
-pub async fn cloud_agent_enqueue(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, kind: String, payload: Value) -> Result<OutboxEntry, String> {
+pub async fn cloud_agent_enqueue(
+    client: Client<'_>,
+    organization_id: String,
+    workspace_id: String,
+    tab_id: String,
+    kind: String,
+    payload: Value,
+    wake: Option<bool>,
+) -> Result<OutboxEntry, String> {
     let client = client.inner().clone();
-    blocking(move || client.enqueue(&organization_id, &workspace_id, &tab_id, &kind, payload)).await
+    blocking(move || client.enqueue(&organization_id, &workspace_id, &tab_id, &kind, payload, wake.unwrap_or(true))).await
 }
 
 #[tauri::command]

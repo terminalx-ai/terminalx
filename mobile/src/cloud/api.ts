@@ -13,8 +13,14 @@ import type { CheckpointEnvelope, CommandEnvelope } from "./crypto";
  * checkpoints only read. `open` is refused by the server for a stopped
  * workspace, and this client never asks it to reconcile the provider. A
  * workspace is woken only by a queued command (`enqueue`), which the server
- * reports back as `wake`.
+ * reports back as `wake`; with `wake: false` the server starts nothing and
+ * refuses a stopped workspace instead (`WORKSPACE_STOPPED`, §11.2.1).
  */
+
+/** The server's refusal of a `wake: false` command for a workspace that is not running. Nothing was stored. */
+export const WORKSPACE_STOPPED = "cloud_workspace_stopped";
+/** The capability flag of a server that knows `wake: false`; an older one rejects the key. */
+const DO_NOT_WAKE_CAPABILITY = "cloud.workspaces.agent-command-wake.v1";
 
 const CONTRACT_HEADERS = {
   "X-TerminalX-Cloud-Workspace-Contract": "providers-v1",
@@ -142,6 +148,9 @@ export class CloudApi {
   /** The server's clock minus this phone's, from the last answer's `Date` header; 0 until one was read. */
   private clockOffsetMs = 0;
 
+  /** Whether the server knows `wake: false`; null until its capabilities were read. */
+  private doNotWakeKnown: boolean | null = null;
+
   constructor(private readonly options: CloudApiOptions) {
     this.fetcher = options.fetch ?? fetch;
     // An answer in a shape this app does not know is one thing to every caller: `cloud_workspace_invalid_response`.
@@ -165,7 +174,19 @@ export class CloudApi {
   /** The organizations this account belongs to, with its role in each. */
   async organizations(): Promise<CloudOrganization[]> {
     const body = await this.request("POST", "/v1/desktop/auth/capabilities", {});
-    return z.object({ organizations: z.array(organizationSchema) }).passthrough().parse(body).organizations;
+    const parsed = z.object({ organizations: z.array(organizationSchema), capabilities: z.object({ flags: z.record(z.string(), z.unknown()) }).passthrough().nullish() }).passthrough().parse(body);
+    this.doNotWakeKnown = parsed.capabilities?.flags[DO_NOT_WAKE_CAPABILITY] === true;
+    return parsed.organizations;
+  }
+
+  /**
+   * Whether a command may be posted with `wake: false`. False for a server
+   * that does not say so, and while that could not be read: the caller then
+   * decides from the list, as before.
+   */
+  async doNotWake(): Promise<boolean> {
+    if (this.doNotWakeKnown === null) await this.organizations().catch(() => undefined);
+    return this.doNotWakeKnown === true;
   }
 
   /** An organization's workspaces as this person may see them. Reading the list never starts compute. */
@@ -186,9 +207,15 @@ export class CloudApi {
     return attachmentSchema.parse(await this.request("POST", `${base(orgId)}/cloud-workspaces/${id(workspaceId)}/open?attachTicket=1`, body));
   }
 
-  /** Queue an encrypted command. The same envelope may be posted again: the server answers with the first outcome. */
-  async enqueue(orgId: string, workspaceId: string, envelope: CommandEnvelope): Promise<{ command: CloudCommand; existing: boolean; wake: WakeResult | null }> {
-    const answer = z.object({ command: commandSchema, existing: z.boolean().optional(), wake: z.string().nullish() }).parse(await this.request("POST", `${mailbox(orgId, workspaceId)}`, envelope));
+  /**
+   * Queue an encrypted command. The same envelope may be posted again: the
+   * server answers with the first outcome. With `wake: false` (only for a
+   * server where `doNotWake()`) nothing is started: a workspace that is not
+   * running is refused with `WORKSPACE_STOPPED` and the command is not stored.
+   */
+  async enqueue(orgId: string, workspaceId: string, envelope: CommandEnvelope, options: { wake?: boolean } = {}): Promise<{ command: CloudCommand; existing: boolean; wake: WakeResult | null }> {
+    const body = options.wake === false ? { ...envelope, wake: false } : envelope;
+    const answer = z.object({ command: commandSchema, existing: z.boolean().optional(), wake: z.string().nullish() }).parse(await this.request("POST", `${mailbox(orgId, workspaceId)}`, body));
     return { command: answer.command, existing: answer.existing ?? false, wake: answer.wake ?? null };
   }
 

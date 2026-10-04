@@ -81,6 +81,9 @@ const PERMISSION_MODES: [&str; 5] = ["plan", "manual", "auto", "acceptEdits", "b
 /// Sink events after which the session list is sent again (`session/2`).
 const SESSION_EVENTS: [&str; 3] = ["session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT];
 
+/// What the phone app calls itself in `rpc.hello`.
+const MOBILE_APP: &str = "terminalx-mobile";
+
 /// One attached client connection.
 pub struct Peer {
     id: u64,
@@ -108,6 +111,9 @@ pub struct Peer {
     closed: tokio::sync::Notify,
     /// Set once the connection has been disconnected from the runtime.
     gone: std::sync::atomic::AtomicBool,
+    /// Held while this connection counts as use of the workspace for idle
+    /// suspend: only a client that can type does (contract 9.4.1).
+    attached: Mutex<Option<crate::cloud_activity::Attached>>,
 }
 
 #[derive(Clone)]
@@ -138,6 +144,12 @@ impl Peer {
         Self::for_user(device_id, authority, None)
     }
 
+    /// Whether this connection is reported as an attached client.
+    #[cfg(test)]
+    pub(crate) fn counts_as_attached(&self) -> bool {
+        self.attached.lock().unwrap().is_some()
+    }
+
     pub fn for_user(device_id: String, authority: Authority, user_id: Option<String>) -> (Arc<Self>, Notifications) {
         Self::for_installation(device_id, authority, user_id, None)
     }
@@ -157,6 +169,7 @@ impl Peer {
             presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
             closed: tokio::sync::Notify::new(),
             gone: std::sync::atomic::AtomicBool::new(false),
+            attached: Mutex::new(None),
         });
         (peer, Notifications { receiver, queued })
     }
@@ -568,6 +581,24 @@ impl WorkspaceRpc {
         }
     }
 
+    /// Looking does not hold compute (terminalx-saas contract 9.4.1): a
+    /// connection keeps the workspace from idle suspending only while it
+    /// can type, which is a manager's or a driver's desktop. A viewer reads,
+    /// and a phone acts through the mailbox, where a command counts itself.
+    /// Typing and agent turns are reported whoever is attached. Before the
+    /// API has listed who has access there are no roles to go by, and every
+    /// connection but a phone counts, as before.
+    fn count_attachment(&self, peer: &Peer, hello: &Value) {
+        let phone = hello["client"]["app"].as_str() == Some(MOBILE_APP);
+        let types = !self.collab.known() || self.access(peer).can_drive();
+        let mut attached = peer.attached.lock().unwrap();
+        if phone || !types || peer.gone.load(Ordering::SeqCst) {
+            *attached = None;
+        } else if attached.is_none() {
+            *attached = Some(crate::cloud_activity::attached());
+        }
+    }
+
     /// A connection's access: its attachment's authority and, for a
     /// participant, the role the workspace is shared with them in.
     pub fn access(&self, peer: &Peer) -> Access {
@@ -775,6 +806,7 @@ impl WorkspaceRpc {
         if method == "rpc.hello" {
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
+            self.count_attachment(peer, &params);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
                 if let Some(agents) = self.agents.get() {
                     agents.client_attached();
@@ -1038,6 +1070,9 @@ impl WorkspaceRpc {
         self.files.disconnect(peer.id);
         // Before its streams are ended, so an open still connecting sees it.
         peer.gone.store(true, Ordering::SeqCst);
+        // Released here, not when the last reference to the peer goes: a
+        // connection that ended must not keep the workspace awake.
+        *peer.attached.lock().unwrap() = None;
         self.ports.disconnect(peer.id);
         if self.peers.lock().unwrap().remove(&peer.id).is_some() {
             if let Some(agents) = self.agents.get() {

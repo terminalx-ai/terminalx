@@ -708,6 +708,39 @@ fn with_tab(f: &Fixture) -> Arc<crate::cloud_agents::CloudAgents> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_a_client_that_can_type_counts_as_attached_for_idle_suspend() {
+    let f = fixture();
+    // Before the API listed anyone there are no roles: every connection counts, but a phone.
+    let (legacy, _events) = Peer::new("d-legacy".into(), Authority::Participate);
+    call(&f.rpc, &legacy, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ALL })).await.unwrap();
+    assert!(legacy.counts_as_attached());
+
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager", "canApprove": true },
+        { "userId": "alice", "role": "driver" },
+        { "userId": "bob", "role": "viewer", "canApprove": true },
+    ])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (carol, _carol_events, _) = person(&f.rpc, "d-carol", Authority::Participate, "carol").await;
+    assert!(admin.counts_as_attached() && alice.counts_as_attached());
+    // A connection that ended holds nothing, whoever still refers to it.
+    f.rpc.disconnect(&alice);
+    assert!(!alice.counts_as_attached());
+    // A viewer reads, approver or not; someone it is not shared with sees nothing.
+    assert!(!bob.counts_as_attached() && !carol.counts_as_attached());
+
+    // A phone only looks, whoever holds it: it acts through the mailbox.
+    for (device, user) in [("p-admin", "admin"), ("p-alice", "alice")] {
+        let (phone, _events) = Peer::for_user(device.into(), Authority::Participate, Some(user.into()));
+        let hello = json!({ "protocol": PROTOCOL, "client": { "app": "terminalx-mobile", "version": "1.0.0" }, "want": ALL });
+        call(&f.rpc, &phone, "rpc.hello", hello).await.unwrap();
+        assert!(!phone.counts_as_attached(), "{user}'s phone");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn roles_decide_what_a_participant_reads_types_and_holds() {
     let f = fixture();
     let agents = with_tab(&f);
