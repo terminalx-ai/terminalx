@@ -15,7 +15,7 @@ export function portErrorMessage(error: unknown, port: number): string {
   const code = typeof error === "string" ? error : error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : String(error);
   switch (code) {
     case "cloud_port_in_use":
-      return `Port ${port} is already in use on this Mac. Untick "Same port number only" to use another one.`;
+      return `Port ${port} is already in use on this Mac. Untick "Same port number as the workspace" to use a free one.`;
     case "cloud_port_not_connected":
       return STOPPED;
     case "cloud_port_invalid":
@@ -26,17 +26,18 @@ export function portErrorMessage(error: unknown, port: number): string {
     case "cloud_remote_connection_unknown":
       return "The connection to this workspace changed. Open the workspace again.";
     default:
-      return `The preview could not be opened (${code}).`;
+      return "The preview could not be opened. Try again.";
   }
 }
 
-const previewUrl = (forward: CloudPortForward) => `http://localhost:${forward.localPort}`;
+// 127.0.0.1, never `localhost`: the listener is IPv4 only, and `localhost`
+// could reach another program listening on IPv6 loopback at that port.
+const previewUrl = (forward: CloudPortForward) => `http://127.0.0.1:${forward.localPort}`;
 
 /**
  * A workspace's ports and previews (PRO-28, docs/CLOUD-PREVIEWS.md). A
- * preview is a forward to this Mac's `localhost` over the workspace
- * connection: there is no public address. Nothing here starts a stopped
- * workspace.
+ * preview is a forward to this Mac's loopback over the workspace connection:
+ * there is no public address. Nothing here starts a stopped workspace.
  *
  * `connectionId` names the native connection the forwards belong to; `mayOpen`
  * is the terminal's rule (a manager, or a driver who may approve).
@@ -63,7 +64,8 @@ export function CloudPortsView({
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [typed, setTyped] = useState("");
-  const [exact, setExact] = useState(false);
+  // Ask for the workspace's own port number on this Mac, and refuse if taken.
+  const [sameNumber, setSameNumber] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -92,9 +94,12 @@ export function CloudPortsView({
     }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [active, usable, read]);
-  // The connection went: its streams are gone, and so are forwards on a new connection.
+  // The connection went: its forwards were closed with it, and do not come back.
   useEffect(() => {
-    if (!connected) setListening([]);
+    if (!connected) {
+      setListening([]);
+      setForwards([]);
+    }
   }, [connected]);
 
   const open = async (port: number) => {
@@ -102,7 +107,7 @@ export function CloudPortsView({
     setBusy(port);
     setError(null);
     try {
-      const forward = await api.cloudPortForward(connectionId, port, { exact });
+      const forward = await api.cloudPortForward(connectionId, port, sameNumber ? { localPort: port, exact: true } : {});
       if (!mounted.current) return;
       setForwards((current) => [...current.filter((other) => other.port !== port), forward].sort((a, b) => a.port - b.port));
       await openUrl(previewUrl(forward));
@@ -157,7 +162,7 @@ export function CloudPortsView({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto text-xs" data-testid="cloud-ports">
       <p className="border-b border-hairline px-3 py-2 text-muted-foreground">
-        A preview opens a workspace port at <span className="text-foreground">localhost</span> on this Mac, over your encrypted connection to the workspace. It has no public address, and it ends when the workspace stops or your access does.
+        A preview opens a workspace port at <span className="text-foreground">127.0.0.1</span> on this Mac, over your encrypted connection to the workspace. It has no public address, and it closes when the workspace stops or your access does. While it is open, other programs on this Mac can connect to it, and it shares cookies with anything else you use at 127.0.0.1.
       </p>
       {error && (
         <p className="px-3 py-1 text-red-500" role="alert">
@@ -176,7 +181,6 @@ export function CloudPortsView({
                   <button type="button" className="font-mono underline decoration-hairline-strong underline-offset-2" onClick={() => void openUrl(previewUrl(forward))}>
                     {previewUrl(forward)}
                   </button>
-                  {forward.reassigned && <span className="text-muted-foreground">(port {port} was taken on this Mac)</span>}
                   {gone && detected && <span className="text-muted-foreground">nothing is listening in the workspace now</span>}
                   <Button className="ml-auto" size="xs" variant="ghost" disabled={busy === port} onClick={() => void stop(port)}>
                     Stop
@@ -208,8 +212,8 @@ export function CloudPortsView({
           Open preview
         </Button>
         <label className="ml-auto flex items-center gap-1 text-muted-foreground">
-          <input type="checkbox" checked={exact} onChange={(event) => setExact(event.target.checked)} />
-          Same port number only
+          <input type="checkbox" checked={sameNumber} onChange={(event) => setSameNumber(event.target.checked)} />
+          Same port number as the workspace
         </label>
       </form>
     </div>

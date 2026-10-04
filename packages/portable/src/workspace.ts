@@ -134,6 +134,9 @@ export type WorkspaceConnectionState =
 /** Who drives a terminal's input and size: this client, another device, or nobody. */
 export type PtyControl = "you" | "other" | "none";
 
+/** The most ports or streams `listPorts` returns, whatever the runtime sent. */
+export const MAX_LISTED_PORTS = 256;
+
 /** An agent process on the runtime. A tab whose process ended keeps its saved conversation. */
 export type AgentProcessState = "running" | "exited" | "not-started";
 export type AgentTabStatus = "idle" | "in_progress" | "waiting" | "completed";
@@ -512,8 +515,18 @@ export class WorkspaceRpcClient {
    * port: a manager, or a driver who may approve.
    */
   async listPorts(): Promise<{ detected: boolean; ports: { port: number }[]; streams: { streamId: string; port: number }[] }> {
-    const listed = await this.call<{ detected?: boolean; ports?: { port: number }[]; streams?: { streamId: string; port: number }[] }>("ports.list");
-    return { detected: listed.detected === true, ports: listed.ports ?? [], streams: listed.streams ?? [] };
+    const listed = await this.call<{ detected?: unknown; ports?: unknown; streams?: unknown }>("ports.list");
+    // The runtime is not trusted for the shape: whole port numbers only, and a bounded list.
+    const port = (value: unknown): number | null => (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535 ? value : null);
+    const entries = (value: unknown): Record<string, unknown>[] => (Array.isArray(value) ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object") : []);
+    const ports = [...new Set(entries(listed.ports).map((entry) => port(entry.port)).filter((value): value is number => value !== null))].sort((a, b) => a - b).slice(0, MAX_LISTED_PORTS);
+    const streams = entries(listed.streams)
+      .flatMap((entry) => {
+        const value = port(entry.port);
+        return typeof entry.streamId === "string" && value !== null ? [{ streamId: entry.streamId, port: value }] : [];
+      })
+      .slice(0, MAX_LISTED_PORTS);
+    return { detected: listed.detected === true, ports: ports.map((value) => ({ port: value })), streams };
   }
 
   async listPtys(): Promise<{ epoch: string; terminals: PtyInfo[] }> {

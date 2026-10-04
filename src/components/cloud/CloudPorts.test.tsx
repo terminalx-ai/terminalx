@@ -58,9 +58,10 @@ beforeEach(() => {
   mocks.invoke.mockImplementation(async (command: string, args: { connectionId: string; port: number; exact?: boolean }) => {
     if (command === "cloud_port_forwards") return forwards;
     if (command === "cloud_port_forward") {
-      const reassigned = taken.includes(args.port);
-      if (reassigned && args.exact) throw "cloud_port_in_use";
-      const forward = { port: args.port, localPort: reassigned ? args.port + 1 : args.port, reassigned };
+      const wanted = (args as { localPort?: number | null }).localPort ?? null;
+      if (wanted !== null && taken.includes(wanted) && args.exact) throw "cloud_port_in_use";
+      // A random free port unless one was named.
+      const forward = { port: args.port, localPort: wanted ?? 49000 + (args.port % 1000), reassigned: false };
       forwards = [...forwards.filter((other) => other.port !== args.port), forward];
       return forward;
     }
@@ -78,31 +79,66 @@ describe("the Ports panel (PRO-28)", () => {
     const { client } = setup();
     render(<CloudPortsView client={client} state={live} connectionId="cloud-1" mayOpen active />);
     await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
-    expect(screen.getByTestId("cloud-ports").textContent).toContain("no public address");
+    const words = screen.getByTestId("cloud-ports").textContent!;
+    expect(words).toContain("no public address");
+    // What a preview exposes is said where it is opened.
+    expect(words).toContain("other programs on this Mac can connect");
+    expect(words).toContain("shares cookies");
     fireEvent.click(screen.getAllByRole("button", { name: "Open preview" })[0]!);
-    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://localhost:3000"));
+    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://127.0.0.1:49000"));
     expect(mocks.invoke).toHaveBeenCalledWith("cloud_port_forward", { connectionId: "cloud-1", port: 3000, localPort: null, exact: false });
     // The forward is shown with its address, and can be stopped.
-    expect(await screen.findByRole("button", { name: "http://localhost:3000" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "http://127.0.0.1:49000" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("cloud_port_unforward", { connectionId: "cloud-1", port: 3000 }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "http://localhost:3000" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "http://127.0.0.1:49000" })).toBeNull());
   });
 
-  it("shows when the local port was taken and another was used, and refuses instead when asked for the same number only", async () => {
+  it("uses a random local port unless the workspace's number is asked for, which is refused when taken", async () => {
     taken = [3000];
     const { client } = setup();
     render(<CloudPortsView client={client} state={live} connectionId="cloud-1" mayOpen active />);
     await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number only" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number as the workspace" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Open preview" })[0]!);
     expect((await screen.findByRole("alert")).textContent).toContain("Port 3000 is already in use on this Mac");
+    expect(mocks.invoke).toHaveBeenCalledWith("cloud_port_forward", { connectionId: "cloud-1", port: 3000, localPort: 3000, exact: true });
     expect(mocks.openUrl).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number only" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Same port number as the workspace" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Open preview" })[0]!);
-    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://localhost:3001"));
-    expect((await screen.findAllByTestId("cloud-port"))[0]!.textContent).toContain("port 3000 was taken on this Mac");
+    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://127.0.0.1:49000"));
+    expect(mocks.invoke).toHaveBeenLastCalledWith("cloud_port_forward", { connectionId: "cloud-1", port: 3000, localPort: null, exact: false });
+  });
+
+  it("shows only whole port numbers from the runtime, at most 256, whatever it sends", async () => {
+    const hostile = () => ({
+      detected: true,
+      ports: [{ port: "3000" }, { port: 0 }, { port: 70000 }, { port: 3.5 }, null, "x", { port: 8080 }, { port: 8080 }, ...Array.from({ length: 5000 }, (_, index) => ({ port: 10000 + index }))],
+      streams: "nope",
+    });
+    const { client } = setup(live, hostile);
+    render(<CloudPortsView client={client} state={live} connectionId="cloud-1" mayOpen active />);
+    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(256));
+    expect(screen.getAllByTestId("cloud-port")[0]!.textContent).toContain("8080");
+    expect((await client.listPorts()).streams).toEqual([]);
+  });
+
+  it("forgets its forwards when the workspace stops: they are closed, and do not come back", async () => {
+    const { runtime, client } = setup();
+    const view = render(<CloudPortsView client={client} state={live} connectionId="cloud-1" mayOpen active />);
+    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole("button", { name: "Open preview" })[0]!);
+    await screen.findByRole("button", { name: "http://127.0.0.1:49000" });
+    forwards = [];
+    const stopped: WorkspaceConnectionState = { state: "suspended" };
+    runtime.setState(stopped);
+    view.rerender(<CloudPortsView client={client} state={stopped} connectionId="cloud-1" mayOpen active />);
+    expect(screen.getByTestId("cloud-ports-stopped")).toBeTruthy();
+    runtime.setState(live);
+    view.rerender(<CloudPortsView client={client} state={live} connectionId="cloud-1" mayOpen active />);
+    await waitFor(() => expect(screen.getAllByTestId("cloud-port")).toHaveLength(2));
+    expect(screen.queryByRole("button", { name: "http://127.0.0.1:49000" })).toBeNull();
   });
 
   it("opens a port by number when nothing is detected", async () => {
@@ -114,7 +150,7 @@ describe("the Ports panel (PRO-28)", () => {
     expect((screen.getByRole("button", { name: "Open preview" }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(input, { target: { value: "8080" } });
     fireEvent.click(screen.getByRole("button", { name: "Open preview" }));
-    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://localhost:8080"));
+    await waitFor(() => expect(mocks.openUrl).toHaveBeenCalledWith("http://127.0.0.1:49080"));
   });
 
   it("never asks a stopped workspace for anything", async () => {
@@ -153,6 +189,6 @@ describe("the Ports panel (PRO-28)", () => {
     expect(portErrorMessage("cloud_port_not_connected", 3000)).toContain("never starts it");
     expect(portErrorMessage({ code: "forbidden" }, 3000)).toBe("You do not have access to this workspace's ports.");
     expect(portErrorMessage("cloud_port_invalid", 0)).toContain("between 1 and 65535");
-    expect(portErrorMessage("something_new", 3000)).toBe("The preview could not be opened (something_new).");
+    expect(portErrorMessage("something_new", 3000)).toBe("The preview could not be opened. Try again.");
   });
 });
