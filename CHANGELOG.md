@@ -1,5 +1,105 @@
 # TerminalX changelog
 
+## 0.2.8
+
+Cloud workspaces gain a full composer, port previews, a local file mirror and
+a CLI. Terminals are faster and recover after sleep, workspace removal is
+safer, and the mobile companion can open cloud workspaces.
+
+### Cloud workspaces
+
+- Switch a cloud agent tab between chat and terminal view. The composer in a
+  cloud tab supports slash commands, @-mentions and images, and Send again
+  keeps a message's images. (#255, #304, #308, #309, #321, #332)
+- Preview a workspace's ports privately: a Ports panel in the workspace view
+  and a local port forwarder on the desktop. (#330, #338, #340)
+- Keep an opt-in local mirror of a workspace's files. Files are staged,
+  verified and published, never over a local change, and the copy is removed
+  with access. (#334, #335, #336, #360)
+- Members can create cloud workspaces and manage the ones they created. A
+  plain driver cannot exceed their role through slash commands or shells.
+  (#273, #297, #342)
+- Manage cloud workspaces from the `terminalx` CLI with the app's own role
+  checks. (#284)
+- The full-window cloud page is gone; its features live in the sidebar, with
+  repository and running-slot chips. Every organization's workspaces load in
+  one request. (#268, #271, #272, #277, #283)
+- After a stop and wake, a person's own terminal comes back to them, the
+  agent terminal can be typed into again, and the key that wakes a workspace
+  is never typed into the agent. A stopped workspace says when it was last
+  saved, and the Stop dialog names what resume brings back. (#299, #301,
+  #320, #344, #362, #377)
+- Notices for a full workspace disk and low memory name the real cause and
+  fit the reader's role. (#305, #306, #319)
+- Repositories are cloned at launch when a workspace has no Environment
+  image, also without a first prompt. A canceled create stops Git, a failed
+  clone says what failed, and a failed checkout is retried. (#300, #323,
+  #331, #339)
+- Connect, replace and disconnect agent logins from the desktop. The first
+  prompt's agent is checked on create and reads "needs sign-in" instead of
+  Working. Pause or allow new machines and re-check a provider key; Hetzner
+  is named as a supported provider. (#279, #281, #292, #293, #303)
+- Tear down an organization's cloud, choose how long an archive is kept and
+  export from the dialog. Setup keeps one record per organization across
+  profile switches and retries. (#282, #314, #315, #328)
+- Cloud model pickers use the workspace runtime's models, and the cloud
+  editor picks up a file changed before it began watching. (#357, #365)
+
+### Sessions and agents
+
+- Claude models come from the CLI, with pinned versions, and issue sessions
+  allow choosing the model and reasoning effort. (#261, #263, #368)
+- Filter the sidebar by Unread and Needs you, for local and cloud sessions.
+  (#285)
+- Customize keyboard shortcuts in Settings. (#253)
+- Website links in chat open in the system browser by default, with a
+  browser choice. (#351, #355)
+- The CLI can name and rename sessions and worktrees, and a new session
+  worktree starts from the freshly fetched default branch. (#356, #359)
+- Chat no longer shows false slow-start and timeout warnings, continuation
+  delivery is confirmed, turns closed by the watcher complete, and a message
+  sent from the terminal view shows in the chat view. (#274, #348, #350,
+  #361)
+- Dashboard cards stay readable in crowded columns, and Stats & Usage
+  recovers when activity ownership changes. (#349, #376)
+
+### Terminals
+
+- Terminal output travels over a raw channel per pane with flow control,
+  memory is bounded, input stays responsive, and terminal and chat views
+  recover after the app is suspended. (#248, #352, #370, #371)
+- Dropping a file on a terminal types its path. (#259)
+
+### Workspaces and worktrees
+
+- Workspaces have one removal path, and deleting a session deletes only that
+  session along with the agent's own data for it. The clean-and-merged check
+  recognises squash and rebase merges, and every workspace row shows its
+  state and size on disk. (#264, #307, #312, #316)
+- A worktree removal that fails is shown, keeps the session and can be
+  retried. (#260)
+
+### Settings
+
+- Settings is a gear at the end of the sidebar's account row and opens on
+  Account; asking for it again goes to the section asked for. A canceled
+  GitHub connect stays canceled. (#269, #270, #280, #286)
+- TerminalX Dev has its own sign-in scheme, separate from the release app.
+  (#298)
+
+### Mobile companion
+
+These source changes require a separately updated mobile app.
+
+- Open cloud workspaces, reconnect to cloud agent sessions and share them
+  with presence, notes and the driver lease. (#294, #295)
+- A paired computer shows its real name, with rename, reconnect and remove
+  in its menu. (#310, #318)
+- Conversations open at the latest content, sync incrementally and page by
+  size; a session looks continuous across a trip to the home screen, and a
+  backgrounded phone neither connects nor posts. (#327, #329, #366, #367,
+  #369)
+
 ## 0.2.7
 
 Terminals are released when their tabs and sessions go away, a slow Keychain
