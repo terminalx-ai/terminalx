@@ -24,6 +24,18 @@ export function ContinuationDialog({ session, source, onClose }: {
   const [deliveryFailed, setDeliveryFailed] = useState(false);
   const startingRef = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
+  const active = useRef(true);
+
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+
+  const close = () => {
+    if (!active.current) return;
+    active.current = false;
+    onClose();
+  };
 
   useEffect(() => {
     let canceled = false;
@@ -57,24 +69,28 @@ export function ContinuationDialog({ session, source, onClose }: {
     try {
       const prompt = preparedPrompt.current ?? continuationPrompt(context, mode);
       preparedPrompt.current = prompt;
-      const result = await launchContinuation(context, provider, prompt, setDestination, destination);
-      if (result.stage === "delivered") onClose();
+      const result = await launchContinuation(context, provider, prompt, (tab) => {
+        if (active.current) setDestination(tab);
+      }, destination);
+      if (!active.current) return;
+      if (result.stage === "delivered") close();
       else {
         setError(result.error);
         setDeliveryFailed(result.stage === "delivery");
         if (!result.tab) preparedPrompt.current = undefined;
       }
     } catch (e) {
-      setError(errorMessage(e));
+      if (active.current) setError(errorMessage(e));
     } finally {
       startingRef.current = false;
-      setStarting(false);
+      if (active.current) setStarting(false);
     }
   };
   const sourceActive = context?.sourceActive || source.status === "in_progress" || source.status === "waiting";
+  const canClose = !starting || !!destination;
   return (
-    <Dialog open onOpenChange={(open) => { if (!open && !startingRef.current) onClose(); }}>
-      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto" showClose={!starting} onEscapeKeyDown={(e) => e.stopPropagation()}>
+    <Dialog open onOpenChange={(open) => { if (!open && canClose) close(); }}>
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto" showClose={canClose} onEscapeKeyDown={(e) => e.stopPropagation()}>
         <DialogHeader>
           <DialogTitle className="text-base font-semibold">Continue in New Session</DialogTitle>
           <DialogDescription className="text-sm text-muted-foreground">Start a fresh agent conversation in this workspace with context from the current conversation.</DialogDescription>
@@ -102,7 +118,7 @@ export function ContinuationDialog({ session, source, onClose }: {
         </>}
         {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
         <DialogFooter>
-          <Button variant="ghost" disabled={starting} onClick={onClose}>{deliveryFailed ? "Open New Session" : "Cancel"}</Button>
+          <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !provider) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
           {!deliveryFailed && <Button disabled={loading || starting || !context || !provider} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />Starting…</> : destination ? "Retry Start" : "Start New Session"}</Button>}
         </DialogFooter>

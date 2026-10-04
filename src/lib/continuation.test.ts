@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, TabEntry } from "@/types/session";
-const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), draft: vi.fn(), apply: vi.fn() }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), add: vi.fn(), start: vi.fn(), send: vi.fn(), apply: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list }, agent: { ensureStarted: mocks.start, send: mocks.send }, errorMessage: String }));
 vi.mock("@/lib/sessions", () => ({ addTab: mocks.add }));
-vi.mock("@/lib/drafts", () => ({ setDraft: mocks.draft }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: mocks.apply }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-default" }, lastEffort: { codex: "high" }, lastMode: "default" }) }));
 import { continuationPrompt, launchContinuation, selectContinuationProvider, type ContinuationContext } from "./continuation";
+import { getDraft, setDraft } from "@/lib/drafts";
 const providers = [{ id: "claude", available: true }, { id: "codex", available: true }] as HarnessInfo[];
 const context: ContinuationContext = { sessionId: "workspace", tabId: "source", title: "Issue 109", cwd: "/same/cwd", provider: "claude", providerSessionId: "original", sourceActive: true, transcriptPath: "/saved/history```file.jsonl", fullUnavailableReason: null, lastPrompt: "Finish ```this```", lastUpdate: "Halfway", partialCapture: null };
 const tab = { id: "fresh", harness: "codex", providerSessionId: null } as TabEntry;
-beforeEach(() => { vi.clearAllMocks(); mocks.list.mockResolvedValue(providers); mocks.add.mockResolvedValue(tab); mocks.start.mockResolvedValue(undefined); mocks.send.mockResolvedValue({ queued: false, events: [] }); });
+beforeEach(() => { vi.clearAllMocks(); setDraft(tab.id, ""); mocks.list.mockResolvedValue(providers); mocks.add.mockResolvedValue(tab); mocks.start.mockResolvedValue(undefined); mocks.send.mockResolvedValue({ queued: false, events: [] }); });
 describe("context and selection", () => {
   it("prefers source, configured default, then first available", () => {
     expect(selectContinuationProvider(providers, "claude", "codex")).toBe("claude");
@@ -48,6 +48,7 @@ describe("launch and actual send boundary", () => {
     expect(mocks.send).toHaveBeenCalledExactlyOnceWith("workspace", "fresh", prompt, undefined, true);
     expect(mocks.start.mock.invocationCallOrder[0]).toBeLessThan(mocks.send.mock.invocationCallOrder[0]);
     expect(context.providerSessionId).toBe("original");
+    expect(getDraft("fresh")).toBe("");
   });
   it("uses destination defaults and waits for confirmed delivery", async () => {
     let resolve!: (value: unknown) => void;
@@ -55,9 +56,10 @@ describe("launch and actual send boundary", () => {
     const running = launchContinuation(context, "codex", "prompt", vi.fn());
     await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
     expect(mocks.add).toHaveBeenCalledWith("workspace", "codex", "codex-default", "high", "default");
-    expect(mocks.draft).not.toHaveBeenCalledWith("fresh", "");
+    expect(getDraft("fresh")).toBe("prompt");
     resolve({ queued: false, events: [] });
     expect((await running).stage).toBe("delivered");
+    expect(getDraft("fresh")).toBe("");
   });
   it("rechecks availability before creating anything", async () => {
     mocks.list.mockResolvedValue([]);
@@ -77,6 +79,29 @@ describe("launch and actual send boundary", () => {
     const failed = await launchContinuation(context, "codex", "prepared prompt", vi.fn());
     expect(failed.stage).toBe("delivery");
     expect(failed.tab).toBe(tab);
-    expect(mocks.draft).toHaveBeenLastCalledWith("fresh", "prepared prompt");
+    expect(getDraft("fresh")).toBe("prepared prompt");
+  });
+  it("retains the prompt when the provider never confirms delivery", async () => {
+    let reject!: (reason: Error) => void;
+    mocks.send.mockReturnValue(new Promise((_resolve, fail) => { reject = fail; }));
+    const running = launchContinuation(context, "claude", "prepared prompt", vi.fn());
+    await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    expect(getDraft("fresh")).toBe("prepared prompt");
+    reject(new Error("prompt delivery could not be confirmed"));
+    const result = await running;
+    expect(result.stage).toBe("delivery");
+    expect(getDraft("fresh")).toBe("prepared prompt");
+  });
+  it.each(["delivered", "delivery"])("preserves a new draft when a dismissed dialog finishes with %s", async (stage) => {
+    let resolve!: (value: unknown) => void;
+    let reject!: (reason: Error) => void;
+    mocks.send.mockReturnValue(new Promise((done, fail) => { resolve = done; reject = fail; }));
+    const running = launchContinuation(context, "codex", "prepared prompt", vi.fn());
+    await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    setDraft("fresh", "my next prompt");
+    if (stage === "delivered") resolve({ queued: false, events: [] });
+    else reject(new Error("could not be confirmed"));
+    expect((await running).stage).toBe(stage);
+    expect(getDraft("fresh")).toBe("my next prompt");
   });
 });

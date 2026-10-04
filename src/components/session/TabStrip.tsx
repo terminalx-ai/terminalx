@@ -7,6 +7,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { closeEditor, useEditors } from "@/lib/editors";
 import { useShortcut } from "@/lib/hotkeys";
+import { useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
 import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
@@ -97,7 +99,8 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
  * menu says why when it is not there.
  */
 function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel }) {
-  const picker = useRowMenu();
+  const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
+  const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
   const tabs = useMemo<(SelectedSessionTab & { created: string })[]>(
     () =>
@@ -148,7 +151,7 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
           <DropdownMenuItem
             key={agent.id}
             disabled={!!blocked || !cloud.canAddTabs}
-            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, model: prefs.lastModel[agent.id] || undefined, effort: prefs.lastEffort[agent.id] ?? undefined, mode: prefs.lastMode }))}
+            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, model: models.find((model) => model.harness === agent.id && model.id === prefs.lastModel[agent.id])?.id, effort: prefs.lastEffort[agent.id] ?? undefined, mode: prefs.lastMode }))}
           >
             <AgentMark id={agent.id} decorative /><span>{agent.name}</span>
             {!blocked && !cloud.canAddTabs ? <span className="ml-auto pl-3 text-[11px] text-faint">update the runtime</span> : null}

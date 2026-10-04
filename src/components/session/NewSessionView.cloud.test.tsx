@@ -1,6 +1,8 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { HarnessInfo, Project } from "@/types/session";
 import type { CloudProject } from "@/types/target";
 import { accessibilityPress, mouseClick } from "@/test/press";
@@ -10,8 +12,9 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or asks for the one-time cost confirmation before creating one.
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart, noLocal } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  modelConnection: { client: null as import("@terminalx/portable/workspace").WorkspaceRpcClient | null, targets: vi.fn() },
   flow: {
     planCloudStart: vi.fn(),
     startInWorkspace: vi.fn(),
@@ -76,6 +79,13 @@ vi.mock("./CloudNewSession", async (importOriginal) => ({
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/cloudModels", async (original) => ({
+  ...(await original<typeof import("@/lib/cloudModels")>()),
+  useCloudModelClient: (target: unknown) => {
+    modelConnection.targets(target);
+    return target ? modelConnection.client : null;
+  },
+}));
 vi.mock("@/components/cloud/RunningLimitNotice", () => ({
   RunningLimitNotice: ({ orgId }: { orgId: string }) => <div data-testid="running-limit-notice">{orgId}</div>,
 }));
@@ -105,6 +115,8 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
+  modelConnection.client = null;
+  modelConnection.targets.mockClear();
   mayStart.value = true;
   noLocal.value = false;
   draft.value = { project, orgName: "Acme", mayStart: true };
@@ -138,6 +150,33 @@ describe("new session in a cloud project", () => {
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("uses the existing workspace's versions, and falls back to aliases when it stops", async () => {
+    const runtime = new FakeAgentRuntime();
+    const base = { efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
+    runtime.agents[0].models = [
+      { ...base, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true },
+      { ...base, id: "claude-opus-4-6", label: "Opus 4.6", isDefault: false },
+    ];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    modelConnection.client = client;
+    flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
+    flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
+    const view = render(<NewSessionView />);
+    const button = await screen.findByRole("button", { name: "Opus (latest · Opus 4.6)" });
+    expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" })).toBeTruthy();
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5" })).toBeNull();
+    fireEvent.keyDown(menu, { key: "Escape" });
+    act(() => runtime.emit({ state: "suspended" }));
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    view.rerender(<NewSessionView />);
+    expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
   });
 
   it("asks once for the cost, showing the quota, before creating a workspace", async () => {

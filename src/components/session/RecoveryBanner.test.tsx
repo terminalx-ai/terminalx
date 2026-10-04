@@ -1,8 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { askDetail } from "@/components/chat/AskCards";
 import type { PendingAsk } from "@/lib/transcript";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
+import { usePickerModels } from "@/lib/cloudModels";
 import type { ModelInfo } from "@/lib/api";
 
 const ask: PendingAsk = {
@@ -31,6 +34,26 @@ describe("session recovery UI smoke", () => {
     expect(p.onStop).toHaveBeenCalledOnce();
     expect(container.textContent).not.toMatch(/secret|TOKEN|\/Users/);
     expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+  });
+
+  it("offers the workspace's pinned model for recovery, with aliases only offline", async () => {
+    const p = props();
+    const runtime = new FakeAgentRuntime();
+    const alias: ModelInfo = { id: "opus", label: "Opus", harness: "claude", alias: true, resolved: "claude-opus-5-5", isDefault: true, efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
+    runtime.agents[0].models = [{ ...alias, resolved: "claude-opus-4-6" }, { ...alias, id: "claude-opus-4-6", label: "Opus 4.6", alias: false, isDefault: false }];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    function CloudRecovery() {
+      const { models, refresh } = usePickerModels([alias], true, client, "claude");
+      return <RecoveryBanner {...p} kind="capacity" models={models} onOpenModels={refresh} />;
+    }
+    render(<CloudRecovery />);
+    expect(await screen.findByRole("option", { name: "Opus (latest · Opus 4.6)" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "claude-opus-4-6" } });
+    expect(p.onRetry).toHaveBeenCalledWith("claude-opus-4-6");
+    act(() => runtime.emit({ state: "suspended" }));
+    expect(screen.getByRole("option", { name: "Opus (latest)" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Opus 4.6" })).toBeNull();
   });
 
   it("keeps keyboard decisions on the focused permission button", () => {

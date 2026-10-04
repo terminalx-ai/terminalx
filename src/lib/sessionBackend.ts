@@ -119,6 +119,8 @@ export interface SessionBackend {
   settingsNotice?(tabId: string): "pending" | "ignored" | null;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
+  /** The workspace client for model discovery, independent of collaboration capabilities. */
+  modelClient?: WorkspaceRpcClient | null;
   /**
    * Cloud only, PRO-30: where the workspace's presence, notes and tab leases
    * live, who this person is there (null when sharing does not apply, as on
@@ -344,6 +346,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     approveBlockedReason,
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,
+    modelClient: cloudAsleep(ctx.state, ctx.workspaceState) ? null : client,
     openTab: (tabId, onError) => {
       setViewing(scope, tabId, true);
       let cancelled = false;

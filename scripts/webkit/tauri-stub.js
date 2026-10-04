@@ -69,13 +69,26 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
       return [
         event({ type: "user_message", text: "slow:30:1500", queued: false }),
         event({ type: "turn_started" }),
-        ...Array.from({ length: 30 }, (_, i) => event({ type: "assistant_text", text: `chunk ${i + 1} of 30` })),
+        ...Array.from({ length: f.chatLinks ? 1 : 30 }, (_, i) => event({ type: "assistant_text", text: f.chatLinks ? "Visit [website](https://example.test/docs) or <https://example.test/auto>." : `chunk ${i + 1} of 30` })),
         event({ type: "permission_requested", requestId: `req-${tabId}`, toolUseId: `tool-${tabId}`, toolName: "Bash", input: { command: "touch /tmp/asked" }, options: [{ id: "allow", label: "Allow", kind: "allow_once" }, { id: "deny", label: "Deny", kind: "deny" }] }),
       ];
     };
     answers.list_sessions = [{ id: SESSION, projectPath: projects[0].path, cwd: projects[0].path, worktreeRemoved: false, title: "Local long session", created: at, modified: at, archived: false, pinned: false, tabs: [tab("lt-pty", "claude"), tab("lt-chat", "gemini")], activeTab: "lt-pty" }];
     answers.list_workspaces = [{ path: projects[0].path, name: "main", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 }];
     answers.load_tab_events = ({ tabId }) => events(tabId, tabId === "lt-pty" ? "claude" : "gemini");
+  }
+  if (f.chatLinks) {
+    const opened = window.__PW_LINK_OPENS__ = { system: [], terminalx: [] };
+    const pages = [];
+    answers.browser_pages = () => pages;
+    answers["plugin:opener|open_url"] = ({ url }) => { opened.system.push(url); };
+    answers.browser_open_tab = ({ workspace, url }) => {
+      opened.terminalx.push({ workspace, url });
+      const page = { id: `page-${pages.length}`, browserPageId: `page-${pages.length}`, profileId: "default", tabId: "browser-tab", url, title: "Website", workspacePath: workspace, created: new Date().toISOString(), active: true, index: pages.length };
+      pages.push(page);
+      window.__PW_STUB__.emit("browser_pages_changed", { pages });
+      return page;
+    };
   }
   // Fixture scripts loaded after this one add answers (a value, or a function
   // of the command's arguments) and emit native events through `__PW_STUB__`.
