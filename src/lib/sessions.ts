@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setSelectedAgent } from "@/lib/terminal";
+import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -97,6 +97,7 @@ function set(patch: Partial<State>) {
     next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
   }
   state = next;
+  if (patch.sessions) setArchivedTerminalSessions(patch.sessions.filter((session) => session.archived).map((session) => session.id));
   for (const l of listeners) l();
 }
 

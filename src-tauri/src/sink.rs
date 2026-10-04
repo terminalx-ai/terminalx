@@ -4,7 +4,9 @@
 //! runtime a cloud workspace boots.
 //!
 //! The desktop sink is the `AppHandle` itself: an emit reaches the webview and
-//! every Rust listener exactly as a direct `app.emit` did. The headless sink
+//! every Rust listener exactly as a direct `app.emit` did, except PTY output:
+//! that stays in process for backend consumers, beside the raw view channels.
+//! The headless sink
 //! keeps the Rust-listener half in process and fans every event out on a
 //! broadcast channel for whatever serves remote clients (the relay host, see
 //! PRO-13).
@@ -23,11 +25,27 @@ pub type Handler = Box<dyn Fn(&str) + Send + Sync>;
 type Listeners = HashMap<String, Vec<(ListenerId, Arc<Handler>)>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ListenerId(u64);
+pub enum ListenerId {
+    Event(u64),
+    #[cfg(feature = "desktop")]
+    Pty(u64),
+}
 
 pub trait EventSink: Send + Sync {
     /// Publish one event whose payload is already JSON.
     fn emit_raw(&self, event: &str, payload: Box<RawValue>);
+    /// Backend consumers of PTY output (mobile and remote clients). Desktop
+    /// xterms already receive raw channels and must not receive this again.
+    fn emit_pty(&self, id: &str, bytes: &[u8]) {
+        use base64::Engine as _;
+        let payload = crate::pty::PtyData {
+            id: id.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        if let Ok(raw) = serde_json::value::to_raw_value(&payload) {
+            self.emit_raw("pty_data", raw);
+        }
+    }
     /// Call `handler` with the JSON payload of every later `event`.
     fn listen(&self, event: &str, handler: Handler) -> ListenerId;
     fn unlisten(&self, id: ListenerId);
@@ -64,19 +82,68 @@ mod desktop {
     use super::*;
     use tauri::{AppHandle, Emitter, Listener, Manager, Runtime};
 
+    /// Separate from Tauri's event bus: even an `Any` JavaScript listener
+    /// cannot accidentally subscribe to the legacy base64 stream.
+    struct PtyListeners {
+        sink: BroadcastSink,
+    }
+
     impl<R: Runtime> EventSink for AppHandle<R> {
         fn emit_raw(&self, event: &str, payload: Box<RawValue>) {
+            if event == "pty_data" {
+                if let Some(listeners) = self.try_state::<PtyListeners>() {
+                    listeners.sink.emit_raw(event, payload);
+                }
+                return;
+            }
             // Already JSON: hand Tauri the buffer rather than serializing it again.
             let _ = Emitter::emit_str(self, event, String::from(Box::<str>::from(payload)));
         }
 
+        fn emit_pty(&self, id: &str, bytes: &[u8]) {
+            if let Some(listeners) = self.try_state::<PtyListeners>() {
+                // No mobile subscriber: no base64 allocation or JSON serialization.
+                let subscribed = listeners
+                    .sink
+                    .listeners
+                    .lock()
+                    .unwrap()
+                    .get("pty_data")
+                    .is_some_and(|entries| !entries.is_empty());
+                if subscribed {
+                    listeners.sink.emit_pty(id, bytes);
+                }
+            }
+        }
+
         fn listen(&self, event: &str, handler: Handler) -> ListenerId {
-            ListenerId(u64::from(Listener::listen(self, event.to_string(), move |e| handler(e.payload()))))
+            if event == "pty_data" {
+                self.manage(PtyListeners { sink: BroadcastSink::new(1) });
+                let ListenerId::Event(id) = self.state::<PtyListeners>().sink.listen(event, handler)
+                else {
+                    unreachable!()
+                };
+                return ListenerId::Pty(id);
+            }
+            ListenerId::Event(u64::from(Listener::listen(
+                self,
+                event.to_string(),
+                move |e| handler(e.payload()),
+            )))
         }
 
         fn unlisten(&self, id: ListenerId) {
-            if let Ok(id) = u32::try_from(id.0) {
-                Listener::unlisten(self, id);
+            match id {
+                ListenerId::Pty(id) => {
+                    if let Some(listeners) = self.try_state::<PtyListeners>() {
+                        listeners.sink.unlisten(ListenerId::Event(id));
+                    }
+                }
+                ListenerId::Event(id) => {
+                    if let Ok(id) = u32::try_from(id) {
+                        Listener::unlisten(self, id);
+                    }
+                }
             }
         }
     }
@@ -157,8 +224,13 @@ impl EventSink for BroadcastSink {
     }
 
     fn listen(&self, event: &str, handler: Handler) -> ListenerId {
-        let id = ListenerId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.listeners.lock().unwrap().entry(event.to_string()).or_default().push((id, Arc::new(handler)));
+        let id = ListenerId::Event(self.next_id.fetch_add(1, Ordering::Relaxed));
+        self.listeners
+            .lock()
+            .unwrap()
+            .entry(event.to_string())
+            .or_default()
+            .push((id, Arc::new(handler)));
         id
     }
 
@@ -172,6 +244,45 @@ impl EventSink for BroadcastSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_pty_output_stays_off_the_tauri_event_bus() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let global = Arc::new(AtomicU64::new(0));
+        let seen = global.clone();
+        tauri::Listener::listen_any(handle, "pty_data", move |_| {
+            seen.fetch_add(1, Ordering::Relaxed);
+        });
+        let backend = Arc::new(Mutex::new(Vec::new()));
+        let received = backend.clone();
+        let sink: &dyn EventSink = handle;
+        let id = sink.listen(
+            "pty_data",
+            Box::new(move |payload| received.lock().unwrap().push(payload.to_string())),
+        );
+        sink.emit_pty("pane", &[0, 255, 27]);
+        assert_eq!(global.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.lock().unwrap().len(), 1);
+        let data: crate::pty::PtyData = serde_json::from_str(&backend.lock().unwrap()[0]).unwrap();
+        assert_eq!(data.id, "pane");
+        assert_eq!(data.data, "AP8b");
+        sink.unlisten(id);
+        sink.emit_pty("pane", b"later");
+        assert_eq!(backend.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn headless_pty_output_reaches_remote_consumers() {
+        let sink = BroadcastSink::new(1);
+        let mut rx = sink.subscribe();
+        sink.emit_pty("pane", b"hello");
+        let event = rx.try_recv().unwrap();
+        assert_eq!(&*event.event, "pty_data");
+        let data: crate::pty::PtyData = serde_json::from_str(&event.payload).unwrap();
+        assert_eq!(data.data, "aGVsbG8=");
+    }
 
     #[test]
     fn broadcast_sink_runs_listeners_and_publishes_the_same_json() {

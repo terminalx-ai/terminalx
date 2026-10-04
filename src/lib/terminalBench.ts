@@ -184,7 +184,9 @@ async function openField(field: Field, roles: (index: number) => string) {
   for (const id of ids) {
     // Registered as an agent-owned pane so closing it releases everything a real one holds.
     await adoptPane({ id, sessionId: run, title: "Benchmark", hidden: true, owned: true });
-    instances.push(getInstance(id, () => createInstance(id, mode())));
+    // This matrix deliberately keeps N parsers alive to stress the transport.
+    // The soak exercises the production idle cache through real views.
+    instances.push(getInstance(id, () => ({ ...createInstance(id, mode()), restorable: false })));
   }
   const front = instances[0];
   host.appendChild(front.el);
