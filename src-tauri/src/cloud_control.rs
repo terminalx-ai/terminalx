@@ -278,8 +278,9 @@ pub fn question_closed() {
 
 /// One whole question for a caller that can wait for the answer: `ask`
 /// returns true only for the explicit agree button. Computer use is paused
-/// while `ask` runs. Used by tests; the app's command drives the same steps
+/// while `ask` runs. For tests; the app's command drives the same steps
 /// around a dialog it cannot wait on forever.
+#[cfg(test)]
 pub fn confirm_with(ask: impl FnOnce() -> bool) -> Answer {
     let start = Instant::now();
     if let Err(answer) = question_begin(start) {
