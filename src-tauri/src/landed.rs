@@ -132,16 +132,21 @@ pub struct Landed {
     /// by the time of the removal, the digest differs and they are asked
     /// again.
     pub digest: String,
+    /// Which files are uncommitted, not only how many: two different sets of
+    /// the same size must not share a digest.
+    #[serde(skip)]
+    changes: u64,
 }
 
 impl Landed {
     fn describe_digest(&self) -> String {
         format!(
-            "checked={} head={} branch={} uncommitted={} stashes={} merged={:?} unmerged={} fresh={} unverified={}",
+            "checked={} head={} branch={} uncommitted={}:{:016x} stashes={} merged={:?} unmerged={} fresh={} unverified={}",
             self.checked,
             self.head.as_deref().unwrap_or("-"),
             self.branch.as_deref().unwrap_or("-"),
             self.uncommitted,
+            self.changes,
             self.stashes,
             self.merged,
             self.unmerged_commits,
@@ -423,9 +428,16 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     landed.not_verified = not_verified;
     landed.fresh = fresh;
 
-    let status = count_lines(path, &["status", "--porcelain", "--untracked-files=normal", "--"]);
+    let listing = git::run(path, &["status", "--porcelain", "--untracked-files=normal", "--"]).ok();
+    let status = listing.as_ref().map(|out| out.lines().count() as u32);
     let stashes = stashes_on(path, branch.as_deref());
     landed.uncommitted = status.unwrap_or(0);
+    landed.changes = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        listing.as_deref().unwrap_or_default().hash(&mut hasher);
+        hasher.finish()
+    };
     landed.stashes = stashes.unwrap_or(0);
     landed.clean = status == Some(0) && stashes == Some(0);
     landed.pushed = git::run(path, &["branch", "-r", "--contains", "HEAD"]).is_ok_and(|out| !out.trim().is_empty());
@@ -472,10 +484,6 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
     landed.losses = landed.describe_losses();
     landed.digest = landed.describe_digest();
     landed
-}
-
-fn count_lines(cwd: &Path, args: &[&str]) -> Option<u32> {
-    git::run(cwd, args).ok().map(|out| out.lines().count() as u32)
 }
 
 /// Why a fetch did not succeed, in a few words.
@@ -976,6 +984,12 @@ mod tests {
         std::fs::write(wt.join("late.txt"), "x").unwrap();
         let dirty = check(&f.project, &wt, Fetch::Fresh);
         assert_ne!(dirty.digest, first.digest);
+        // One uncommitted file swapped for another: the same count, a
+        // different thing to lose.
+        std::fs::rename(wt.join("late.txt"), wt.join("other.txt")).unwrap();
+        let swapped = check(&f.project, &wt, Fetch::Fresh);
+        assert_eq!(swapped.uncommitted, dirty.uncommitted);
+        assert_ne!(swapped.digest, dirty.digest);
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "late"]);
         let ahead = check(&f.project, &wt, Fetch::Fresh);

@@ -2206,8 +2206,8 @@ impl WorkspaceRpc {
         let mut kept_branch = None;
         let removed = match &workspace {
             Some(path) => {
-let expected = vec![session.id.clone()];
-                                let request = crate::session_ops::WorkspaceRemoval {
+                let expected = vec![session.id.clone()];
+                let request = crate::session_ops::WorkspaceRemoval {
                     project_path: &session.project_path,
                     path,
                     sessions: crate::session_ops::SessionsFate::Delete,

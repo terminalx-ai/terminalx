@@ -353,9 +353,19 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
     if !permitted(&after, &request.confirmation) {
         return Err(needs_confirmation(&after, &request.confirmation, "It changed while its sessions were being stopped. Nothing was removed; its sessions are stopped."));
     }
+    // The fetch can take many seconds, and stopping takes a few more: a
+    // session started in the workspace meanwhile was not stopped and, when
+    // sessions were named, was not named either.
+    let now = sessions_in_workspace(&target)?;
+    let ids = |sessions: &[SessionEntry]| sessions.iter().map(|session| session.id.clone()).collect::<std::collections::BTreeSet<_>>();
+    if ids(&now) != ids(&affected) {
+        let titles: Vec<String> = now.iter().map(|session| format!("• {}", session.title)).collect();
+        return Err(format!("{SESSIONS_CHANGED}, while it was being checked. Nothing was removed; the sessions that were in it are stopped. It now holds:\n{}", titles.join("\n")));
+    }
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
     let removal = if on_disk {
-        let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_merged: after.safe };
+        let verified_head = if after.safe { after.head.as_deref() } else { None };
+        let options = crate::workspaces::DeleteOptions { delete_branch: request.delete_branch, direct: request.direct, verified_head };
         crate::workspaces::delete(&project, &target, options).map_err(err)?
     } else {
         // Not there: only git's record of it is left to clear. Nothing is
@@ -802,6 +812,27 @@ mod tests {
         removal.expected_sessions = Some(&none);
         remove_workspace(&sink(), &removal, &|_| {}).unwrap();
         assert!(!Path::new(&session.cwd).exists());
+    }
+
+    #[test]
+    fn a_session_started_while_the_workspace_was_being_checked_stops_the_removal() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let session = worktree_session(dir.path());
+        let project = dir.path().to_path_buf();
+        let cwd = session.cwd.clone();
+        // It arrives after the first look at the sessions: here, while the
+        // one that was there is being stopped.
+        let started = std::cell::Cell::new(false);
+        let stop = |_: &SessionEntry| {
+            if !started.replace(true) {
+                session_in(&project, &cwd, "Started during the check");
+            }
+        };
+        let error = remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &stop).unwrap_err();
+        assert!(error.starts_with(SESSIONS_CHANGED) && error.contains("Started during the check"), "{error}");
+        assert!(Path::new(&session.cwd).join("a.txt").exists());
+        assert_eq!(index::load().unwrap().len(), 2, "neither session is deleted");
     }
 
     #[test]
