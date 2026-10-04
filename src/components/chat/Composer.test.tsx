@@ -732,6 +732,31 @@ describe("composer history (PRO-85)", () => {
     expect(search).not.toHaveBeenCalled();
   });
 
+  it("asks a cloud tab's source again when the reader starts a command and the list is still empty", async () => {
+    const lists = [Promise.reject(new Error("unavailable")), Promise.resolve({ commands: [], note: null }), Promise.resolve({ commands: [{ name: "compact", description: "", source: "builtin" as const }], note: null })];
+    lists[0]!.catch(() => undefined);
+    const load = vi.fn(() => lists[Math.min(load.mock.calls.length - 1, 2)]!);
+    function CloudComposer() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} commands={{ key: "cloud|all|live", known: () => null, load }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    render(<CloudComposer />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    // The CLI had not answered; then it listed nothing; the third `/` gets the list.
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    expect((await screen.findByRole("option")).textContent).toBe("/compact");
+    expect(load).toHaveBeenCalledTimes(3);
+    // With a list in hand, starting a command asks nobody.
+    fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
+    fireEvent.change(box, { target: { value: "/c", selectionStart: 2 } });
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
   it("a cloud tab with no source and no directory has no command list", () => {
     render(<TestComposer onSend={vi.fn()} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "/", selectionStart: 1 } });

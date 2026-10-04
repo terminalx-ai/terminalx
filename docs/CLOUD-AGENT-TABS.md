@@ -240,10 +240,20 @@ instead of from this computer.
     they typed is not offered;
   - someone who cannot send (a viewer) gets none.
 
-  The desktop asks once per session, agent and right while connected. It
-  never wakes a stopped workspace for the list: a stopped workspace shows
-  what was last listed in this run of the app, or no list. A list read with
-  the right to approve is never shown to the same person without it. A
+  The desktop keeps a list that has commands in it, per session, agent and
+  the right the runtime said it was made for (`restricted`), and does not
+  ask again. A CLI that is not installed or did not answer in time is an
+  error (`unavailable`), not an empty list; an empty or failed listing is
+  not kept, and the composer asks again when the reader next starts a
+  command. It never wakes a stopped workspace for the list: a stopped
+  workspace shows what was last listed in this run of the app, or no list.
+  A list made for someone who may approve is never shown to the same person
+  without that right.
+
+  The CLI is asked with the runtime's own environment, not the tab's grant
+  environment. Checked on 2026-10-03 with Claude Code 2.1.288 in a throwaway
+  home with no sign-in and no key: it answers (49 commands, the project's
+  own among them), so the list does not depend on the agent's credentials. A
   runtime from before `composer/1` gets no list (the message is still sent
   as typed and judged by the runtime).
 

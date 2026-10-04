@@ -1117,7 +1117,7 @@ async fn the_composer_is_offered_only_the_commands_its_reader_may_send() {
         argument_hint: None,
         source: source.into(),
     };
-    f.rpc.set_commands_for_tests(vec![command("compact", "builtin"), command("deploy", "user"), command("help", "builtin"), command("review", "builtin")]);
+    f.rpc.set_commands_for_tests(Some(vec![command("compact", "builtin"), command("deploy", "user"), command("help", "builtin"), command("review", "builtin")]));
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager" },
         { "userId": "alice", "role": "driver", "canApprove": false },
@@ -1157,6 +1157,24 @@ async fn the_composer_is_offered_only_the_commands_its_reader_may_send() {
     ])));
     let listed = call(&f.rpc, &erin, "session.commands", params).await.unwrap();
     assert_eq!((listed["restricted"].clone(), names(&listed).contains(&"deploy".to_string())), (json!(true), false));
+}
+
+/// A CLI that did not answer is an error, not "this agent has no commands".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_list_that_could_not_be_read_is_an_error_not_an_empty_list() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let params = json!({ "sessionId": session.id, "tabId": session.tabs[0].id });
+    f.rpc.set_collaboration(members(json!([{ "userId": "admin", "role": "manager" }, { "userId": "vera", "role": "viewer" }])));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    f.rpc.set_commands_for_tests(None);
+    assert_eq!(code(call(&f.rpc, &admin, "session.commands", params.clone()).await), "unavailable");
+    // Someone who is offered nothing is not asked of the CLI at all.
+    assert_eq!(call(&f.rpc, &vera, "session.commands", params.clone()).await.unwrap()["commands"], json!([]));
+    f.rpc.set_commands_for_tests(Some(Vec::new()));
+    assert_eq!(call(&f.rpc, &admin, "session.commands", params).await.unwrap()["commands"], json!([]));
 }
 
 /// PRO-22: `session.files` finds the session's files by name for the
