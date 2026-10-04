@@ -165,6 +165,16 @@ export function resendable(record: OrganizationSetupRecord, now = Date.now()): P
 }
 
 /**
+ * An unanswered create request that is too old to resend and has not been
+ * settled against the workspace list yet. It may have made a workspace, so
+ * while it stands no new setup workspace may be prepared.
+ */
+export function unsettledRequest(record: OrganizationSetupRecord, now = Date.now()): boolean {
+  const workspace = record.workspace;
+  return Boolean(workspace && !workspace.id && workspace.pending && !resendable(record, now));
+}
+
+/**
  * An unanswered create request that is too old to resend: if the workspace
  * it asked for is in the list after all (same name, created since), that is
  * the setup workspace; otherwise the request is dropped and a new one may
