@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TabEntry } from "@/types/session";
@@ -192,6 +192,62 @@ describe("composer attachments", () => {
     fireEvent.drop(dropTarget, { dataTransfer: { files: [image], types: ["Files"] } });
 
     expect(await screen.findByAltText("drop.webp")).toBeTruthy();
+  });
+
+  it("a file dropped from this computer is mentioned to a local agent, and left alone for a cloud one", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? null : []));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    function Dropped({ remote }: { remote: boolean }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote={remote} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<Dropped remote={false} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(box.value).toBe("@/Users/me/notes.txt ");
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
+    view.unmount();
+    listening = 0;
+
+    render(<Dropped remote />);
+    const cloudBox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop images to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(cloudBox.value).toBe("");
+    // It says why, instead of ignoring the file without a word (an over-5 MB image reads the same way).
+    expect(screen.getByTestId("attach-notice").textContent).toBe("notes.txt was not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.");
+    // The next image attached clears it.
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : []));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/shot.png"] } }));
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
+    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+  });
+
+  it("hands over the very same image when a failed send is tried again", async () => {
+    const sent: unknown[] = [];
+    const onSend = vi.fn(async (_text: string, images: unknown[]) => {
+      sent.push(images[0]);
+      if (sent.length === 1) throw new Error("offline");
+    });
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const image = new File([new Uint8Array([1, 2, 3])], "retry.png", { type: "image/png" });
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files: [image], types: ["Files"] } });
+    await screen.findByAltText("retry.png");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    expect(sent[1]).toBe(sent[0]);
   });
 
   it("keeps an attachment when sending fails", async () => {

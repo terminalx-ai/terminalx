@@ -73,6 +73,7 @@ export function Composer({
   cwd,
   commands: givenCommands,
   files: givenFiles,
+  remote = false,
   busy,
   draft,
   onDraftChange,
@@ -101,6 +102,8 @@ export function Composer({
   commands?: ComposerCommands | null;
   /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
   files?: ComposerFiles | null;
+  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  remote?: boolean;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -155,7 +158,9 @@ export function Composer({
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange });
+  // A file dropped from this computer can be mentioned only to an agent that runs here.
+  const mentionDropped = !remote;
+  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
   const { attachments } = attach;
 
   // Grow with content, up to ~10 lines. Tabs that are not selected stay
@@ -391,7 +396,7 @@ export function Composer({
             note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
-        <DropHint dragging={attach.dragging} />
+        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (
@@ -410,6 +415,11 @@ export function Composer({
           </div>
         )}
         <AttachmentThumbs attach={attach} />
+        {attach.notice && (
+          <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
+            {attach.notice}
+          </div>
+        )}
         <textarea
           ref={ref}
           data-composer

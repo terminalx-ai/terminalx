@@ -693,7 +693,7 @@ fn members(list: Value) -> Option<collab::Members> {
     Some(serde_json::from_value(json!({ "v": 1, "members": list })).unwrap())
 }
 
-const ALL: [&str; 8] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1", "composer/2"];
+const ALL: [&str; 9] = ["pty/1", "fs/1", "session/1", "keys/1", "collab/1", "git/1", "composer/1", "composer/2", "composer/3"];
 
 async fn person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, user: &str) -> (Arc<Peer>, Notifications, Value) {
     let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
@@ -1194,6 +1194,75 @@ async fn the_composer_finds_the_sessions_files_by_name() {
     assert_eq!(code(call(&f.rpc, &alice, "session.files", json!({ "sessionId": session.id, "query": "x".repeat(401) })).await), "invalid_params");
     // Someone the workspace is not shared with is refused: no file names.
     assert_eq!(code(call(&f.rpc, &nora, "session.files", json!({ "sessionId": session.id, "query": "login" })).await), "forbidden");
+}
+
+/// PRO-22: `session.attach` takes an image in parts from someone who may
+/// send, keeps it for their message only, and the live send names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_is_uploaded_in_parts_by_someone_who_may_send_and_named_by_their_message() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let agents = with_tab(&f);
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "driver", "canApprove": false },
+        { "userId": "vera", "role": "viewer" },
+    ])));
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    let (vera, _vera_events, _) = person(&f.rpc, "d-vera", Authority::Participate, "vera").await;
+    let requests = AtomicUsize::new(0);
+    let part = |peer: &Arc<Peer>, id: &str, offset: u64, bytes: &[u8], last: bool, media_type: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({
+            "sessionId": session.id, "tabId": tab_id, "attachmentId": id, "mediaType": media_type, "name": "shot.png",
+            "offset": offset, "data": STANDARD.encode(bytes), "last": last,
+            "clientRequestId": format!("request-attach-{}", requests.fetch_add(1, Ordering::SeqCst)),
+        });
+        async move { call(&rpc, &peer, "session.attach", params).await }
+    };
+    // A plain driver may attach: an image changes nothing about what the agent may do.
+    assert_eq!(part(&alice, "attach-0001", 0, b"abc", false, "image/png").await.unwrap()["size"], 3);
+    // The answer to a part was lost and it is sent again under a new request: nothing is written twice.
+    assert_eq!(part(&alice, "attach-0001", 0, b"abc", false, "image/png").await.unwrap()["size"], 3);
+    let done = part(&alice, "attach-0001", 3, b"def", true, "image/png").await.unwrap();
+    assert_eq!((done["size"].clone(), done["complete"].clone()), (json!(6), json!(true)));
+    assert_eq!(agents.attachments.load("alice", &["attach-0001".into()]).unwrap()[0].data, "YWJjZGVm");
+    // Not an image, not a driver, and somebody else's upload.
+    assert_eq!(code(part(&alice, "attach-0002", 0, b"<html>", true, "text/html").await), "invalid_params");
+    assert_eq!(code(part(&vera, "attach-0003", 0, b"abc", true, "image/png").await), "forbidden");
+    assert_eq!(code(part(&bob, "attach-0001", 6, b"ghi", true, "image/png").await), "invalid_params");
+    // It is not a file of the workspace: the tree, Git and the agent never see it.
+    assert!(!walk_names(&f.root).iter().any(|name| name.contains("attach-0001")));
+    // The live send: bob cannot name alice's upload; alice's own passes every check
+    // (the fixture runs no agent, so it ends `unavailable`) and is then done with.
+    let send = |peer: &Arc<Peer>, request: &str| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({ "sessionId": session.id, "tabId": tab_id, "text": "what is this?", "images": [{ "id": "attach-0001" }], "clientRequestId": request });
+        async move { rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": params })).await }
+    };
+    let refused = send(&bob, "request-image-send-1").await;
+    assert_eq!((refused["error"]["code"].clone(), refused["error"]["data"]["reason"].clone()), (json!("invalid_params"), json!("attachment-missing")));
+    assert_eq!(send(&alice, "request-image-send-2").await["error"]["code"], "unavailable");
+    assert!(agents.attachments.load("alice", &["attach-0001".into()]).is_err());
+}
+
+/// Every file name under `root`.
+fn walk_names(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+            if entry.path().is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    names
 }
 
 /// One tab whose turn is running.

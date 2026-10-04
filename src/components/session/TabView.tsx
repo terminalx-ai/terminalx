@@ -7,7 +7,7 @@ import { useSessionStore } from "@/lib/sessions";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
-import { CLOUD_IMAGES_UNSUPPORTED, localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
+import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { CloudAgentTerminal } from "@/components/cloud/CloudAgentTerminal";
 import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudCollab";
@@ -104,7 +104,7 @@ export function TabView({
   // A cloud command's refusal says what happened to it (queued, view only, no key yet).
   const commandError = (e: unknown) => {
     const message = e instanceof Error ? e.message : null;
-    if (message && (message === CLOUD_IMAGES_UNSUPPORTED || message === backend.readOnlyReason)) return message;
+    if (message && message === backend.readOnlyReason) return message;
     return cloudCommandError(e);
   };
 
@@ -278,6 +278,7 @@ export function TabView({
           cwd={local ? session.cwd : undefined}
           commands={backend.commands?.(tab)}
           files={backend.files?.()}
+          remote={!local}
           busy={live}
           draft={draft}
           onDraftChange={(v) => {
