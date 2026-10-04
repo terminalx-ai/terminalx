@@ -163,7 +163,7 @@ export function Composer({
     [givenFiles?.key, cwd],
   );
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
-  const [highlighted, setHighlighted] = useState(0);
+  const [highlight, setHighlight] = useState<{ list: string | null; row: number }>({ list: null, row: 0 });
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The model and permission pickers open on a click and an accessibility press too.
@@ -318,7 +318,20 @@ export function Composer({
     return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
   }, [token, commands, fileHits]);
 
-  useEffect(() => setHighlighted(0), [items.length, tokenKey]);
+  // The highlighted row belongs to the list it was chosen in: another token, or a list of another
+  // length, starts at its first row. That is read off while rendering, never reset in an effect. A
+  // reset in an effect runs a task after the new rows are on screen, and undid an arrow pressed in
+  // between (the key was answered, then the late reset put the highlight back).
+  const listKey = `${tokenKey}|${items.length}`;
+  const highlighted = highlight.list === listKey ? highlight.row : 0;
+  const setHighlighted = useCallback(
+    (next: number | ((row: number) => number)) =>
+      setHighlight((was) => {
+        const row = was.list === listKey ? was.row : 0;
+        return { list: listKey, row: typeof next === "function" ? next(row) : next };
+      }),
+    [listKey],
+  );
 
   const complete = useCallback(
     (item: PickerItem) => {
