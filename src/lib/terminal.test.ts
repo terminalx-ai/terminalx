@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { TerminalInstance } from "./terminal";
 
 const pty = vi.hoisted(() => ({
   spawn: vi.fn().mockResolvedValue(undefined),
@@ -77,6 +78,61 @@ describe("session shell tabs", () => {
 });
 
 describe("terminal counters", () => {
+  it("restores the pane's grid before its output replay, and forgets it when the pane closes", async () => {
+    const terminal = await loadTerminalStore();
+    const pane = await terminal.openTerminal("s1", "/repo");
+    const resize = vi.fn();
+    const make = () => ({ el: document.createElement("div"), term: { dispose: vi.fn(), resize, cols: 140, rows: 37 }, fit: {}, restorable: true }) as unknown as TerminalInstance;
+    terminal.getInstance(pane.id, make);
+    terminal.disposeInstance(pane.id);
+    terminal.getInstance(pane.id, make);
+    expect(resize).toHaveBeenLastCalledWith(140, 37);
+    await terminal.closeTerminal(pane.id);
+    resize.mockClear();
+    terminal.getInstance(pane.id, make);
+    expect(resize).not.toHaveBeenCalled();
+  });
+
+  it("bounds the idle cache, keeps recently used and visible instances, and recreates evicted views without killing a process", async () => {
+    const terminal = await loadTerminalStore();
+    const { setOnScreen } = await import("./terminalCounters");
+    const make = () => ({ el: document.createElement("div"), term: { dispose: vi.fn() }, fit: {}, restorable: true }) as unknown as TerminalInstance;
+    const visible = terminal.getInstance("visible", make);
+    setOnScreen(visible.term, true);
+    const first = terminal.getInstance("idle-0", make);
+    for (let i = 1; i < terminal.IDLE_TERMINAL_LIMIT; i++) terminal.getInstance(`idle-${i}`, make);
+    terminal.getInstance("idle-0", make); // Touch the oldest; idle-1 is next out.
+    const evicted = terminal.peekInstance("idle-1")!;
+    terminal.getInstance("new", make);
+    expect(terminal.peekInstance("idle-1")).toBeUndefined();
+    expect(evicted.term.dispose).toHaveBeenCalledOnce();
+    expect(terminal.peekInstance("idle-0")).toBe(first);
+    expect(terminal.peekInstance("visible")).toBe(visible);
+    expect(terminal.getInstance("idle-1", make)).not.toBe(evicted);
+    expect(pty.kill).not.toHaveBeenCalled();
+    setOnScreen(visible.term, false);
+    terminal.trimTerminalInstances();
+    expect(visible.term.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("releases archived hidden views but keeps their panes, cloud instances, and a view still on screen", async () => {
+    const terminal = await loadTerminalStore();
+    const { setOnScreen } = await import("./terminalCounters");
+    const pane = await terminal.openTerminal("archived", "/repo");
+    const make = () => ({ el: document.createElement("div"), term: { dispose: vi.fn() }, fit: {}, restorable: true }) as unknown as TerminalInstance;
+    const inst = terminal.getInstance(pane.id, make);
+    const cloud = terminal.getInstance("cloud", () => ({ ...make(), restorable: false }));
+    setOnScreen(inst.term, true);
+    terminal.setArchivedTerminalSessions(["archived"]);
+    expect(inst.term.dispose).not.toHaveBeenCalled();
+    setOnScreen(inst.term, false);
+    terminal.trimTerminalInstances();
+    expect(terminal.peekInstance(pane.id)).toBeUndefined();
+    expect(terminal.peekInstance("cloud")).toBe(cloud);
+    expect(terminal.getTerminalState().panes).toContain(pane);
+    expect(pty.kill).not.toHaveBeenCalled();
+  });
+
   it("counts live instances by renderer and where they are, and stops an instance's output when it is disposed", async () => {
     const terminal = await loadTerminalStore();
     const { setRenderer } = await import("./terminalCounters");

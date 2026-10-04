@@ -16,6 +16,9 @@ mod binpath;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
+#[cfg(feature = "desktop")]
+mod cloud_mirror;
+mod mirror_rules;
 mod cloud_bootstrap;
 mod cloud_quiesce;
 mod cloud_resources;
@@ -38,6 +41,8 @@ mod cloud_diagnostics;
 mod cloud_ports;
 #[cfg(feature = "desktop")]
 mod cloud_remote;
+#[cfg(feature = "desktop")]
+mod agent_local_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
@@ -327,6 +332,13 @@ pub fn run() {
             commands::cloud_teardown_request,
             commands::cloud_provider_set_creation_enabled,
             commands::cloud_provider_revalidate,
+            commands::cloud_agent_logins,
+            commands::cloud_agent_login_connect,
+            commands::cloud_agent_login_remove,
+            commands::cloud_agent_claude_login_start,
+            commands::cloud_agent_claude_login_open,
+            commands::cloud_agent_claude_login_complete,
+            commands::cloud_agent_claude_login_cancel,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
@@ -437,6 +449,14 @@ pub fn run() {
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,
+            commands::cloud_mirror_status,
+            commands::cloud_mirror_enable,
+            commands::cloud_mirror_disable,
+            commands::cloud_mirror_check,
+            commands::cloud_mirror_plan,
+            commands::cloud_mirror_stage,
+            commands::cloud_mirror_publish,
+            commands::cloud_mirror_resolve,
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
