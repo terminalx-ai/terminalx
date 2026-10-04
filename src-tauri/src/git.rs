@@ -451,7 +451,7 @@ pub fn create_worktree(project: &Path, name: &str, base: Option<&str>) -> Result
     let path = worktree_path(project, name);
     std::fs::create_dir_all(worktree_root(project))?;
     let branch = worktree_branch(name);
-    run(project, &["worktree", "add", "--no-track", "-B", &branch, arg(&path)?, &base])?;
+    run(project, &["worktree", "add", "--no-track", "-b", &branch, arg(&path)?, &base])?;
     ensure_worktree_dir_ignored(project);
     let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
     Ok(CreatedWorktree { name: name.to_string(), path: path.to_string_lossy().into_owned(), branch, base, base_tree })
