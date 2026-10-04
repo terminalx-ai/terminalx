@@ -925,6 +925,7 @@ mod tests {
             worktree_name: None,
             branch: Some("main".into()),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

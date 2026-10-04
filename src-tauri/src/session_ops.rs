@@ -150,6 +150,7 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
         worktree_name: None,
         branch: git::current_branch(project_path),
         base_ref: None,
+        worktree_base: None,
         worktree_removed: false,
         removed_workspace: None,
         issue: req.issue.clone(),
@@ -176,6 +177,7 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
         entry.worktree_name = Some(wt.name);
         entry.branch = Some(wt.branch);
         entry.base_ref = Some(wt.base_tree);
+        entry.worktree_base = wt.worktree_base;
     }
 
     entry.title = requested_title.unwrap_or_else(|| {
@@ -448,6 +450,20 @@ mod tests {
             tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn failed_fetch_warning_survives_session_storage() {
+        let _home = crate::store::temp_home();
+        let project = repo();
+        let missing = project.path().join("missing-remote");
+        git::run(project.path(), &["remote", "add", "origin", missing.to_str().unwrap()]).unwrap();
+        let session = worktree_session(project.path());
+        let stored = index::get(&session.id).unwrap();
+        let base = stored.worktree_base.unwrap();
+        assert!(!base.fetched);
+        assert!(base.warning.unwrap().contains("may be out of date"));
+        assert_eq!(Some(base.commit), git::head_commit(Path::new(&session.cwd)));
     }
 
     /// Makes a directory read-only for the length of a test, so nothing in it

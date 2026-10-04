@@ -419,6 +419,17 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
+            {session.worktreeBase && (
+              <span
+                role={session.worktreeBase.warning ? "status" : undefined}
+                className="truncate text-[11px] text-muted-foreground"
+                title={session.worktreeBase.warning ?? `Base commit: ${session.worktreeBase.commit}`}
+              >
+                {session.worktreeBase.warning
+                  ? "Base may be out of date"
+                  : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
+              </span>
+            )}
             {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
