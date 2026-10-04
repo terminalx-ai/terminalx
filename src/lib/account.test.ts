@@ -361,3 +361,26 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     expect(account.getAccount().status.state).toBe("signed-out");
   });
 });
+
+describe("who owns the local mirrors on this computer (PRO-25)", () => {
+  const base = { identity: null, expiresAt: null, lastError: null } as const;
+
+  it("is the account's own id when signed in, never the email", async () => {
+    const { mirrorOwnerOf } = await import("./account");
+    const signedIn = { ...base, state: "signed-in" as const, identity: { name: null, email: "ada@example.com", organization: null }, context: { scope: "s", revision: "r", account: "acc-hash-1" } };
+    expect(mirrorOwnerOf(signedIn)).toBe("acc-hash-1");
+    // The same person under a changed address is still the owner; another person reusing the address is not.
+    expect(mirrorOwnerOf({ ...signedIn, identity: { ...signedIn.identity, email: "ada@new.example" } })).toBe("acc-hash-1");
+    expect(mirrorOwnerOf({ ...signedIn, context: { scope: "s", revision: "r", account: "acc-hash-2" } })).toBe("acc-hash-2");
+    // No id to go by: not known, so nothing is claimed.
+    expect(mirrorOwnerOf({ ...signedIn, context: null })).toBeUndefined();
+  });
+
+  it("is nobody only for a clean signed-out, and unknown when the saved session could not be read", async () => {
+    const { mirrorOwnerOf } = await import("./account");
+    expect(mirrorOwnerOf({ ...base, state: "signed-out" })).toBeNull();
+    // What a Keychain read failure at launch reports: signed-out, with an error.
+    expect(mirrorOwnerOf({ ...base, state: "signed-out", lastError: "The saved TerminalX account session could not be read from macOS Keychain." })).toBeUndefined();
+    expect(mirrorOwnerOf({ ...base, state: "signing-in" })).toBeUndefined();
+  });
+});
