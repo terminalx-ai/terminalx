@@ -1606,6 +1606,10 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
     else this.unlisten = unlisten;
   }
 
+  get id(): string | null {
+    return this.connectionId;
+  }
+
   bind(connectionId: string): void {
     this.connectionId = connectionId;
     const early = this.early;
@@ -1665,6 +1669,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
+  /** The native connection's id, for calls that act on it (port forwards); null until attached. */
+  connectionId?: () => string | null;
   /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
   activate(activation: Activation): Promise<void>;
   close(): void;
@@ -1724,6 +1730,7 @@ async function adopt(
   const connection: CloudWorkspaceConnection = {
     target,
     client,
+    connectionId: () => transport.id,
     activate: (next) => transport.activate(next),
     close: () => {
       if (connections.get(key) === self) connections.delete(key);
