@@ -701,11 +701,15 @@ fn request_line(head: &[u8]) -> Option<bool> {
     }
     let Some(end) = head.iter().position(|byte| *byte == b'\n') else {
         // No line end yet. It can still become a request line only if every
-        // byte so far fits one: a method, then printable characters.
+        // byte so far fits one: a method, then printable characters. However
+        // long the method or the line: a page chooses both, and a line that
+        // is called "not HTTP" before its end is forwarded with its `Host`
+        // unread. It stays undecided until its line end, or until the head
+        // is too long and is refused.
         let method_end = head.iter().position(|byte| *byte == b' ');
         let method = &head[..method_end.unwrap_or(head.len())];
         let rest = method_end.map_or(&[][..], |at| &head[at..]);
-        let plausible = method.iter().all(|byte| token(*byte)) && method.len() <= 64 && rest.iter().all(|byte| (0x20..0x7f).contains(byte) || *byte == b'\r');
+        let plausible = method.iter().all(|byte| token(*byte)) && rest.iter().all(|byte| (0x20..0x7f).contains(byte) || *byte == b'\r');
         return if plausible { None } else { Some(false) };
     };
     let line = head[..end].strip_suffix(b"\r").unwrap_or(&head[..end]);
@@ -870,10 +874,33 @@ mod tests {
         for partial in [&b""[..], b"G", b"PROPFIND /x", b"GET / HTTP/1.1\r\n", b"GET / HTTP/1.1\r\nHost: 127.0.0.1:80\r\n"] {
             assert_eq!(classify(partial, 80), None, "{:?}", String::from_utf8_lossy(partial));
         }
+        // A method or a first line of any length is still a request line in
+        // the making: what fetch('/' + 'a'.repeat(5000), { method: 'A'.repeat(65) })
+        // sends has no line end in its first read.
+        let long_method = "A".repeat(65);
+        assert_eq!(classify(format!("{long_method} /x").as_bytes(), 80), None);
+        assert_eq!(classify("A".repeat(4096).as_bytes(), 80), None);
+        let long_line = format!("{long_method} /{}", "a".repeat(5000));
+        assert_eq!(classify(long_line.as_bytes(), 80), None);
+        assert_eq!(classify(format!("{long_line} HTTP/1.1\r\nHost: attacker.example\r\n\r\n").as_bytes(), 80), refuse);
+        assert_eq!(classify(format!("{long_line} HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n").as_bytes(), 80), carry);
         // Not HTTP: carried as it is.
         for other in [&b"SSH-2.0-OpenSSH\r\n"[..], b"\x16\x03\x01\x02\x00", b"\x00\x00\x00\x08\x04\xd2\x16\x2f", b"HELO there\r\n", b"GET /\r\n"] {
             assert_eq!(classify(other, 80), carry, "{:?}", String::from_utf8_lossy(other));
         }
+    }
+
+    #[tokio::test]
+    async fn a_first_line_that_never_ends_is_refused_not_carried() {
+        // Read in 4096-byte pieces, as from a socket: undecided all the way to the cap.
+        let endless = format!("{} /{}", "A".repeat(65), "a".repeat(2 * MAX_HEAD_BYTES));
+        let mut head = Vec::new();
+        assert_eq!(judge(&mut endless.as_bytes(), &mut head, 80).await, Verdict::Refuse);
+        assert!(head.len() >= MAX_HEAD_BYTES);
+        // The same request with its end and a foreign Host, arriving whole.
+        let request = format!("{} /{} HTTP/1.1\r\nHost: attacker.example\r\n\r\n", "A".repeat(65), "a".repeat(5000));
+        let mut head = Vec::new();
+        assert_eq!(judge(&mut request.as_bytes(), &mut head, 80).await, Verdict::Refuse);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -896,6 +923,13 @@ mod tests {
             closed |= frame["method"] == "ports.close";
         }
         assert!(closed);
+
+        // The long method and long path a page can choose, with its own Host:
+        // refused, and nothing is asked of the workspace.
+        let mut browser = connect(local).await;
+        browser.write_all(format!("{} /{} HTTP/1.1\r\nHost: attacker.example\r\n\r\n", "A".repeat(65), "a".repeat(5000)).as_bytes()).await.unwrap();
+        assert!(read_all(&mut browser).await.starts_with("HTTP/1.1 403 "));
+        assert!(requests.try_recv().is_err(), "a long request line was carried unjudged");
 
         // In pieces, with the Host last: nothing is asked of the workspace until the head is whole.
         let mut browser = connect(local).await;
