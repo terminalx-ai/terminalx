@@ -78,6 +78,27 @@ describe("session shell tabs", () => {
 });
 
 describe("terminal counters", () => {
+  it("mounts a visible terminal before applying the idle budget", async () => {
+    const terminal = await loadTerminalStore();
+    const make = () => ({ el: document.createElement("div"), term: { dispose: vi.fn() }, fit: {}, restorable: true }) as unknown as TerminalInstance;
+    const idle = Array.from({ length: terminal.IDLE_TERMINAL_LIMIT }, (_, i) => terminal.getInstance(`idle-${i}`, make));
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    try {
+      const shown = terminal.getInstance("shown", make, host);
+      expect(shown.el.parentElement).toBe(host);
+      expect(idle.every((inst, i) => terminal.peekInstance(`idle-${i}`) === inst)).toBe(true);
+      expect(idle.every((inst) => vi.mocked(inst.term.dispose).mock.calls.length === 0)).toBe(true);
+      // Once it really leaves the document, the regular idle limit applies.
+      shown.el.remove();
+      terminal.trimTerminalInstances();
+      expect(idle[0].term.dispose).toHaveBeenCalledOnce();
+      expect(terminal.peekInstance("shown")).toBe(shown);
+    } finally {
+      host.remove();
+    }
+  });
+
   it("restores the pane's grid before its output replay, and forgets it when the pane closes", async () => {
     const terminal = await loadTerminalStore();
     const pane = await terminal.openTerminal("s1", "/repo");

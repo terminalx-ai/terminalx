@@ -1,0 +1,574 @@
+{
+  "label": "57f302f plus async input and bulk transport cleanup; fresh process",
+  "at": "2026-10-04T17:19:30.963Z",
+  "complete": true,
+  "app": {
+    "version": "0.2.7",
+    "pid": 33361
+  },
+  "host": {
+    "platform": "darwin",
+    "release": "27.0.0",
+    "arch": "arm64",
+    "cpus": 12,
+    "memoryBytes": 25769803776,
+    "loadBefore": [
+      3.828125,
+      12.25,
+      14.3369140625
+    ],
+    "loadAfter": [
+      3.3125,
+      10.11572265625,
+      13.33203125
+    ]
+  },
+  "terminalsAfter": {
+    "backend": {
+      "dataBytes": 6963704,
+      "dataEvents": 365,
+      "panes": 0,
+      "running": 0,
+      "scrollbackBytes": 0,
+      "unackedBytes": 0,
+      "views": 0
+    },
+    "webview": {
+      "attached": 0,
+      "bufferLines": 0,
+      "data": {
+        "cloud": {
+          "bytes": 0,
+          "bytesPerSecond": 0,
+          "events": 0,
+          "eventsPerSecond": 0
+        },
+        "local": {
+          "bytes": 7092598,
+          "bytesPerSecond": 0,
+          "events": 361,
+          "eventsPerSecond": 0
+        }
+      },
+      "dom": 0,
+      "domOnScreen": 0,
+      "evictedInstances": 1,
+      "hiddenInDocument": 0,
+      "idleInstances": 0,
+      "idleLimit": 8,
+      "instances": 0,
+      "onScreen": 0,
+      "panes": 0,
+      "queuedOutputBytes": 0,
+      "webgl": 0,
+      "webglContexts": {
+        "created": 60,
+        "failed": 0,
+        "lost": 0
+      }
+    }
+  },
+  "results": [
+    {
+      "name": "4 sessions open (baseline)",
+      "bytes": null,
+      "request": {
+        "scenario": "soak",
+        "projectPath": "/tmp/tx232-soak-1004/perf/soak-project",
+        "fill": "sh -c 'seq 1 20000; exec cat'",
+        "step": "open",
+        "sessions": 4
+      },
+      "result": {
+        "closed": {
+          "collected": 0,
+          "tracked": 0
+        },
+        "counters": {
+          "attached": 1,
+          "bufferLines": 40296,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 516624,
+              "bytesPerSecond": 103324.8,
+              "events": 29,
+              "eventsPerSecond": 5.8
+            }
+          },
+          "dom": 2,
+          "domOnScreen": 0,
+          "evictedInstances": 0,
+          "hiddenInDocument": 0,
+          "idleInstances": 7,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 6,
+          "webglContexts": {
+            "created": 7,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 66,
+          "frames": 113,
+          "framesPerSecond": 54.2,
+          "longTasks": 1,
+          "longestFrameMs": 75,
+          "longestMs": 66,
+          "seconds": 2.1,
+          "slowFrames": 5
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": true,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "scenario": "soak",
+        "step": "open"
+      },
+      "memory": {
+        "before": {
+          "WebContent": 275775488,
+          "GPU": 161480704,
+          "main": 46137344,
+          "Networking": 6438912
+        },
+        "peak": {
+          "WebContent": 552599552,
+          "GPU": 272629760,
+          "main": 48234496,
+          "Networking": 6438912
+        },
+        "after": {
+          "WebContent": 365953024,
+          "GPU": 257949696,
+          "main": 48234496,
+          "Networking": 6438912
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "50 tabs opened and closed",
+      "bytes": null,
+      "request": {
+        "scenario": "soak",
+        "projectPath": "/tmp/tx232-soak-1004/perf/soak-project",
+        "fill": "sh -c 'seq 1 20000; exec cat'",
+        "step": "tabs",
+        "count": 50
+      },
+      "result": {
+        "closed": {
+          "collected": 49,
+          "tracked": 50
+        },
+        "counters": {
+          "attached": 1,
+          "bufferLines": 30259,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6961624,
+              "bytesPerSecond": 0,
+              "events": 328,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 2,
+          "domOnScreen": 0,
+          "evictedInstances": 1,
+          "hiddenInDocument": 0,
+          "idleInstances": 6,
+          "idleLimit": 8,
+          "instances": 7,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 5,
+          "webglContexts": {
+            "created": 58,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 953,
+          "framesPerSecond": 56.6,
+          "longTasks": 0,
+          "longestFrameMs": 59,
+          "longestMs": 47,
+          "seconds": 16.8,
+          "slowFrames": 49
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": true,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "scenario": "soak",
+        "step": "tabs",
+        "stepClosed": {
+          "collected": 49,
+          "tracked": 50
+        }
+      },
+      "memory": {
+        "before": {
+          "WebContent": 365953024,
+          "GPU": 257949696,
+          "main": 48234496,
+          "Networking": 6438912
+        },
+        "peak": {
+          "WebContent": 791674880,
+          "GPU": 266338304,
+          "main": 49283072,
+          "Networking": 6438912
+        },
+        "after": {
+          "WebContent": 611319808,
+          "GPU": 250609664,
+          "main": 46137344,
+          "Networking": 6438912
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "20 agent tabs opened and closed",
+      "bytes": null,
+      "request": {
+        "scenario": "soak",
+        "projectPath": "/tmp/tx232-soak-1004/perf/soak-project",
+        "fill": "sh -c 'seq 1 20000; exec cat'",
+        "step": "agents",
+        "count": 20,
+        "harness": "claude"
+      },
+      "result": {
+        "closed": {
+          "collected": 69,
+          "tracked": 70
+        },
+        "counters": {
+          "attached": 1,
+          "bufferLines": 30259,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 6962824,
+              "bytesPerSecond": 0,
+              "events": 348,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 1,
+          "domOnScreen": 0,
+          "evictedInstances": 1,
+          "hiddenInDocument": 0,
+          "idleInstances": 6,
+          "idleLimit": 8,
+          "instances": 7,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 6,
+          "webglContexts": {
+            "created": 59,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 1217,
+          "framesPerSecond": 58.9,
+          "longTasks": 0,
+          "longestFrameMs": 56,
+          "longestMs": 39,
+          "seconds": 20.7,
+          "slowFrames": 33
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "scenario": "soak",
+        "step": "agents",
+        "stepClosed": {
+          "collected": 19,
+          "tracked": 20
+        }
+      },
+      "memory": {
+        "before": {
+          "WebContent": 611319808,
+          "GPU": 250609664,
+          "main": 46137344,
+          "Networking": 6438912
+        },
+        "peak": {
+          "WebContent": 880803840,
+          "GPU": 271581184,
+          "main": 46137344,
+          "Networking": 6438912
+        },
+        "after": {
+          "WebContent": 725614592,
+          "main": 42991616,
+          "GPU": 41943040,
+          "Networking": 6438912
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "200 session switches",
+      "bytes": null,
+      "request": {
+        "scenario": "soak",
+        "projectPath": "/tmp/tx232-soak-1004/perf/soak-project",
+        "fill": "sh -c 'seq 1 20000; exec cat'",
+        "step": "switches",
+        "count": 200
+      },
+      "result": {
+        "closed": {
+          "collected": 70,
+          "tracked": 70
+        },
+        "counters": {
+          "attached": 1,
+          "bufferLines": 40296,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 7091718,
+              "bytesPerSecond": 0,
+              "events": 349,
+              "eventsPerSecond": 0
+            }
+          },
+          "dom": 2,
+          "domOnScreen": 0,
+          "evictedInstances": 1,
+          "hiddenInDocument": 0,
+          "idleInstances": 7,
+          "idleLimit": 8,
+          "instances": 8,
+          "onScreen": 1,
+          "panes": 8,
+          "queuedOutputBytes": 0,
+          "webgl": 6,
+          "webglContexts": {
+            "created": 60,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 660,
+          "framesPerSecond": 59.9,
+          "longTasks": 0,
+          "longestFrameMs": 48,
+          "longestMs": 39,
+          "seconds": 11,
+          "slowFrames": 12
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "scenario": "soak",
+        "step": "switches"
+      },
+      "memory": {
+        "before": {
+          "WebContent": 725614592,
+          "main": 42991616,
+          "GPU": 41943040,
+          "Networking": 6438912
+        },
+        "peak": {
+          "WebContent": 861929472,
+          "main": 42991616,
+          "GPU": 245366784,
+          "Networking": 6438912
+        },
+        "after": {
+          "WebContent": 417333248,
+          "GPU": 240123904,
+          "main": 38797312,
+          "Networking": 6438912
+        }
+      },
+      "discarded": 0
+    },
+    {
+      "name": "sessions deleted, terminals closed",
+      "bytes": null,
+      "request": {
+        "scenario": "soak",
+        "projectPath": "/tmp/tx232-soak-1004/perf/soak-project",
+        "fill": "sh -c 'seq 1 20000; exec cat'",
+        "step": "cleanup"
+      },
+      "result": {
+        "closed": {
+          "collected": 70,
+          "tracked": 70
+        },
+        "counters": {
+          "attached": 0,
+          "bufferLines": 0,
+          "data": {
+            "cloud": {
+              "bytes": 0,
+              "bytesPerSecond": 0,
+              "events": 0,
+              "eventsPerSecond": 0
+            },
+            "local": {
+              "bytes": 7092598,
+              "bytesPerSecond": 176,
+              "events": 361,
+              "eventsPerSecond": 2.4
+            }
+          },
+          "dom": 0,
+          "domOnScreen": 0,
+          "evictedInstances": 1,
+          "hiddenInDocument": 0,
+          "idleInstances": 0,
+          "idleLimit": 8,
+          "instances": 0,
+          "onScreen": 0,
+          "panes": 0,
+          "queuedOutputBytes": 0,
+          "webgl": 0,
+          "webglContexts": {
+            "created": 60,
+            "failed": 0,
+            "lost": 0
+          }
+        },
+        "leftAfterDelete": {
+          "counters": {
+            "attached": 0,
+            "bufferLines": 0,
+            "data": {
+              "cloud": {
+                "bytes": 0,
+                "bytesPerSecond": 0,
+                "events": 0,
+                "eventsPerSecond": 0
+              },
+              "local": {
+                "bytes": 7092598,
+                "bytesPerSecond": 176,
+                "events": 361,
+                "eventsPerSecond": 2.4
+              }
+            },
+            "dom": 0,
+            "domOnScreen": 0,
+            "evictedInstances": 1,
+            "hiddenInDocument": 0,
+            "idleInstances": 0,
+            "idleLimit": 8,
+            "instances": 0,
+            "onScreen": 0,
+            "panes": 0,
+            "queuedOutputBytes": 0,
+            "webgl": 0,
+            "webglContexts": {
+              "created": 60,
+              "failed": 0,
+              "lost": 0
+            }
+          },
+          "panes": 0,
+          "sessions": 0
+        },
+        "mainThread": {
+          "blockedMs": 0,
+          "frames": 128,
+          "framesPerSecond": 59.4,
+          "longTasks": 0,
+          "longestFrameMs": 22,
+          "longestMs": 12,
+          "seconds": 2.2,
+          "slowFrames": 0
+        },
+        "page": {
+          "devicePixelRatio": 2,
+          "focused": false,
+          "height": 860,
+          "visibility": "visible",
+          "width": 1360
+        },
+        "scenario": "soak",
+        "step": "cleanup"
+      },
+      "memory": {
+        "before": {
+          "WebContent": 417333248,
+          "GPU": 240123904,
+          "main": 38797312,
+          "Networking": 6438912
+        },
+        "peak": {
+          "WebContent": 484442112,
+          "GPU": 245366784,
+          "main": 38797312,
+          "Networking": 6438912
+        },
+        "after": {
+          "WebContent": 462422016,
+          "GPU": 167772160,
+          "main": 37748736,
+          "Networking": 6438912
+        }
+      },
+      "discarded": 0
+    }
+  ]
+}

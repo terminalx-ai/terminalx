@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
 import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
 import { feedLocalPane } from "@/lib/terminalFeed";
+import { terminalInput } from "@/lib/terminalInput";
 import { fitTerminal } from "@/lib/terminalFit";
 import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
 import { onAppResume } from "@/lib/appResume";
@@ -139,8 +140,9 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     // Disposed while the attach was on its way: it must not be left attached to nothing.
     .then(() => (released ? pty.detach(id, token) : undefined))
     .catch(() => {});
-  term.onData((d) => void pty.write(id, d).catch(() => {}));
-  term.onBinary((d) => void pty.write(id, d).catch(() => {}));
+  const input = terminalInput(id);
+  term.onData(input.write);
+  term.onBinary(input.write);
   term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
   return {
     el,
@@ -149,6 +151,7 @@ export function createInstance(id: string, mode: "dark" | "light"): TerminalInst
     restorable: true,
     release: () => {
       released = true;
+      input.stop();
       feed.stop();
       void pty.detach(id, token).catch(() => {});
     },
@@ -251,8 +254,7 @@ export function TerminalView({
   useLayoutEffect(() => {
     const el = host.current;
     if (!shown || !el) return;
-    const inst = getInstance(id, make);
-    el.appendChild(inst.el);
+    const inst = getInstance(id, make, el);
     showWebgl(inst.term);
     return () => {
       hideWebgl(inst.term);

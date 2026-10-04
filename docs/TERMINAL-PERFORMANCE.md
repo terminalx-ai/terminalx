@@ -71,6 +71,11 @@ scheme, its own `TERMINALX_HOME` and Keychain service, and
 benchmark. Run the soak on a freshly launched app (`--scenarios soak`), since
 the other scenarios leave their own mark on memory.
 
+The driver checkpoints `--out` after each case. `complete: false` identifies
+an interrupted matrix; only a completed run has `complete: true` and final
+terminal counters. Host metadata includes load averages before and after
+the run, since competing builds can dominate latency measurements.
+
 What a run does:
 
 - **Field.** `N` terminals are open (1, 8 and 20). One is on screen. The
@@ -552,8 +557,8 @@ evicted foreground terminal when the window returns, even without a tab
 switch. This uses the same bounded-tail restoration tradeoff as idle
 eviction, rather than feeding a truncated byte stream to a live VT parser.
 
-These changes require a fresh native matrix and memory soak before claiming
-the acceptance thresholds again. This development run encountered system
+At this revision, a fresh native matrix and memory soak were still needed
+before claiming the acceptance thresholds again. That development run encountered system
 load averages above 160 and test-worker startup timeouts; those conditions
 cannot establish a 16.7 ms latency or 10% memory claim. The earlier tables
 are historical measurements, not measurements of this revision.
@@ -568,11 +573,121 @@ Validation for this revision:
   `node --check`, and `git diff --check` is clean.
 - The renderer spike completed all 18 matrix cases and a smoke rerun of the
   final harness. Results and limitations follow below.
-- Native validation is **unfinished**. `cargo check --lib -j 2` was stopped
+- Native validation was **unfinished at this revision**. `cargo check --lib -j 2` was stopped
   after approximately half an hour still compiling dependencies under the
   system load described above. It had not checked the application crate;
-  the new Rust sink tests have not run. Run the native check and tests before
-  merging, followed by the isolated native matrix and soak on a quiet host.
+  the new Rust sink tests had not run. The follow-up below completes those
+  builds and tests and records new native measurements.
+
+### Input, cache transitions and transport cleanup (follow-up)
+
+The raw output transport and renderer fixes above were already present at
+`57f302f`. This follow-up found a remaining blocking operation on the input
+path: `pty_write` synchronously waited for the PTY writer. A large paste into
+a program that is not reading stdin can fill its input buffer. Waiting on
+the native UI thread also delays output acknowledgements and commands for
+other terminals.
+
+- Desktop input now performs the blocking write on Tokio's blocking pool.
+  It captures the pane's writer before dispatch, so a delayed worker cannot
+  deliver input to a replacement process under the same pane id.
+- Each local terminal sends its first key immediately and has at most one
+  input invocation in flight. Input arriving during that write is combined
+  in order. Disposal drops unsent input. Other panes have independent queues.
+- Bulk shutdown now removes unused transport slots, as individual shutdown
+  already did. Slots with attached views remain until those views detach.
+- A view mounts its terminal before the store enforces the idle budget.
+  Previously, acquiring a visible terminal with eight cached instances
+  briefly counted all nine as idle and evicted one unnecessarily. The soak
+  exposed this as a lost cached buffer followed by a replay during session
+  switching. The visible terminal now sits outside the idle limit from the
+  moment it is acquired.
+
+This does not interrupt a blocked paste within the same PTY; it keeps the
+application and other terminals responsive while that program is not
+reading. Output flow control and renderer ownership are unchanged.
+
+**Fresh native measurements, 2026-10-04.** Debug bundle with the production
+frontend, macOS 27.0, 12-core Apple silicon, 24 GiB. This run uses a
+1360 × 860 window at 2× and a 177 × 46 terminal grid, so it is not a
+pixel-for-pixel comparison with the earlier 190 × 24 baseline. The window
+was visible. One-minute host load fell from 7.75 to 4.30 over the matrix;
+the benchmark ran after this checkout's compilers had finished.
+
+| Terminals | `yes` drain (ms) | 50 MiB log drain (ms) | TUI drain (ms) | Echo p95 (ms) | Echo to frame p95 (ms) | Ctrl+C to exit / output stopped (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2,044 | 508 | 108 | 3 | 18 | 8 / 11 |
+| 8 | 2,021 | 583 | 91 | 1 | 16 | 7 / 13 |
+| 20 | 2,106 | 529 | 79 | 2 | 16 | 3 / 6 |
+
+The 8- and 20-terminal echo cases each had another tab flooding at about
+5 MiB/s. Both meet the 16.7 ms p95 typing target, including the next frame.
+The idle one-terminal case took 18 ms to the next frame. Every case used
+WebGL on screen; no contexts were lost or refused, no input was lost, and
+xterm discarded no writes. No main-thread task exceeded 50 ms. The
+one-terminal log case had one frame longer than 34 ms; the other drain
+cases had none. Final counters were zero for panes, instances, attached
+views, scrollback, and queued output.
+
+Raw results: `docs/perf/native-matrix-2026-10-04-followup.json`.
+
+Two soaks before the mount-order correction released every tracked closed
+terminal, but missed the physical-memory threshold:
+
+| Run | WebContent baseline → after 200 switches → after cleanup (MiB) | Change at 200 switches | Closed terminals collected |
+| --- | --- | ---: | --- |
+| Fresh process | 349 → 398 → 441 | +14.0% | 70 / 70 |
+| Second cycle, same process | 283 → 338 → 341 | +19.4% | 140 / 140 cumulative |
+
+Both finished with zero panes, instances, views, queued output and backend
+scrollback, with no context loss or visible DOM fallback. The second cycle's
+absolute footprint was lower, which does not show cumulative terminal
+retention. Collection timing and allocator retention remain possible
+explanations; these process footprints are not heap snapshots and do not
+prove the cause. The strict 10% target cannot be claimed from either run.
+Raw results are `native-soak-2026-10-04-followup.json` and
+`native-soak-repeat-2026-10-04-followup.json` under `docs/perf/`.
+
+With the mount-order correction, the shell-tab step retained all eight
+original instances and caused no eviction. The agent-tab step still
+legitimately exceeded the idle budget once. The fresh soak measured
+337 → 375 → 378 MiB (baseline → after switches → after cleanup), with all
+70 closed terminals collected. Two hidden WebGL contexts were lost and
+recovered when shown; `domOnScreen` remained zero at every checkpoint.
+This is **+11.3% after switches**, so the strict 10% memory acceptance
+criterion remains unmet. See `docs/perf/native-soak-mount-order-2026-10-04.json`.
+
+An additional experiment zeroed the disposed GL and link-overlay canvas
+dimensions to retire their bitmaps immediately. It did not demonstrate a
+memory improvement: 361 → 676 → 596 MiB, despite all 70 tracked terminals
+being collected and zero final live-instance/queue counters. That change
+is **not included**. Its result is retained in
+`docs/perf/native-soak-surfaces-2026-10-04.json` to avoid recommending it on
+the basis of bitmap ownership alone. These runs cannot distinguish native
+WebKit allocation retention from JavaScript allocations not covered by the
+terminal finalization counters; a heap/native allocation profile is still
+needed before declaring the memory target fixed.
+
+Validation of the retained changes:
+
+- The complete frontend suite passed 1,842 tests across 181 files on the
+  final retained code, including all 99 targeted local/cloud terminal
+  regressions across 12 files.
+- Native PTY and harness tests passed 26 tests, including blocked input and
+  bulk shutdown cleanup. The four sink tests and two performance-request
+  tests also passed, completing the native validation left open above.
+- Type checking, production frontend builds, and the native debug app
+  bundle passed. `node --check scripts/perf/terminal-bench.mjs` and
+  `git diff --check` passed.
+- This host initially mixed Xcode's compiler with the newer Command Line
+  Tools SDK. Setting `SDKROOT` to the SDK reported by
+  `xcrun --sdk macosx --show-sdk-path` fixed the native build without changing
+  project dependencies or system configuration.
+
+The measurements use synthetic TUI redraws and a stand-in agent CLI; no
+real Claude/Codex account workload or cloud-runtime soak was run. The
+native throughput matrix preceded the mount-order correction; its stress
+field bypasses the idle cache, so that correction does not alter that path.
 
 ## Renderer replacement spike
 
@@ -623,6 +738,32 @@ renderer is faster. In particular the one-parser xterm `yes` run contains a
 The spike establishes that this pinned Ghostty package can run these inputs
 in WebKit, but does not establish its long-session memory safety. Raw results
 are in `docs/perf/renderer-spike-2026-10-04.json`.
+
+A follow-up completed all 18 cases under lower, though still non-idle, host
+load (25.8 / 24.2 / 17.7). Same package, workload bytes and scheduling:
+
+| Parsers | Workload | xterm drain (ms) | Ghostty drain (ms) |
+| --- | --- | ---: | ---: |
+| 1 | yes | 994 | 410 |
+| 1 | 50 MiB log | 3,231 | 3,366 |
+| 1 | TUI redraws | 463 | 498 |
+| 8 | yes | 980 | 437 |
+| 8 | 50 MiB log | 3,242 | 3,396 |
+| 8 | TUI redraws | 452 | 537 |
+| 20 | yes | 1,014 | 690 |
+| 20 | 50 MiB log | 3,259 | 5,500 |
+| 20 | TUI redraws | 477 | 898 |
+
+Neither renderer reported exceptions or context loss. Ghostty drained the
+short `yes` lines faster. At 20 parsers, however, its log case recorded 51
+timer gaps over 50 ms and a 61 ms timer-delay p95, versus zero gaps over
+50 ms and a 7 ms timer-delay p95 for xterm. Its TUI case likewise took
+longer with 19 detached background terminals. These are renderer-harness
+results, **not typing latency or native PTY throughput**, and do not isolate
+parsing from each library's treatment of hidden canvases. They support
+keeping xterm while investigating memory, rather than claiming the WASM
+renderer is a demonstrated replacement. Raw results:
+`docs/perf/renderer-spike-2026-10-04-followup.json`.
 
 | Candidate | Benefits | Remaining integration work |
 | --- | --- | --- |

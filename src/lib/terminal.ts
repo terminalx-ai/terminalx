@@ -112,7 +112,8 @@ export function peekInstance(id: string): TerminalInstance | undefined {
   return instances.get(id);
 }
 
-export function getInstance(id: string, create: () => TerminalInstance): TerminalInstance {
+/** Mount before trimming when a view is acquiring a visible terminal. */
+export function getInstance(id: string, create: () => TerminalInstance, host?: HTMLElement): TerminalInstance {
   let inst = instances.get(id);
   if (!inst) {
     inst = create();
@@ -124,6 +125,10 @@ export function getInstance(id: string, create: () => TerminalInstance): Termina
   // Map order is the last use order, not the order terminals were created in.
   instances.delete(id);
   instances.set(id, inst);
+  // The visible instance does not spend an instant in the idle budget. If
+  // eight terminals are cached, trimming before mounting the ninth needlessly
+  // evicts one of them and forces a scrollback replay on the next switch.
+  host?.appendChild(inst.el);
   trimTerminalInstances(id);
   return inst;
 }
