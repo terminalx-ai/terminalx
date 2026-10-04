@@ -69,6 +69,7 @@ function skippedLine(skipped: Record<string, number> | null): string | null {
     skipped.secret ? `${skipped.secret} secret ${skipped.secret === 1 ? "file" : "files"}` : null,
     skipped.toolConfig ? `${skipped.toolConfig} tool settings that run commands (agent, editor and Git hook configuration)` : null,
     skipped.gitDirectory ? `${skipped.gitDirectory} inside a folder Git would treat as a repository` : null,
+    skipped.onDisk ? `${skipped.onDisk} that on this disk turned out to be part of a Git repository or tool settings` : null,
     skipped.collision ? `${skipped.collision} whose name is taken by another file on this disk` : null,
     skipped.tooLong ? `${skipped.tooLong} with a name too long for this disk` : null,
     skipped.excluded ? `${skipped.excluded} excluded by the repository` : null,
@@ -110,9 +111,10 @@ export function CloudMirrorDialog({ request, onClose }: { request: MirrorRequest
           <DialogTitle className="truncate">Local mirror · {request.workspaceName}</DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             A copy of the workspace's files on this computer, for local tools to read. It goes one way, from the workspace to here. Commands, agents and terminals still run in the
-            cloud workspace, and this is not a backup. The files come from the workspace as they are: treat them like a download. Nothing in the copy can be run by opening it, the
-            folder cannot be opened as a project or used by an agent here, and the copy is removed from this computer if you lose access to the workspace, sign out, or the workspace is
-            deleted.
+            cloud workspace, and this is not a backup. The files come from the workspace as they are: treat them like a download. No file in the copy is marked executable, and macOS
+            asks before opening one. An editor or build tool opened on the folder may still build or index it, which runs the workspace's code on this computer. The folder cannot be
+            opened as a project or used by an agent here. The copy is removed from this computer if you lose access to the workspace, sign out, or the workspace is deleted; files you
+            edited in it are kept aside.
           </DialogDescription>
         </DialogHeader>
 

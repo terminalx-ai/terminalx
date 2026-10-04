@@ -139,9 +139,17 @@ struct Record {
     owned: BTreeMap<String, Owned>,
     #[serde(default)]
     revision: Option<Revision>,
-    /// Divergent paths a person chose to replace with the workspace's.
+    /// Divergent paths a person chose to replace with the workspace's, each
+    /// with what was there when they chose (its content hash, `missing` or
+    /// `other`). The choice covers that state only: an edit made afterwards
+    /// is a new divergence.
     #[serde(default)]
-    discard: BTreeSet<String>,
+    discard: BTreeMap<String, String>,
+    /// Paths the check of the disk after a publish removed (they turned out
+    /// to be part of a Git directory, or tool configuration, as the disk
+    /// spells them). Never written again.
+    #[serde(default)]
+    blocked: BTreeSet<String>,
 }
 
 /// One file a publish is about to put in place.
@@ -177,6 +185,8 @@ pub struct Refused {
     pub too_long: usize,
     /// Not a plain relative path.
     pub invalid: usize,
+    /// Removed by the check of the disk after an earlier publish.
+    pub on_disk: usize,
 }
 
 
@@ -226,6 +236,9 @@ pub struct Published {
     pub diverged_total: usize,
     pub written: usize,
     pub removed: usize,
+    /// Files this publish wrote and then took back, because on the disk
+    /// they turned out to be something a mirror never holds.
+    pub taken_back: usize,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
@@ -308,20 +321,23 @@ fn components(relative: &str) -> Result<Vec<&str>> {
     if crate::mirror_rules::tool_config(relative) {
         bail!("tool configuration that runs by itself is never mirrored");
     }
+    if crate::mirror_rules::git_pointer(relative) {
+        bail!("a file that points Git at another folder is never mirrored");
+    }
     if parts.len() > MAX_DEPTH || parts.iter().any(|part| part.len() > MAX_NAME_BYTES) {
         bail!("the path is too long or too deep");
     }
     Ok(parts)
 }
 
-/// What makes two names one file on a disk that folds case and Unicode form
-/// (APFS and NTFS do): composed, then lower case.
+/// What makes two names one file on this disk: always the composed Unicode
+/// form, and where the disk folds case, Unicode's case folding (not ASCII
+/// lower-casing: the long s is `s` there, the final sigma is sigma).
 fn fold(path: &str, case: bool) -> String {
-    let composed = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(path);
     if case {
-        composed.to_lowercase()
+        path.split('/').map(crate::mirror_rules::fold).collect::<Vec<_>>().join("/")
     } else {
-        composed.into_owned()
+        icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(path).into_owned()
     }
 }
 
@@ -442,7 +458,8 @@ impl Mirror {
             enabled: true,
             owned: BTreeMap::new(),
             revision: None,
-            discard: BTreeSet::new(),
+            discard: BTreeMap::new(),
+            blocked: BTreeSet::new(),
         });
         record.enabled = true;
         self.save(&record)?;
@@ -471,16 +488,31 @@ impl Mirror {
     }
 
     /// Remove the mirrored copy because the person may no longer have it
-    /// (access revoked, signed out, the workspace deleted). By the record
-    /// only: every file the mirror wrote, its staging, journal and record.
-    /// Files the person added themselves, and their exports, stay.
+    /// (access revoked, signed out, another account, the workspace deleted).
+    /// By the record only: every file the mirror wrote, its staging, journal
+    /// and record. A mirrored file the person edited is their work: it is
+    /// moved to `exports/<time>/`, not deleted. Files they added themselves
+    /// and their earlier exports stay.
     pub fn purge(&self) -> Result<usize> {
         let Some(record) = self.record()? else { return Ok(0) };
+        let exports = self.dir.join(EXPORTS).join(now_ms().to_string());
         let mut removed = 0;
-        for path in record.owned.keys() {
+        for (path, owned) in &record.owned {
             // A path behind a link is not followed; the record goes regardless.
             let Ok(target) = self.local_path_unchecked(path) else { continue };
-            if std::fs::symlink_metadata(&target).is_ok_and(|meta| !meta.is_dir()) && std::fs::remove_file(&target).is_ok() {
+            let Ok(meta) = std::fs::symlink_metadata(&target) else { continue };
+            if meta.is_dir() {
+                continue;
+            }
+            let edited = meta.is_file() && signature(&meta) != owned.local && etag_of_file(&target).is_ok_and(|etag| etag != owned.etag);
+            if edited {
+                let kept = exports.join(path);
+                if let Some(parent) = kept.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(&target, &kept).with_context(|| format!("keep the edited {path}"))?;
+            }
+            if std::fs::remove_file(&target).is_ok() {
                 removed += 1;
             }
             self.prune_empty_parents(&target);
@@ -544,13 +576,27 @@ impl Mirror {
         })
     }
 
+    /// What is at `relative` now, as a discard remembers it.
+    fn local_token(&self, relative: &str) -> String {
+        match self.look(relative) {
+            Ok(Local::File(_)) => self.local_path_unchecked(relative).ok().and_then(|path| etag_of_file(&path).ok()).unwrap_or_else(|| "unreadable".into()),
+            Ok(Local::Missing) => "missing".into(),
+            _ => "other".into(),
+        }
+    }
+
+    /// Did the person discard exactly what is at `relative` now?
+    fn discarded(&self, record: &Record, relative: &str) -> bool {
+        record.discard.get(relative).is_some_and(|token| *token == self.local_token(relative))
+    }
+
     /// Local changes to the files the mirror wrote, without asking the
     /// workspace anything.
     pub fn check(&self) -> Result<(Vec<Divergence>, usize)> {
         let record = self.working_record()?;
         let mut diverged = Vec::new();
         for (path, owned) in &record.owned {
-            if record.discard.contains(path) {
+            if self.discarded(&record, path) {
                 continue;
             }
             if let Some(reason) = self.divergence_of(path, owned)? {
@@ -576,7 +622,7 @@ impl Mirror {
     /// The entries this mirror will hold, and what was refused here and why.
     /// Nothing the workspace says about itself is taken on trust: the
     /// counts, the sizes and the names are all bounded on this side.
-    fn desired<'a>(&self, manifest: &'a Manifest) -> Result<(BTreeMap<&'a str, &'a Entry>, Refused, bool)> {
+    fn desired<'a>(&self, manifest: &'a Manifest, blocked: &BTreeSet<String>) -> Result<(BTreeMap<&'a str, &'a Entry>, Refused, bool)> {
         if manifest.truncated {
             bail!("the workspace has more files than a mirror holds");
         }
@@ -616,7 +662,9 @@ impl Mirror {
             let parts: Vec<&str> = path.split('/').collect();
             if crate::mirror_rules::secret(path) {
                 refused.secret += 1;
-            } else if crate::mirror_rules::inside(path, &git_directories) {
+            } else if blocked.contains(path) {
+                refused.on_disk += 1;
+            } else if crate::mirror_rules::inside(path, &git_directories) || crate::mirror_rules::git_pointer(path) {
                 refused.git_directory += 1;
             } else if crate::mirror_rules::tool_config(path) {
                 refused.tool_config += 1;
@@ -645,8 +693,8 @@ impl Mirror {
     }
 
     fn plan_with(&self, record: &Record, manifest: &Manifest) -> Result<(Plan, Vec<Divergence>, Vec<String>)> {
-        let (desired, refused, case) = self.desired(manifest)?;
-        let forced = |path: &str| record.discard.contains(path);
+        let (desired, refused, case) = self.desired(manifest, &record.blocked)?;
+        let forced = |path: &str| self.discarded(record, path);
         // Files of ours the workspace no longer lists, by the name this disk
         // knows them under: a rename that only changes case or Unicode form
         // leaves our own file where the new name goes, and that is not a
@@ -756,7 +804,7 @@ impl Mirror {
         let mut record = self.working_record()?;
         let (plan, diverged, remove) = self.plan_with(&record, manifest)?;
         if !diverged.is_empty() {
-            return Ok(Published { status: self.status_of(Some(&record)), diverged: plan.diverged, diverged_total: plan.diverged_total, written: 0, removed: 0 });
+            return Ok(Published { status: self.status_of(Some(&record)), diverged: plan.diverged, diverged_total: plan.diverged_total, written: 0, removed: 0, taken_back: 0 });
         }
         let entries: BTreeMap<&str, &Entry> = manifest.entries.iter().map(|entry| (entry.path.as_str(), entry)).collect();
         // Everything is here, the size the workspace listed and intact,
@@ -824,6 +872,16 @@ impl Mirror {
             let _ = std::fs::remove_file(self.dir.join(JOURNAL));
             return Err(error);
         }
+        // The names were judged by what this code knows of the disk. Now the
+        // disk has them: look at what is really there.
+        let taken_back = match self.audit(&mut record) {
+            Ok(taken_back) => taken_back,
+            Err(error) => {
+                self.save(&record)?;
+                let _ = std::fs::remove_file(self.dir.join(JOURNAL));
+                return Err(error);
+            }
+        };
         record.discard.clear();
         record.revision = Some(Revision {
             manifest_id: manifest.manifest_id.clone(),
@@ -835,7 +893,74 @@ impl Mirror {
         self.save(&record)?;
         let _ = std::fs::remove_file(self.dir.join(JOURNAL));
         let _ = std::fs::remove_dir_all(self.dir.join(STAGING));
-        Ok(Published { status: self.status_of(Some(&record)), diverged: Vec::new(), diverged_total: 0, written, removed })
+        Ok(Published { status: self.status_of(Some(&record)), diverged: Vec::new(), diverged_total: 0, written, removed, taken_back })
+    }
+
+    /// Every file and folder really under `files/`, by the names the disk
+    /// gives them, relative and `/`-separated. A folder is listed as
+    /// `<folder>/.`, so an empty `objects/` still counts. Links are listed,
+    /// never followed.
+    fn on_disk(&self) -> Result<Vec<String>> {
+        let root = self.files();
+        let mut found = Vec::new();
+        let mut frontier = vec![(root.clone(), 0usize)];
+        while let Some((dir, depth)) = frontier.pop() {
+            for entry in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+                let entry = entry?;
+                let path = entry.path();
+                let relative = path.strip_prefix(&root).unwrap_or(&path).to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+                if entry.file_type()?.is_dir() {
+                    found.push(format!("{relative}/."));
+                    if depth < MAX_DEPTH + 1 {
+                        frontier.push((path, depth + 1));
+                    }
+                } else {
+                    found.push(relative);
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The disk's own spelling of a file the mirror wrote: the folder it
+    /// landed in may be an existing one under another case or Unicode form.
+    fn real_relative(&self, relative: &str) -> Option<String> {
+        let real = std::fs::canonicalize(self.local_path_unchecked(relative).ok()?).ok()?;
+        let root = std::fs::canonicalize(self.files()).ok()?;
+        Some(real.strip_prefix(&root).ok()?.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+    }
+
+    /// After the files are in place, judge them again by what the disk
+    /// really holds, with the disk's own idea of which names are one folder.
+    /// Whatever the mirror wrote that is, there, part of a Git directory, a
+    /// pointer to one, tool configuration or a secret is removed and never
+    /// written again. Only the mirror's own files are removed. Returns how
+    /// many.
+    fn audit(&self, record: &mut Record) -> Result<usize> {
+        let real = self.on_disk()?;
+        let git_directories = crate::mirror_rules::git_directories(real.iter().map(String::as_str));
+        let mut taken_back = Vec::new();
+        for path in record.owned.keys() {
+            let Some(spelled) = self.real_relative(path) else { continue };
+            let refused = crate::mirror_rules::inside(&spelled, &git_directories)
+                || crate::mirror_rules::git_pointer(&spelled)
+                || crate::mirror_rules::tool_config(&spelled)
+                || crate::mirror_rules::secret(&spelled)
+                || crate::mirror_rules::reserved(&spelled);
+            if refused {
+                taken_back.push(path.clone());
+            }
+        }
+        for path in &taken_back {
+            let target = self.local_path_unchecked(path)?;
+            if std::fs::symlink_metadata(&target).is_ok_and(|meta| !meta.is_dir()) {
+                std::fs::remove_file(&target).with_context(|| format!("remove {path}"))?;
+            }
+            self.prune_empty_parents(&target);
+            record.owned.remove(path);
+            record.blocked.insert(path.clone());
+        }
+        Ok(taken_back.len())
     }
 
     /// Remove folders the last removal left empty, up to `files/`.
@@ -843,6 +968,12 @@ impl Mirror {
         let root = self.files();
         let mut dir = target.parent();
         while let Some(current) = dir.filter(|current| *current != root && current.starts_with(&root)) {
+            // Finder's own bookkeeping is not content: a folder holding
+            // nothing else is empty, and must not outlive its files.
+            let only_finder = std::fs::read_dir(current).is_ok_and(|entries| entries.filter_map(Result::ok).all(|entry| entry.file_name() == ".DS_Store"));
+            if only_finder {
+                let _ = std::fs::remove_file(current.join(".DS_Store"));
+            }
             if std::fs::remove_dir(current).is_err() {
                 break;
             }
@@ -878,7 +1009,9 @@ impl Mirror {
             }
             exported_to = Some(destination.to_string_lossy().into_owned());
         }
-        record.discard.extend(diverged.iter().map(|item| item.path.clone()));
+        for item in &diverged {
+            record.discard.insert(item.path.clone(), self.local_token(&item.path));
+        }
         self.save(&record)?;
         Ok(Resolved { paths: diverged.len(), exported_to })
     }
@@ -911,6 +1044,35 @@ pub fn existing(home: &Path) -> Vec<(String, String)> {
     }
     found.sort();
     found
+}
+
+const OWNER: &str = "owner";
+
+/// Say which account is using the app. Mirrors made under another one (a
+/// sign-out while the app was closed, a direct switch of account) are
+/// removed, as at sign-out. Returns how many mirrors were removed. The owner
+/// is kept as a hash.
+pub fn claim_owner(home: &Path, account: &str) -> Result<usize> {
+    let mirrors = existing(home);
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let file = home.join(DIR).join(OWNER);
+    let wanted: String = Sha256::digest(account.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+    let known = std::fs::read_to_string(&file).ok();
+    if known.as_deref() == Some(wanted.as_str()) {
+        return Ok(0);
+    }
+    let mut purged = 0;
+    if known.is_some() {
+        for (organization, workspace) in &mirrors {
+            Mirror::at(&home, organization, workspace)?.purge()?;
+            purged += 1;
+        }
+    }
+    // Nothing is created for someone who has no mirror.
+    if known.is_some() || !mirrors.is_empty() {
+        crate::store::write_atomic(&file, wanted.as_bytes())?;
+    }
+    Ok(purged)
 }
 
 /// Is `path` inside the directory that holds every mirror? A mirror is for

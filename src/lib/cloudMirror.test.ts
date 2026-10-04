@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     cloudMirrorResolve: vi.fn(),
     cloudMirrorList: vi.fn(),
     cloudMirrorPurge: vi.fn(),
+    cloudMirrorClaimOwner: vi.fn(),
   },
   listeners: new Set<Listener>(),
   connected: new Map<string, unknown>(),
@@ -57,7 +58,7 @@ const manifest = (manifestId: string, paths: string[]) => ({
   skipped: { secret: 1, toolConfig: 0, gitDirectory: 0, excluded: 0, symlink: 0, unsupported: 0, tooLarge: 0 },
   truncated: false,
 });
-const refused = { secret: 0, toolConfig: 0, gitDirectory: 0, collision: 0, tooLong: 0, invalid: 0 };
+const refused = { secret: 0, toolConfig: 0, gitDirectory: 0, collision: 0, tooLong: 0, invalid: 0, onDisk: 0 };
 const plan = (fetch: string[], patch: Record<string, unknown> = {}) => ({ fetch, fetchBytes: fetch.length * 3, remove: 0, unchanged: 0, diverged: [], divergedTotal: 0, refused, upToDate: false, ...patch });
 
 /** A workspace connects because someone opened it. Returns its disconnect. */
@@ -93,7 +94,7 @@ beforeEach(() => {
   });
   mocks.api.cloudMirrorPlan.mockResolvedValue(plan(["a.ts", "b.ts"]));
   mocks.api.cloudMirrorStage.mockResolvedValue(undefined);
-  mocks.api.cloudMirrorPublish.mockResolvedValue({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0 });
+  mocks.api.cloudMirrorPublish.mockResolvedValue({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0, takenBack: 0 });
   mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0 });
   mirror.bootCloudMirrors();
 });
@@ -272,6 +273,31 @@ describe("the local mirror's sync loop", () => {
     expect(mocks.api.cloudMirrorPurge.mock.calls.map(([, workspace]) => workspace)).toEqual(["ws-1", "ws-kept", "ws-other"]);
     expect(mocks.retain).not.toHaveBeenCalled();
     expect(mocks.wake).not.toHaveBeenCalled();
+  });
+
+  it("removes mirrors left by another account or by a sign-out while the app was closed", async () => {
+    mocks.api.cloudMirrorList.mockResolvedValue([{ organizationId: "org-1", workspaceId: "ws-1" }]);
+    mocks.api.cloudMirrorPurge.mockResolvedValue(1);
+    mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
+    // Signed in: the native side compares with who made the mirrors.
+    await mirror.claimCloudMirrorOwner("ada@example.com");
+    await mirror.claimCloudMirrorOwner("ada@example.com");
+    expect(mocks.api.cloudMirrorClaimOwner.mock.calls).toEqual([["ada@example.com"]]);
+    // Another account is reported without a sign-out in between.
+    mocks.api.cloudMirrorClaimOwner.mockResolvedValue(1);
+    await mirror.claimCloudMirrorOwner("bob@example.com");
+    expect(mocks.api.cloudMirrorClaimOwner).toHaveBeenLastCalledWith("bob@example.com");
+    // Nobody is signed in at launch: every mirror goes.
+    await mirror.claimCloudMirrorOwner(null);
+    expect(mocks.api.cloudMirrorPurge.mock.calls).toEqual([["org-1", "ws-1"]]);
+  });
+
+  it("counts what the check of the disk took back", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true));
+    mocks.api.cloudMirrorPublish.mockResolvedValue({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0, takenBack: 2 });
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).skipped?.onDisk).toBe(2);
   });
 
   it("says a runtime from before mirrors cannot be mirrored, and asks it nothing", async () => {

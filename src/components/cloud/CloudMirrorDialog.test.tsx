@@ -120,6 +120,11 @@ describe("the local mirror dialog", () => {
     expect(text).toContain("1 whose name is taken by another file on this disk, 1 link, 2 other.");
     // The dialog says what the copy is, and when it goes away.
     expect(text).toContain("treat them like a download");
+    // What it does not promise: macOS asks, it does not prevent; a tool opened there may run code.
+    expect(text).toContain("No file in the copy is marked executable, and macOS asks before opening one");
+    expect(text).toContain("may still build or index it, which runs the workspace's code on this computer");
+    expect(text).not.toContain("Nothing in the copy can be run");
+    expect(text).toContain("files you edited in it are kept aside");
     expect(text).toContain("cannot be opened as a project or used by an agent here");
     expect(text).toContain("removed from this computer if you lose access to the workspace, sign out, or the workspace is deleted");
     cleanup();

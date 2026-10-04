@@ -2697,3 +2697,9 @@ pub async fn cloud_mirror_list() -> CmdResult<Vec<CloudMirrorRef>> {
 pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.purge().map_err(err)).await.map_err(err)?
 }
+
+/// The account now using the app; mirrors made under another one are removed.
+#[tauri::command]
+pub async fn cloud_mirror_claim_owner(account: String) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account).map_err(err)).await.map_err(err)?
+}

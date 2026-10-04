@@ -166,7 +166,8 @@ async function scan(target: CloudTarget, run: Running): Promise<void> {
       publish(key, { phase: "diverged", progress: null, diverged: published.diverged, divergedTotal: published.divergedTotal, revision: published.status.revision });
       return;
     }
-    publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, revision: published.status.revision, root: published.status.root, error: null });
+    if (published.takenBack > 0) skipped.onDisk = (skipped.onDisk ?? 0) + published.takenBack;
+    publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, revision: published.status.revision, root: published.status.root, error: null, skipped });
   } catch (error) {
     if (signal.aborted) return;
     // The last successful revision stays: a failed sync changed nothing that was published.
@@ -307,8 +308,33 @@ export async function purgeCloudMirrors(keep: (orgId: string, workspaceId: strin
   }
 }
 
+let claimedOwner: string | null = null;
+
+/**
+ * Say who is using the app now (`null`: nobody). Mirrors made under another
+ * account are removed: this covers a sign-out that happened while the app
+ * was closed and a direct switch of account, where nothing else notices.
+ */
+export async function claimCloudMirrorOwner(account: string | null): Promise<void> {
+  const owner = account ?? "";
+  if (claimedOwner === owner) return;
+  claimedOwner = owner;
+  try {
+    if (account === null) await purgeCloudMirrors(() => false);
+    else if ((await api.cloudMirrorClaimOwner(account)) > 0) {
+      for (const key of [...running.keys()]) stop(key);
+      states.clear();
+      for (const listener of listeners) listener();
+    }
+  } catch {
+    // Tried again the next time the account is reported.
+    claimedOwner = null;
+  }
+}
+
 /** For tests. */
 export function resetCloudMirrors(): void {
+  claimedOwner = null;
   for (const key of [...running.keys()]) stop(key);
   booted?.();
   booted = null;

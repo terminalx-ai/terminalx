@@ -442,6 +442,7 @@ pub fn run() {
             commands::cloud_mirror_resolve,
             commands::cloud_mirror_list,
             commands::cloud_mirror_purge,
+            commands::cloud_mirror_claim_owner,
             commands::git_push,
             commands::git_pull,
             commands::git_discard,

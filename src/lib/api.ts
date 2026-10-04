@@ -341,6 +341,8 @@ export const api = {
   cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, size: number, etag: string) =>
     invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, size, etag }),
   cloudMirrorList: () => invoke<{ organizationId: string; workspaceId: string }[]>("cloud_mirror_list"),
+  /** Says who is using the app; mirrors made under another account are removed. Returns how many. */
+  cloudMirrorClaimOwner: (account: string) => invoke<number>("cloud_mirror_claim_owner", { account }),
   /** Removes what the mirror wrote; files the person added and their exports stay. */
   cloudMirrorPurge: (organizationId: string, workspaceId: string) => invoke<number>("cloud_mirror_purge", { organizationId, workspaceId }),
   cloudMirrorPublish: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, etags: Record<string, string>) =>
@@ -463,7 +465,7 @@ export interface CloudMirrorPlan {
   diverged: CloudMirrorDivergence[];
   divergedTotal: number;
   /** Listed by the workspace and left out on this computer, by reason. */
-  refused: { secret: number; toolConfig: number; gitDirectory: number; collision: number; tooLong: number; invalid: number };
+  refused: { secret: number; toolConfig: number; gitDirectory: number; collision: number; tooLong: number; invalid: number; onDisk: number };
   upToDate: boolean;
 }
 
@@ -473,6 +475,8 @@ export interface CloudMirrorPublished {
   divergedTotal: number;
   written: number;
   removed: number;
+  /** Written, then removed again: on the disk they turned out to be something a mirror never holds. */
+  takenBack: number;
 }
 
 export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";

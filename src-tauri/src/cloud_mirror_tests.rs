@@ -719,7 +719,10 @@ fn losing_access_removes_what_the_mirror_wrote_and_nothing_else() {
     // The person's own file and their exports are not the mirror's to remove.
     assert_eq!(f.local("dir/mine.txt").as_deref(), Some("mine\n"));
     let dir = f.home.join("cloud-mirrors/org-1/workspace-1");
-    assert_eq!(std::fs::read_dir(dir.join("exports")).unwrap().count(), 1);
+    // The edited file was the person's work on it: kept aside, not deleted.
+    let exports: Vec<_> = std::fs::read_dir(dir.join("exports")).unwrap().filter_map(Result::ok).map(|entry| entry.path()).collect();
+    assert!(exports.iter().any(|export| std::fs::read_to_string(export.join("a.txt")).is_ok_and(|text| text == "edited\n")));
+    assert!(exports.iter().all(|export| !export.join("dir/b.txt").exists()), "an untouched copy is not exported");
     assert!(!dir.join("mirror.json").exists());
     assert!(!f.mirror.status().unwrap().enabled);
     assert!(existing(&f.home).is_empty());
@@ -731,4 +734,208 @@ fn losing_access_removes_what_the_mirror_wrote_and_nothing_else() {
     g.sync().unwrap();
     g.mirror.purge().unwrap();
     assert!(!g.home.join("cloud-mirrors/org-1/workspace-1").exists());
+}
+
+// ---- Review 2: bypasses of the Git-directory rule, on a real disk ----------
+//
+// These run against a temporary directory on this machine's own filesystem
+// (APFS on the Macs this ships to), so what is asserted is what the disk
+// does, not what the rules assume it does.
+
+/// Whether Git, run inside `dir`, takes anything there for a repository.
+fn git_sees_a_repository(dir: &Path) -> bool {
+    dir.is_dir() && crate::git::is_repo(dir)
+}
+
+#[test]
+fn a_git_directory_split_across_two_folders_is_never_written() {
+    let mut f = Fixture::new();
+    // One folder holds HEAD and a pointer; its sibling holds the rest.
+    f.remote_write("wt/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("wt/commondir", "../common\n");
+    f.remote_write("wt/config.worktree", "[core]\n\tfsmonitor = touch /tmp/owned\n");
+    f.remote_write("common/objects/x", "x\n");
+    f.remote_write("common/refs/x", "x\n");
+    f.remote_write("common/config", "[extensions]\n\tworktreeConfig = true\n");
+    f.remote_write("src/a.ts", "x\n");
+    // A pointer on its own, anywhere, is refused too.
+    f.remote_write("docs/gitdir", "../common\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.refused.git_directory, 4, "wt/HEAD, wt/commondir, wt/config.worktree, docs/gitdir");
+    assert_eq!(plan.fetch, ["common/config", "common/objects/x", "common/refs/x", "src/a.ts"]);
+    f.sync().unwrap();
+    assert!(!f.files().join("wt").exists());
+    assert!(!f.files().join("docs").exists());
+    // What is left of the pair is not a repository to Git, from either folder.
+    assert!(!git_sees_a_repository(&f.files().join("common")));
+    assert!(!git_sees_a_repository(&f.files()));
+}
+
+#[test]
+fn names_the_disk_folds_do_not_get_past_the_rules() {
+    let mut f = Fixture::new();
+    // The long s (U+017F) and the Kelvin sign (U+212A): on APFS these are
+    // `objects`, `refs`, `.vscode/tasks.json`, `.mcp.json`, `.husky`.
+    f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("pkg/config", "[core]\n\tfsmonitor = touch /tmp/owned\n");
+    f.remote_write("pkg/object\u{17f}/x", "x\n");
+    f.remote_write("pkg/ref\u{17f}/x", "x\n");
+    f.remote_write(".v\u{17f}code/ta\u{17f}k\u{17f}.json", "{}\n");
+    f.remote_write(".mcp.j\u{17f}on", "{}\n");
+    f.remote_write(".hu\u{17f}\u{212a}y/pre-commit", "#!/bin/sh\n");
+    f.remote_write("src/a.ts", "x\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.fetch, ["src/a.ts"]);
+    assert_eq!((plan.refused.git_directory, plan.refused.tool_config), (4, 3));
+    f.sync().unwrap();
+    assert_eq!(std::fs::read_dir(f.files()).unwrap().count(), 1, "only src/");
+    assert!(!git_sees_a_repository(&f.files().join("pkg")));
+}
+
+#[test]
+fn one_folder_under_three_spellings_is_one_folder() {
+    let mut f = Fixture::new();
+    f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("PKG/objects/x", "x\n");
+    f.remote_write("Pkg/refs/x", "x\n");
+    f.remote_write("Pkg/config", "[core]\n\tfsmonitor = touch /tmp/owned\n");
+    f.remote_write("src/a.ts", "x\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.fetch, ["src/a.ts"]);
+    assert_eq!(plan.refused.git_directory, 4);
+    f.sync().unwrap();
+    assert!(!f.files().join("pkg").exists() && !f.files().join("PKG").exists());
+}
+
+#[test]
+fn the_disk_has_the_last_word_after_a_publish() {
+    let mut f = Fixture::new();
+    // The names alone do not make a Git directory: the manifest has HEAD
+    // and a config, in a folder that on THIS disk already holds `objects/`
+    // and `refs/` (left by something else, under another spelling).
+    std::fs::create_dir_all(f.files().join("PKG/objects")).unwrap();
+    std::fs::create_dir_all(f.files().join("PKG/refs")).unwrap();
+    f.write_local("PKG/objects/mine.txt", "the person's\n");
+    f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("pkg/README.md", "looks harmless\n");
+    f.remote_write("src/a.ts", "x\n");
+    let folds = f.mirror.case_insensitive();
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!(plan.refused.git_directory, 0, "nothing in the manifest says Git directory");
+
+    let published = f.sync().unwrap();
+    if folds {
+        // On a disk that folds case `pkg` IS `PKG`: HEAD landed beside
+        // objects/ and refs/. The check of the disk takes it back.
+        assert_eq!((published.written, published.taken_back), (3, 2));
+        assert!(!f.files().join("PKG/HEAD").exists());
+        assert!(!f.files().join("PKG/README.md").exists());
+        assert!(!git_sees_a_repository(&f.files().join("PKG")));
+        // The person's own file is not the mirror's to remove.
+        assert_eq!(f.local("PKG/objects/mine.txt").as_deref(), Some("the person's\n"));
+        assert_eq!(f.local("src/a.ts").as_deref(), Some("x\n"));
+        // And it is not written again on the next sync.
+        let plan = f.mirror.plan(&f.manifest()).unwrap();
+        assert_eq!((plan.fetch.len(), plan.refused.on_disk), (0, 2));
+        assert_eq!(f.sync().unwrap().written, 0);
+        assert!(!f.files().join("PKG/HEAD").exists());
+    } else {
+        // A disk that keeps `pkg` and `PKG` apart: two folders, no Git directory.
+        assert_eq!(published.taken_back, 0);
+        assert!(!git_sees_a_repository(&f.files().join("pkg")));
+    }
+}
+
+#[test]
+fn an_edit_made_after_discard_is_a_new_divergence() {
+    let mut f = Fixture::new();
+    f.remote_write("a.txt", "v1\n");
+    f.remote_write("b.txt", "v1\n");
+    f.sync().unwrap();
+    f.write_local("a.txt", "first edit\n");
+    std::fs::remove_file(f.files().join("b.txt")).unwrap();
+    f.remote_write("a.txt", "v2\n");
+    assert_eq!(f.sync().unwrap().diverged_total, 2);
+    f.mirror.resolve(&f.manifest(), Resolution::Discard).unwrap();
+
+    // Before the next sync the person edits one again, and restores the other by hand.
+    f.write_local("a.txt", "second edit, after discarding the first\n");
+    f.write_local("b.txt", "written back by hand\n");
+    let blocked = f.sync().unwrap();
+    assert_eq!(reasons(&blocked.diverged), [("a.txt", "modified"), ("b.txt", "modified")]);
+    assert_eq!(blocked.written, 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("second edit, after discarding the first\n"));
+    assert_eq!(f.local("b.txt").as_deref(), Some("written back by hand\n"));
+
+    // Discarding what is there now does replace it.
+    f.mirror.resolve(&f.manifest(), Resolution::Discard).unwrap();
+    f.sync().unwrap();
+    assert_eq!(f.local("a.txt").as_deref(), Some("v2\n"));
+    assert_eq!(f.local("b.txt").as_deref(), Some("v1\n"));
+}
+
+#[test]
+fn finders_bookkeeping_does_not_keep_a_removed_folder_alive() {
+    let mut f = Fixture::new();
+    f.remote_write("lib/objects/x", "x\n");
+    f.remote_write("lib/refs/x", "x\n");
+    f.remote_write("keep.txt", "x\n");
+    f.sync().unwrap();
+    // The person looked at the folders in Finder.
+    f.write_local("lib/objects/.DS_Store", "finder\n");
+    f.write_local("lib/refs/.DS_Store", "finder\n");
+    f.write_local("lib/.DS_Store", "finder\n");
+    f.remote.remove("lib/objects/x");
+    f.remote.remove("lib/refs/x");
+    f.sync().unwrap();
+    assert!(!f.files().join("lib").exists(), "no empty objects/ and refs/ left for a later HEAD to complete");
+    // A folder with something of the person's in it stays.
+    let mut g = Fixture::new();
+    g.remote_write("dir/a.txt", "x\n");
+    g.sync().unwrap();
+    g.write_local("dir/.DS_Store", "finder\n");
+    g.write_local("dir/mine.txt", "mine\n");
+    g.remote.remove("dir/a.txt");
+    g.sync().unwrap();
+    assert_eq!(g.local("dir/mine.txt").as_deref(), Some("mine\n"));
+}
+
+#[test]
+fn names_that_fold_by_unicode_not_only_by_ascii_are_one_file() {
+    let mut f = Fixture::new();
+    if !f.mirror.case_insensitive() {
+        return;
+    }
+    // The long s against `s`: one file on a disk that folds case.
+    f.remote_write("sample.txt", "plain\n");
+    f.remote_write("\u{17f}ample.txt", "long s\n");
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert_eq!((plan.fetch.len(), plan.refused.collision), (1, 1));
+    f.sync().unwrap();
+    // The disk agrees: one file, and the mirror does not see its own as a conflict.
+    assert_eq!(std::fs::read_dir(f.files()).unwrap().count(), 1);
+    assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
+    assert_eq!(f.mirror.check().unwrap().1, 0);
+}
+
+#[test]
+fn a_mirror_made_under_another_account_is_removed_when_the_next_one_arrives() {
+    let mut f = Fixture::new();
+    f.remote_write("a.txt", "v1\n");
+    f.sync().unwrap();
+    // The first account to be seen owns what is there.
+    assert_eq!(claim_owner(&f.home, "ada@example.com").unwrap(), 0);
+    assert_eq!(claim_owner(&f.home, "ada@example.com").unwrap(), 0);
+    assert_eq!(f.local("a.txt").as_deref(), Some("v1\n"));
+    // The app was closed, and opens signed in as someone else.
+    assert_eq!(claim_owner(&f.home, "bob@example.com").unwrap(), 1);
+    assert_eq!(f.local("a.txt"), None);
+    assert!(existing(&f.home).is_empty());
+    // The owner is kept as a hash, not as the address.
+    let owner = std::fs::read_to_string(f.home.join("cloud-mirrors/owner")).unwrap();
+    assert!(!owner.contains("bob") && !owner.contains("example.com"));
+    // Nothing to do when there are no mirrors at all.
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(claim_owner(empty.path(), "ada@example.com").unwrap(), 0);
+    assert!(!empty.path().join("cloud-mirrors").exists());
 }
