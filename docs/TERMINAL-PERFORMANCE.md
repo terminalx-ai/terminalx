@@ -17,10 +17,13 @@ program ──▶ PTY ──▶ pty-read thread ──▶ pty-emit thread ──
                          └──────────── acknowledgements ◀──── xterm.js ──▶ WebGL
 ```
 
-One xterm.js instance per terminal lives for as long as the terminal does
-(`src/lib/terminal.ts`). It is in the document, and has a WebGL context, only
-while a view shows it (`src/components/terminal/TerminalView.tsx`,
-`src/lib/terminalWebgl.ts`). The baseline below was measured on the path as
+Local terminals retain up to eight hidden xterm.js instances in an LRU cache
+(`src/lib/terminal.ts`), in addition to those on screen. Evicted instances
+reattach to the backend's 512 KiB output tail when shown again. Cloud
+instances retain their existing stream lifecycle. Terminals enter the
+document only while shown; WebGL contexts are budgeted separately
+(`src/components/terminal/TerminalView.tsx`, `src/lib/terminalWebgl.ts`).
+The baseline below was measured on the path as
 it was before: output base64-encoded in a JSON event broadcast to the window,
 no acknowledgements, and a WebGL context per terminal from creation.
 
@@ -40,6 +43,9 @@ no acknowledgements, and a WebGL context per terminal from creation.
   output for nobody), WebGL contexts created / lost / refused since the window
   loaded, buffer lines held, and output events and bytes per second (local
   and cloud). It is `null` when the window did not answer within 500 ms.
+  `idleInstances`, `idleLimit`, and `evictedInstances` expose the local LRU.
+  `queuedOutputBytes` counts local output not yet parsed, including bytes
+  acknowledged on receipt while the window is hidden.
 
 The webview counts as it goes (a few additions per output event) and computes
 the rest only when asked. The same counters are at
@@ -487,9 +493,152 @@ reply to a prompt appears in the tab's terminal:
 | An agent tab after a launch | blank | live |
 | An agent tab after the page is reloaded | scrollback only | live |
 
-All five acceptance criteria of the issue are met on this machine (memory
+All five acceptance criteria of the issue were met in that recorded run (memory
 after the soak 1.04 times the baseline in this run).
 
 Still open from the baseline: finding 8 (the status bar cannot see the web
-view's memory on macOS). Not done: an archived session keeps its terminals,
-and there is no cap on how many idle xterm instances are kept.
+view's memory on macOS).
+
+### Remaining lifecycle and transport fixes (2026-10-04)
+
+- **Idle instances are bounded.** Eight recently used hidden local terminals
+  retain their parsers and scrollback. Older ones release their channel,
+  xterm, renderer and element. PTYs continue running, keeping the backend's
+  bounded output tail. Visible terminals are never evicted. The throughput
+  matrix explicitly bypasses this cache to continue stressing 20 live
+  parsers; the soak uses the real view lifecycle and cache.
+- **Archive releases hidden terminal instances.** This applies to archive
+  updates from the UI, backend events and full session refreshes. Archiving
+  does not terminate an agent or shell. An archived terminal still being read
+  is released when its view leaves the screen.
+- **Late work cannot use a disposed terminal.** Feed shutdown now rejects
+  queued channel data and parse acknowledgements. View cleanup cancels its
+  animation frames; resize callbacks look up the current instance so an
+  evicted terminal is not held by a mounted hidden view.
+- **WebGL recovery owns its resources.** A failed addon activation is cleaned
+  up, retries after refusal occur without requiring a tab switch, and hidden
+  or disposed terminals cancel pending retries. Canvas loss listeners are
+  removed at release. Hidden contexts are retired before requesting a new
+  one, avoiding the temporary extra allocation at the budget boundary.
+- **Local PTY output no longer enters the global event bus.** Desktop
+  backend subscribers use an in-process sink; without one, PTY output incurs
+  no legacy base64 encoding or JSON serialization. The raw per-pane channels
+  remain the desktop frontend transport. Headless and mobile consumers keep
+  their existing event format. The prior code already avoided a webview eval
+  when no JavaScript `pty_data` listener existed; this change also removes
+  the backend encoding cost and prevents accidental double subscription.
+- **Closed local chat transcripts are released.** Session/tab removal events
+  prune their logs, late local events cannot recreate closed tabs, and a
+  history request finishing after disposal cannot resurrect a deleted log.
+  Empty subscriber sets are removed. Cloud tab/workspace removal already
+  calls `dropTabLog`; its persisted cache is capped at 2,000 events per tab.
+  Open transcripts still retain full histories in memory.
+
+Replay starts at the pane's remembered grid size before the view refits it,
+so output originally written into a wide terminal is not parsed at xterm's
+default 80 columns. Restoration from a bounded raw tail is not a full VT state snapshot. History
+older than 512 KiB is unavailable after eviction, and a full-screen program
+may need its next redraw to reconstruct its screen and modes. This is the
+same attach path used after a page reload. Cloud terminals are excluded from
+eviction because their stream offsets and controller state require a
+separate reconnect policy.
+
+The hidden-window flow-control exemption remains intentional: WebKit can
+stop parser timers while an agent must continue working. A hidden window
+still acknowledges receipt before parsing, but its local parser is now
+retired before the unparsed queue exceeds **2 MiB**. This detaches the view
+without blocking the process. The visibility subscription reacquires an
+evicted foreground terminal when the window returns, even without a tab
+switch. This uses the same bounded-tail restoration tradeoff as idle
+eviction, rather than feeding a truncated byte stream to a live VT parser.
+
+These changes require a fresh native matrix and memory soak before claiming
+the acceptance thresholds again. This development run encountered system
+load averages above 160 and test-worker startup timeouts; those conditions
+cannot establish a 16.7 ms latency or 10% memory claim. The earlier tables
+are historical measurements, not measurements of this revision.
+
+Validation for this revision:
+
+- The targeted frontend regression run passed 93 tests across 11 files,
+  including real xterm/WebGL-addon cleanup, feed disposal, view restoration,
+  local session lifecycle, cloud terminals and chat history/recovery. The
+  subsequent remembered-grid change passed all 12 terminal-store tests.
+- `tsc --noEmit` passed after the final code changes; benchmark scripts pass
+  `node --check`, and `git diff --check` is clean.
+- The renderer spike completed all 18 matrix cases and a smoke rerun of the
+  final harness. Results and limitations follow below.
+- Native validation is **unfinished**. `cargo check --lib -j 2` was stopped
+  after approximately half an hour still compiling dependencies under the
+  system load described above. It had not checked the application crate;
+  the new Rust sink tests have not run. Run the native check and tests before
+  merging, followed by the isolated native matrix and soak on a quiet host.
+
+## Renderer replacement spike
+
+`scripts/perf/renderer-spike.mjs` compares xterm 6 + WebGL with
+[`ghostty-web`](https://github.com/coder/ghostty-web) 0.4.0, which wraps
+Ghostty's WASM VT parser and a Canvas 2D renderer. It uses the **same** seeded
+50 MiB log and 4,000 synchronized redraws as the native benchmark, plus two
+million `yes` lines. Both receive 32 KiB chunks with at most 256 KiB queued
+per batch, with a yield between batches. The log and redraw bytes receive
+the PTY's LF-to-CRLF translation. Runs cover 1, 8 and 20 parsers, with only
+the foreground renderer attached and agent-style background output at 10 Hz.
+
+The package is loaded from a scratch directory so it adds no production
+dependency or WASM asset to the app:
+
+```sh
+mkdir -p /tmp/tx232-ghostty
+npm pack ghostty-web@0.4.0 --pack-destination /tmp/tx232-ghostty
+tar -xzf /tmp/tx232-ghostty/ghostty-web-0.4.0.tgz -C /tmp/tx232-ghostty
+node scripts/perf/renderer-spike.mjs --ghostty /tmp/tx232-ghostty/package --out /tmp/renderers.json
+```
+
+This is a Playwright WebKit renderer experiment: it measures parse/drain
+time, the next frame, timer delays and context loss. It does **not** measure
+Tauri IPC, process exit, actual keyboard echo, real Claude output, heap
+collection, or WKWebView process footprint. Its timer p95 must not be
+reported as typing latency. A new page for each case isolates a failed WASM
+instance and avoids carrying its allocator high-water mark into the next case.
+
+Exploratory run on 2026-10-04 (system load at start: 153 / 164 / 143):
+
+| Parsers | Workload | xterm drain (ms) | Ghostty drain (ms) |
+| --- | --- | ---: | ---: |
+| 1 | yes | 6,822 | 1,230 |
+| 1 | 50 MiB log | 3,540 | 3,519 |
+| 1 | TUI redraws | 734 | 554 |
+| 8 | yes | 1,265 | 507 |
+| 8 | 50 MiB log | 4,211 | 5,886 |
+| 8 | TUI redraws | 2,292 | 3,912 |
+| 20 | yes | 1,266 | 993 |
+| 20 | 50 MiB log | 4,026 | 5,903 |
+| 20 | TUI redraws | 947 | 1,205 |
+
+All 18 cases completed without a reported exception or WebGL context loss.
+These are single samples under heavy contention, not evidence that either
+renderer is faster. In particular the one-parser xterm `yes` run contains a
+3.3-second main-thread gap; the absolute throughput is not representative.
+The spike establishes that this pinned Ghostty package can run these inputs
+in WebKit, but does not establish its long-session memory safety. Raw results
+are in `docs/perf/renderer-spike-2026-10-04.json`.
+
+| Candidate | Benefits | Remaining integration work |
+| --- | --- | --- |
+| Current xterm + raw channel | Existing input, selection, accessibility, links, cloud streams and measured native baseline | Full VT snapshots for exact eviction restoration |
+| Ghostty WASM + Canvas 2D | Native VT core in a browser, avoids WebGL context allocation | Validate IME, selection, accessibility, terminal queries, Unicode, mouse protocols and long-session WASM allocation; prove the native acceptance matrix |
+| Native Rust VT + binary damage frames | Parsing and snapshots can outlive a suspended webview; potential shared native/mobile VT core | Custom renderer and input/selection model; versioned frame protocol, ordering, resize epochs, full-snapshot recovery and backpressure |
+
+For the native option, send changed cell runs in binary frames with a
+generation and sequence number, acknowledge consumption, and coalesce
+damage while the renderer is behind. A resize starts a new generation and
+requires a snapshot. Full-screen redraws remain a bandwidth cost even with
+damage tracking; avoid sending a JSON cell grid every frame. This is a
+design evaluation, not a measured native prototype.
+
+Decision: retain xterm for this fix. The registry still reports 6.0.0 as
+stable (`pnpm view @xterm/xterm dist-tags`, checked 2026-10-04), so no
+prerelease upgrade is included. A replacement needs clean native benchmark
+results and terminal feature coverage before migration. Sharing the VT core
+with mobile is a possible benefit, not yet a product requirement.

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import type { ModelInfo } from "@/lib/api";
 import { modelOptionText } from "@/lib/models";
 
-export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = false, models, modelsAreLocal = true, onPermission, onQuestions, onRetry, onStop, onContinue }: {
+export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = false, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue }: {
   kind: RecoveryKind | null;
   waiting: boolean;
   asks: PendingAsk[];
@@ -17,8 +17,7 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
   /** Quote the command, file or tool each permission request is about (a shared cloud workspace: approvers and everyone waiting on them see the same). */
   askDetail?: boolean;
   models: ModelInfo[];
-  /** False for a tab on another machine: no version is claimed for an alias there. */
-  modelsAreLocal?: boolean;
+  onOpenModels?: () => void;
   onPermission: (id: string, option: string) => void;
   onQuestions: (id: string, answers: Record<string, string>) => void;
   onRetry: (model?: string) => void;
@@ -33,10 +32,10 @@ export function RecoveryBanner({ kind, waiting, asks, busy, answering = false, a
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
-      {kind && kind !== "permission_expired" && !asks.length && <Button size="sm" disabled={busy} onClick={() => onRetry()}>Retry safely</Button>}
-      {kind === "capacity" && !asks.length && <select aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
+      {kind && kind !== "permission_expired" && kind !== "delivery_unconfirmed" && !asks.length && <Button size="sm" disabled={busy} onClick={() => onRetry()}>Retry safely</Button>}
+      {kind === "capacity" && !asks.length && <select onFocus={onOpenModels} onPointerDown={onOpenModels} aria-label="Choose another model" disabled={busy} value="" onChange={e => onRetry(e.target.value)} className="rounded border border-hairline bg-background px-2">
         <option value="" disabled>Choose another model</option>
-        {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models, modelsAreLocal)}</option>)}
+        {models.map(model => <option key={model.id} value={model.id}>{modelOptionText(model, models)}</option>)}
       </select>}
       <Button size="sm" variant="outline" disabled={busy} onClick={onStop}>Stop session</Button>
       {kind && <Button size="sm" variant="ghost" disabled={busy} onClick={onContinue}>Continue in new session</Button>}

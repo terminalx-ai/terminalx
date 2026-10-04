@@ -22,7 +22,8 @@ import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText, offeredOn, prettyModelId, refreshModels, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText, prettyModelId, useModels } from "@/lib/models";
+import { useCloudModelClient, usePickerModels } from "@/lib/cloudModels";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -70,7 +71,7 @@ export function NewSessionView({
   const projectMenu = useRowMenu();
   // Every picker opens on a click and an accessibility press, not only the project one.
   const agentMenu = useRowMenu();
-  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const effortMenu = useRowMenu();
   const modeMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
@@ -86,11 +87,13 @@ export function NewSessionView({
   const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
-  const listed = useModels(harness?.id);
-  const models = useMemo(() => offeredOn(listed, !cloud), [listed, cloud]);
+  const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
+  const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
+    ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
+  const { models, refresh: refreshPickerModels } = usePickerModels(useModels(harness?.id), !!cloud, modelClient, harness?.id);
   const fallbackModelId = models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "";
   const lastModelId = harness ? prefs.lastModel[harness.id] : undefined;
-  // A version pinned for local work is not carried into a cloud workspace, whose CLI may not have it.
+  // A saved model is carried into cloud only if this workspace offers it.
   const modelId = !harness ? "" : cloud && lastModelId != null && !models.some((m) => m.id === lastModelId) ? fallbackModelId : (lastModelId ?? fallbackModelId);
   const model = models.find((m) => m.id === modelId) ?? null;
   const effort = harness ? (prefs.lastEffort[harness.id] ?? model?.defaultEffort ?? null) : null;
@@ -365,7 +368,7 @@ export function NewSessionView({
               <DropdownMenu {...modelMenu.root}>
                 <DropdownMenuTrigger asChild {...modelMenu.trigger}>
                   <Button variant="secondary" size="sm" className={pill}>
-                    {model ? modelOptionText(model, models, !cloud) : modelId ? prettyModelId(modelId) : "Model"}
+                    {model ? modelOptionText(model, models) : modelId ? prettyModelId(modelId) : "Model"}
                     <ChevronDown className="text-faint" />
                   </Button>
                 </DropdownMenuTrigger>
@@ -376,7 +379,7 @@ export function NewSessionView({
                       <Fragment key={group.title ?? "models"}>
                         {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
                         {group.models.map((m) => {
-                          const note = modelNote(m, models, !cloud);
+                          const note = modelNote(m, models);
                           return (
                             <DropdownMenuRadioItem key={m.id} value={m.id}>
                               {m.label}

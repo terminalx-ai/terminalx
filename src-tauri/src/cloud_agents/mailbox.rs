@@ -266,6 +266,12 @@ fn apply(agents: &CloudAgents, lease: &Lease, session_id: &str, plaintext: &Valu
             if settings_ignored {
                 log::warn!("{} {}: settings ignored, the actor may not configure the tab", lease.kind, lease.client_command_id);
             } else if !settings.is_empty() {
+                if let Some(model) = &settings.model {
+                    let Some(tab) = agents.tab(tab_id) else { return failed(anyhow::anyhow!("no such tab")) };
+                    if let Err(error) = crate::harness::claude::models::validate(&tab.harness, model) {
+                        return failed(error);
+                    }
+                }
                 if let Err(error) = ops.configure(session_id, tab_id, &settings) {
                     return failed(error);
                 }

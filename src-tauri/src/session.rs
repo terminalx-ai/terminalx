@@ -125,6 +125,9 @@ struct ComposerEcho {
     image_count: usize,
     sent_at: Instant,
     receipt: Option<DeliveryReceipt>,
+    /// Confirmation is armed only after Enter was written successfully, not
+    /// while the prompt is waiting for the CLI to become ready.
+    submitted: bool,
     /// Sent while a turn was running, so the CLI holds it until it has a
     /// use for it. Its echo may be a long time coming, and may arrive after
     /// the turn it was queued behind has ended — as the prompt of the next.
@@ -155,13 +158,30 @@ const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, queued: false, command: false, seq: 0 }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0 }
     }
 
     fn matches(&self, echoed: &str) -> bool {
         let (labels, rest) = strip_image_labels(echoed);
         let (rest, text) = (rest.trim(), self.text.trim());
-        labels == self.image_count && (rest == text || (self.command && text.split_whitespace().next() == Some(rest)))
+        if labels != self.image_count {
+            return false;
+        }
+        if rest == text || (self.command && text.split_whitespace().next() == Some(rest)) {
+            return true;
+        }
+        // The CLI may reflow a paste or enclose it (or its chunks) in these
+        // tags. Compare every word: a shared prefix/suffix alone could swallow
+        // a different prompt typed in the terminal.
+        static PASTED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?s)<pasted_content(?:\s+[^>]*)?>(.*?)</pasted_content(?:\s+[^>]*)?>").unwrap()
+        });
+        rest.split_whitespace().eq(text.split_whitespace())
+            || PASTED.replace_all(rest, "$1").split_whitespace().eq(text.split_whitespace())
+    }
+
+    fn confirm_delivery(&mut self) -> bool {
+        self.submitted && self.receipt.take().is_some_and(|receipt| receipt.send(Ok(())).is_ok())
     }
 
     fn expired(&self, now: Instant) -> bool {
@@ -209,13 +229,11 @@ fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Op
 /// the terminal, and the transcript's record is the only one there is.
 fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>, payload: &Payload) -> Option<Echoed> {
     let Payload::UserMessage { text, .. } = payload else { return None };
-    let at = pending.iter().position(|prompt| prompt.matches(text))?;
+    let at = pending.iter().position(|prompt| (prompt.receipt.is_none() || prompt.submitted) && prompt.matches(text))?;
     if at > 0 {
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
-    if let Some(receipt) = &pending[at].receipt {
-        let _ = receipt.send(Ok(()));
-    }
+    pending[at].confirm_delivery();
     let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
     pending.drain(..=at);
     Some(echoed)
@@ -267,6 +285,9 @@ pub struct CliTab {
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     echoed: std::collections::VecDeque<ComposerEcho>,
+    /// The initial composer prompt, until the CLI confirms it through a
+    /// transcript echo or turn activity. Startup readiness is not delivery.
+    awaiting_delivery: Option<u64>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -314,7 +335,7 @@ pub struct TabRuntime {
     pub turn_started_at: Option<Instant>,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
-    /// When the session watcher raised the `Timeout` now shown, if it did.
+    /// When the session watcher raised a silence/delivery warning, if it did.
     /// A timeout the provider reported is a different fact and is not
     /// cleared by the terminal drawing again.
     pub stalled_at: Option<Instant>,
@@ -568,7 +589,12 @@ impl SessionManager {
             }
             let quiet = drawn.map_or(silent, |drawn| now.saturating_duration_since(drawn).min(silent));
             if recovery::is_stale(rt.status == TabStatus::InProgress, quiet, patience) {
-                self.needs_recovery(&mut rt, RecoveryKind::Timeout);
+                let kind = if matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery.is_some()) {
+                    RecoveryKind::DeliveryUnconfirmed
+                } else {
+                    RecoveryKind::Timeout
+                };
+                self.needs_recovery(&mut rt, kind);
                 rt.stalled_at = Some(now);
             }
         }
@@ -684,6 +710,25 @@ impl SessionManager {
         } else if rt.recovery.take().is_some() {
             // Still waiting, on an ask or on nothing: only the warning goes.
             self.publish(rt, Payload::Recovery { kind: None }, None);
+        }
+    }
+
+    /// Evidence from the CLI, not from writing bytes into its input. Keep
+    /// startup recovery and continuation receipts separate: continuations
+    /// require a matching echo or a submit hook after their Enter was written.
+    fn delivery_confirmed(&self, rt: &mut TabRuntime) {
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.awaiting_delivery = None;
+            p.ready.mark();
+        }
+        self.stall_disproved(rt);
+        if rt.recovery == Some(RecoveryKind::DeliveryUnconfirmed) {
+            if rt.turn_open && rt.pending.is_empty() {
+                self.set_status(rt, TabStatus::InProgress);
+            } else {
+                rt.recovery = None;
+                self.publish(rt, Payload::Recovery { kind: None }, None);
+            }
         }
     }
 
@@ -945,7 +990,7 @@ impl SessionManager {
     }
 
     /// Continuations use the normal send path, but only acknowledge delivery
-    /// when the provider's own saved transcript echoes the prompt.
+    /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
         let outcome = self.send_impl(session_id, tab_id, text.clone(), text, Vec::new(), Some(tx))?;
@@ -1584,6 +1629,7 @@ impl SessionManager {
             ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
             tail: tail.clone(),
             echoed: Default::default(),
+            awaiting_delivery: None,
             decisions: HashMap::new(),
             turn_tail: Default::default(),
             transcript_turn: None,
@@ -1832,6 +1878,9 @@ impl SessionManager {
                 _ => None,
             };
             if let Some(echo) = echoed {
+                if matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery == Some(echo.seq)) {
+                    self.delivery_confirmed(&mut rt);
+                }
                 // A queued prompt the CLI held until its turn was over is the
                 // start of the next one. The `UserPromptSubmit` hook may have
                 // opened that turn already, but only a prompt resets the latch
@@ -1858,6 +1907,7 @@ impl SessionManager {
                 }
             }
             if matches!(payload, Payload::UserMessage { .. }) {
+                self.delivery_confirmed(&mut rt);
                 rt.open_turn();
                 if let Engine::Cli(p) = &mut rt.engine {
                     p.turn_tail.opened();
@@ -1970,7 +2020,7 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
-        self.type_prompt(rt_arc, &pane, agent, paths, Some(ready), receipt);
+        self.type_prompt(rt_arc, &pane, agent, paths, Some(ready), receipt.map(|receipt| (ev.seq, receipt)));
         Ok(SendOutcome { queued, events: vec![ev] })
     }
 
@@ -1990,6 +2040,7 @@ impl SessionManager {
             p.echoed.push_back(echo);
             if !queued {
                 p.turn_tail.opened();
+                p.awaiting_delivery = Some(ev.seq);
             }
         }
         if !queued {
@@ -2004,7 +2055,7 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<DeliveryReceipt>) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<(u64, DeliveryReceipt)>) {
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -2013,37 +2064,15 @@ impl SessionManager {
         let spawn_receipt = receipt.clone();
         let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(ready) = ready {
-                let readiness = manager.wait_ready(&pane, &ready);
-                if let Readiness::Blocked(message) = readiness {
-                    // Typing into a first-run dialog would answer it with
-                    // whatever the prompt happens to contain, and the tab
-                    // would say "Working" over a CLI that never took it.
-                    log::warn!("[{pane}] the CLI is on a first-run screen: {message}");
-                    let mut rt = rt_arc.lock().unwrap();
-                    rt.turn_open = false;
-                    manager.apply(&mut rt, Payload::Error { message: message.to_string(), fatal: false }, None);
-                    manager.set_status(&mut rt, TabStatus::Idle);
-                    if let Some(receipt) = &receipt {
-                        let _ = receipt.send(Err(format!("{message} The prepared prompt is retained.")));
-                    }
+            if let Some(ready) = &ready {
+                let readiness = manager.wait_ready(&pane, ready);
+                let mut rt = rt_arc.lock().unwrap();
+                // Stop or a restart may have replaced the CLI while waiting.
+                if !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready)) {
                     return;
                 }
-                if readiness == Readiness::TimedOut {
-                    if let Some(receipt) = &receipt {
-                        let mut rt = rt_arc.lock().unwrap();
-                        rt.turn_open = false;
-                        manager.set_status(&mut rt, TabStatus::Idle);
-                        let _ = receipt.send(Err("The new session did not become ready. Context was not sent; the prepared prompt is retained.".into()));
-                        return;
-                    }
-                    // Both signals failed. Typing anyway may lose the prompt to
-                    // a TUI that is not listening, but dropping it silently is
-                    // worse: the reader would watch a message they sent never
-                    // appear anywhere at all.
-                    log::warn!("[{pane}] never reported ready; typing the prompt regardless");
-                    let mut rt = rt_arc.lock().unwrap();
-                    manager.apply(&mut rt, Payload::Status { text: "The agent was slow to start; check that your message arrived.".into() }, None);
+                if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref().map(|(_, receipt)| receipt)) {
+                    return;
                 }
             }
             let result = (|| -> Result<()> {
@@ -2057,26 +2086,71 @@ impl SessionManager {
                 let body = tui::body_bytes(&text);
                 terminals.write(&pane, &body)?;
                 std::thread::sleep(tui::submit_delay(body.len()));
-                terminals.write(&pane, tui::SUBMIT)?;
+                if let Some((seq, _)) = &receipt {
+                    // Hold the runtime lock across Enter and arming so a fast
+                    // submit hook/echo cannot arrive between the two.
+                    let mut rt = rt_arc.lock().unwrap();
+                    terminals.write(&pane, tui::SUBMIT)?;
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        if let Some(echo) = p.echoed.iter_mut().find(|echo| echo.seq == *seq) {
+                            echo.submitted = true;
+                        }
+                    }
+                } else {
+                    terminals.write(&pane, tui::SUBMIT)?;
+                }
                 Ok(())
             })();
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
-                if let Some(receipt) = receipt {
-                    let mut rt = rt_arc.lock().unwrap();
+                let mut rt = rt_arc.lock().unwrap();
+                if ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready))) {
+                    return;
+                }
+                if let Some((_, receipt)) = receipt {
                     rt.turn_open = false;
                     manager.set_status(&mut rt, TabStatus::Idle);
                     let _ = receipt.send(Err(format!("The new session opened, but writing its continuation prompt failed: {e}. The prepared prompt is retained.")));
+                } else if ready.is_some() && matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery.is_some()) {
+                    manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    rt.stalled_at = Some(Instant::now());
                 }
             }
         });
-        if let (Err(e), Some(receipt)) = (spawned, spawn_receipt) {
+        if let (Err(e), Some((_, receipt))) = (spawned, spawn_receipt) {
             let _ = receipt.send(Err(format!("Could not start prompt delivery: {e}")));
         }
     }
 
-    /// Wait until the pane's CLI is listening. `true` when it said so — or looked
-    /// like it — and `false` when neither signal came in time.
+    /// Decide whether to type after readiness has settled. A quiet-screen
+    /// timeout says nothing about delivery: send normally and let transcript,
+    /// hooks and terminal activity inform the single recovery banner.
+    fn prepare_prompt(&self, rt: &mut TabRuntime, readiness: Readiness, receipt: Option<&DeliveryReceipt>) -> bool {
+        if let Readiness::Blocked(message) = readiness {
+            log::warn!("[{}] the CLI is on a first-run screen: {message}", rt.key());
+            rt.turn_open = false;
+            self.apply(rt, Payload::Error { message: message.to_string(), fatal: false }, None);
+            self.set_status(rt, TabStatus::Idle);
+            if let Some(receipt) = receipt {
+                let _ = receipt.send(Err(format!("{message} The prepared prompt is retained.")));
+            }
+            return false;
+        }
+        if readiness == Readiness::TimedOut {
+            if let Some(receipt) = receipt {
+                rt.turn_open = false;
+                self.set_status(rt, TabStatus::Idle);
+                let _ = receipt.send(Err("The new session did not become ready. Context was not sent; the prepared prompt is retained.".into()));
+                return false;
+            }
+            log::warn!("[{}] never reported ready; typing the prompt and watching for delivery", rt.key());
+        }
+        // Startup time must not consume the prompt's delivery grace period.
+        rt.last_activity = Instant::now();
+        true
+    }
+
+    /// Wait until the pane's CLI is listening, blocked on setup, or out of time.
     ///
     /// Claude Code's `SessionStart` hook is the deterministic signal: it runs
     /// once the session is up, whether it started fresh or resumed. Quiet output
@@ -2208,6 +2282,16 @@ impl SessionManager {
         }
         self.pump(&rt_arc, &tail);
 
+        // Codex creates its session on the first prompt; Claude announces
+        // startup before accepting input, so its SessionStart proves less.
+        if matches!(frame.event.as_str(), "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PermissionRequest" | "Stop")
+            || (kind == CliKind::Codex && frame.event == "SessionStart") {
+            let mut rt = rt_arc.lock().unwrap();
+            if matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
+                self.delivery_confirmed(&mut rt);
+            }
+        }
+
         match frame.event.as_str() {
             // The CLI's session is up; the composer may stop waiting. Codex
             // also mints its own conversation id, so this is where the app
@@ -2233,6 +2317,15 @@ impl SessionManager {
                 // while its transcript was being drained above.
                 if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
                     return HookReply::default();
+                }
+                if frame.event == "UserPromptSubmit" {
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        for echo in p.echoed.iter_mut().filter(|echo| echo.submitted && !echo.queued && !echo.command) {
+                            // A timed-out receipt must not absorb a later
+                            // submission's hook. Keep its echo for deduplication.
+                            if echo.confirm_delivery() { break; }
+                        }
+                    }
                 }
                 rt.last_activity = Instant::now();
                 if !rt.turn_open {
@@ -2484,8 +2577,14 @@ impl SessionManager {
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
         if subagent.is_none() {
-            if rt.pending.is_empty() && rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) && matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
-                self.set_status(rt, TabStatus::InProgress);
+            if matches!(&payload, Payload::ModelRequestStarted | Payload::Reasoning { .. } | Payload::Delta(Delta::ThinkingDelta { .. }) | Payload::ToolCallCompleted { .. }) {
+                self.delivery_confirmed(rt);
+            }
+            if matches!(&payload, Payload::AssistantText { .. } | Payload::Delta(Delta::TextDelta { .. }) | Payload::ToolCallStarted { .. }) {
+                self.delivery_confirmed(rt);
+                if rt.pending.is_empty() && rt.recovery.is_some() && rt.recovery != Some(RecoveryKind::PermissionExpired) {
+                    self.set_status(rt, TabStatus::InProgress);
+                }
             }
             // The watcher's timeout is a guess that the turn is stuck, and a
             // turn that has ended is not. A failed ending raises its own
@@ -2559,6 +2658,7 @@ impl SessionManager {
         if is_boundary {
             rt.turn_open = false;
             if let Engine::Cli(p) = &mut rt.engine {
+                p.awaiting_delivery = None;
                 p.transcript_end_owed = p.transcript_turn.take() != Some(tui::TurnMark::Ended);
                 // An interrupted CLI hands what was queued back to its own
                 // input rather than sending it. If it does send one after
@@ -2728,18 +2828,37 @@ mod tests {
     }
 
     #[test]
-    fn delivery_is_confirmed_only_by_the_matching_provider_echo() {
+    fn delivery_is_confirmed_by_the_matching_provider_echo_after_submission() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
         echo.receipt = Some(tx);
         let mut pending = std::collections::VecDeque::from([echo]);
         let message = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
+        assert!(rx.try_recv().is_err(), "a prompt still waiting for readiness is not delivered");
+        pending[0].submitted = true;
         assert!(consume_composer_echo(&mut pending, &message("unrelated prompt")).is_none());
         assert!(rx.try_recv().is_err());
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_some());
         assert_eq!(rx.try_recv().unwrap(), Ok(()));
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn composer_echo_matches_pasted_content_and_whitespace_without_accepting_partial_prompts() {
+        let text = format!("Continue work\n\n{}\nKeep the transcript unchanged.", "historical context ".repeat(1000));
+        let echo = ComposerEcho::new(text.clone(), 0);
+        assert!(echo.matches(&format!("<pasted_content id=\"1\">\n{text}\n</pasted_content>")));
+        assert!(echo.matches(&format!("<pasted_content id=\"1\">\n{text}\n</pasted_content id=\"1\">")));
+        assert!(echo.matches(&text.split_whitespace().collect::<Vec<_>>().join(" \r\n\t")));
+        assert!(ComposerEcho::new("first part second part".into(), 0).matches(
+            "<pasted_content id=\"1\">first part</pasted_content>\n<pasted_content id=\"2\">second part</pasted_content>"
+        ));
+        assert!(!echo.matches("Continue work historical context Keep the transcript unchanged."));
+        assert!(!echo.matches(&format!("{text} extra instructions")));
+        assert!(!echo.matches(&format!("<pasted_content id=\"1\">{text}")));
+        assert!(!ComposerEcho::new(text.clone(), 1).matches(&format!("<pasted_content>{text}</pasted_content>")));
     }
 
     /// One echo the transcript never produces must not shift every later

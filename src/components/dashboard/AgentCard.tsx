@@ -15,6 +15,7 @@ import type { Project, SessionEntry } from "@/types/session";
 
 /**
  * One session as a card.
+ * Cards keep their content height inside the dashboard's scrolling flex columns.
  *
  * The card answers "can I leave this alone?" without opening the session, so
  * it carries the last thing said in both directions — and, when the agent is
@@ -68,8 +69,8 @@ export function AgentCard({
         onFocus={onFocus}
         onKeyDown={(e) => e.key === "Enter" && open()}
         className={cn(
-          "group relative flex cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none hairline transition-colors hover:bg-selected/50",
-          focused && "ring-2 ring-ring/50",
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
         )}
       >
         <span
@@ -205,8 +206,8 @@ export function CloudAgentCard({
         onFocus={onFocus}
         onKeyDown={(e) => e.key === "Enter" && onOpen()}
         className={cn(
-          "group relative flex cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none hairline transition-colors hover:bg-selected/50",
-          focused && "ring-2 ring-ring/50",
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
         )}
       >
         <span
@@ -292,7 +293,7 @@ function Snippet({ who, text, tone, icon }: { who: string; text?: string | null;
 /** What a card looks like before its snippets have been read off disk. */
 export function AgentCardSkeleton() {
   return (
-    <div aria-hidden className="flex flex-col gap-2 rounded-lg bg-card p-2.5 pl-3 shadow-card hairline">
+    <div aria-hidden className="flex shrink-0 flex-col gap-2 rounded-lg bg-card p-2.5 pl-3 shadow-card hairline">
       <div className="h-3 w-2/3 rounded-sm bg-veil-raised" />
       <div className="h-2.5 w-1/3 rounded-sm bg-veil-raised" />
       <div className="h-2.5 w-5/6 rounded-sm bg-veil-raised" />

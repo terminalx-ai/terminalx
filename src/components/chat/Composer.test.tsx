@@ -2,6 +2,8 @@ import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { TabEntry } from "@/types/session";
 import { accessibilityPress, mouseClick } from "@/test/press";
 
@@ -344,7 +346,8 @@ describe("a Claude alias in the model picker (#256)", () => {
     show({ modelsAreLocal: false, tab: { ...onOpus, model: "claude-opus-5" } });
     mouseClick(screen.getByTitle("Model: Opus 5"));
     menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5"]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 5" }).getAttribute("aria-disabled")).toBe("true");
   });
 
   it("offers the alias and, apart, the versions that can be pinned", async () => {
@@ -357,6 +360,26 @@ describe("a Claude alias in the model picker (#256)", () => {
     expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
     fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+  });
+
+  it("offers the VM's pinned versions and resolved alias, then aliases only when disconnected", async () => {
+    const runtime = new FakeAgentRuntime();
+    runtime.agents[0].models = [claude("opus", "Opus", { alias: true, isDefault: true, resolved: "claude-opus-4-6" }), claude("claude-opus-4-6", "Opus 4.6")];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    const onSetModel = vi.fn();
+    show({ modelsAreLocal: false, modelClient: client, onSetModel });
+    const button = await screen.findByTitle("Model: Opus (latest, running Opus 4.6)");
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("latest · Opus 4.6")).toBeTruthy();
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5" })).toBeNull();
+    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" }));
+    expect(onSetModel).toHaveBeenCalledWith("claude-opus-4-6");
+    act(() => runtime.emit({ state: "suspended" }));
+    mouseClick(screen.getByTitle("Model: Opus (latest)"));
+    const offline = await screen.findByRole("menu");
+    expect(within(offline).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
   });
 
   it("reads a stored pinned id the list no longer carries", async () => {

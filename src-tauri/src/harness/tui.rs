@@ -86,7 +86,8 @@ pub const READY_SETTLE: Duration = Duration::from_millis(300);
 /// and never goes quiet at all.
 pub const READY_QUIET: Duration = Duration::from_millis(3000);
 /// The give-up. Long, because it is only reached when every signal failed, and
-/// what follows is typing anyway and saying so — never dropping the prompt.
+/// what follows is typing anyway and checking delivery through the normal
+/// transcript, hooks and terminal activity — never a permanent warning.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// When a pane's CLI said it was up. Shared with the thread that types into

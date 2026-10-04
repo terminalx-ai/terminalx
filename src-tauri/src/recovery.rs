@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RecoveryKind { Capacity, Tool, Timeout, Disconnected, PermissionExpired, Failed }
+pub enum RecoveryKind { Capacity, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, Failed }
 
 impl RecoveryKind {
     pub fn classify(message: &str) -> Self {
@@ -22,6 +22,7 @@ impl RecoveryKind {
             Self::Capacity => "The provider is at capacity. Retry or choose another available model.",
             Self::Tool => "A tool or command failed. Review its outcome before continuing.",
             Self::Timeout => "No progress was confirmed before the timeout. The process outcome is unknown.",
+            Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal. To resend, stop the session, then press Up in the composer to recall your message.",
             Self::Disconnected => "The connection was lost. The process outcome is unknown.",
             Self::PermissionExpired => "The permission request expired. Check the terminal for a new request or stop the session.",
             Self::Failed => "The agent encountered an error. Review the conversation before continuing.",
