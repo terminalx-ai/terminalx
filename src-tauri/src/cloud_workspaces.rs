@@ -351,6 +351,56 @@ pub struct AgentLoginList {
     pub credentials: Vec<AgentLogin>,
 }
 
+/// A sign-in the account service has begun: the page to approve it on, and
+/// the attempt to finish.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLoginStart {
+    pub attempt_id: String,
+    pub authorize_url: String,
+    pub expires_in_seconds: u64,
+}
+
+/// How finishing a sign-in went. `status` is the service's word: `complete`
+/// (with the stored login's public fields), `code-invalid` (with the tries
+/// left), `unavailable`, `pending`, `expired`, `canceled` or `failed`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLoginOutcome {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<AgentLogin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts_left: Option<u32>,
+}
+
+/// Whether `value` is a page of the provider that may be opened for a
+/// sign-in: `https`, on claude.com, claude.ai or anthropic.com (or a
+/// subdomain), with no credentials in the address. A debug build also
+/// accepts a loopback address, for a local stack's stand-in provider.
+pub(crate) fn claude_login_page(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else { return false };
+    if value.len() > 4096 || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    if cfg!(debug_assertions) && url.scheme() == "http" && matches!(host, "127.0.0.1" | "localhost") {
+        return true;
+    }
+    url.scheme() == "https"
+        && ["claude.com", "claude.ai", "anthropic.com"].iter().any(|domain| host == *domain || host.strip_suffix(domain).is_some_and(|rest| rest.ends_with('.')))
+}
+
+/// The service does not offer the sign-in (an older server, or the feature is off there).
+fn flow_unavailable_on_404(error: CloudWorkspaceClientError) -> CloudWorkspaceClientError {
+    if error.status == Some(404) { CloudWorkspaceClientError::local("cloud_agent_login_flow_unavailable", false) } else { error }
+}
+
+/// The attempt is not there for this person any more (expired and removed, or begun by someone else).
+fn attempt_gone_on_404(error: CloudWorkspaceClientError) -> CloudWorkspaceClientError {
+    if error.status == Some(404) { CloudWorkspaceClientError::local("cloud_agent_login_attempt_gone", false) } else { error }
+}
+
 /// What the person agreed to before a login is stored, and for which
 /// organization they were looking at.
 #[derive(Clone, Debug, Deserialize)]
@@ -1875,6 +1925,81 @@ impl CloudWorkspaceService {
             return Err(invalid_response());
         }
         Ok(login)
+    }
+
+    // ---- "Log in with Claude" (PRO-82, the server-side sign-in) ----------
+    //
+    // The lasting way to connect a Claude subscription: the account service
+    // runs the sign-in, keeps the login and renews it. The desktop starts an
+    // attempt, opens the provider's page, and hands back the code the page
+    // shows. The code is collected in a native dialog and sent once.
+
+    /// Begin a sign-in. The answer's page address is checked here: only an
+    /// `https` page of the provider is ever opened.
+    pub(crate) fn start_claude_login(&self, authorization: &AgentLoginAuthorization) -> Result<ClaudeLoginStart, CloudWorkspaceClientError> {
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let started: ClaudeLoginStart = self
+            .client
+            .request(&authorization.context, &["cloud-workspace-credentials", "claude", "login-start"], None, Some(json!({})), None, RequestRisk::Mutation)
+            .map_err(flow_unavailable_on_404)?;
+        if !valid_resource_id(&started.attempt_id) || !claude_login_page(&started.authorize_url) {
+            return Err(invalid_response());
+        }
+        Ok(started)
+    }
+
+    /// Finish a sign-in with the code the provider's page showed. A new
+    /// login is usable by the whole organization (the owner's default).
+    pub(crate) fn complete_claude_login(
+        &self,
+        authorization: AgentLoginAuthorization,
+        attempt_id: &str,
+        code: zeroize::Zeroizing<String>,
+    ) -> Result<ClaudeLoginOutcome, CloudWorkspaceClientError> {
+        if !valid_resource_id(attempt_id) || code.trim().is_empty() || code.len() > 8 * 1024 {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let invalid = |_| CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
+        let escaped = zeroize::Zeroizing::new(serde_json::to_string(code.trim()).map_err(invalid)?);
+        drop(code);
+        let body = zeroize::Zeroizing::new(format!(
+            r#"{{"attemptId":{},"code":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true,"sharedUse":"organization"}}"#,
+            serde_json::to_string(attempt_id).map_err(invalid)?,
+            escaped.as_str()
+        ));
+        drop(escaped);
+        let outcome: ClaudeLoginOutcome = self
+            .client
+            .send_secret("POST", &authorization.context, &["cloud-workspace-credentials", "claude", "login-complete"], body)
+            .map_err(attempt_gone_on_404)?;
+        if !self.account.is_current(&authorization.context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        if outcome.credential.as_ref().is_some_and(|login| login.provider != AgentLoginProvider::Claude.as_str()) {
+            return Err(invalid_response());
+        }
+        Ok(outcome)
+    }
+
+    /// Abandon a sign-in that was started here.
+    pub fn cancel_claude_login(&self, attempt_id: &str, context_revision: String) -> Result<(), CloudWorkspaceClientError> {
+        if !valid_resource_id(attempt_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        let context = self.context()?;
+        if context_revision != AccountManager::context_revision(&context) || !self.account.is_current(&context) {
+            return Err(context_changed_error(RequestRisk::Mutation));
+        }
+        let _: Value = self
+            .client
+            .request(&context, &["cloud-workspace-credentials", "claude", "login-cancel"], None, Some(json!({ "attemptId": attempt_id })), None, RequestRisk::Mutation)
+            .map_err(attempt_gone_on_404)?;
+        Ok(())
     }
 
     /// Disconnect an agent's login. The service refuses while a workspace
@@ -3486,6 +3611,83 @@ mod tests {
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
         let other = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
+    }
+
+    // PRO-82 on the desktop: the account service's own sign-in for Claude.
+    #[test]
+    fn a_claude_sign_in_starts_completes_and_cancels_on_its_routes_and_opens_only_the_providers_page() {
+        let authorization = || AgentLoginAuthorization { context: context(), replaces: None };
+        let (base, _, request) = serve_once(response("200 OK", r#"{"attemptId":"attempt_1","authorizeUrl":"https://claude.com/cai/oauth/authorize?state=s","expiresInSeconds":600,"mode":"paste"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let started = service.start_claude_login(&authorization()).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-start HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({}));
+        assert_eq!((started.attempt_id.as_str(), started.expires_in_seconds), ("attempt_1", 600));
+
+        // A page that is not the provider's is never handed on to be opened.
+        let (base, _, request) = serve_once(response("200 OK", r#"{"attemptId":"attempt_1","authorizeUrl":"https://claude.com.evil.example/authorize","expiresInSeconds":600}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert!(service.start_claude_login(&authorization()).is_err());
+        request.join().unwrap();
+        // An older server, or one with the feature off, answers 404: said as such.
+        let (base, _, request) = serve_once(response("404 Not Found", r#"{"error":"not_found"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.start_claude_login(&authorization()).err().unwrap().code, "cloud_agent_login_flow_unavailable");
+        request.join().unwrap();
+
+        let done = r#"{"status":"complete","credential":{"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","displayIdentity":"ada@example.com","version":1,"updatedAt":9,"state":"connected","sharedUse":"organization","secret":"must-not-cross"}}"#;
+        let (base, _, request) = serve_once(response("200 OK", done, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let outcome = service.complete_claude_login(authorization(), "attempt_1", zeroize::Zeroizing::new("  the-code#the-state \n".to_string())).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-complete HTTP/1.1"));
+        // The whole organization may use a new login; both confirmations are sent; the code is trimmed and sent once.
+        assert_eq!(
+            serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
+            json!({ "attemptId": "attempt_1", "code": "the-code#the-state", "confirmOrganizationSharing": true, "confirmMachineInstallation": true, "sharedUse": "organization" })
+        );
+        assert!(!captured.extra_request);
+        let sent = serde_json::to_value(&outcome).unwrap();
+        assert_eq!((sent["status"].as_str(), sent["credential"]["displayIdentity"].as_str()), (Some("complete"), Some("ada@example.com")));
+        assert!(!sent.to_string().contains("must-not-cross") && !sent.to_string().contains("the-code"));
+
+        let (base, _, request) = serve_once(response("200 OK", r#"{"status":"code-invalid","attemptsLeft":3}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let wrong = service.complete_claude_login(authorization(), "attempt_1", zeroize::Zeroizing::new("nope".to_string())).unwrap();
+        request.join().unwrap();
+        assert_eq!((wrong.status.as_str(), wrong.attempts_left, wrong.credential.is_none()), ("code-invalid", Some(3), true));
+        // An empty code is not sent at all.
+        assert_eq!(service.complete_claude_login(authorization(), "attempt_1", zeroize::Zeroizing::new("  ".to_string())).err().unwrap().code, "cloud_workspace_request_invalid");
+
+        let (base, _, request) = serve_once(response("200 OK", r#"{"status":"canceled"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.cancel_claude_login("attempt_1", "old-context".into()).err().unwrap().code, "account_context_changed");
+        service.cancel_claude_login("attempt_1", AccountManager::context_revision(&context())).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-cancel HTTP/1.1"));
+        assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({ "attemptId": "attempt_1" }));
+        assert!(!captured.extra_request);
+    }
+
+    #[test]
+    fn only_the_providers_https_pages_count_as_a_sign_in_page() {
+        for page in ["https://claude.com/cai/oauth/authorize?x=1", "https://claude.ai/oauth/authorize", "https://platform.claude.com/x", "https://console.anthropic.com/oauth"] {
+            assert!(claude_login_page(page), "{page}");
+        }
+        for page in [
+            "http://claude.com/authorize",
+            "https://claude.com.evil.example/authorize",
+            "https://evilclaude.com/authorize",
+            "https://user:pass@claude.com/authorize",
+            "https://example.com/?next=https://claude.com",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "claude.com/authorize",
+            "",
+        ] {
+            assert!(!claude_login_page(page), "{page}");
+        }
     }
 
     #[test]

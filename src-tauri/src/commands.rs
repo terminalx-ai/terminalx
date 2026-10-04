@@ -710,6 +710,102 @@ fn native_confirm(_title: &str, _text: &str, _confirm: &str) -> Option<bool> {
     None
 }
 
+// "Log in with Claude": the account service's own sign-in (PRO-82).
+
+/// What the page needs after a sign-in has begun. The page address is kept
+/// so "open the page again" can ask for the same one; it is not a secret.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLoginStarted {
+    attempt_id: String,
+    authorize_url: String,
+    expires_in_seconds: u64,
+    /// The browser was asked to open the page.
+    opened: bool,
+}
+
+/// Begin a sign-in and open the provider's page in the browser. Consent,
+/// the active organization, the owner-or-admin check and the explicit choice
+/// to replace a stored login all come first, as for any other way to connect.
+#[tauri::command]
+pub async fn cloud_agent_claude_login_start(
+    app: AppHandle,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<ClaudeLoginStarted, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    use tauri_plugin_opener::OpenerExt;
+    let service = state.cloud_workspaces.clone();
+    let started = tauri::async_runtime::spawn_blocking(move || {
+        let authorization = service.authorize_agent_login(AgentLoginProvider::Claude, &consent)?;
+        service.start_claude_login(&authorization)
+    })
+    .await
+    .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))??;
+    let opened = app.opener().open_url(&started.authorize_url, None::<&str>).is_ok();
+    Ok(ClaudeLoginStarted { attempt_id: started.attempt_id, authorize_url: started.authorize_url, expires_in_seconds: started.expires_in_seconds, opened })
+}
+
+/// Open a sign-in page again. Only a page of the provider is opened,
+/// whatever the webview hands in.
+#[tauri::command]
+pub fn cloud_agent_claude_login_open(app: AppHandle, url: String) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use tauri_plugin_opener::OpenerExt;
+    let refused = || crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
+    if !crate::cloud_workspaces::claude_login_page(&url) {
+        return Err(refused());
+    }
+    app.opener().open_url(&url, None::<&str>).map_err(|_| refused())
+}
+
+/// Finish a sign-in: the code the provider's page showed is typed or pasted
+/// into a native secure dialog, never into the webview, and sent once.
+#[tauri::command]
+pub async fn cloud_agent_claude_login_complete(
+    app: AppHandle,
+    attempt_id: String,
+    consent: crate::cloud_workspaces::AgentLoginConsent,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::ClaudeLoginOutcome, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    use crate::cloud_workspaces::{AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
+    let service = state.cloud_workspaces.clone();
+    let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(AgentLoginProvider::Claude, &consent))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
+    let organization = state
+        .account
+        .active_organization_name(authorization.organization_id())
+        .map(|name| dialog_text(&name))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| authorization.organization_id().to_owned());
+    let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
+    let text = format!(
+        "Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login, renews it, and agents in every member's cloud workspaces of the organization may run on it."
+    );
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = sender.send(secure_prompt("Log in with Claude", &text, "Code from the Claude page"));
+    })
+    .map_err(|_| unavailable())?;
+    let entered = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await.map_err(|_| unavailable())?.map_err(|_| unavailable())?;
+    let code = entered.map_err(ProviderPromptError::client_error)?;
+    let service = state.cloud_workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || service.complete_claude_login(authorization, &attempt_id, code))
+        .await
+        .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+#[tauri::command]
+pub async fn cloud_agent_claude_login_cancel(
+    attempt_id: String,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_claude_login(&attempt_id, context_revision))
+}
+
 #[tauri::command]
 pub async fn cloud_agent_login_remove(
     provider: crate::cloud_workspaces::AgentLoginProvider,

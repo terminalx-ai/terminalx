@@ -1,13 +1,17 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
-import { agentLoginStatus, lentUntil, OrganizationAgentLogins } from "./OrganizationAgentLogins";
+import { agentLoginStatus, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
 
 vi.mock("@/lib/api", () => ({
   api: {
     cloudAgentLogins: vi.fn(),
     cloudAgentLoginConnect: vi.fn(),
     cloudAgentLoginRemove: vi.fn(),
+    cloudAgentClaudeLoginStart: vi.fn(),
+    cloudAgentClaudeLoginOpen: vi.fn(),
+    cloudAgentClaudeLoginComplete: vi.fn(),
+    cloudAgentClaudeLoginCancel: vi.fn(),
   },
 }));
 
@@ -181,5 +185,128 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(after.warn).toBe(true);
     // The time is rendered in the viewer's own zone, not the uploader's.
     expect(after.text).toContain(new Date(at).toLocaleString());
+  });
+
+  // PRO-82 on the desktop: the account service's own sign-in is the first way offered for Claude.
+  describe("Log in with Claude", () => {
+    const started = { attemptId: "attempt_1", authorizeUrl: "https://claude.com/cai/oauth/authorize?state=s", expiresInSeconds: 600, opened: true };
+    const begin = async () => {
+      vi.mocked(api.cloudAgentClaudeLoginStart).mockResolvedValue(started);
+      await show();
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Log in with Claude" }));
+      consent(within(row("claude")).getByTestId("agent-login-consent"));
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Open Claude to sign in" }));
+      return within(await within(row("claude")).findByTestId("agent-login-code"));
+    };
+
+    it("is the first and primary way for Claude, with the temporary lend after it; other agents have none", async () => {
+      await show();
+      const labels = within(row("claude")).getAllByRole("button").map((button) => button.textContent);
+      expect(labels).toEqual(["Log in with Claude", "Connect with an API key", "Lend this Mac's Claude Code sign-in (temporary)"]);
+      expect(within(row("codex")).queryByRole("button", { name: /Log in with/ })).toBeNull();
+      expect(within(row("cursor")).queryByRole("button", { name: /Log in with/ })).toBeNull();
+    });
+
+    it("starts after both consents, then takes the code in a native dialog and stores a login that is renewed", async () => {
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockImplementation(async () => {
+        stored = [login({ displayIdentity: "ada@example.com" })];
+        return { status: "complete", credential: stored[0] };
+      });
+      await show();
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Log in with Claude" }));
+      const panel = within(row("claude")).getByTestId("agent-login-consent");
+      expect(panel.textContent).toContain("You sign in to Claude in your browser and approve access for Acme Robotics");
+      expect(panel.textContent).toContain("receives a login it can renew");
+      expect(panel.textContent).toContain("every member's cloud workspaces of Acme Robotics");
+      expect(panel.textContent).toContain("Disconnecting does not sign you out at the provider");
+      const go = within(panel).getByRole("button", { name: "Open Claude to sign in" });
+      expect(go.hasAttribute("disabled")).toBe(true);
+      vi.mocked(api.cloudAgentClaudeLoginStart).mockResolvedValue(started);
+      consent(panel);
+      fireEvent.click(go);
+      const code = within(await within(row("claude")).findByTestId("agent-login-code"));
+      const agreed = { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false };
+      expect(api.cloudAgentClaudeLoginStart).toHaveBeenCalledWith(agreed);
+      // No field for the code on the page: the app asks for it in its own dialog.
+      expect(document.querySelector('input[type="text"], input[type="password"], textarea')).toBeNull();
+      // While a sign-in is open, the other ways to change this login wait.
+      expect(within(row("claude")).getByRole("button", { name: "Connect with an API key" }).hasAttribute("disabled")).toBe(true);
+
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("keeps this login and renews it"));
+      expect(api.cloudAgentClaudeLoginComplete).toHaveBeenCalledWith("attempt_1", agreed);
+      expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull();
+      expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected · subscription login · ada@example\.com/);
+    });
+
+    it("keeps the sign-in open after a wrong code or an outage, and ends it when it expired", async () => {
+      const code = await begin();
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockResolvedValueOnce({ status: "code-invalid", attemptsLeft: 3 });
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("Claude did not accept that code (3 tries left)");
+      expect(within(row("claude")).getByTestId("agent-login-code")).toBeTruthy();
+
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockResolvedValueOnce({ status: "unavailable" });
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("could not be reached"));
+      expect(within(row("claude")).getByTestId("agent-login-code")).toBeTruthy();
+
+      // Canceling the native dialog is not the end of the sign-in either.
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockRejectedValueOnce({ code: "cloud_provider_entry_cancelled" });
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Key entry canceled"));
+      expect(within(row("claude")).getByTestId("agent-login-code")).toBeTruthy();
+
+      vi.mocked(api.cloudAgentClaudeLoginComplete).mockResolvedValueOnce({ status: "expired" });
+      fireEvent.click(code.getByRole("button", { name: "Enter the code" }));
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("expired"));
+      expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull();
+      expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected");
+    });
+
+    it("opens the page again and cancels the sign-in", async () => {
+      const code = await begin();
+      vi.mocked(api.cloudAgentClaudeLoginOpen).mockResolvedValue(undefined);
+      fireEvent.click(code.getByRole("button", { name: "Open the page again" }));
+      expect(api.cloudAgentClaudeLoginOpen).toHaveBeenCalledWith(started.authorizeUrl);
+      vi.mocked(api.cloudAgentClaudeLoginCancel).mockRejectedValue({ code: "cloud_workspace_unavailable" });
+      fireEvent.click(code.getByRole("button", { name: "Cancel sign-in" }));
+      await waitFor(() => expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull());
+      expect(api.cloudAgentClaudeLoginCancel).toHaveBeenCalledWith("attempt_1", "org-revision");
+      // Nothing was stored, and the other ways are offered again.
+      expect(api.cloudAgentClaudeLoginComplete).not.toHaveBeenCalled();
+      expect(within(row("claude")).getByRole("button", { name: "Connect with an API key" }).hasAttribute("disabled")).toBe(false);
+    });
+
+    it("says so when the server does not offer the sign-in, and that it replaces a stored login", async () => {
+      stored = [login({ authKind: "api-key" })];
+      vi.mocked(api.cloudAgentClaudeLoginStart).mockRejectedValue({ code: "cloud_agent_login_flow_unavailable" });
+      await show();
+      fireEvent.click(within(row("claude")).getByRole("button", { name: "Replace by logging in with Claude" }));
+      const panel = within(row("claude")).getByTestId("agent-login-consent");
+      expect(within(panel).getByTestId("agent-login-replace").textContent).toContain("Replace the API key now stored for Claude Code.");
+      const go = within(panel).getByRole("button", { name: "Open Claude to sign in" });
+      const boxes = within(panel).getAllByRole("checkbox");
+      fireEvent.click(boxes[1]!);
+      fireEvent.click(boxes[2]!);
+      expect(go.hasAttribute("disabled")).toBe(true);
+      fireEvent.click(boxes[0]!);
+      fireEvent.click(go);
+      expect((await screen.findByRole("alert")).textContent).toContain("does not offer Log in with Claude yet");
+      expect(api.cloudAgentClaudeLoginStart).toHaveBeenCalledWith(expect.objectContaining({ replaceExisting: true }));
+      expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull();
+    });
+
+    it("words every way a sign-in can end", () => {
+      expect(signInOutcome({ status: "complete" })).toMatchObject({ done: true, over: true });
+      expect(signInOutcome({ status: "code-invalid", attemptsLeft: 1 }).text).toContain("(1 try left)");
+      expect(signInOutcome({ status: "code-invalid" })).toMatchObject({ done: false, over: false });
+      expect(signInOutcome({ status: "pending" })).toMatchObject({ done: false, over: false });
+      for (const status of ["expired", "canceled", "failed", "something-new"]) {
+        const result = signInOutcome({ status });
+        expect(result).toMatchObject({ done: false, over: true });
+        expect(result.text).not.toContain("something-new");
+      }
+    });
   });
 });

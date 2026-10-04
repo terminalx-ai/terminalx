@@ -201,6 +201,13 @@ export const api = {
   cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
     invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
   cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
+  // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
+  // The page opens in the browser; the code it shows is entered in a native dialog, never here.
+  cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
+  cloudAgentClaudeLoginOpen: (url: string) => invoke<void>("cloud_agent_claude_login_open", { url }),
+  cloudAgentClaudeLoginComplete: (attemptId: string, consent: AgentLoginConsent) =>
+    invoke<ClaudeLoginOutcome>("cloud_agent_claude_login_complete", { attemptId, consent }),
+  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string) => invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -464,6 +471,20 @@ export interface AgentLogin {
   updatedAt: number;
   state?: "connected" | "revoked" | "disconnected" | (string & {});
   sharedUse?: "organization" | "managers" | (string & {});
+}
+
+export interface ClaudeLoginStarted {
+  attemptId: string;
+  authorizeUrl: string;
+  expiresInSeconds: number;
+  /** The browser was asked to open the page. */
+  opened: boolean;
+}
+
+export interface ClaudeLoginOutcome {
+  status: "complete" | "code-invalid" | "unavailable" | "pending" | "expired" | "canceled" | "failed" | (string & {});
+  credential?: AgentLogin;
+  attemptsLeft?: number;
 }
 
 export interface AgentLoginConsent {

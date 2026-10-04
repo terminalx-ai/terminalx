@@ -10,15 +10,18 @@ Settings → Account → **Agent logins**.
 
 - Lists each agent's status: connected (API key or subscription login, whose
   it is when the service knows, who may use it), revoked, or not connected.
+- **Log in with Claude** (the first way offered for Claude Code). The
+  account service runs the sign-in and keeps a login it renews. See below.
 - **Connect / replace with an API key.** A native secure dialog collects the
   key (`secure_prompt` in `commands.rs`, the same one provider keys use).
 - **Use this Mac's Claude Code login.** The app lends the short-lived access
   token of the Claude Code sign-in on this computer. See below.
 - **Disconnect**, after a confirmation.
 
-The provider's own sign-in flows ("Log in with Claude", "Sign in with
-ChatGPT") are PRO-82 and are added to this same section. They are the lasting
-way to connect a subscription; lending this Mac's sign-in is temporary.
+"Log in with Claude" is PRO-82's server-side sign-in and the lasting way to
+connect a subscription; lending this Mac's sign-in is the secondary,
+temporary one. Codex's "Sign in with ChatGPT" (also PRO-82) is not on the
+desktop yet.
 
 ## Who may do it
 
@@ -42,6 +45,36 @@ service yet, so the desktop does not offer one.
   service answered the list (so the person is an owner or admin).
 - A login is never logged. Failures are codes.
 - **A refresh token never leaves this Mac.**
+
+## "Log in with Claude"
+
+The account service's sign-in (terminalx-saas PRO-82): PKCE, with the
+verifier and state kept by the service. The desktop's part:
+
+1. The page's consent (the same two checkboxes, and the replace choice when
+   a login is stored), then `authorize_agent_login`.
+2. `…/claude/login-start`. The app opens the answer's page in the browser,
+   after checking it is an `https` page of the provider (`claude_login_page`);
+   nothing else is ever opened, also not through "Open the page again".
+3. The person signs in and approves. The provider's page shows a code.
+4. "Enter the code" opens a **native secure dialog** for the code; it is
+   sent once to `…/claude/login-complete` from a zeroized buffer and never
+   passes through the webview. The dialog names the organization.
+5. The answer is `complete` (the login is stored), `code-invalid` with the
+   tries left, `unavailable` (the provider did not answer; the attempt stays
+   open), `pending`, or `expired` / `canceled` / `failed` (the attempt is
+   over and nothing was stored).
+6. "Cancel sign-in" calls `…/claude/login-cancel`.
+
+A server that does not offer the routes (older, or with the feature off)
+answers 404 to the start, and the page says the sign-in is not available
+there.
+
+Defaults, as the owner chose them: a new login is usable by the whole
+organization (`sharedUse: "organization"` is sent); Disconnect removes the
+stored login and does not sign the account out at the provider, and the page
+says so; a login stays when the admin who made it leaves, until an owner or
+admin disconnects it (flagging it to owners is the service's part).
 
 ## "Use this Mac's Claude Code login"
 
