@@ -23,6 +23,8 @@ interface AppContextValue {
   activeHost: StoredHost | null;
   connectionStage: ConnectionStage;
   connectionAttempt: number;
+  /** Goes up each time the connection is usable again (a reconnect, a return from the background): what is on screen reads what it missed. */
+  connectionEpoch: number;
   sessions: SessionSummary[];
   loadingMachines: boolean;
   loadingSessions: boolean;
@@ -64,6 +66,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [connectionStage, setConnectionStage] = useState<ConnectionStage>("idle");
   const connectionStageRef = useRef<ConnectionStage>("idle");
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loadingMachines, setLoadingMachines] = useState(false);
   const [loadingSessions, setLoadingSessions] = useState(false);
@@ -198,14 +201,20 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (message.method === "notifications.event" && activeHostRef.current) void handleNotificationEvent(activeHostRef.current.id, message.params);
       if (message.method === "sessions.changed") void refreshSessions();
     });
-    return () => { stage(); log(); event(); connection.stop(); };
+    const resumed = connection.onConnected(() => setConnectionEpoch((epoch) => epoch + 1));
+    return () => { stage(); log(); event(); resumed(); connection.stop(); };
   }, [connection, refreshHostName, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
+      // The home screen (PRO-50): the connection is told, so that coming back is one quick, quiet resume
+      // to the same Mac and session. "inactive" (the app switcher, a system sheet) is not leaving.
+      if (state === "background") return connection.background();
       if (state !== "active") return;
       if (session) void refreshCloudSession(session).catch((cause: unknown) => setError(readableError(cause)));
-      if (activeHostRef.current && connectionStage !== "connected") connection.restart();
+      if (!activeHostRef.current) return;
+      // Not a return from the background it knew of (the first activation): as before, connect if not connected.
+      if (!connection.foreground() && connectionStage !== "connected") connection.restart();
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, session]);
@@ -326,7 +335,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     if (host) await connectHost(host);
   }, [connectHost, connection]);
 
-  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions]);
+  const value = useMemo<AppContextValue>(() => ({ ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions, clearError: () => setError(null) }), [ready, session, hosts, availableHosts, installationState, activeHost, connectionStage, connectionAttempt, connectionEpoch, sessions, loadingMachines, loadingSessions, error, logs, connection, api, signIn, signOut, refreshMachines, pairAvailable, pairCode, retryPairing, connectHost, disconnectHost, forgetHost, renameHost, reconnectHost, refreshSessions]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

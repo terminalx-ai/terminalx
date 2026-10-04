@@ -26,6 +26,8 @@ import {
   refreshFromCheckpoint,
   resetCloudAgents,
   SAVE_DEBOUNCE_MS,
+  sendAgain,
+  SEND_AGAIN_IMAGES_GONE,
   sendToCloudAgent,
   steerCloudAgent,
   stopCloudAgent,
@@ -101,6 +103,7 @@ class FakeBackend {
           tabId: String(args.tabId),
           kind: args.kind as OutboxEntry["kind"],
           text: (payload.text as string) ?? null,
+          ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images.length } : {}),
           requestId: (payload.requestId as string) ?? null,
           state: "queued",
           wake: "not-needed",
@@ -314,6 +317,47 @@ describe("cloud agent tabs store", () => {
     expect(order.indexOf("session.attach")).toBeLessThan(order.indexOf("cloud_agent_enqueue"));
     // The image itself never rides in the command.
     expect(JSON.stringify(payload)).not.toContain("YWJj");
+  });
+
+  it("PRO-22: Send again sends a message's images again, and never the message without them", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const mutate = vi.fn(async (_method: string, _params: Record<string, unknown>) => ({}));
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" });
+    const image = { mediaType: "image/png", data: "YWJj", name: "shot.png" };
+    const payloads = () => backend.calls.filter((c) => c.cmd === "cloud_agent_enqueue").map((c) => c.args.payload as { text: string; images?: { id: string }[] });
+
+    // Images alone: the first attempt's fate is unknown, and the second carries the same image.
+    const first = await sendToCloudAgent(scope, "t-1", "", client, [image]);
+    expect(first.images).toBe(1);
+    const again = await sendAgain(scope, { ...first, state: "outcome-unknown" }, client);
+    expect(payloads()[1]).toEqual({ text: "", images: [{ id: payloads()[0]!.images![0]!.id, mediaType: "image/png", name: "shot.png" }] });
+    expect(mutate).toHaveBeenCalledTimes(2);
+    expect(again.images).toBe(1);
+    // The old entry gave its images to the new one; the new one can go again.
+    await sendAgain(scope, { ...again, state: "outcome-unknown" }, client);
+    expect(payloads()[2]!.images).toHaveLength(1);
+
+    // Text with an image, after the app no longer holds the image (a restart): not sent as text alone.
+    const afterRestart = { clientCommandId: "cmd-old", tabId: "t-1", kind: "send" as const, text: "what is this?", images: 2, state: "outcome-unknown" as const, createdAt: 1, updatedAt: 1 };
+    await expect(sendAgain(scope, afterRestart, client)).rejects.toThrow(SEND_AGAIN_IMAGES_GONE);
+    // Nor when the images cannot be uploaded now.
+    const third = await sendToCloudAgent(scope, "t-1", "look", client, [image]);
+    await expect(sendAgain(scope, { ...third, state: "outcome-unknown" }, null)).rejects.toThrow("Not connected to the workspace");
+    expect(payloads()).toHaveLength(4);
+    // A message without images goes again as before.
+    await sendAgain(scope, { ...afterRestart, images: undefined }, null);
+    expect(payloads()[4]).toEqual({ text: "what is this?" });
+  });
+
+  it("PRO-22: lets a settled message's images go", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    const client = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: () => true });
+    const entry = await sendToCloudAgent(scope, "t-1", "look", client, [{ mediaType: "image/png", data: "YWJj" }]);
+    backend.syncs = [[{ ...entry, state: "rejected", category: "attachment-missing" }]];
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(getCloudAgents(scope).outbox[0]!.state).toBe("rejected");
+    await expect(sendAgain(scope, { ...entry, state: "outcome-unknown" }, client)).rejects.toThrow(SEND_AGAIN_IMAGES_GONE);
   });
 
   it("PRO-22: sends nothing when the images cannot reach the runtime", async () => {

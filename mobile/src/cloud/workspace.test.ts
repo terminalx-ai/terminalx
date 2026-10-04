@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudApiError, type CloudCommand, type CloudWorkspace } from "./api";
 import { b64, checkpointAad, unb64, type CheckpointEnvelope, type CommandEnvelope } from "./crypto";
 import { NOW, pairingCode, Runtime } from "./fake-runtime";
-import { CloudWorkspaceSession } from "./workspace";
+import { CloudWorkspaceSession, RESUME_QUIET_MS } from "./workspace";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 const key = new Uint8Array(randomBytes(32));
@@ -346,12 +346,135 @@ describe("a cloud workspace on the phone", () => {
     h.session.close();
   });
 
+  it("does not connect when the app went to the background while it was starting, and connects on return", async () => {
+    const h = harness();
+    const starting = h.session.start();
+    // Backgrounded before start() got past reading the keys and the outbox.
+    h.session.pause();
+    await starting;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.api.open).not.toHaveBeenCalled();
+    expect(h.runtimes).toEqual([]);
+    expect(h.session.getSnapshot().connection.state).toBe("idle");
+    h.session.resume();
+    await connected(h);
+    expect(h.api.open).toHaveBeenCalledTimes(1);
+    h.session.close();
+  });
+
+  it("connects by itself when a pause and a resume both came before it had started", async () => {
+    const h = harness();
+    h.session.pause();
+    h.session.resume();
+    await h.session.start();
+    await connected(h);
+    h.session.close();
+  });
+
+  it("posts nothing when the app goes to the background while a poll is reading the list", async () => {
+    const before = await keyed();
+    const h = harness({ secrets: before.secrets, blobs: before.blobs });
+    // Not connected (the API is down for attach), with one message held on the phone.
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_unavailable", null));
+    await h.session.start();
+    h.refresh.ok = false;
+    await h.session.send("t1", "held");
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    // The next poll's list read is still on its way when pause() lands; it then says "running".
+    let finish!: () => void;
+    const reading = new Promise<void>((resolve) => (finish = resolve));
+    const original = (h.session as unknown as { options: { refreshList: () => Promise<boolean> } }).options;
+    original.refreshList = async () => {
+      await reading;
+      return true;
+    };
+    await vi.advanceTimersByTimeAsync(1_100);
+    h.session.pause();
+    finish();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    expect(h.api.commandStatuses).not.toHaveBeenCalled();
+    expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "unsent" }]);
+    h.session.close();
+  });
+
+  it("looks continuous across a trip to the home screen: no socket is held, and the return shows no reconnect", async () => {
+    const h = harness({ checkpoints: [checkpoint(1, [event(1)])] });
+    await h.session.start();
+    await connected(h);
+    const stop = h.session.view("t1");
+    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2]));
+    const seen: string[] = [];
+    h.session.subscribe(() => seen.push(h.session.getSnapshot().connection.state));
+
+    h.session.pause();
+    // The phone holds no connection in the background and asks nothing...
+    expect(h.runtimes[0].readyState).toBe(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.api.open).toHaveBeenCalledTimes(1);
+    // ...while what is on screen stays as it was: live, with its conversation.
+    expect(h.session.getSnapshot().connection.state).toBe("connected");
+    expect(tab(h).events).toHaveLength(2);
+
+    h.each((runtime) => (runtime.methods["session.subscribe"] = () => ({ subscriptionId: "sub-2", events: [{ cursor: "c3", event: event(3) }], cursor: "c3" })));
+    h.session.resume();
+    await vi.waitFor(() => expect(h.runtimes).toHaveLength(2));
+    await vi.waitFor(() => expect(tab(h).events.map((entry) => entry.seq)).toEqual([1, 2, 3]));
+    // Never anything but "connected" was shown, and what happened meanwhile is there.
+    expect(new Set(seen)).toEqual(new Set(["connected"]));
+    expect(tab(h).source).toBe("live");
+    stop();
+    h.session.close();
+  });
+
+  it("says it is connecting when the return takes longer than a moment, and says stopped when the workspace stopped meanwhile", async () => {
+    const slow = harness();
+    await slow.session.start();
+    await connected(slow);
+    slow.session.pause();
+    slow.api.open.mockImplementation(() => new Promise(() => undefined));
+    slow.session.resume();
+    await vi.advanceTimersByTimeAsync(RESUME_QUIET_MS - 100);
+    expect(slow.session.getSnapshot().connection.state).toBe("connected");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(slow.session.getSnapshot().connection.state).toBe("opening");
+    expect(slow.session.getSnapshot().tabs[0].source).toBe("checkpoint");
+    slow.session.close();
+
+    const stopped = harness();
+    await stopped.session.start();
+    await connected(stopped);
+    stopped.session.pause();
+    stopped.list("suspended");
+    stopped.session.resume();
+    await vi.advanceTimersByTimeAsync(RESUME_QUIET_MS + 100);
+    expect(stopped.session.getSnapshot().connection.state).toBe("suspended");
+    // Nothing was asked of the stopped workspace on return.
+    expect(stopped.api.open).toHaveBeenCalledTimes(1);
+    // And in the quiet moment a send still asks before starting it.
+    stopped.session.close();
+  });
+
+  it("does not skip the start confirmation in the quiet moment after a return", async () => {
+    const h = harness();
+    await h.session.start();
+    await connected(h);
+    h.session.pause();
+    h.refresh.state = "suspended";
+    h.api.open.mockImplementation(() => new Promise(() => undefined));
+    h.session.resume();
+    // Shown as live for a moment, but the workspace was stopped while the app was away.
+    expect(h.session.getSnapshot().connection.state).toBe("connected");
+    await expect(h.session.send("t1", "still there?")).rejects.toMatchObject({ code: "would-wake" });
+    expect(h.api.enqueue).not.toHaveBeenCalled();
+    h.session.close();
+  });
+
   it("lets go of the connection in the background and takes it up again in the foreground", async () => {
     const h = harness();
     await h.session.start();
     await connected(h);
     h.session.pause();
-    expect(h.session.getSnapshot().connection.state).toBe("idle");
     expect(h.runtimes[0].readyState).toBe(3);
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.api.open).toHaveBeenCalledTimes(1);

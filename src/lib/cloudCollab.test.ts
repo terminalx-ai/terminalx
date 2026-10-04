@@ -112,6 +112,10 @@ describe("PRO-88: what the approval right guards beyond permission requests", ()
       "Not sent: A turn is running: send this command when it has ended.",
     );
     expect(inputRefusalText("command-not-queued", null)).toBe("Not sent: a turn is running. Send this command when it has ended.");
+    // An image the runtime does not hold (PRO-22): the receipt's sentence, or this one without a readable receipt.
+    const missing = "Not sent: an image of this message did not reach the workspace. Attach it and send again.";
+    expect(inputRefusalText("attachment-missing", { message: missing })).toBe(missing);
+    expect(inputRefusalText("attachment-missing", null)).toBe(missing);
     expect(inputRefusalText("lease-held", { message: "anything" })).toBeNull();
     expect(inputRefusalText(null, null)).toBeNull();
   });

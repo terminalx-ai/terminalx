@@ -174,6 +174,8 @@ export class CloudCatalog {
       void this.remember(orgId, workspaceId);
       // A message sent, or a state learned, may mean the list should be followed for a while.
       session.subscribe(() => this.followChanges());
+      // Opened while the app is in the background (a screen that mounts late): it connects when the app is back.
+      if (this.paused) session.pause();
       void session.start();
     }
     return session;

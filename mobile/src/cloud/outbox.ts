@@ -192,10 +192,16 @@ export class CloudOutbox {
    * `deliver` only while the workspace runs or the person agreed to start it.
    * Returns whether anything changed.
    */
-  async sync(options: { deliver?: boolean } = {}): Promise<boolean> {
+  async sync(options: { deliver?: boolean | (() => boolean) } = {}): Promise<boolean> {
     await this.load();
     const before = this.fingerprint();
-    if (options.deliver) for (const item of this.items.filter((entry) => entry.state === "unsent")) await this.post(item);
+    const { deliver } = options;
+    // A function is asked again before each post: the permission can end while earlier ones are on their way.
+    const may = () => (typeof deliver === "function" ? deliver() : deliver === true);
+    for (const item of this.items.filter((entry) => entry.state === "unsent")) {
+      if (!may()) break;
+      await this.post(item);
+    }
     const open_ = this.items.filter((entry) => entry.state === "queued" || entry.state === "leased");
     if (open_.length) {
       const commands = await this.options.api.commandStatuses(this.options.scope.organizationId, this.options.scope.workspaceId, open_.map((entry) => entry.envelope.clientCommandId));

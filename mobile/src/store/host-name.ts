@@ -21,7 +21,7 @@ export const HOST_NAME_MAX = 64;
 export const FALLBACK_HOST_LABEL = "Paired Mac";
 
 // Controls, and the invisible characters that reorder or hide text.
-const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
 /** A name fit to store and show, or null when nothing is left of it. */
 export function cleanHostName(value: unknown): string | null {

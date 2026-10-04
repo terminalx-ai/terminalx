@@ -287,6 +287,20 @@ describe("the phone's cloud catalog", () => {
     h.catalog.close();
   });
 
+  it("does not connect a workspace opened while the app is in the background, until it is back", async () => {
+    const h = harness();
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-new", { state: "ready" })] : [], tombstones: [] }));
+    await h.catalog.refresh();
+    h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+    h.catalog.pause();
+    const release = h.catalog.retain("org-1", "ws-new");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.api.open).not.toHaveBeenCalled();
+    h.catalog.resume();
+    await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledTimes(1));
+    release();
+  });
+
   it("makes one read at a time", async () => {
     const h = harness();
     await Promise.all([h.catalog.refresh(), h.catalog.refresh()]);
