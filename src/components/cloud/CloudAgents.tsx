@@ -782,7 +782,12 @@ export function CloudOutbox({
             data-state={entry.state}
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text ? <span className="min-w-0 truncate">{entry.text}</span> : entry.kind === "send" ? <span className="min-w-0 truncate text-muted-foreground">(images)</span> : null}
+            {entry.text ? <span className="min-w-0 truncate">{entry.text}</span> : null}
+            {entry.kind === "send" && (entry.images || !entry.text) ? (
+              <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
+                {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}
+              </span>
+            ) : null}
             <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
               <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>

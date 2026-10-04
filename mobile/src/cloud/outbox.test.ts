@@ -90,6 +90,21 @@ describe("the phone's command outbox", () => {
     expect(again.posted).toHaveLength(1);
   });
 
+  it("asks before each post whether delivery is still allowed, so none leaves after it ends", async () => {
+    const h = await harness();
+    for (const text of ["one", "two", "three"]) await h.outbox.enqueue("tab-1", "send", { text }, { post: false });
+    let allowed = true;
+    h.api.enqueue.mockImplementation(async (_org: string, _ws: string, envelope) => {
+      h.posted.push(envelope);
+      // The permission ends while the first is on its way.
+      allowed = false;
+      return { command: command(envelope), existing: false, wake: null };
+    });
+    await h.outbox.sync({ deliver: () => allowed });
+    expect(h.posted).toHaveLength(1);
+    expect(h.outbox.entries().map((entry) => entry.state)).toEqual(["queued", "unsent", "unsent"]);
+  });
+
   it("can keep a command without posting it at all", async () => {
     const h = await harness();
     expect(await h.outbox.enqueue("tab-1", "send", { text: "later" }, { post: false })).toMatchObject({ state: "unsent", error: null });

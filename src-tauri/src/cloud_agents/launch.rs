@@ -17,6 +17,14 @@
 //! the API for a short-lived one scoped to this workspace's repositories;
 //! this module never sees a token, and none is put in the URL, the remote,
 //! the Git config, the environment or a log line.
+//!
+//! When there is no first prompt to deliver (a workspace created without
+//! one, as the console does; a launch that settled without its clone; a
+//! replaced disk), the claim carries a `checkout` plan instead: the same
+//! repositories and the workspace's own branch. The runtime sets each one up
+//! once and remembers it in `checkout.json`, so a later boot never switches
+//! a person's branch back or clones again what they removed. No agent is
+//! started and nothing is reported.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +37,7 @@ use serde_json::{json, Value};
 use super::api::{CallError, HttpMailboxApi};
 
 const FILE: &str = "launch.json";
+const CHECKOUT_FILE: &str = "checkout.json";
 /// Contract §19.1 limits, shared with the desktop's create checks.
 pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
 pub const MAX_REPOSITORIES: usize = 5;
@@ -126,6 +135,23 @@ pub struct CloneSource {
     pub provider: String,
 }
 
+/// The repositories and work branch of a workspace with no first prompt to
+/// deliver (§19.3 `checkout`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutPlan {
+    pub work_branch: String,
+    #[serde(default)]
+    pub repositories: Vec<Repository>,
+}
+
+/// What one claim answered.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Claimed {
+    pub launch: Option<Claim>,
+    pub checkout: Option<CheckoutPlan>,
+}
+
 /// The tab a claimed launch starts. A launch that names no mode (or a blank
 /// one) starts in the default launch mode, bypass, like any other session.
 pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
@@ -138,7 +164,7 @@ pub(crate) fn new_tab(claim: &Claim) -> crate::session_ops::NewTab {
 }
 
 /// `launch` of a claim response.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Claim {
     pub launch_id: String,
@@ -201,7 +227,7 @@ pub enum Completed {
 }
 
 pub trait LaunchApi: Send + Sync {
-    fn claim(&self, storage_incarnation_id: &str) -> Result<Option<Claim>, CallError>;
+    fn claim(&self, storage_incarnation_id: &str) -> Result<Claimed, CallError>;
     /// `Some(state)` when the intent is no longer claimed (canceled, expired
     /// or settled by the server): the launch must stop.
     fn phase(&self, launch_id: &str, phase: &str) -> Result<Option<String>, CallError>;
@@ -209,17 +235,22 @@ pub trait LaunchApi: Send + Sync {
 }
 
 impl LaunchApi for HttpMailboxApi {
-    fn claim(&self, storage_incarnation_id: &str) -> Result<Option<Claim>, CallError> {
+    fn claim(&self, storage_incarnation_id: &str) -> Result<Claimed, CallError> {
         let body = json!({ "v": 1, "storageIncarnationId": storage_incarnation_id });
         match self.call_with("POST", "/v1/cloud-workspace-bootstrap/launch-intent/claim", Some(body), &[(CAPABILITIES_HEADER, CLAIM_CAPABILITIES)])? {
-            (200, body) => match body.get("launch") {
-                None | Some(Value::Null) => Ok(None),
-                Some(launch) => serde_json::from_value(launch.clone())
-                    .map(Some)
-                    .map_err(|error| CallError::Transient(anyhow!("launch claim: unreadable response: {error}"))),
-            },
+            (200, body) => {
+                let launch = match body.get("launch") {
+                    None | Some(Value::Null) => None,
+                    Some(launch) => Some(serde_json::from_value(launch.clone()).map_err(|error| CallError::Transient(anyhow!("launch claim: unreadable response: {error}")))?),
+                };
+                // A plan this runtime cannot read is no plan: the launch still counts.
+                let checkout = body.get("checkout").filter(|plan| !plan.is_null()).and_then(|plan| {
+                    serde_json::from_value(plan.clone()).map_err(|error| log::warn!("launch claim: unreadable checkout plan: {error}")).ok()
+                });
+                Ok(Claimed { launch, checkout })
+            }
             // A server without launch intents (§19 is additive).
-            (404, _) => Ok(None),
+            (404, _) => Ok(Claimed::default()),
             (status, body) => Err(CallError::Transient(anyhow!("launch claim: HTTP {status} {}", error_code(&body)))),
         }
     }
@@ -320,14 +351,43 @@ impl Record {
     }
 }
 
-/// `launch.json`: one launch per workspace, so one record.
+/// `checkout.json`: the repository paths this runtime has set up, each once.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SetUp {
+    v: u8,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+/// `launch.json`: one launch per workspace, so one record. `checkout.json`
+/// next to it lists the repositories already set up.
 pub struct Store {
     path: PathBuf,
+    checkout_path: PathBuf,
 }
 
 impl Store {
     pub fn open(dir: &Path) -> Self {
-        Self { path: dir.join(FILE) }
+        Self { path: dir.join(FILE), checkout_path: dir.join(CHECKOUT_FILE) }
+    }
+
+    fn set_up(&self) -> Vec<String> {
+        std::fs::read(&self.checkout_path).ok().and_then(|bytes| serde_json::from_slice::<SetUp>(&bytes).ok()).map(|record| record.paths).unwrap_or_default()
+    }
+
+    /// Remember `paths` as set up, for good.
+    fn mark_set_up(&self, paths: &[String]) -> Result<()> {
+        let mut known = self.set_up();
+        let before = known.len();
+        for path in paths {
+            if !known.contains(path) {
+                known.push(path.clone());
+            }
+        }
+        if known.len() == before {
+            return Ok(());
+        }
+        crate::cloud_bootstrap::write_durable(&self.checkout_path, &serde_json::to_vec(&SetUp { v: 1, paths: known })?)
     }
 
     fn get(&self, launch_id: &str) -> Option<Record> {
@@ -390,7 +450,13 @@ impl Launcher {
     }
 
     fn attempt(&self) -> Result<Pass, CallError> {
-        let Some(claim) = self.api.claim(&self.incarnation)? else { return Ok(Pass::None) };
+        let claimed = self.api.claim(&self.incarnation)?;
+        // Sent only when there is no prompt to deliver; a launch being
+        // delivered sets its repositories up itself.
+        if let Some(plan) = claimed.checkout.as_ref().filter(|_| claimed.launch.as_ref().is_none_or(|claim| claim.state != "deliver")) {
+            self.ensure_checkout(plan);
+        }
+        let Some(claim) = claimed.launch else { return Ok(Pass::None) };
         if claim.state != "deliver" {
             return Ok(Pass::Settled(claim.state));
         }
@@ -407,6 +473,51 @@ impl Launcher {
         match self.api.complete(&claim.launch_id, &outcome)? {
             Completed::Settled(state) | Completed::Conflict(state) => Ok(Pass::Settled(state)),
             Completed::NotFound => Ok(Pass::Settled("not-found".into())),
+        }
+    }
+
+    /// Set up every repository of `plan` that is not set up yet: clone it,
+    /// then cut the workspace's work branch. One that fails is logged and
+    /// left for the next boot; the others are still done.
+    fn ensure_checkout(&self, plan: &CheckoutPlan) {
+        if !valid_branch(&plan.work_branch) || plan.repositories.len() > MAX_REPOSITORIES {
+            log::warn!("checkout plan refused: invalid work branch or too many repositories");
+            return;
+        }
+        let known = self.store.set_up();
+        let pending: Vec<&Repository> = plan.repositories.iter().filter(|repository| repository.clone.is_some() && !known.contains(&repository.path)).collect();
+        if pending.is_empty() {
+            return;
+        }
+        // Work, like a launch: a clone must not be cut short by idle suspend.
+        let _launching = crate::cloud_activity::launching();
+        let deadline = std::time::Instant::now() + CLONE_BUDGET;
+        for repository in pending {
+            if let Err(error) = validate_repository(repository, &self.root) {
+                log::warn!("checkout plan: {}/{} refused: {error:#}", repository.owner, repository.name);
+                continue;
+            }
+            // A checkout from before this runtime kept a record (or made by
+            // a launch on an older runtime) is adopted as it is: its branch
+            // is the person's by now.
+            if !Path::new(&repository.path).join(".git").exists() {
+                let within = deadline.saturating_duration_since(std::time::Instant::now());
+                match self.checkout.clone_missing(repository, within, &|| false) {
+                    Ok(()) => {}
+                    Err(CloneError::Canceled) => continue,
+                    Err(CloneError::Failed { category, detail }) => {
+                        log::warn!("checkout {}/{}: {category}: {detail}", repository.owner, repository.name);
+                        continue;
+                    }
+                }
+                if let Err(error) = self.checkout.prepare(repository, &plan.work_branch) {
+                    log::warn!("checkout {}/{}: work branch: {error:#}", repository.owner, repository.name);
+                    continue;
+                }
+            }
+            if let Err(error) = self.store.mark_set_up(std::slice::from_ref(&repository.path)) {
+                log::warn!("record the checkout of {}: {error:#}", repository.path);
+            }
         }
     }
 
@@ -474,6 +585,11 @@ impl Launcher {
                 }
             }
         }
+        // Set up by this launch: a later checkout plan leaves them alone.
+        let cloned: Vec<String> = claim.repositories.iter().filter(|repository| repository.clone.is_some()).map(|repository| repository.path.clone()).collect();
+        if let Err(error) = self.store.mark_set_up(&cloned) {
+            log::warn!("record the launch's checkouts: {error:#}");
+        }
         // Checked again right before the agent is touched: a create canceled
         // while the repositories were prepared is never delivered.
         if let Some(state) = self.api.phase(&claim.launch_id, "starting-agent")? {
@@ -536,27 +652,32 @@ fn validate(claim: &Claim, root: &Path) -> Result<()> {
         bail!("too many repositories");
     }
     for repository in &claim.repositories {
-        if repository.base_ref.as_deref().is_some_and(|base| !valid_branch(base)) {
-            bail!("invalid base ref");
-        }
-        if !valid_repository_path(&repository.path) {
-            bail!("invalid repository path");
-        }
-        if let Some(source) = &repository.clone {
-            if source.provider != GITHUB_PROVIDER || !valid_github_name(&repository.owner) || !valid_github_name(&repository.name) {
-                bail!("invalid clone source");
-            }
-            // Only ever a new directory directly in the project root.
-            if Path::new(&repository.path).parent() != Some(root) {
-                bail!("clone path outside the project root");
-            }
-        }
+        validate_repository(repository, root)?;
     }
     if claim.prompt.as_ref().is_some_and(|prompt| prompt.len() > MAX_PROMPT_BYTES || prompt.contains('\0')) {
         bail!("invalid prompt");
     }
     if !valid_agent(&claim.agent) {
         bail!("invalid agent");
+    }
+    Ok(())
+}
+
+fn validate_repository(repository: &Repository, root: &Path) -> Result<()> {
+    if repository.base_ref.as_deref().is_some_and(|base| !valid_branch(base)) {
+        bail!("invalid base ref");
+    }
+    if !valid_repository_path(&repository.path) {
+        bail!("invalid repository path");
+    }
+    if let Some(source) = &repository.clone {
+        if source.provider != GITHUB_PROVIDER || !valid_github_name(&repository.owner) || !valid_github_name(&repository.name) {
+            bail!("invalid clone source");
+        }
+        // Only ever a new directory directly in the project root.
+        if Path::new(&repository.path).parent() != Some(root) {
+            bail!("clone path outside the project root");
+        }
     }
     Ok(())
 }

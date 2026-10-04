@@ -184,6 +184,29 @@ describe("organization provider controls", () => {
     expect(screen.getByText(/Cleanup unresolved/)).toBeTruthy();
     expect(screen.getByText(/0.1200\/hour/)).toBeTruthy();
   });
+  it("offers archiving on disconnect, and says when the archived workspaces are deleted (PRO-34)", async () => {
+    const deadline = Date.UTC(2026, 10, 2, 12);
+    vi.mocked(api.cloudProviderDisconnect).mockImplementation(async () => {
+      detail.disconnectRetention = "archive";
+      detail.retentionDeadline = deadline;
+      detail.operationsBlocked = true;
+      return detail;
+    });
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Archive workspaces/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm disconnect" }));
+    await waitFor(() =>
+      expect(api.cloudProviderDisconnect).toHaveBeenCalledWith(
+        "box",
+        "org-revision",
+        "archive",
+      ),
+    );
+    // Reported apart from retain and destroy, and still a pending disconnect.
+    await screen.findByRole("button", { name: "Retry disconnect / cleanup" });
+    expect(screen.getByText(/Disconnect pending — workspaces are archived and deleted on .*2026; new provisioning blocked/)).toBeTruthy();
+  });
   it("fails closed when an older service omits the lifecycle metadata", async () => {
     delete detail.resources;
     delete detail.credentialVersion;

@@ -32,8 +32,19 @@ dialog then promises neither (`resumeBehaviourText`).
   (`lifecycle.dispositionFacts`: uncommitted files, unpushed and local-only
   commits, open pull requests, running terminals). The runtime is asked only
   when the workspace is running; a suspended one is reported as not
-  checkable rather than woken. "Open workspace" opens it to push or copy
-  files out first (the server has no export of its own).
+  checkable rather than woken.
+- Export before an archive or delete (the server has no export of its own,
+  so these are the choices): **Push**, beside each repository with unpushed
+  or local-only commits, pushes its current branch from the dialog
+  (`pushRepository`: a `connect`, never a wake, and the facts are read again
+  afterwards); **Open workspace** opens it to commit uncommitted files or
+  copy files out, which a push cannot do for them; and on Delete, **Archive
+  instead** switches to keeping everything for the retention period.
+- Retention: the Archive tab offers the periods the server lists
+  (`archiveRetentionChoices`: 7, 30 or 90 days), with the workspace's own
+  preselected. A chosen period is sent as `retentionDays`; the workspace's
+  own is not sent. A server that lists none takes no choice (it would refuse
+  the field), and the picker is absent.
 - Running agent work: archive, and a lifecycle client's delete, are refused
   with `409 cloud_workspace_active_work`. The dialog sends `force` only after
   "Stop the running agent work" is ticked, and a refusal for work that
@@ -61,6 +72,53 @@ dialog then promises neither (`resumeBehaviourText`).
   ("2 agent messages that never reached it, unsaved edits in 1 file").
 - An archived workspace opens read-only from its checkpoints; `wake` on it
   answers `cloud_workspace_archived` (`src-tauri/src/cloud_remote.rs`).
+
+## Organization teardown and provider disconnect (PRO-34)
+
+The server half is saas contract §10.7; both paths run the same inventory and
+cleanup as a single workspace's archive and delete.
+
+- **Provider disconnect** (`src/components/settings/ProviderControls.tsx`)
+  offers three choices: retain the resources, destroy them, or **archive**
+  the workspaces (stopped, kept 30 days with one shared deadline, then
+  deleted). The server reports an archiving disconnect as
+  `disconnectRetention: "archive"` with `retentionDeadline`, apart from
+  `disconnectDisposition` (which an older desktop decodes as retain or
+  destroy only); the section then reads "Disconnect pending — workspaces are
+  archived and deleted on …".
+- **Organization teardown** (`OrganizationCloudTeardown.tsx`, in Settings →
+  Account, for owners and administrators): archive every workspace of the
+  organization with one deadline, or delete them now
+  (`GET`/`POST …/cloud-teardown`, `cloud_teardown_status` and
+  `cloud_teardown_request`). It cannot be cancelled, and while it runs nobody
+  in the organization can create, resume or unarchive a workspace. So the
+  confirmation first shows how many workspaces it takes, counted by the
+  server (`GET …/cloud-teardown/preview`, `cloud_teardown_preview`) because
+  an admin's own list leaves out other people's private workspaces, and says
+  so ("including 3 private ones that belong to other people"); it cannot be
+  started when the count cannot be read. Archive, the choice that can still
+  be undone, is preselected, and nothing is sent before the organization's
+  name is typed. The confirmation is for one organization at one account
+  context: the request carries both, and `request_teardown` sends nothing
+  (`account_context_changed`) if the active organization or the context
+  changed since it was opened, so a name typed for one organization never
+  tears down another; the page also drops an open confirmation when either
+  changes. The count shown is the count acted on: the request carries the
+  preview's count and token, the native side reads the preview again just
+  before sending and sends nothing if it differs, and the server refuses
+  (`cloud_teardown_preview_changed`) a teardown of any other set. A
+  confirmation is spent by one attempt and void after every read of the
+  status (Refresh included): a name typed to archive never carries over to
+  "Delete every workspace", which always needs its own count and its own
+  freshly typed name. After an outcome that is not known the status is read
+  at once. Resources are named with the server's own kinds (`workspace`,
+  `runtime`, `build`, `legacy-operation`) and their states in the app's
+  words; one it does not know is shown as it comes. A pending archive can only be escalated to deleting now. The section
+  shows the deadline, what still remains at the providers (with each
+  resource's own deadline and whether its cleanup is unresolved), that
+  session runtimes and build templates are not removed by it, and released
+  workspaces the provider kept. It is not offered when the status could not
+  be read, and it is absent for a member (the server refuses the read).
 
 ## Runtime: the final checkpoint
 
@@ -178,8 +236,17 @@ and a stopped workspace's disk is not known.
 
 ## Tests
 
+- `src/components/settings/OrganizationCloudTeardown.test.tsx`,
+  `ProviderControls.test.tsx`: nothing is sent without a disposition and the
+  typed name; the count shown, private workspaces included; a context change
+  while the confirmation is open; an archive with an unknown outcome leaves
+  no armed delete; Refresh voids the confirmation; one request for a double
+  click; the server's real resource kinds; escalation only; what remains; a finished
+  teardown; a member; an unknown outcome; archive on disconnect and its
+  deadline.
 - `src/components/cloud/CloudWorkspaceLifecycle.test.tsx`: what a resume
-  brings back, per provider; dirty files,
+  brings back, per provider; the retention periods and which is sent; a push
+  from the dialog and its refusal; archive instead of delete; dirty files,
   unpushed commits, an open PR and a running turn before an archive; force
   only once confirmed; a refusal for new work; an offline workspace; a
   provider without permanent delete; cleanup progress; retry after a
@@ -204,8 +271,9 @@ and a stopped workspace's disk is not known.
 
 ## Open
 
-- Organization teardown and the provider disconnect `archive` disposition
-  have no desktop UI yet.
+- There is no endpoint to delete an organization, so nothing yet requires a
+  completed teardown first; a teardown cannot be cancelled; the console has
+  no archive or unarchive.
 - There are no preview routes on the server. A preview is a port stream
   inside an attached connection and ends with it
   ([CLOUD-PREVIEWS.md](CLOUD-PREVIEWS.md)); scoped runtime secrets are
