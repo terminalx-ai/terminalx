@@ -125,3 +125,23 @@ describe("WebGL contexts, with the real addon", () => {
     expect(counters.webglContexts).toEqual({ created: 0, lost: 0, failed: 1 });
   });
 });
+
+it("preserves scrollback, alternate-screen content and pending terminal input across recovery", async () => {
+  const { webgl, term } = await shown();
+  const write = (text: string) => new Promise<void>((resolve) => term.write(text, resolve));
+  await write("synthetic history\r\nsynthetic draft");
+  const normal = term.buffer.normal.getLine(0)!.translateToString(true);
+  await write("\x1b[?1049hsynthetic full-screen view");
+  const alternate = term.buffer.active.getLine(0)!.translateToString(true);
+  const input = vi.fn();
+  const listener = term.onData(input);
+  webgl.recoverWebgl(term);
+  expect(term.buffer.normal.getLine(0)!.translateToString(true)).toBe(normal);
+  expect(term.buffer.active.getLine(0)!.translateToString(true)).toBe(alternate);
+  expect(input).not.toHaveBeenCalled();
+  await write("\x1b[?1049l");
+  expect(term.buffer.active.getLine(1)!.translateToString(true)).toContain("synthetic draft");
+  listener.dispose();
+  webgl.dropWebgl(term);
+  term.dispose();
+});

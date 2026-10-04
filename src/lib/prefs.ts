@@ -6,8 +6,8 @@ import { useSyncExternalStore } from "react";
  * ~/.raccoon/settings.json instead (see store/settings.rs).
  */
 export interface Prefs {
-  linkBrowser: "terminalx" | "system";
-  /** The reader chose a browser in Settings, rather than inheriting a default. */
+  linkBrowser: "terminalx" | "system" | "ask";
+  /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
   linkBrowserChosen: boolean;
   linkActions: boolean;
   sidebarOpen: boolean;
@@ -68,7 +68,7 @@ export interface Prefs {
 }
 
 const DEFAULTS: Prefs = {
-  linkBrowser: "system",
+  linkBrowser: "ask",
   linkBrowserChosen: false,
   linkActions: true,
   sidebarOpen: true,
@@ -109,7 +109,7 @@ function load(): Prefs {
     const prefs = { ...DEFAULTS, ...parsed };
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
-    // choices made in Settings from now on survive this migration.
+    // choices made in Settings or remembered in the chooser survive this migration.
     if (prefs.linkBrowser === "terminalx" && prefs.linkBrowserChosen !== true) {
       prefs.linkBrowser = "system";
       try {

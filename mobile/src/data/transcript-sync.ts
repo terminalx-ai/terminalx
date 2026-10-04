@@ -8,7 +8,7 @@ import { cacheEpoch, emptyTranscript, readCache, writeCache, type TranscriptCach
  */
 export function watchTranscript(
   api: HostApi, host: string, session: string, tab: string, connected: boolean,
-  update: (cache: TranscriptCache, replace: boolean) => void,
+  update: (cache: TranscriptCache, replace: boolean, source: "cache" | "live" | "page") => void,
   error: (cause: unknown) => void,
 ): () => void {
   let active = true;
@@ -39,7 +39,7 @@ export function watchTranscript(
           else {
             legacyDuringRead?.push(event);
             state = { events: mergeEvents(state.events, [event]).slice(-500), hasEarlier: state.hasEarlier };
-            update(state, false);
+            update(state, false, "live");
             void save().catch(error);
           }
         }, invalidate);
@@ -55,7 +55,7 @@ export function watchTranscript(
           // rather than visually joining two ranges that may have a gap.
           state = { events: mergeEvents(page.events, legacyDuringRead), hasEarlier: page.hasMore };
           legacyDuringRead = null;
-          update(state, true);
+          update(state, true, "page");
           await save();
           continue;
         }
@@ -63,7 +63,7 @@ export function watchTranscript(
         if (!current()) return;
         if (page.deleted) {
           state = emptyTranscript();
-          update(state, true);
+          update(state, true, "page");
           await save();
           return;
         }
@@ -73,7 +73,7 @@ export function watchTranscript(
           events: merged.slice(-500), cursor: page.cursor,
           hasEarlier: page.reset ? page.hasEarlier : state.hasEarlier || merged.length > 500,
         };
-        update(state, page.reset);
+        update(state, page.reset, "page");
         await save();
         dirty ||= page.hasMore;
       }
@@ -90,7 +90,7 @@ export function watchTranscript(
   void (async () => {
     state = await readCache(host, session, tab);
     if (!current()) return;
-    update(state, false);
+    update(state, false, "cache");
     if (!connected) return;
     initialized = true;
     await drain();

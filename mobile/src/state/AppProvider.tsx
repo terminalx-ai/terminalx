@@ -151,7 +151,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     try {
       while (summariesDirty.current && activeHostRef.current) {
         summariesDirty.current = false;
-        const host = activeHostRef.current.id;
+        const host: string = activeHostRef.current.id;
         const values = await api.summaries();
         if (values && activeHostRef.current?.id === host) setSessions(values);
       }

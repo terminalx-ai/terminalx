@@ -51,8 +51,9 @@ export function WorkspaceActionItems({
   const sharedWith = workspace.sharedWith ?? 0;
   const lifecycle = authority.lifecycle;
   // Sharing a private workspace means making it organization-visible first,
-  // which is an owner's or admin's: a creator who is a plain member is told
-  // so here, instead of being walked into a refusal.
+  // which takes managing it. Against a server from before PRO-73 a creator
+  // who is a plain member manages shares only: they are told so here,
+  // instead of being walked into a refusal.
   const shareBlocked = workspace.accessMode === "private" && authority.manageShares && !authority.lifecycle;
   const offersLifecycle =
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");

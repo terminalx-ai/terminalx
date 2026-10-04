@@ -67,7 +67,13 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const [events, setEvents] = useConversationState<AgentEvent[]>(`${stateKey}:events`, []);
   const [notes, setNotes] = useConversationState<ChatNote[]>(`${stateKey}:notes`, []);
   const [hasMore, setHasMore] = useConversationState(`${stateKey}:hasMore`, false);
+  const [before, setBefore] = useConversationState<number | undefined>(`${stateKey}:before`, undefined);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [earlierError, setEarlierError] = useState<string | null>(null);
+  const earlierRequest = useRef<object | null>(null);
   const [draft, setDraft] = useConversationState(`${stateKey}:draft`, "");
   const [sendToAgent, setSendToAgent] = useConversationState(`${stateKey}:sendToAgent`, true);
   const [sending, setSending] = useConversationState(`${stateKey}:sending`, false);
@@ -80,14 +86,37 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const cacheKey = `terminalx:draft:${hostId}:${sessionId}:${tabId}`;
   const transcript = useMemo(() => buildTranscript(events, connected), [connected, events]);
 
-  useEffect(() => watchTranscript(app.api, hostId, sessionId, tabId, connected, (cache, replace) => {
-    setEvents((existing) => replace ? cache.events : mergeEvents(existing, cache.events));
-    setHasMore(cache.hasEarlier);
-    if (!connected || replace || cache.cursor || cache.events.length) setLoading(false);
-  }, (cause) => {
-    setLoading(false);
-    app.connection.reportError("Transcript sync failed", cause);
-  }), [app.api, app.connection, connected, epoch, hostId, sessionId, tabId, setEvents, setHasMore]);
+  useEffect(() => {
+    let receivedPage = false;
+    setLoading(true);
+    setLoadingEarlier(false);
+    setEarlierError(null);
+    setLoadError(connected ? null : "Reconnect to your Mac to load the transcript.");
+    const stop = watchTranscript(app.api, hostId, sessionId, tabId, connected, (cache, replace, source) => {
+      setEvents((existing) => replace ? cache.events : source === "cache" ? mergeEvents(cache.events, existing) : mergeEvents(existing, cache.events));
+      if (source === "page") {
+        // Only an authoritative page establishes the backward cursor. Live
+        // events and cache eviction must not move it past unrequested history.
+        if (!receivedPage || replace) {
+          setBefore(cache.events[0]?.seq);
+          setHasMore(cache.hasEarlier);
+          earlierRequest.current = null;
+          setLoadingEarlier(false);
+          setEarlierError(null);
+        }
+        receivedPage = true;
+        setLoadError(null);
+        setLoading(false);
+      } else if (!connected) {
+        setLoading(false);
+      }
+    }, (cause) => {
+      setLoading(false);
+      setLoadError(cause instanceof Error ? cause.message : "Could not load the transcript. Try again.");
+      app.connection.reportError("Transcript sync failed", cause);
+    });
+    return () => { stop(); earlierRequest.current = null; };
+  }, [app.api, app.connection, connected, epoch, hostId, sessionId, tabId, retry, setEvents, setHasMore, setBefore]);
 
   useEffect(() => {
     let active = true;
@@ -127,12 +156,24 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   }, [app.api, app.connection, connected, epoch, sessionId, setNotes]);
 
   const loadEarlier = async () => {
-    const before = events[0]?.seq;
-    if (before === undefined || !connected) return;
-    const page = await app.api.tail(sessionId, tabId, before);
-    if (page) {
+    if (before === undefined || !connected || loading || earlierRequest.current) return;
+    const request = {};
+    earlierRequest.current = request;
+    setLoadingEarlier(true);
+    setEarlierError(null);
+    try {
+      const page = await app.api.tail(sessionId, tabId, before);
+      if (earlierRequest.current !== request) return;
       setEvents((existing) => mergeEvents(existing, page.events));
       setHasMore(page.hasMore);
+      setBefore(page.events[0]?.seq);
+    } catch (error) {
+      if (earlierRequest.current === request) setEarlierError(error instanceof Error ? error.message : "Could not load earlier turns. Try again.");
+    } finally {
+      if (earlierRequest.current === request) {
+        earlierRequest.current = null;
+        setLoadingEarlier(false);
+      }
     }
   };
 
@@ -243,8 +284,27 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     }
   };
 
+  const transcriptHeader = <>
+    {loadError ? <Card>
+      <EmptyState title="Could not load transcript" detail={loadError} />
+      <Button label="Retry loading transcript" kind="secondary" disabled={!connected || loading} onPress={() => setRetry((value) => value + 1)} />
+    </Card> : null}
+    {earlierError ? <EmptyState title="Could not load earlier turns" detail={earlierError} /> : null}
+    {hasMore ? <Button
+      label={loadingEarlier ? "Loading earlier…" : earlierError ? "Retry loading earlier" : "Load earlier"}
+      kind="secondary"
+      disabled={!connected || loading || loadingEarlier || !!loadError}
+      onPress={() => void loadEarlier()}
+    /> : null}
+  </>;
+  const emptyTranscript = loading
+    ? <EmptyState title="Loading transcript" detail="Reading the latest turns from your Mac." busy />
+    : loadError ? null
+      : hasMore ? <EmptyState title="Earlier turns available" detail="Load earlier to see the context for these updates." />
+        : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />;
+
   const sendDisabled = !connected || (!draft.trim() && !attachments.length) || sending;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><FlatList data={items} keyExtractor={(item) => item.kind === "turn" ? item.turn.key : `note-${item.note.id}`} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.transcript} keyboardDismissMode="interactive" ListHeaderComponent={hasMore ? <Button label="Load earlier" kind="secondary" disabled={!connected} onPress={() => void loadEarlier()} /> : null} ListEmptyComponent={loading ? <EmptyState title="Loading transcript" detail="Reading the latest turns from your Mac." busy /> : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />} renderItem={({ item }) => item.kind === "turn" ? <TurnCard turn={item.turn} /> : <NoteCard note={item.note} />} ListFooterComponent={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={connected ? "Message this session" : "Draft kept while offline"} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><FlatList data={items} keyExtractor={(item) => item.kind === "turn" ? item.turn.key : `note-${item.note.id}`} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.transcript} keyboardDismissMode="interactive" ListHeaderComponent={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TurnCard turn={item.turn} /> : <NoteCard note={item.note} />} ListFooterComponent={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={connected ? "Message this session" : "Draft kept while offline"} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
 }
 
 function base64Size(value: string): number {

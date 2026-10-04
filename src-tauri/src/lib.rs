@@ -38,6 +38,8 @@ mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
 #[cfg(feature = "desktop")]
+mod cloud_ports;
+#[cfg(feature = "desktop")]
 mod cloud_remote;
 #[cfg(feature = "desktop")]
 mod agent_local_login;
@@ -54,6 +56,7 @@ mod organization_workspace_config;
 #[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
+mod cloud_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
@@ -76,6 +79,7 @@ mod issues;
 mod installation;
 #[cfg(feature = "desktop")]
 mod keychain;
+mod landed;
 mod memory_baseline;
 mod models;
 mod names;
@@ -362,6 +366,9 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            cloud_remote::cloud_port_forward,
+            cloud_remote::cloud_port_unforward,
+            cloud_remote::cloud_port_forwards,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
@@ -412,7 +419,8 @@ pub fn run() {
             commands::list_branches,
             commands::worktree_disposition,
             commands::sessions_sharing_worktree,
-            commands::remove_session_worktree,
+            commands::relocate_session,
+            commands::sole_workspace_of,
             commands::snapshot_tree,
             commands::head_tree,
             commands::changes_between,
@@ -477,6 +485,10 @@ pub fn run() {
             commands::mobile_terminal_drivers,
             commands::pty_kill,
             commands::terminal_perf_reply,
+            commands::cloud_control_reply,
+            commands::cloud_control_setting,
+            commands::cloud_control_set_setting,
+            commands::cloud_control_confirm,
             commands::list_dir,
             media::open_media_file,
             media::close_media_file,
@@ -487,7 +499,6 @@ pub fn run() {
             commands::open_local_path,
             commands::search_text,
             commands::replace_text,
-            commands::settle_session,
             commands::fork_session,
             commands::dictation_available,
             commands::dictation_start,
@@ -498,7 +509,8 @@ pub fn run() {
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::workspace_disposition,
-            commands::delete_workspace,
+            commands::remove_workspace,
+            commands::workspace_size,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,

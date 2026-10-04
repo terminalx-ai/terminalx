@@ -259,6 +259,7 @@ mod tests {
             worktree_name: Some("ws".into()),
             branch: None,
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

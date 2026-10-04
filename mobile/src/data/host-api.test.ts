@@ -11,6 +11,26 @@ function hostApi(request: ReturnType<typeof vi.fn>) {
   return new HostApi({ request } as unknown as HostConnection);
 }
 
+describe("mobile transcript pages", () => {
+  it("preserves refusals and transport failures instead of reporting empty history", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: false, refusal: { code: "unavailable", message: "Transcript event 12 is too large to load on mobile." } });
+    await expect(hostApi(request).tail("session", "tab")).rejects.toThrow("event 12 is too large");
+    request.mockRejectedValueOnce(new Error("Connection closed"));
+    await expect(hostApi(request).tail("session", "tab")).rejects.toThrow("Connection closed");
+  });
+
+  it.each([null, {}, { events: [], hasMore: true }, { events: [] }, { events: [{}], hasMore: false }])("rejects malformed pages: %j", async (value) => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value });
+    await expect(hostApi(request).tail("session", "tab")).rejects.toThrow("invalid transcript page");
+  });
+
+  it("accepts empty history and forwards the exclusive event cursor", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
+    await expect(hostApi(request).tail("session", "tab", 12)).resolves.toEqual({ events: [], hasMore: false });
+    expect(request).toHaveBeenCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 12, limit: 20 });
+  });
+});
+
 describe("mobile chat sends", () => {
   it("returns the created note instead of discarding the host result", async () => {
     const note = { id: "note-1", body: "hello", createdAt: 1, author: { userId: "user-1", displayName: "Paresh" } };

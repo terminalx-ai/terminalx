@@ -93,12 +93,14 @@ export class HostApi {
     return Array.isArray(value?.sessions) ? value.sessions.filter(isSessionSummary) : null;
   }
 
-  async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean } | null> {
+  async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
     const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 20 });
-    if (!result.ok) return null;
+    if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
-    if (!Array.isArray(value?.events)) return null;
-    return { events: value.events.filter(isAgentEvent), hasMore: value.hasMore === true };
+    if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {
+      throw new Error("The Mac returned an invalid transcript page. Try loading it again.");
+    }
+    return { events: value.events, hasMore: value.hasMore };
   }
 
   subscribeSession(tabId: string, listener: (event: AgentEvent) => void, ready?: () => void): () => void {

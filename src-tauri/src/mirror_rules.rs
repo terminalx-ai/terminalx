@@ -38,7 +38,7 @@ const SECRET_DIR_PAIRS: &[(&str, &str)] = &[(".config", "gh"), (".config", "gclo
 /// container definitions an editor offers to start.
 const TOOL_CONFIG_DIRS: &[&str] = &[
     // Agents.
-    ".claude", ".codex", ".cursor", ".gemini", ".windsurf", ".continue", ".roo", ".kiro", ".amazonq",
+    ".claude", ".codex", ".cursor", ".gemini", ".windsurf", ".continue", ".roo", ".kiro", ".amazonq", ".opencode", ".clinerules", ".factory", ".goose", ".agents",
     // Editors and their run configurations.
     ".vscode", ".idea", ".zed", ".helix", ".run", ".devcontainer",
     // Hooks and shells.
@@ -69,6 +69,9 @@ const TOOL_CONFIG_NAMES: &[&str] = &[
 /// `<dir>/<name>` pairs: Cargo runs what its config names; the Gradle
 /// wrapper downloads and runs what its properties name.
 const TOOL_CONFIG_PAIRS: &[(&str, &str)] = &[(".cargo", "config.toml"), (".cargo", "config"), ("wrapper", "gradle-wrapper.properties")];
+/// `<dir>/<dir>` pairs: hooks an agent runs from the repository's own
+/// `.github` folder.
+const TOOL_CONFIG_DIR_PAIRS: &[(&str, &str)] = &[(".github", "hooks")];
 /// Extensions of files an editor opens as a project of its own.
 const TOOL_CONFIG_EXTENSIONS: &[&str] = &["code-workspace"];
 /// Besides `HEAD`, any one of these makes a folder a Git directory: Git
@@ -80,11 +83,23 @@ const GIT_POINTERS: &[&str] = &["commondir", "gitdir"];
 
 /// A name as a disk that folds case and Unicode form compares it: composed,
 /// case-folded by Unicode's rules (upper, then lower, so the long s is `s`
-/// and the Kelvin sign `k`), composed again.
+/// and the Kelvin sign `k`), composed again. Folded until it stops changing:
+/// one round takes the capital sharp s (U+1E9E) only as far as `ß`, which a
+/// second round takes to `ss`, so all three spellings agree. Names that are
+/// one file on the disk must never fold apart here, or the mirror would
+/// write both and then see its own file as a local change for ever.
 pub fn fold(name: &str) -> String {
     let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
-    let folded: String = nfc.normalize(name).chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect();
-    nfc.normalize(&folded).into_owned()
+    let mut current = nfc.normalize(name).into_owned();
+    for _ in 0..4 {
+        let folded: String = current.chars().flat_map(char::to_uppercase).flat_map(char::to_lowercase).collect();
+        let next = nfc.normalize(&folded).into_owned();
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
 }
 
 fn folded_parts(path: &str) -> Vec<String> {
@@ -152,6 +167,7 @@ pub fn tool_config(path: &str) -> bool {
     let mut parts = folded_parts(path);
     let Some(name) = parts.pop() else { return false };
     parts.iter().any(|dir| TOOL_CONFIG_DIRS.contains(&dir.as_str()))
+        || parts.windows(2).any(|pair| TOOL_CONFIG_DIR_PAIRS.contains(&(pair[0].as_str(), pair[1].as_str())))
         || TOOL_CONFIG_NAMES.contains(&name.as_str())
         || parts.last().is_some_and(|dir| TOOL_CONFIG_PAIRS.contains(&(dir.as_str(), name.as_str())))
         || name.rsplit_once('.').is_some_and(|(_, extension)| TOOL_CONFIG_EXTENSIONS.contains(&extension))
@@ -340,6 +356,10 @@ mod tests {
         assert_eq!(fold("objectſ"), "objects");
         assert_eq!(fold("\u{212a}elvin"), "kelvin");
         assert_eq!(fold("STRASSE"), fold("straße"));
+        // The capital sharp s (U+1E9E), the small one and `ss` are one name.
+        assert_eq!(fold("stra\u{1e9e}e"), "strasse");
+        assert_eq!(fold("stra\u{1e9e}e"), fold("straße"));
+        assert_eq!(fold(&fold("\u{1e9e}")), fold("\u{1e9e}"), "folding is stable");
         assert_eq!(fold("ΣΑΣ"), fold("σας"));
         assert_eq!(fold("cafe\u{301}"), fold("caf\u{e9}"));
         assert_eq!(git_directories(["pkg/HEAD", "pkg/objectſ/x", "pkg/refſ/x"]).into_iter().collect::<Vec<_>>(), ["pkg"]);
@@ -382,10 +402,17 @@ mod tests {
             ".roo/mcp.json",
             ".kiro/settings.json",
             ".amazonq/mcp.json",
+            ".opencode/agent/x.md",
+            ".clinerules/rules.md",
+            ".factory/droids/x.md",
+            ".goose/config.yaml",
+            ".agents/skills/x/SKILL.md",
+            ".github/hooks/pre-tool.json",
+            "packages/app/.github/hooks/x.sh",
         ] {
             assert!(tool_config(path), "{path}");
         }
-        for path in ["gradle/wrapper/gradle-wrapper.jar", "docs/yarnrc.md", "src/run/a.ts", "workspace.code-workspace.md"] {
+        for path in ["gradle/wrapper/gradle-wrapper.jar", "docs/yarnrc.md", "src/run/a.ts", "workspace.code-workspace.md", ".github/workflows/ci.yml", "src/hooks/useThing.ts", "docs/agents.md"] {
             assert!(!tool_config(path), "{path}");
         }
     }

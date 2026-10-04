@@ -13,14 +13,31 @@ negotiated as its own namespace (`collab/1`).
 
 ## Who may do what
 
+**Any member creates a cloud workspace and manages the ones they created
+(PRO-73).** "Manages" is stop, resume, archive, unarchive, delete, the access
+mode, shares, and the runtime-scope work below. Owners and admins manage
+every workspace, as before. The API reports whoever manages a workspace as
+its `manager`, so everything in the app that keys on that role (the lifecycle
+menu, visibility, sharing, adding tabs and terminals) follows by itself. The
+server says it has this rule with the capability
+`cloud.workspaces.member-managed.v1` (`status.memberWorkspaces`); against a
+server without it, creating stays with owners and admins and a creator who is
+a plain member is a `driver`, which is what the "against a server from before
+PRO-73" notes below describe. A new session a member starts only reuses or
+wakes a workspace they manage; with none of their own in the project it
+creates one (`planCloudStart`). The organization's limits apply to everyone,
+and an organization may also cap the running workspaces per person
+(Settings → Compute, "Running per person"; blank is no cap).
+
 Two things decide a connection's rights:
 
-- **Attachment authority** (PRO-13): `manage` for an organization admin's
-  desktop, `participate` for everyone else and every phone. Runtime-scope
+- **Attachment authority** (PRO-13): `manage` for the desktop of whoever
+  manages the workspace (an organization owner or admin, or its creator),
+  `participate` for everyone else and every phone. Runtime-scope
   work (create or kill terminals, file and Git writes, create, close or
   configure agent tabs, rotate the key) stays `manage`.
-- **Role** (per person, from the API): `manager` (owners and admins),
-  `driver` (the workspace's creator, and members shared as drivers), `viewer`
+- **Role** (per person, from the API): `manager` (owners and admins, and
+  the workspace's creator), `driver` (members shared as drivers), `viewer`
   (members shared as viewers), or `none` (any other member). `canApprove` is
   separate: managers and the creator always approve; a share says whether its
   person does. A viewer may approve.
@@ -78,7 +95,7 @@ change the mode back.
   read the tokens in the environment, edit the agent's settings files, or
   start an agent with other flags. Give `canApprove` to a driver only if
   they may do all of that.
-- **Manager** (organization owners and admins). Everything, plus the
+- **Manager** (organization owners and admins, and the workspace's creator). Everything, plus the
   runtime-scope work of a `manage` attachment (create and kill terminals,
   file and Git writes, tabs and sessions, the key) and other people's leases.
 
@@ -380,8 +397,9 @@ organization-visible. A workspace created from the sidebar starts private
   switches back to `private`; the server revokes every share with it.
 * Someone who cannot manage shares gets the same list titled "Who has
   access", with neutral copy.
-* Visibility is the API's owner-or-admin switch. A creator who is a plain
-  member (`you.role` is not `manager`) manages the shares of a workspace that
+* Visibility is for whoever manages the workspace. Against a server from
+  before PRO-73 a creator who is a plain member is not a manager
+  (`you.role` is not `manager`): they manage the shares of a workspace that
   is already organization-visible; "Share…" on their private workspace and
   "Make private again" are disabled with the reason.
 * The two calls of "make visible and share" can part ways. If the share is
@@ -692,6 +710,20 @@ Who may do what (checked on every call, against the latest member list):
 - **One controller**: input and size follow one device, as for shells
   (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
   A second viewer's window never resizes the program.
+- **After a stop and a wake** the app that stayed open is a new device to
+  the runtime: a stop revokes every attachment, and the wake issues a new
+  attachment and device. Where the runtime process survived the stop (a
+  frozen container), the terminal's controller is still the old device, so
+  the returning person watches ("You control this terminal from another
+  window or device") until they take control, which is never done for them.
+  The runtime counts a writer's `seq` per device, so the open app's first
+  write is refused with `conflict`; the client then starts a new writer, and
+  types that write under it when it was sent only once (it was refused, so
+  it cannot have been applied) or reports it when it had been resent after a
+  drop. A runtime that restarted knows no controller: the terminal starts
+  over, as after any restart. Shells follow the same rules. Recognising the
+  same installation, so that the banner does not appear, needs a stable
+  installation key from the API (the attachment id changes at every mint).
 - **Revocation** is the shells': a person who lost access has their
   connection closed and their streams ended; one who may no longer drive
   loses control, announced.
@@ -703,6 +735,35 @@ never holds: a `/login` code or URL, the output of a `!` shell command, text
 typed into the CLI's composer and not sent. The ring exists only in the
 runtime's memory: it is gone when the tab is removed, and when the runtime
 process ends (a stop, a restart).
+
+**A person's own terminal after a stop and a wake.** A stop revokes every
+attachment, and the wake issues the app that stayed open a new attachment
+and device. With an API that sends `installationKey` on each attachment
+(asked for with the runtime capability `attachment-installation-v1`; the
+same key at every mint for one person's client installation), a runtime
+process that survived the stop (a frozen container) gives the terminal back
+to the person who controlled it, on their new device, without `pty.control`.
+All of this must hold, for shells and agent terminals alike:
+
+- the same person (`userId`, supplied by the API) and the same installation
+  key; the key is never compared without the person;
+- the old device has no connection left (with two, both must end; a view
+  that was already watching is then told `pty.control: you`);
+- the person may still type: a manager, or a driver who may approve, and for
+  an agent's terminal nobody else holds the tab's lease. Otherwise the view
+  reads `other`, exactly what its writes would be told;
+- it happens on attach, on the shell list, and on a key or a resize from
+  that person, never on a `report` write: what a terminal says by itself
+  moves nothing.
+
+Nothing else moves control by itself: another person, the same person's
+other installation, a controller whose access was revoked (that clears the
+controller; sharing again does not restore it), or any link without a key
+(an older API): they watch until `pty.control`. A writer's `seq` is counted
+per person and installation key (per device without one), so the open app
+continues with the next number and a write it resends is answered, not
+typed again. Coming back is not activity and claims no lease. A runtime
+that restarted has no controller to give back.
 
 Nothing new is stored. Output is kept only in the runtime's memory, and
 keystrokes go from the desktop to the runtime as `pty.write` over the same
@@ -731,12 +792,18 @@ point) beside the shell terminals' but apart from them, and
   view starts over on the new process instead of ending.
 - **Looking never starts the agent.** With the CLI not running the view says
   so and offers "Start agent"; pressing a key does the same, and that key is
-  not typed into a CLI that is still starting.
+  not typed: it only starts the CLI and takes control. From the moment the
+  runtime reports the tab's process running, keys are sent, also while the
+  CLI is still drawing its first screen: the terminal holds them and the CLI
+  reads them once it is ready, as with a local tab.
 - **Control.** If nobody controls the terminal and this person may type, the
   view takes control at its own size when it opens. While someone else
   controls it, it shows their size and "<Name> controls this terminal; you
   are watching." with "Take control". The tab's lease bar sits above it as it
-  does above the chat.
+  does above the chat. After a stop and a wake of a runtime that kept
+  running, the person's own terminal reads "You control this terminal from
+  another window or device", and "Take control" takes it (see "After a stop
+  and a wake").
 - **Read-only** for a viewer, for a driver while someone else drives the tab,
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.

@@ -315,6 +315,23 @@ impl ControlService {
         }
         #[cfg(not(feature = "desktop"))]
         let _ = request_id;
+        // Cloud workspaces (PRO-40): the window decides and acts, exactly as a
+        // click there would. The headless runtime has no account and no window.
+        if let Some(action) = command.strip_prefix("cloud.") {
+            if !self.has_webview() {
+                return Err(ControlError::new(
+                    "unsupported",
+                    format!("{command} needs the TerminalX desktop app, signed in."),
+                    None::<String>,
+                ));
+            }
+            // The person's switch is checked here, in native code, before the
+            // window hears of the command. `status` still answers, to say so.
+            if action != "status" && !crate::cloud_control::enabled() {
+                return Err(crate::cloud_control::disabled_error());
+            }
+            return crate::cloud_control::call(self.sink.as_ref(), action, params);
+        }
         if command.starts_with("computer.") || command.starts_with("browser.") {
             return Err(ControlError::new(
                 "unsupported",
@@ -652,35 +669,47 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        let affected = crate::session_ops::sessions_in_workspace(Path::new(&worktree.path))
-            .map_err(ControlError::internal)?;
-        // Agents, then the sessions' shells, each waited for, so nothing
+        // Agents, then the session's shells, each waited for, so nothing
         // still holds the directory.
-        let mut shells = Vec::new();
-        for session in &affected {
+        let stop = |session: &crate::store::index::SessionEntry| {
             for tab in &session.tabs {
                 let _ = self.manager.stop(&session.id, &tab.id);
             }
-            shells.extend(self.manager.terminals().session_pane_ids(&session.id, &[]));
-        }
-        self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+            let shells = self.manager.terminals().session_pane_ids(&session.id, &[]);
+            self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+        };
         #[cfg(feature = "desktop")]
         let browser_key = crate::browser::control::canonical(&worktree.path);
-        // The CLI showed nothing of what the directory holds, so a worktree
-        // git cannot remove is reported rather than deleted directly.
-        let (entries, removal) = crate::session_ops::delete_workspace_entries(
-            &project.path,
-            &worktree.path,
-            false,
-            crate::git::DirectDelete::Never,
-        )
-        .map_err(ControlError::internal)?;
-        // Only once the workspace is really gone: a delete that fails keeps it.
+        // The same check as every other way of removing a workspace. One
+        // that is not clean and merged is removed only with `--force`, which
+        // is the CLI's second confirmation. A directory git cannot remove is
+        // reported, never deleted directly: the CLI showed nothing of it.
+        let force = params.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let request = crate::session_ops::WorkspaceRemoval {
+            project_path: &project.path,
+            path: &worktree.path,
+            sessions: crate::session_ops::SessionsFate::Delete,
+            delete_branch: false,
+            // The CLI shows nothing first, so its `--force` covers whatever
+            // is there, and it names no sessions to compare with.
+            confirmation: if force { crate::session_ops::Confirmation::Forced } else { crate::session_ops::Confirmation::Single },
+            expected_sessions: None,
+            direct: crate::git::DirectDelete::Never,
+            fetch: crate::landed::Fetch::Fresh,
+        };
+        let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(|error| {
+            if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
+                ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
+            } else {
+                ControlError::internal(error)
+            }
+        })?;
+        // Only once the workspace is really gone: a removal that fails keeps it.
         #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             desktop.browser.forget_workspace(&browser_key);
         }
-        crate::session_ops::notify_workspace_deleted(&*self.sink, &project.path, &entries);
+        let (entries, removal) = (removed.sessions, removed.removal);
         let removed: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
         Ok(json!({"deleted": worktree.path, "project": project.path, "removedSessions": removed, "keptBranch": removal.kept_branch}))
     }
@@ -1022,6 +1051,7 @@ mod tests {
             worktree_name: None,
             branch: Some("main".into()),
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

@@ -11,7 +11,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
-import { roleRefusedMessage } from "@/lib/accountRoles";
+import { managerRefusedMessage, roleRefusedMessage } from "@/lib/accountRoles";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
@@ -185,7 +185,11 @@ const MESSAGES: Record<string, string> = {
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
-  // Offered because the app still held an owner's or admin's role: it changed since.
+  // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
+  // thought this person was one of them: the role, or the list, changed since.
+  cloud_workspace_manager_required: managerRefusedMessage("stop, resume, archive or delete it"),
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
+  // A server from before PRO-73 keeps these for owners and admins.
   organization_admin_required: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
   forbidden: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
 };

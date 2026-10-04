@@ -11,7 +11,8 @@ switching hosts.
 
 `session.sync({sessionId, tabId, cursor?})` returns:
 
-- `events`: a forward page of at most 500 canonical log records.
+- `events`: a forward page of at most 500 canonical log records, additionally
+  bounded so the complete serialized RPC response fits within 6 MiB.
 - `cursor: {offset, digest}`: record count plus a SHA-256 hash of the entire
   canonical prefix, including protocol generation and conversation identity.
 - `hasMore`: another forward page is required.
@@ -19,7 +20,9 @@ switching hosts.
 - `hasEarlier`: older history exists before this page.
 
 An absent or invalid cursor resets to the most recent 20 turns, capped at 500
-records. A valid cursor returns only subsequent records, irrespective of turn
+records and the response-byte budget. A single event too large to fit returns a
+visible error with a retry action; its checkpoint is never skipped. A valid
+cursor returns only subsequent records, irrespective of turn
 boundaries. An unchanged prefix returns an empty event array. The client never
 uses a live event's sequence number as its checkpoint. It validates page shape
 and offset progression, applies records in order, and atomically stores data and
@@ -48,7 +51,9 @@ On an older host, the phone replaces the recent window with `session.tail`,
 buffering live events arriving during that read. Replacing the window avoids
 joining an old cached range to a recent tail across an unprovable gap. Older
 hosts are not polled repeatedly. `Load earlier` retains its existing `before`
-pagination and does not advance the forward checkpoint.
+pagination and does not advance the forward checkpoint. Its cursor comes from
+the authoritative history window and remains stable during live catch-up;
+failed backward reads retain that cursor and offer a retry.
 
 ## Cache and cleanup
 
@@ -140,11 +145,10 @@ and old-host fallback. Rust tests exercise the actual cursor/hash implementation
 rewrites, truncation, conversation scope, empty logs, conditional lists and the
 synthetic response-size benchmark.
 
-Local validation completed with 293 mobile tests, 1,848 desktop tests, and 1,179
-Rust tests passing (five Rust tests ignored). Both TypeScript checks and Clippy
+Local validation after merging the oversized-transcript fix completed with 310
+mobile tests, 1,988 desktop tests, and 1,289 Rust tests passing (six Rust tests
+ignored). Both TypeScript checks and Clippy
 with `-D warnings` passed. Mobile lint had no errors and one pre-existing
-`import/first` warning in `transport/connection.test.ts`. The first full Rust run
-hit an unrelated subprocess-startup timeout test; it passed alone and the entire
-suite passed with `--test-threads=4`. Local Rust commands used SDK 26.5 via
+`import/first` warning in `transport/connection.test.ts`. The full Rust suite passed with `--test-threads=4`. Local Rust commands used SDK 26.5 via
 `SDKROOT` / `CMAKE_OSX_SYSROOT` and `MACOSX_DEPLOYMENT_TARGET=14.0` because the
 installed SDK 27 stub files were incompatible with the default linker.

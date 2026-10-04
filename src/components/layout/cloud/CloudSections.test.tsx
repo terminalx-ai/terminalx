@@ -591,7 +591,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     openMenu("fix-login");
     const locked = within(await screen.findByRole("menu")).getByTestId("cloud-share-locked");
     expect(locked.getAttribute("aria-disabled")).toBe("true");
-    expect(locked.textContent).toBe("Share…Only an organization owner or admin can change whether a workspace is private or visible to the organization");
+    expect(locked.textContent).toBe("Share…Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization");
     fireEvent.click(locked);
     expect(opened).not.toHaveBeenCalled();
     cleanup();
@@ -602,7 +602,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     opened.mockRestore();
   });
 
-  it("offers Stop, Archive and Delete only to an organization owner or admin, and says so to everyone else", async () => {
+  it("offers Stop, Archive and Delete only to whoever manages the workspace, and says so to everyone else", async () => {
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(
       {
@@ -621,7 +621,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     const names = (menu: HTMLElement) => within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
     expect(names(await screen.findByRole("menu"))).toEqual(["Share…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
     cleanup();
-    // A viewer, a driver (even the creator) and an unshared member: the server refuses all three, so none is offered.
+    // A viewer, a driver (the creator too, against a server from before PRO-73, which reports them as a driver) and an unshared member: the server refuses all three, so none is offered.
     for (const [name, first] of [
       ["perf-sweep", "Who has access…"],
       ["driven", "Share…"],
@@ -631,14 +631,55 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
       mount();
       openMenu(name);
       const menu = await screen.findByRole("menu");
-      expect(names(menu)).toEqual([first, "Only an organization owner or admin can stop, archive or delete a cloud workspace"]);
+      expect(names(menu)).toEqual([first, "Only this workspace's creator or an organization owner or admin can stop, archive or delete it"]);
       expect(within(menu).getByTestId("cloud-lifecycle-locked").getAttribute("aria-disabled")).toBe("true");
       expect(within(menu).queryByRole("menuitem", { name: /^(Stop|Resume|Archive|Delete)/ })).toBeNull();
       cleanup();
     }
   });
 
-  it("does not offer a new session to a member, who could only be refused", async () => {
+  it("offers a member a new session, and no 'admins only', where the server lets members create (PRO-73)", async () => {
+    mocks.status = { ...mocks.status, memberWorkspaces: true, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role: "member" } : org)) };
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(shared, ORG);
+    mount();
+    expect(screen.getByRole("button", { name: "New session in acme/api" })).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Project menu for acme/api" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(screen.getByRole("button", { name: "Project menu for acme/api" }));
+    const menu = await screen.findByRole("menu");
+    const entry = within(menu).getByRole("menuitem", { name: /New session/ });
+    expect(entry.getAttribute("aria-disabled")).toBeNull();
+    expect(entry.getAttribute("title")).toBeNull();
+    expect(menu.textContent).not.toContain("admins only");
+  });
+
+  it("gives a member the whole lifecycle menu on a workspace they created, and not on a teammate's (PRO-73)", async () => {
+    mocks.status = { ...mocks.status, memberWorkspaces: true, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role: "member" } : org)) };
+    catalog.resetCloudCatalog();
+    await catalog.ingestCloudList(
+      {
+        workspaces: [
+          // Theirs: the server reports the creator as its manager.
+          item("fix-login", { repositories, lastActivityAt: 50, authority: "manage", you: { role: "manager", canApprove: true, canManageShares: true } }),
+          // A teammate's, shared with them as a driver who may approve.
+          item("perf-sweep", { repositories, lastActivityAt: 40, authority: "participate", you: { role: "driver", canApprove: true, canManageShares: false } }),
+        ],
+      },
+      ORG,
+    );
+    const names = (menu: HTMLElement) => within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
+    mount();
+    openMenu("fix-login");
+    expect(names(await screen.findByRole("menu"))).toEqual(["Share…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    cleanup();
+    mount();
+    openMenu("perf-sweep");
+    const menu = await screen.findByRole("menu");
+    expect(names(menu)).toEqual(["Who has access…", "Only this workspace's creator or an organization owner or admin can stop, archive or delete it"]);
+    expect(within(menu).queryByRole("menuitem", { name: /^(Stop|Resume|Archive|Delete)/ })).toBeNull();
+  });
+
+  it("does not offer a new session to a member against a server from before PRO-73, who could only be refused", async () => {
     mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? { ...org, role: "member" } : org)) };
     catalog.resetCloudCatalog();
     await catalog.ingestCloudList(shared, ORG);
