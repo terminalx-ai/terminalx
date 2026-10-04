@@ -14,7 +14,7 @@ pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
 use crate::session_ops::{
     available_worktree_name, delete_workspace_entries, notify_workspace_deleted, notify_workspace_settled,
-    sessions_in_workspace,
+    rename_workspace_entries, sessions_in_workspace,
 };
 
 type CmdResult<T> = Result<T, String>;
@@ -2212,10 +2212,11 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 
 /// One native question, one at a time.
 ///
-/// - **Only the agree button agrees.** The dialog reports which button was
-///   pressed; anything else (Refuse, a dismissal, a result this code does not
-///   know) is a refusal. "Refuse" is the first, default button, so Return
-///   refuses.
+/// - **Only the agree button agrees.** The dialog has three buttons (see
+///   [`cloud_control_buttons`]): "Refuse" first and default, so Return
+///   refuses; the agree button; and "Close", which is where the platform
+///   reports every dismissal (Escape, the window's close box). Anything but
+///   the agree button is a refusal.
 /// - **It expires.** The caller is answered after [`QUESTION_TTL`] whether or
 ///   not the person has answered. An expired request is dropped: the dialog
 ///   may still be on screen (it cannot be closed from here), and pressing
@@ -2226,7 +2227,7 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
 async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.
     let ok_label: String = ok_label.chars().filter(|c| !c.is_control()).take(40).collect();
     if let Err(answer) = question_begin(std::time::Instant::now()) {
@@ -2241,7 +2242,7 @@ async fn cloud_control_question(app: tauri::AppHandle, title: String, message: S
             .message(message)
             .title(title)
             .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom("Refuse".to_string(), ok_label))
+            .buttons(cloud_control_buttons(&ok_label))
             .blocking_show_with_result();
         cloud_control_agreed(&pressed, &agree)
     });
@@ -2259,9 +2260,28 @@ async fn cloud_control_question(app: tauri::AppHandle, title: String, message: S
     }
 }
 
+const CLOUD_CONTROL_REFUSE: &str = "Refuse";
+const CLOUD_CONTROL_CLOSE: &str = "Close";
+
+/// The question's buttons. Which slot each label sits in matters, because
+/// the dialog layer reports a dismissal as its *cancel* slot and then renames
+/// the result to that slot's label (tauri-plugin-dialog `desktop.rs`: rfd
+/// answers `Cancel` for Escape and the close box on Linux and Windows):
+///
+/// - yes: "Refuse" (first, so it is the default and Return refuses);
+/// - no: the agree label;
+/// - cancel: "Close". A dismissal lands here and nowhere else.
+///
+/// With two buttons the agree label would have to take the cancel slot, and
+/// every dismissal would come back as agreement.
+fn cloud_control_buttons(agree: &str) -> tauri_plugin_dialog::MessageDialogButtons {
+    tauri_plugin_dialog::MessageDialogButtons::YesNoCancelCustom(CLOUD_CONTROL_REFUSE.to_string(), agree.to_string(), CLOUD_CONTROL_CLOSE.to_string())
+}
+
 /// Whether the dialog's result is the explicit agree button, and nothing else.
 fn cloud_control_agreed(pressed: &tauri_plugin_dialog::MessageDialogResult, agree: &str) -> bool {
-    matches!(pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label) if label == agree && label != "Refuse")
+    matches!(pressed, tauri_plugin_dialog::MessageDialogResult::Custom(label)
+        if label == agree && label != CLOUD_CONTROL_REFUSE && label != CLOUD_CONTROL_CLOSE)
 }
 
 /// The window's answer to a `cloud_control_request` event (PRO-40).
@@ -2514,8 +2534,62 @@ mod command_tests {
         ] {
             assert!(!super::cloud_control_agreed(&pressed, "Resume and send"), "{pressed:?}");
         }
-        // A caller cannot make "Refuse" the agree button.
+        // A caller cannot make "Refuse" or "Close" the agree button.
         assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom("Refuse".into()), "Refuse"));
+        assert!(!super::cloud_control_agreed(&MessageDialogResult::Custom("Close".into()), "Close"));
+    }
+
+    /// What the platform's dialog answered, before the dialog layer renames it.
+    #[derive(Clone, Copy, Debug)]
+    enum Native {
+        Yes,
+        No,
+        Ok,
+        Cancel,
+    }
+
+    /// The renaming tauri-plugin-dialog 2.7.3 applies to a native result
+    /// (`desktop.rs`, `show_message_dialog`), for the button sets used here.
+    /// On Linux and Windows the platform never names a custom button itself,
+    /// so this table is what decides which label a click or a dismissal
+    /// becomes.
+    fn as_the_dialog_layer_reports(native: Native, buttons: &tauri_plugin_dialog::MessageDialogButtons) -> tauri_plugin_dialog::MessageDialogResult {
+        use tauri_plugin_dialog::{MessageDialogButtons as Buttons, MessageDialogResult as Result};
+        match (native, buttons) {
+            (Native::Ok, Buttons::OkCancelCustom(ok, _)) => Result::Custom(ok.clone()),
+            (Native::Cancel, Buttons::OkCancelCustom(_, cancel)) => Result::Custom(cancel.clone()),
+            (Native::Yes, Buttons::YesNoCancelCustom(yes, _, _)) => Result::Custom(yes.clone()),
+            (Native::No, Buttons::YesNoCancelCustom(_, no, _)) => Result::Custom(no.clone()),
+            (Native::Cancel, Buttons::YesNoCancelCustom(_, _, cancel)) => Result::Custom(cancel.clone()),
+            (Native::Yes, _) => Result::Yes,
+            (Native::No, _) => Result::No,
+            (Native::Ok, _) => Result::Ok,
+            (Native::Cancel, _) => Result::Cancel,
+        }
+    }
+
+    #[test]
+    fn a_dismissal_of_the_cloud_question_never_agrees_on_any_platform() {
+        use tauri_plugin_dialog::MessageDialogButtons;
+        let agree = "Resume and send";
+        let buttons = super::cloud_control_buttons(agree);
+        // The button set itself: Refuse first (the default), the agree label in the "no" slot, and a
+        // third button whose only job is to be where a dismissal lands.
+        assert!(matches!(&buttons, MessageDialogButtons::YesNoCancelCustom(yes, no, cancel) if yes == "Refuse" && no == agree && cancel == "Close"));
+        let agreed = |native| super::cloud_control_agreed(&as_the_dialog_layer_reports(native, &buttons), agree);
+        // Escape, the close box, an aborted modal: the platform says Cancel. That is not agreement.
+        assert!(!agreed(Native::Cancel));
+        // The default button (Return) refuses.
+        assert!(!agreed(Native::Yes));
+        // A result the button set does not have is not agreement either.
+        assert!(!agreed(Native::Ok));
+        // Only a click on the agree button is.
+        assert!(agreed(Native::No));
+
+        // Why three buttons: with two, the agree label has to sit in the cancel slot, and the same
+        // dismissal comes back named as the agree button. This is the bug the review found.
+        let two = MessageDialogButtons::OkCancelCustom("Refuse".into(), agree.into());
+        assert!(super::cloud_control_agreed(&as_the_dialog_layer_reports(Native::Cancel, &two), agree));
     }
 
     use std::path::Path;
@@ -2973,67 +3047,15 @@ pub async fn preview_workspace_name(project_path: String, requested: Option<Stri
     .map_err(err)?
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRename {
-    pub name: String,
-    pub path: String,
-    pub branch: String,
-    pub sessions: Vec<SessionEntry>,
-}
-
-fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> CmdResult<WorkspaceRename> {
-    let project = projects::canonical(project_path).map_err(err)?;
-    let target = std::fs::canonicalize(path).map_err(err)?;
-    let old_name = target
-        .file_name()
-        .and_then(|part| part.to_str())
-        .ok_or_else(|| "Workspace has no usable name.".to_string())?
-        .to_string();
-    let name = available_worktree_name(Path::new(&project), Some(requested), Some(&old_name))?;
-    let renamed = git::rename_worktree(Path::new(&project), &target, &name).map_err(err)?;
-    let new_path = renamed.path.clone();
-    let new_branch = renamed.branch.clone();
-    let update = index::update(|sessions| {
-        let mut affected = Vec::new();
-        for session in sessions {
-            // The old folder no longer exists after `git worktree move`, so
-            // compare its canonical path lexically instead of canonicalising
-            // the session cwd after the move.
-            let matches = Path::new(&session.cwd) == target || session.cwd == path;
-            if matches {
-                session.cwd = new_path.clone();
-                session.worktree_name = Some(name.clone());
-                session.branch = Some(new_branch.clone());
-                session.modified = index::now();
-                affected.push(session.clone());
-            }
-        }
-        Ok(affected)
-    });
-    match update {
-        Ok(sessions) => Ok(WorkspaceRename { name, path: renamed.path, branch: renamed.branch, sessions }),
-        Err(save_error) => {
-            let rollback = git::rename_worktree(Path::new(&project), Path::new(&renamed.path), &old_name);
-            match rollback {
-                Ok(_) => Err(err(save_error)),
-                Err(rollback_error) => Err(format!(
-                    "Workspace was renamed but its session metadata could not be saved ({save_error:#}); rollback also failed ({rollback_error:#})."
-                )),
-            }
-        }
-    }
-}
+pub use crate::session_ops::WorkspaceRename;
 
 /// Rename a managed workspace's folder and matching `raccoon/<name>` branch,
 /// then retarget every session that shares it.
 #[tauri::command]
 pub async fn rename_workspace(app: AppHandle, project_path: String, path: String, name: String) -> CmdResult<WorkspaceRename> {
     tauri::async_runtime::spawn_blocking(move || {
-        let renamed = rename_workspace_entries(&project_path, &path, &name)?;
-        for session in &renamed.sessions {
-            let _ = app.emit("session_updated", session);
-        }
+        let renamed = rename_workspace_entries(&project_path, &path, &name).map_err(err)?;
+        crate::session_ops::notify_workspace_settled(&app, &project_path, &renamed.sessions);
         Ok(renamed)
     })
     .await

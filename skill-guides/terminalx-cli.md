@@ -65,6 +65,7 @@ terminalx sessions create \
   --project <project> \
   --agent <claude|codex> \
   --prompt <text> \
+  [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
@@ -75,6 +76,28 @@ project's own checkout; `--worktree` makes the default explicit. The command cre
 session, starts its PTY-first tab, types the prompt through the same path as the composer, and
 returns both ids. Valid modes are `plan`, `manual`, `auto`, `acceptEdits`, and
 `bypassPermissions`.
+
+`--title` sets the sidebar title. `--name` chooses the worktree directory name and branch
+suffix (by default, `raccoon/<name>`). Names use the workspace UI's slug rules: lowercase
+ASCII letters and digits, other characters become hyphens, and the slug is limited to 40
+characters. An empty slug or an explicitly named workspace already claimed by a directory,
+branch, or session fails with `invalid_arguments` before anything is created. `--name`
+requires a Git project and cannot be combined with `--on-main`.
+
+With only `--title`, its slug becomes the worktree name. Generated names gain a numeric
+suffix when taken; random names remain the fallback without a usable title. Sessions started
+from an issue use its identifier and title by default, preserving the issue number in both
+the session title and worktree name.
+
+```text
+terminalx sessions create --project <project> --agent codex --prompt "Fix the timeout" \
+  --title "#203 fix" --name fix-203 --json
+terminalx sessions rename <session> --title "#203 ready for review" --json
+```
+
+Creation returns `sessionId`, `tabId`, the final `title`, `worktreeName`, `branch`, and `path`,
+alongside the full `session` and prompt delivery `outcome`. Renaming a session changes its
+title without changing its worktree name.
 
 ### Send, read, and wait
 
@@ -109,8 +132,14 @@ already raised.
 
 ```text
 terminalx worktrees list [--project <project>] --json
+terminalx worktrees rename <path-or-name> --name <name> [--project <project>] --json
 terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
 ```
+
+Renaming moves a TerminalX-managed worktree and renames its matching branch, using the same
+slug rules as creation. It rejects taken or unusable names and updates every session attached
+to that workspace. The response includes `name`, `path`, `branch`, and the updated `sessions`.
+The project's main checkout and externally managed worktrees cannot be renamed here.
 
 Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
 running in the worktree and removes the sessions that ran there, transcripts included; the
@@ -158,7 +187,7 @@ signed-in person's account, and any agent in a local session can run them. They 
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
 cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
 command that starts billed compute or stops a workspace is still confirmed by the person in a
-native dialog first. Only its agree button agrees: Refuse, closing it, or no answer within 40
+native dialog first. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
 while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
