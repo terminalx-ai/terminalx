@@ -15,7 +15,7 @@ listed below, and only as of the last successful sync.
 | The file set: `mirror/1`, `mirror.manifest` | `src-tauri/src/remote/mirror.rs`, `src-tauri/src/mirror_rules.rs` | built |
 | Reading the manifest on the client | `packages/portable/src/workspaceMirror.ts` | built |
 | Writing the mirror: staging, verify, publish, divergence, discard and export | `src-tauri/src/cloud_mirror.rs`, the `cloud_mirror_*` commands | built |
-| The sync loop, the opt-in, states and labels in the UI | desktop, TypeScript | next PR |
+| The sync loop, the opt-in, states and labels in the UI | `src/lib/cloudMirror.ts`, `src/components/cloud/CloudMirrorDialog.tsx` | built |
 
 ## The workspace is not trusted
 
@@ -30,10 +30,21 @@ other tools read. So the mirror treats the workspace as hostile:
   written are the bytes the workspace served. It never means authentic or
   safe. A mirrored script is whatever the workspace says it is.
 
-### Dangerous-content policy (defaults, for the owner to confirm)
+### Dangerous-content policy (decided)
 
-These are the coordinator's defaults from the security review of
-2026-10-04. They hold until the owner changes them.
+The owner confirmed the strict policy on 2026-10-04. It is the rule, not a
+default:
+
+1. Anything that looks like a Git folder is refused.
+2. Tool configuration that runs by itself is skipped, and shown to the
+   person as not mirrored.
+3. The executable bit is never written.
+4. Every mirrored file carries the macOS quarantine flag.
+5. A mirror can never be a project or an agent's folder.
+6. The mirror is deleted when access is revoked, at sign-out, and when the
+   workspace is deleted, by the recorded manifest only.
+
+The tables below are how each point is carried out.
 
 | Never mirrored | Why | Counted as |
 | --- | --- | --- |
@@ -84,12 +95,11 @@ does not make the copy safe.
 - The lists are names known today. A tool that reads a configuration file
   not on them is not covered.
 
-Not covered by the defaults, and so still mirrored: `Makefile`,
+Not covered by the policy, and so still mirrored: `Makefile`,
 `package.json` scripts, `CLAUDE.md`/`AGENTS.md`, build scripts, and any
-other file that only does something when a person runs a command on it. The
-rule above (a mirror is never a project or an agent's working directory) is
-what stands between those and an agent. **For the owner:** whether that is
-enough, or whether more names should be left out.
+other file that only does something when a person runs a command on it.
+Point 5 (a mirror is never a project or an agent's working directory) is
+what stands between those and an agent.
 
 ## Direction
 
@@ -183,7 +193,7 @@ sync makes are `mirror.manifest { manifestId, cursor }` and
 `fs.read { path, offset, version }` with workspace-relative paths. The
 mirror's location exists only in the desktop's native side and its UI.
 
-## When it syncs: never by waking compute (next PR)
+## When it syncs: never by waking compute
 
 - A sync runs only on a connection that is **already open** for another
   reason (the person has the workspace open). It subscribes to
@@ -195,7 +205,13 @@ mirror's location exists only in the desktop's native side and its UI.
   are not activity, and with no lease of its own the connection still closes
   when the person leaves.
 - On connect it scans once, then every 30 seconds while connected. An
-  unchanged workspace answers the same `manifestId` and nothing is read.
+  unchanged workspace answers the same `manifestId` and nothing is read;
+  only local changes are checked, which asks the workspace nothing.
+- Turning the mirror on while the workspace is not connected copies nothing:
+  it stays paused until someone opens the workspace.
+- `src/lib/cloudMirror.ts` imports neither `retainCloudConnection` nor
+  `wakeCloudConnection`. Its tests fail if either is called, and check that
+  no timer is left once the connection is gone.
 
 ## How a sync is applied
 
@@ -294,12 +310,66 @@ nothing by itself.
 - Turning the mirror off keeps the files. Removing the local copy is a
   separate, explicit choice, and it keeps `exports/`.
 
-## Labels (next PR)
+## When the copy is removed
 
-Terminals are labelled by where they run: a local terminal opened in the
-mirror runs on this computer; a cloud terminal runs in the workspace. The
-"Synced" badge says files only: it never implies that anything runs locally
-or that the workspace is backed up.
+The mirrored copy goes with the access to the workspace (point 6 of the
+policy, decided):
+
+- when the organization's list no longer has the workspace for this person:
+  it was deleted, or it is no longer shared with them (role `none`);
+- when the person leaves the organization;
+- at sign-out, every mirror;
+- when the app next sees a different account, or nobody, than the one the
+  mirrors were made under: a sign-out while the app was closed, or a direct
+  switch of account.
+
+Whose the mirrors are is recorded as a hash in `cloud-mirrors/owner`. It is
+written when a mirror is turned on, so a mirror made in the middle of a
+session has an owner too. Mirrors found with no owner recorded are nobody's:
+they are removed, never adopted, even for the same address. Nobody signed in
+cannot turn a mirror on.
+
+Removal is by the record only (`cloud_mirror_purge`): every file the mirror
+wrote, its staging, journal and record. A mirrored file the person edited is
+their work and is moved to `exports/<time>/` instead of deleted. Files they
+added to the folder and the copies they kept when resolving a divergence
+stay. It connects to nothing. The dialog says so before the mirror is turned
+on.
+
+"Remove local copy…" in the dialog is different: it is the person's own
+choice, asks again, and removes the whole mirrored tree.
+
+## In the app
+
+- **Opt-in:** the workspace menu on a cloud session's location chip has
+  "Local mirror…". The dialog says what the mirror is and is not, that the
+  files should be treated like a download, that no file is marked executable
+  and macOS asks before opening one, that an editor or build tool opened on
+  the folder may still run the workspace's code, that the folder cannot be a
+  project or an agent's working directory, and when the copy is removed. It has "Turn on for this
+  computer". Off is the default, per workspace, per device.
+- **Not mirrored:** the dialog lists what was left out and why, from both
+  sides: secrets, tool settings that run commands, folders Git would treat
+  as a repository, names taken by another file on this disk, names too long,
+  links, files over 32 MB.
+- **State:** off, paused, waiting, copying (files so far), synced, failed
+  (with the reason), local changes, or "runtime too old". The last
+  successful revision stays on screen through a failure or a divergence:
+  time, file count and size, and each repository's branch and commit "with
+  the workspace's uncommitted files".
+- **Divergence:** the divergent paths with what happened to each, and two
+  buttons: "Keep a copy, then use the workspace's files" and "Discard my
+  changes". Opening the dialog resolves nothing.
+- **Off and remove:** "Turn off" keeps the files. "Remove local copy…" asks
+  again, says that files the person added to the folder go too, and keeps
+  the copies made when resolving.
+- **Badge:** a chip in the session header, absent while the mirror is off.
+  It says "Files mirrored" and its tooltip "A copy of files only; commands
+  still run in the cloud workspace, and it is not a backup." It never says
+  synced without "files", and never anything about running locally.
+- **Terminals by location:** the new-tab menu says "Terminal · on this
+  computer" in a local session and "Terminal · on the VM" in a cloud one.
+  A terminal tab's own title is unchanged.
 
 ## Tests
 
@@ -320,6 +390,14 @@ or that the workspace is backed up.
   incomplete manifest refused, odd names left out and counted, a listing
   that never ends, a cursor that does not move, a runtime without
   `mirror/1`.
+- `src/lib/cloudMirror.test.ts`: off does nothing; sync on connect and
+  every 30 s; no connection opened and no wake; only a manifest request and
+  relative paths are sent; divergence stops and resumes only on the person's
+  answer; a failure keeps the last revision and retries; an old runtime;
+  the copy removed on lost access, deletion and sign-out.
+- `src/components/cloud/CloudMirrorDialog.test.tsx`: the opt-in and its
+  wording, the revision, what is not mirrored, divergence resolved only by
+  choice, off against remove, the chip's wording.
 - `src-tauri/src/cloud_mirror_tests.rs`: a first sync (nothing executable);
   remote create, edit and delete with local-only files left alone; content
   and size verified before anything moves; a publish that died reconciled

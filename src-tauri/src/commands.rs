@@ -2937,8 +2937,8 @@ pub async fn cloud_mirror_status(organization_id: String, workspace_id: String) 
 }
 
 #[tauri::command]
-pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String) -> CmdResult<crate::cloud_mirror::Status> {
-    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable().map_err(err)).await.map_err(err)?
+pub async fn cloud_mirror_enable(organization_id: String, workspace_id: String, account: String) -> CmdResult<crate::cloud_mirror::Status> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.enable_as(&account).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2992,4 +2992,35 @@ pub async fn cloud_mirror_resolve(
     resolution: crate::cloud_mirror::Resolution,
 ) -> CmdResult<crate::cloud_mirror::Resolved> {
     tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.resolve(&manifest, resolution).map_err(err)).await.map_err(err)?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudMirrorRef {
+    organization_id: String,
+    workspace_id: String,
+}
+
+/// The mirrors on this computer, so the copy of a workspace the person can
+/// no longer open can be removed.
+#[tauri::command]
+pub async fn cloud_mirror_list() -> CmdResult<Vec<CloudMirrorRef>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let found = crate::cloud_mirror::existing(&store::root().map_err(err)?);
+        Ok(found.into_iter().map(|(organization_id, workspace_id)| CloudMirrorRef { organization_id, workspace_id }).collect())
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Remove what the mirror wrote. Returns the number of files removed.
+#[tauri::command]
+pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || cloud_mirror(&organization_id, &workspace_id)?.purge().map_err(err)).await.map_err(err)?
+}
+
+/// The account now using the app; mirrors made under another one are removed.
+#[tauri::command]
+pub async fn cloud_mirror_claim_owner(account: String) -> CmdResult<usize> {
+    tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account).map_err(err)).await.map_err(err)?
 }
