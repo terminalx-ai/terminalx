@@ -883,6 +883,14 @@ impl RelayHost {
                                 let request: Value = serde_json::from_slice(&plaintext)?;
                                 let response = match request["method"].as_str() {
                                     Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
+                                    // Connecting can take seconds, so from its own
+                                    // task; answered in order with the stream's data.
+                                    Some("ports.open") => {
+                                        let rpc = self.rpc.clone();
+                                        let peer = peer.clone();
+                                        tokio::spawn(async move { rpc.answer_port_open(&peer, &request).await });
+                                        continue;
+                                    }
                                     Some(method) if SLOW_METHODS.contains(&method) => {
                                         let rpc = self.rpc.clone();
                                         let peer = peer.clone();

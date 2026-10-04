@@ -174,8 +174,21 @@ export const api = {
   // are resolved natively, so account tokens never cross this boundary.
   cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
-  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
+  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
+  /** The organization's cloud teardown, or null when none was ever asked for. Owners and admins only; the server decides. */
+  cloudTeardownStatus: (orgId?: string | null) => invoke<CloudTeardown | null>("cloud_teardown_status", { orgId: orgId ?? null }),
+  /** How many workspaces a teardown of `organizationId` would take, private ones the caller cannot list included. Refused if that is not the active organization. */
+  cloudTeardownPreview: (organizationId: string) => invoke<CloudTeardownPreview>("cloud_teardown_preview", { organizationId }),
+  /**
+   * Archive or delete every cloud workspace of `organizationId`. It cannot be
+   * cancelled; call it only after an explicit confirmation, with the
+   * organization and the context revision that confirmation was given for,
+   * and the preview it showed. Nothing is sent if the organization or context
+   * is no longer current, or the workspaces are no longer the ones counted.
+   */
+  cloudTeardownRequest: (organizationId: string, contextRevision: string, disposition: "archive" | "destroy", confirmed: { expectedWorkspaces: number; previewToken: string }) =>
+    invoke<CloudTeardown>("cloud_teardown_request", { organizationId, contextRevision, disposition, confirmed }),
   /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
   cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
     invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
@@ -207,9 +220,13 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
-  /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
-  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null }),
+  /**
+   * Archive (30-day trash by default). `force` only after the person confirmed
+   * stopping running agent work. `retentionDays` only when the person chose a
+   * period the disposition facts offer; a server without the choice refuses it.
+   */
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null, retentionDays?: number | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null, retentionDays: retentionDays ?? null }),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
   cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
@@ -521,7 +538,43 @@ export interface CloudProviderConnection {
   providerAccount?: string | null;
   operationsBlocked?: boolean | null;
   disconnectDisposition?: "retain" | "destroy" | null;
+  /** `archive` while a disconnect that archives is under way; its workspaces are deleted at `retentionDeadline`. */
+  disconnectRetention?: "archive" | (string & {}) | null;
+  retentionDeadline?: number | null;
   resources?: CloudProviderResource[] | null;
+}
+
+/** One thing an organization still has at a provider, in a teardown's inventory (saas contract §10.7). */
+export interface CloudTeardownResource {
+  provider: string;
+  id: string;
+  kind: string;
+  state: string;
+  releaseDisposition: string | null;
+  cleanupRequired: boolean;
+  deleteAfter: number | null;
+}
+
+/** What a teardown would take, as counts (no names or ids). */
+export interface CloudTeardownPreview {
+  organizationId: string;
+  workspaces: number;
+  /** Private workspaces created by someone other than the caller. */
+  othersPrivateWorkspaces: number;
+  archivedWorkspaces: number;
+  /** Names exactly the set counted; it goes back with the request. */
+  token: string;
+}
+
+/** An organization-wide cloud teardown: what was asked, the deadline, and what still blocks completion. */
+export interface CloudTeardown {
+  organizationId: string;
+  disposition: "archive" | "destroy" | (string & {});
+  requestedAt: number;
+  retentionDeadline: number;
+  completedAt: number | null;
+  resources: CloudTeardownResource[];
+  remaining: CloudTeardownResource[];
 }
 
 export interface CloudProviderConnectInput {
@@ -671,6 +724,8 @@ export interface CloudWorkspaceDisposition {
   /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
   providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
+  /** The periods an archive may ask for instead; absent or empty from a server that takes no choice. */
+  archiveRetentionChoices?: number[];
   blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
   removedOnDelete: string[];
   runtimeFacts: { available: boolean };

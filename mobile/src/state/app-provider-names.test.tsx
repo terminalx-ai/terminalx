@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -54,6 +54,7 @@ vi.mock("../transport/connection", () => ({
     onStage(listener: (stage: string, attempt: number) => void) { fake.stage = listener; return () => undefined; }
     onLog() { return () => undefined; }
     onEvent() { return () => undefined; }
+    onConnected() { return () => undefined; }
   },
 }));
 vi.mock("../data/host-api", () => ({
@@ -69,8 +70,14 @@ const { hostDisplayName } = await import("../store/host-name");
 const { readHosts, savePairedHost } = await import("../store/hosts");
 
 const HOST = { id: "host-aaaa1111", label: "Paired Mac", publicKeyB64: "key-a", endpoint: "ws://192.0.2.4:6768", lastConnectedAt: 1, provenance: { kind: "explicit" as const } };
-let app: ReturnType<typeof useApp>;
-function Probe() { app = useApp(); return null; }
+// The provider's current value, kept by an effect (a render must not write outside itself) and read through `app`.
+const live: { current: ReturnType<typeof useApp> | null } = { current: null };
+const app = new Proxy({} as ReturnType<typeof useApp>, { get: (_target, key) => live.current![key as keyof ReturnType<typeof useApp>] });
+function Probe() {
+  const value = useApp();
+  useEffect(() => { live.current = value; });
+  return null;
+}
 let root: Root;
 const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 const connected = async () => { await act(async () => fake.stage!("connected", 0)); await settle(); };
