@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
 use base64::Engine as _;
 use portable_pty::{CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -123,7 +124,7 @@ pub struct TerminalStats {
     /// Views attached to a pane's output, and what they have yet to draw.
     pub views: usize,
     pub unacked_bytes: usize,
-    /// `pty_data` events and their raw bytes since launch.
+    /// Output batches and their raw bytes since launch, including unattached panes.
     pub data_events: u64,
     pub data_bytes: u64,
 }
@@ -304,7 +305,6 @@ impl Terminals {
             })?;
             std::thread::Builder::new().name(format!("pty-emit-{id}")).spawn(move || {
                 let flush = |acc: &mut Vec<u8>| {
-                    let data = base64::engine::general_purpose::STANDARD.encode(&*acc);
                     {
                         // Held across both, so a view attaching now gets these
                         // bytes exactly once: in the scrollback it is handed,
@@ -320,7 +320,7 @@ impl Terminals {
                     emitted.events.fetch_add(1, Ordering::Relaxed);
                     emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
                     *last_output.lock().unwrap() = Some(Instant::now());
-                    sink.emit("pty_data", &PtyData { id: id.clone(), data });
+                    sink.emit_pty(&id, acc);
                     acc.clear();
                 };
                 let mut acc: Vec<u8> = Vec::with_capacity(MAX_CHUNK);

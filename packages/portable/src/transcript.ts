@@ -305,6 +305,10 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         rateLimit = { status: payload.status, resetsAt: payload.resetsAt };
         break;
       case "status":
+        // Older apps persisted a readiness guess as a permanent transcript
+        // warning. It never established whether the prompt was delivered;
+        // the recovery state now owns that question, including on reload.
+        if (payload.text === "The agent was slow to start; check that your message arrived.") break;
         if (payload.text.startsWith("rate_limit:")) {
           try {
             const parsed = JSON.parse(payload.text.slice("rate_limit:".length));

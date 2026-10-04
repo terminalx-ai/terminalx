@@ -650,7 +650,7 @@ fn hash_file(path: &Path) -> std::io::Result<String> {
 /// Cheap identity of a file's current state: size, modification time and
 /// inode (a write through rename changes it). Not a content hash; it only
 /// tells parts of one read apart from a file rewritten in between.
-fn version_of(meta: &std::fs::Metadata) -> String {
+pub(super) fn version_of(meta: &std::fs::Metadata) -> String {
     let modified = meta
         .modified()
         .ok()

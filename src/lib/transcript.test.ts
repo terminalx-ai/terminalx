@@ -26,6 +26,17 @@ function toolDone(callId: string): AgentEvent {
 }
 
 describe("buildTranscript", () => {
+  it("drops legacy startup guesses on reload while keeping actual progress and other notices", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "implement this", queued: false }),
+      ev({ type: "status", text: "The agent was slow to start; check that your message arrived." }),
+      ev({ type: "assistant_text", text: "Editing the files" }),
+      ev({ type: "status", text: "Session closed." }),
+    ], false);
+    expect(t.turns[0].work.filter(w => w.kind === "status").map(w => w.text)).toEqual(["Session closed."]);
+    expect(t.turns[0].work.some(w => w.kind === "text" && w.text === "Editing the files")).toBe(true);
+  });
+
   it("opens a turn at each prompt and closes it at turn_completed", () => {
     const events = [
       ev({ type: "user_message", text: "hi", queued: false }),

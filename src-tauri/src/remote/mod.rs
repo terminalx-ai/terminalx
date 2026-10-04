@@ -16,6 +16,7 @@ pub mod collab;
 pub mod files;
 pub mod git;
 pub mod host;
+pub mod mirror;
 pub mod ports;
 pub mod protocol;
 pub mod server;

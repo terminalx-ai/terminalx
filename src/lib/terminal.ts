@@ -4,6 +4,7 @@ import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
+import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
 
 /**
  * Terminal panes per session, and the live xterm of each one that has been
@@ -68,9 +69,9 @@ export function getTerminalState(): TerminalState {
 }
 
 /**
- * Live xterm instances outlive their views: a pane's element is re-parented
- * into whichever view is showing it, so a session switch keeps scrollback,
- * cursor and running programs exactly as they were.
+ * Recently used xterms outlive their views: a pane's element is re-parented
+ * into whichever view shows it. Local instances beyond the idle budget are
+ * restored from backend scrollback; their processes remain alive.
  */
 export interface TerminalInstance {
   el: HTMLDivElement;
@@ -78,8 +79,34 @@ export interface TerminalInstance {
   fit: FitAddon;
   /** Stops whatever feeds it output; called when the instance is disposed. */
   release?: () => void;
+  /** May be rebuilt from the backend's bounded scrollback without ending the process. */
+  restorable?: boolean;
 }
 const instances = new Map<string, TerminalInstance>();
+const sizes = new Map<string, { cols: number; rows: number }>();
+/** Recently used, hidden local terminals. Visible and remote terminals are not evicted. */
+export const IDLE_TERMINAL_LIMIT = 8;
+let archivedSessions = new Set<string>();
+let evictedInstances = 0;
+
+export function trimTerminalInstances(keep?: string) {
+  const archivedPanes = new Set(state.panes.filter((pane) => archivedSessions.has(pane.sessionId)).map((pane) => pane.id));
+  const idle = [...instances].filter(([, inst]) => inst.restorable && !isOnScreen(inst.term) && !inst.el.isConnected);
+  let remaining = idle.length;
+  for (const [id] of idle) {
+    if (id === keep) continue;
+    if (remaining <= IDLE_TERMINAL_LIMIT && !archivedPanes.has(id)) continue;
+    disposeInstance(id);
+    evictedInstances++;
+    remaining--;
+  }
+}
+
+/** Archiving releases hidden views, while a terminal still being read stays intact. */
+export function setArchivedTerminalSessions(ids: readonly string[]) {
+  archivedSessions = new Set(ids);
+  trimTerminalInstances();
+}
 /** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
 export function peekInstance(id: string): TerminalInstance | undefined {
   return instances.get(id);
@@ -89,14 +116,26 @@ export function getInstance(id: string, create: () => TerminalInstance): Termina
   let inst = instances.get(id);
   if (!inst) {
     inst = create();
+    const size = sizes.get(id);
+    // Replay must use the grid the PTY printed into, before a view refits it.
+    if (size) inst.term.resize(size.cols, size.rows);
     instances.set(id, inst);
   }
+  // Map order is the last use order, not the order terminals were created in.
+  instances.delete(id);
+  instances.set(id, inst);
+  trimTerminalInstances(id);
   return inst;
 }
 
 export interface TerminalCounters {
   /** Live xterm instances, local and cloud, and how many are in the document. */
   instances: number;
+  idleInstances: number;
+  idleLimit: number;
+  evictedInstances: number;
+  /** Raw local output received but not yet parsed, including hidden-window output. */
+  queuedOutputBytes: number;
   attached: number;
   /** Live instances by the renderer they are on now. A hidden terminal needs none, so `dom` counts those too. */
   webgl: number;
@@ -119,6 +158,10 @@ export function terminalCounters(): TerminalCounters {
   const webgl = live.filter((inst) => rendererOf(inst.term) === "webgl").length;
   return {
     instances: live.length,
+    idleInstances: live.filter((inst) => inst.restorable && !isOnScreen(inst.term) && !inst.el.isConnected).length,
+    idleLimit: IDLE_TERMINAL_LIMIT,
+    evictedInstances,
+    queuedOutputBytes: queuedLocalOutputBytes(),
     attached: live.filter((inst) => inst.el.isConnected).length,
     webgl,
     dom: live.length - webgl,
@@ -141,7 +184,10 @@ export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
+  const paneExists = state.panes.some((pane) => pane.id === id);
+  if (!paneExists) sizes.delete(id);
   if (inst) {
+    if (inst.restorable && paneExists) sizes.set(id, { cols: inst.term.cols, rows: inst.term.rows });
     inst.release?.();
     inst.term.dispose();
     for (const listener of disposals) listener(inst);
