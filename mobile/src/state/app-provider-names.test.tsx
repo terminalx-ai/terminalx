@@ -54,6 +54,7 @@ vi.mock("../transport/connection", () => ({
     onStage(listener: (stage: string, attempt: number) => void) { fake.stage = listener; return () => undefined; }
     onLog() { return () => undefined; }
     onEvent() { return () => undefined; }
+    onConnected() { return () => undefined; }
   },
 }));
 vi.mock("../data/host-api", () => ({
