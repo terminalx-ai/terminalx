@@ -882,6 +882,12 @@ impl Mirror {
             Ok(())
         })();
         if let Err(error) = applied {
+            // Some files did land before the failure: the disk is judged
+            // for those too, so nothing a mirror never holds stays behind
+            // because the publish it came in did not finish.
+            if let Err(audit) = self.audit(&mut record) {
+                log::warn!("check the mirror after a failed publish: {audit:#}");
+            }
             // What did move is recorded as moved, and the journal goes: the
             // next sync sees every path as it is, with nothing exempt.
             self.save(&record)?;

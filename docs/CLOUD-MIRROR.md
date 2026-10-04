@@ -50,7 +50,7 @@ The tables below are how each point is carried out.
 | --- | --- | --- |
 | Anything inside a folder that has `HEAD` and any other piece of a Git directory (`objects/`, `refs/`, `commondir`, `gitdir`, `config`, `config.worktree`), under any name, at any depth | It is a Git directory, or half of one: Git accepts a folder holding only `HEAD` and a `commondir` pointing at a sibling. Git run inside it obeys its config, which can name a command to run. A shell prompt, an editor's Git scan or an agent is enough to trigger it | `gitDirectory` |
 | A file named `commondir` or `gitdir`, anywhere | It points Git at a directory elsewhere | `gitDirectory` |
-| Agents: `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.windsurf/`, `.continue/`, `.roo/`, `.kiro/`, `.amazonq/`, `.mcp.json`, `.cursorrules`, `opencode.json`, `.aider.conf.yml` | Agent settings, hooks and MCP servers: an agent opened there would run what they name | `toolConfig` |
+| Agents: `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.windsurf/`, `.continue/`, `.roo/`, `.kiro/`, `.amazonq/`, `.opencode/`, `.clinerules/`, `.factory/`, `.goose/`, `.agents/`, `.github/hooks/`, `.mcp.json`, `.cursorrules`, `opencode.json`, `.aider.conf.yml` | Agent settings, hooks and MCP servers: an agent opened there would run what they name | `toolConfig` |
 | Editors: `.vscode/`, `.idea/`, `.zed/`, `.helix/`, `.run/`, `.devcontainer/`, `*.code-workspace`, `.nvim.lua`, `.exrc` | Tasks, run configurations and editor scripts that start on open | `toolConfig` |
 | Hooks and shells: `.husky/`, `.githooks/`, `.pre-commit-config.yaml`, `lefthook.yml`, `.envrc`, `.direnv/`, `mise.toml` | Run by Git or by the shell on entering the folder | `toolConfig` |
 | Other version control: `.hg/`, `.jj/`, `.sl/`, `.svn/` | Their tools obey these as Git obeys `.git` | `toolConfig` |
@@ -68,7 +68,8 @@ every publish the desktop lists what is really under `files/`, by the names
 the filesystem gives back, and judges that: whatever the mirror wrote that
 is, there, inside a Git directory, a pointer to one, tool configuration or
 a secret is removed again, counted (`onDisk`), and never written again.
-Only the mirror's own files are removed. A folder left holding nothing but
+Only the mirror's own files are removed. The same check runs when a publish
+fails part of the way, for the files that did land. A folder left holding nothing but
 Finder's `.DS_Store` is removed with its files, so empty `objects/` and
 `refs/` do not wait for a later `HEAD`.
 

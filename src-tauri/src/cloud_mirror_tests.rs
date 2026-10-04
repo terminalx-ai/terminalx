@@ -985,3 +985,46 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     // Nobody signed in cannot turn one on.
     assert!(Mirror::at(&other_home, "org-1", "workspace-2").unwrap().enable_as("").is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_disk_is_checked_even_when_a_publish_fails_part_way() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    if !f.mirror.case_insensitive() {
+        return;
+    }
+    // On this disk `pkg` is `PKG`, which already holds objects/ and refs/.
+    std::fs::create_dir_all(f.files().join("PKG/objects")).unwrap();
+    std::fs::create_dir_all(f.files().join("PKG/refs")).unwrap();
+    f.remote_write("pkg/HEAD", "ref: refs/heads/main\n");
+    f.remote_write("z/late.txt", "v1\n");
+    // The second file cannot be written: its folder is read-only.
+    std::fs::create_dir_all(f.files().join("z")).unwrap();
+    std::fs::set_permissions(f.files().join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = f.sync();
+    std::fs::set_permissions(f.files().join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(failed.is_err());
+    // HEAD landed before the failure, and was taken back all the same.
+    assert!(!f.files().join("PKG/HEAD").exists());
+    assert!(!git_sees_a_repository(&f.files().join("PKG")));
+    assert_eq!(f.mirror.plan(&f.manifest()).unwrap().refused.on_disk, 1);
+}
+
+#[test]
+fn the_sharp_s_in_its_three_spellings_is_one_file_and_does_not_stall_the_mirror() {
+    let mut f = Fixture::new();
+    f.remote_write("stra\u{1e9e}e.txt", "capital sharp s\n");
+    f.remote_write("stra\u{df}e.txt", "small sharp s\n");
+    f.remote_write("other.txt", "x\n");
+    let folds = f.mirror.case_insensitive();
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    if folds {
+        assert_eq!(plan.refused.collision, 1, "settled before anything is written");
+    }
+    f.sync().unwrap();
+    // Whatever this disk makes of the two names, the mirror does not see
+    // its own files as local changes afterwards.
+    assert_eq!(f.mirror.check().unwrap().1, 0);
+    assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
+}
