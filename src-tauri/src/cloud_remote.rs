@@ -175,6 +175,14 @@ impl CloudRemote {
     /// reads the scope as it is.)
     fn drop_previous_identity(&self) -> Vec<String> {
         let Some(scope) = self.account.settled_scope() else { return Vec::new() };
+        // A port forward does not outlive a switch of the active
+        // organization, even where the connection itself does (CS-18).
+        {
+            let active = scope.as_ref().map(|scope| scope.active_org_id.as_str());
+            for attached in self.connections.lock().unwrap().values() {
+                attached.ports.keep_scope(active);
+            }
+        }
         self.agents.observe_identity(scope.as_ref().map(|scope| (scope.user_id.clone(), scope.kept_orgs())));
         let stopped: Vec<(String, Attached)> = {
             let mut connections = self.connections.lock().unwrap();
@@ -203,8 +211,11 @@ impl CloudRemote {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let supervisor = Supervisor::start(source, activation, events);
         let ports = {
-            let supervisor = supervisor.clone();
-            PortForwarder::new(move |frame| supervisor.send(frame))
+            // Under the same rule as every frame the web view sends: nothing
+            // goes out for an identity that is no longer current, a pending
+            // sign-out included.
+            let (supervisor, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
+            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && supervisor.send(frame))
         };
         self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
         let app = app.clone();
@@ -467,12 +478,15 @@ pub async fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, con
 }
 
 /// Forward a port of the connection's workspace to this Mac's loopback
-/// (PRO-28). Never wakes the workspace: `cloud_port_not_connected` when the
-/// connection is not live. `local_port` taken and not `exact`: another is
-/// used and the answer says `reassigned`.
+/// (PRO-28), on a random free port unless `local_port` names one. Never
+/// wakes the workspace: `cloud_port_not_connected` when the connection is
+/// not live. `local_port` taken and not `exact`: a random one is used and
+/// the answer says `reassigned`. The forward closes when the connection
+/// stops being live or the active organization changes.
 #[tauri::command]
 pub async fn cloud_port_forward(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, port: u16, local_port: Option<u16>, exact: Option<bool>) -> Result<Forward, String> {
-    remote.ports(&connection_id)?.forward(port, local_port, exact.unwrap_or(false)).await
+    let scope = remote.scope().map(|scope| scope.active_org_id);
+    remote.ports(&connection_id)?.forward(port, local_port, exact.unwrap_or(false), scope).await
 }
 
 #[tauri::command]

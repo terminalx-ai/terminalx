@@ -267,9 +267,11 @@ export const api = {
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
   /**
    * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
-   * docs/CLOUD-PREVIEWS.md). Never wakes the workspace: rejects with
-   * `cloud_port_not_connected` unless the connection is live. `reassigned` says
-   * the wanted local port was taken; `exact` refuses instead (`cloud_port_in_use`).
+   * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
+   * Never wakes the workspace: rejects with `cloud_port_not_connected` unless the
+   * connection is live. `reassigned` says the named local port was taken; `exact`
+   * refuses instead (`cloud_port_in_use`). The forward closes when the workspace
+   * stops, access goes or the active organization changes.
    */
   cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
     invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
@@ -799,7 +801,7 @@ export interface CloudWorkspaceLaunchInput {
   prompt?: string | null;
 }
 
-/** A workspace port reachable at `http://localhost:<localPort>` on this Mac. */
+/** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
 export interface CloudPortForward {
   port: number;
   localPort: number;
