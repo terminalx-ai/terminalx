@@ -77,6 +77,20 @@ export class MirrorManifestError extends Error {
  * letter, a `..`) is left out and counted as unsupported: one odd name must
  * not stop the whole mirror, and it is never asked for or written.
  */
+/** The runtime's counts, with zero for a reason an older runtime does not report, plus the names left out here. */
+function countsOf(reported: Partial<MirrorSkipped> | undefined, odd: number): MirrorSkipped {
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  return {
+    secret: count(reported?.secret),
+    toolConfig: count(reported?.toolConfig),
+    gitDirectory: count(reported?.gitDirectory),
+    excluded: count(reported?.excluded),
+    symlink: count(reported?.symlink),
+    unsupported: count(reported?.unsupported) + odd,
+    tooLarge: count(reported?.tooLarge),
+  };
+}
+
 /** Exactly what `remotePath` would send: relative, no `..`, no backslash, no drive. */
 function plainPath(path: string): boolean {
   try {
@@ -134,7 +148,7 @@ export async function readMirrorManifest(client: WorkspaceRpcClient, options: { 
       repositories: first.repositories,
       entries: kept,
       totalBytes: kept.reduce((sum, entry) => sum + entry.size, 0),
-      skipped: { secret: 0, toolConfig: 0, gitDirectory: 0, excluded: 0, symlink: 0, tooLarge: 0, ...first.skipped, unsupported: (first.skipped?.unsupported ?? 0) + odd },
+      skipped: countsOf(first.skipped, odd),
       truncated: first.truncated === true,
     };
   }
