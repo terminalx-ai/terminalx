@@ -66,7 +66,7 @@ export const CLOUD_CONTROL_VERSION = 1;
  * Two answers to that are built, and they compose. This one constant
  * chooses what ships (the owner's decision, PRO-40):
  *
- * - `"both"` (the default, and the coordinator's recommendation): every
+ * - `"both"` (what ships; the owner's decision of 2026-10-04): every
  *   cloud command is refused until the person turns on "Let agents in local
  *   sessions control cloud workspaces" in Settings (off by default), AND
  *   with it on, each command that would start billed compute or stop a
