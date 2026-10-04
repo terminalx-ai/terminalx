@@ -26,6 +26,14 @@
 //! So every match is confirmed with `git patch-id --verbatim` before it
 //! counts.
 //!
+//! Even an exact patch match is not enough: a patch id does not record where
+//! in the file a hunk applies. With two identical blocks in one file, a
+//! change to the first upstream and the same change to the second on the
+//! branch have the same id. So after a match the branch is test-merged into
+//! the base (`git merge-tree`, nothing is written to any checkout): if that
+//! merge is clean and would change the base, the branch holds something the
+//! base does not, and it is not merged.
+//!
 //! A merged pull request is not used as proof on its own: commits can be
 //! added to a branch after its pull request merged, and those would be lost.
 //!
@@ -42,6 +50,9 @@
 //!   on (as `workspaces::delete` does, reading it from the checkout), never
 //!   a branch chosen by the worktree's name: with a detached HEAD that
 //!   branch can hold commits this check never looked at.
+//! - **Files hidden from `git status`.** A file marked `skip-worktree` or
+//!   `assume-unchanged` can be modified without showing. When any file has
+//!   either flag the result is "not verified".
 //! - **Commits inside a submodule** that the submodule has not pushed. A
 //!   submodule with uncommitted changes, or checked out at a commit other
 //!   than the recorded one, shows as an uncommitted file; one whose recorded
@@ -153,10 +164,49 @@ fn count(cwd: &Path, args: &[&str]) -> Option<u32> {
 /// counts every one of them: over-warning is the safe side. `None` when the
 /// stash list cannot be read, which is not the same as "no stashes".
 fn stashes_on(cwd: &Path, branch: Option<&str>) -> Option<u32> {
-    let out = git::run(cwd, &["stash", "list", "--format=%gs"]).ok()?;
+    let out = stash_list(cwd)?;
     let branch = branch.unwrap_or("(no branch)");
     let (wip, on) = (format!("WIP on {branch}:"), format!("On {branch}:"));
     Some(out.lines().filter(|line| line.starts_with(&wip) || line.starts_with(&on)).count() as u32)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets a test stand in for a `git stash list` that fails, which a
+    /// healthy repository will not do on request.
+    static STASH_LIST_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn stash_list(cwd: &Path) -> Option<String> {
+    #[cfg(test)]
+    if STASH_LIST_FAILS.with(|fails| fails.get()) {
+        return None;
+    }
+    git::run(cwd, &["stash", "list", "--format=%gs"]).ok()
+}
+
+/// Files in the checkout that `git status` has been told not to look at:
+/// `skip-worktree` (`S`) and `assume-unchanged` (a lower-case letter) in
+/// `git ls-files -v`. A change to one is invisible and would be deleted with
+/// the worktree. `None` when the list cannot be read.
+fn hidden_from_status(cwd: &Path) -> Option<u32> {
+    let out = git::run(cwd, &["ls-files", "-v"]).ok()?;
+    Some(out.lines().filter(|line| line.starts_with('S') || line.chars().next().is_some_and(|flag| flag.is_ascii_lowercase())).count() as u32)
+}
+
+/// After a patch match: would merging HEAD into `base` leave `base` as it
+/// is? `Some(false)` when the merge is clean and changes the base, so the
+/// branch holds something the base does not. A merge that conflicts cannot
+/// say either way and leaves the patch verdict standing. `None` when git
+/// cannot do the test merge at all.
+fn base_already_holds_head(cwd: &Path, base: &str) -> Option<bool> {
+    let base_tree = git::run(cwd, &["rev-parse", &format!("{base}^{{tree}}")]).ok()?.trim().to_string();
+    match git::run(cwd, &["merge-tree", "--write-tree", base, "HEAD"]) {
+        Ok(out) => Some(out.lines().next().map(str::trim) == Some(base_tree.as_str())),
+        // Exit 1 with nothing on stderr is "there are conflicts".
+        Err(error) if format!("{error:#}").contains(": exit ") => Some(true),
+        Err(_) => None,
+    }
 }
 
 /// The exact patch ids (whitespace included) of the non-merge commits in
@@ -193,7 +243,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         // change exactly, not the same but for whitespace.
         let ours = verbatim_patch_ids(cwd, &[&format!("{base}..HEAD")])?;
         let theirs = upstream()?;
-        if ours.iter().all(|id| theirs.contains(id)) {
+        if ours.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base)? {
             return Some((Some(MergedBy::Rebase), 0));
         }
     }
@@ -223,7 +273,7 @@ fn merged_into(cwd: &Path, base: &str) -> Option<(Option<MergedBy>, u32)> {
         // re-indents a line still matches when whitespace is ignored.
         let whole = verbatim_patch_ids(cwd, &["-1", squashed.trim()])?;
         let theirs = upstream()?;
-        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) {
+        if !whole.is_empty() && whole.iter().all(|id| theirs.contains(id)) && base_already_holds_head(cwd, base)? {
             return Some((Some(MergedBy::Squash), 0));
         }
     }
@@ -258,9 +308,9 @@ pub(crate) fn base_for(project: &Path, fetch: Fetch) -> (Option<String>, Option<
     let mut not_verified = None;
     let mut fresh = fetch == Fetch::JustFetched;
     if fetch == Fetch::Fresh {
-        match git::run_within(project, &["fetch", "--quiet", "origin", &default], FETCH_TIMEOUT) {
-            Ok(_) => fresh = true,
-            Err(error) => not_verified = Some(format!("origin/{default} could not be fetched ({}), so this is compared with the last known copy.", first_line(&format!("{error:#}")))),
+        match git::run_within(project, &["fetch", "--quiet", "origin", &default], FETCH_TIMEOUT, &|| false) {
+            Ok(()) => fresh = true,
+            Err(error) => not_verified = Some(format!("origin/{default} could not be fetched ({}), so this is compared with the last known copy.", fetch_failure(&error))),
         }
     }
     let remote = format!("origin/{default}");
@@ -306,6 +356,18 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
         landed.not_verified = Some("Git could not read the working tree's status.".to_string());
     } else if stashes.is_none() {
         landed.not_verified = Some("Git could not read the stash list, so stashed work cannot be ruled out.".to_string());
+    } else {
+        match hidden_from_status(path) {
+            Some(0) => {}
+            Some(hidden) => {
+                landed.not_verified = Some(format!(
+                    "{hidden} file{} hidden from git status (skip-worktree or assume-unchanged), so changes to {} cannot be seen.",
+                    if hidden == 1 { " is" } else { "s are" },
+                    if hidden == 1 { "it" } else { "them" }
+                ))
+            }
+            None => landed.not_verified = Some("Git could not list the files in the working tree.".to_string()),
+        }
     }
     landed.base = base;
     landed.safe = landed.clean && landed.merged.is_some() && landed.not_verified.is_none() && landed.fresh;
@@ -315,6 +377,16 @@ pub fn check(project: &Path, path: &Path, fetch: Fetch) -> Landed {
 
 fn count_lines(cwd: &Path, args: &[&str]) -> Option<u32> {
     git::run(cwd, args).ok().map(|out| out.lines().count() as u32)
+}
+
+/// Why a fetch did not succeed, in a few words.
+fn fetch_failure(error: &git::RunError) -> String {
+    match error {
+        git::RunError::TimedOut => format!("no answer within {} s", FETCH_TIMEOUT.as_secs()),
+        git::RunError::Stopped => "it was stopped".to_string(),
+        git::RunError::Failed(text) => first_line(text.trim()).to_string(),
+        git::RunError::Spawn(error) => format!("git could not be started: {error}"),
+    }
 }
 
 fn first_line(text: &str) -> &str {
@@ -628,6 +700,65 @@ mod tests {
         assert_eq!(landed.merged, None, "{landed:?}");
         assert!(!landed.safe);
         assert_eq!(landed.unmerged_commits, 1);
+    }
+
+    #[test]
+    fn the_same_change_made_in_a_second_identical_block_is_not_merged() {
+        let f = Fixture::new();
+        // A file with two identical blocks, each with the same three lines
+        // of context either side.
+        let block = "start\nalpha\nbeta\ngamma\nvalue = 1\ndelta\nepsilon\nzeta\nend\n";
+        let file = |first: &str, second: &str| format!("{}{}", block.replace("value = 1", first), block.replace("value = 1", second));
+        f.elsewhere(|other| commit(other, "twin.txt", &file("value = 1", "value = 1")));
+        sh(&f.project, &["pull", "-q", "origin", "main"]);
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+
+        // Upstream changes block 1.
+        f.elsewhere(|other| commit(other, "twin.txt", &file("value = 2", "value = 1")));
+        // The branch's unpushed commit makes the same change in block 2.
+        commit(&wt, "twin.txt", &file("value = 1", "value = 2"));
+
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        // `git cherry` calls it equivalent, and the exact patch ids match...
+        assert!(sh(&wt, &["cherry", "origin/main", "HEAD"]).lines().all(|line| line.starts_with('-')));
+        let ours = verbatim_patch_ids(&wt, &["origin/main..HEAD"]).unwrap();
+        let theirs = verbatim_patch_ids(&wt, &["HEAD..origin/main"]).unwrap();
+        assert!(!ours.is_empty() && ours.iter().all(|id| theirs.contains(id)), "the trap this test is about");
+        // ...while the branch changes a line the base does not.
+        assert!(!sh(&wt, &["diff", "origin/main", "HEAD"]).is_empty());
+        assert_eq!(landed.merged, None, "{landed:?}");
+        assert!(!landed.safe);
+        assert_eq!(landed.unmerged_commits, 1);
+    }
+
+    #[test]
+    fn a_modified_file_hidden_from_status_makes_the_check_unverified() {
+        let f = Fixture::new();
+        for flag in ["--skip-worktree", "--assume-unchanged"] {
+            let name = if flag == "--skip-worktree" { "quiet-amber-fox" } else { "calm-teal-bee" };
+            let wt = PathBuf::from(git::create_worktree(&f.project, name, Some("main")).unwrap().path);
+            assert!(check(&f.project, &wt, Fetch::Fresh).safe);
+            sh(&wt, &["update-index", flag, "a.txt"]);
+            std::fs::write(wt.join("a.txt"), "changed, and invisible\n").unwrap();
+            // Git reports a clean tree...
+            assert!(sh(&wt, &["status", "--porcelain"]).trim().is_empty(), "{flag}");
+            // ...and the check does not take its word for it.
+            let landed = check(&f.project, &wt, Fetch::Fresh);
+            assert!(landed.not_verified.as_deref().is_some_and(|reason| reason.contains("hidden from git status")), "{flag}: {landed:?}");
+            assert!(!landed.safe, "{flag}");
+        }
+    }
+
+    #[test]
+    fn a_stash_list_that_cannot_be_read_is_not_verified() {
+        let f = Fixture::new();
+        let wt = PathBuf::from(git::create_worktree(&f.project, "quiet-amber-fox", Some("main")).unwrap().path);
+        assert!(check(&f.project, &wt, Fetch::Fresh).safe);
+        STASH_LIST_FAILS.with(|fails| fails.set(true));
+        let landed = check(&f.project, &wt, Fetch::Fresh);
+        STASH_LIST_FAILS.with(|fails| fails.set(false));
+        assert!(landed.not_verified.as_deref().is_some_and(|reason| reason.contains("stash list")), "{landed:?}");
+        assert!(!landed.clean && !landed.safe, "unknown is not 'no stashes'");
     }
 
     #[test]
