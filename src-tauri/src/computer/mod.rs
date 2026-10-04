@@ -36,6 +36,44 @@ pub const HELPER_EXECUTABLE_NAME: &str = "terminalx-computer-use-macos";
 pub const HELPER_APP_PATH_ENV: &str = "TERMINALX_COMPUTER_MACOS_HELPER_APP_PATH";
 /// The helper protocol this app speaks; the handshake must agree.
 pub const REQUIRED_PROTOCOL_VERSION: u64 = 1;
+/// The error an action on TerminalX's own windows answers.
+pub const OWN_APP_PROTECTED: &str = "own_app_protected";
+/// Escape hatch for TerminalX's own UI tests: a test build started with this
+/// set to `1` may drive its own windows. It is read from this process's own
+/// environment, once, and only in a debug build. A child process (an agent)
+/// cannot set it for the app, cannot pass it in a request (it travels in the
+/// helper handshake, which only the app sends), and a released app and a
+/// released helper both ignore it. Starting a second test build with it set
+/// only lets that build drive itself.
+pub const ALLOW_OWN_WINDOWS_ENV: &str = "TERMINALX_COMPUTER_USE_TEST_ALLOW_OWN_WINDOWS";
+
+pub fn own_windows_allowed_for_tests() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| own_windows_allowed(cfg!(debug_assertions), std::env::var(ALLOW_OWN_WINDOWS_ENV).ok().as_deref()))
+}
+
+fn own_windows_allowed(test_build: bool, value: Option<&str>) -> bool {
+    test_build && value == Some("1")
+}
+
+/// True when an `--app pid:<n>` selector names this very process. Names and
+/// bundle ids are resolved by the provider, which refuses them itself on
+/// macOS; this catches the unambiguous case before anything is started.
+fn targets_this_process(params: &Value, this_pid: u32) -> bool {
+    params
+        .get("app")
+        .and_then(Value::as_str)
+        .and_then(|app| app.trim().strip_prefix("pid:"))
+        .and_then(|pid| pid.parse::<u32>().ok())
+        == Some(this_pid)
+}
+
+fn own_app_protected() -> ComputerError {
+    ComputerError::new(
+        OWN_APP_PROTECTED,
+        "Computer use does not click, type or change anything in TerminalX's own windows: its confirmations and settings are the person's to operate.",
+    )
+}
 
 /// A failure the agent can act on: `code` is one of the guide's error codes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +118,7 @@ pub fn recovery_for(code: &str) -> &'static str {
         "app_not_found" => "Run terminalx computer list-apps and retry with the bundle id or pid:<n>; website names are not desktop apps.",
         "app_not_running" => "The target quit and computer use never launches apps: start it, run terminalx computer list-apps, then retry with pid:<n>.",
         "app_blocked" => "Stop; this app is intentionally blocked from computer use.",
+        "own_app_protected" => "Stop: computer use never operates TerminalX's own windows. Ask the person to do it themselves; do not look for another way.",
         "confirmation_pending" => "Stop and wait for the person: only they can answer a TerminalX confirmation. Do not retry in a loop.",
         "window_not_found" | "window_stale" => "Run terminalx computer list-windows --app <app>, choose a current selector, then rerun get-app-state.",
         "window_not_focused" => "Retry once with --restore-window; if restore was already requested, bring the app forward manually.",
@@ -258,6 +297,15 @@ impl ComputerService {
                 "confirmation_pending",
                 "TerminalX is asking the person to confirm a request. Computer use cannot click, type or press keys until they have answered it themselves.",
             ));
+        }
+        // TerminalX's own windows are the person's to operate, always, not
+        // only while a question is open (PRO-90). The helper enforces this for
+        // every selector; this is the same answer without starting it.
+        if ActionMethod::from_wire(method).is_some()
+            && !own_windows_allowed_for_tests()
+            && targets_this_process(&params, std::process::id())
+        {
+            return Err(own_app_protected());
         }
         match method {
             "permissions" => {
@@ -480,6 +528,8 @@ mod tests {
             "screenshot_failed",
             "accessibility_error",
             "permission_denied",
+            "own_app_protected",
+            "confirmation_pending",
         ] {
             let copy = recovery_for(code);
             assert!(!copy.is_empty());
@@ -493,6 +543,46 @@ mod tests {
         let candidates = helper_app_candidates(Some(resources));
         assert!(candidates.contains(&resources.join(HELPER_APP_NAME)));
         assert!(helper_executable_in(Path::new("/definitely/missing.app")).is_none());
+    }
+
+    #[test]
+    fn an_action_on_this_apps_own_pid_is_refused_with_its_own_code() {
+        let service = ComputerService::new(None);
+        let own = format!("pid:{}", std::process::id());
+        for method in ["click", "typeText", "pressKey", "hotkey", "pasteText", "setValue", "performSecondaryAction", "scroll", "drag"] {
+            for selector in [own.clone(), format!("  {own} ")] {
+                let error = service
+                    .call(method, serde_json::json!({ "app": selector, "elementIndex": 1, "x": 1, "y": 1 }), "r")
+                    .unwrap_err();
+                assert_eq!(error.code, OWN_APP_PROTECTED, "{method}");
+                assert!(error.message.contains("own windows"), "{method}");
+                assert!(error.recovery().contains("Ask the person"), "{method}");
+            }
+        }
+        // Looking at the app is not an action, and another process is not this app.
+        let looked = service.call("getAppState", serde_json::json!({ "app": own }), "r");
+        assert!(looked.err().is_none_or(|error| error.code != OWN_APP_PROTECTED));
+        let other = service.call("click", serde_json::json!({ "app": "pid:1", "elementIndex": 1 }), "r");
+        assert!(other.err().is_none_or(|error| error.code != OWN_APP_PROTECTED));
+    }
+
+    #[test]
+    fn only_a_pid_selector_for_this_process_is_decided_here() {
+        assert!(targets_this_process(&serde_json::json!({ "app": "pid:42" }), 42));
+        assert!(targets_this_process(&serde_json::json!({ "app": " pid:42\n" }), 42));
+        assert!(!targets_this_process(&serde_json::json!({ "app": "pid:43" }), 42));
+        assert!(!targets_this_process(&serde_json::json!({ "app": "TerminalX" }), 42));
+        assert!(!targets_this_process(&serde_json::json!({ "app": 42 }), 42));
+        assert!(!targets_this_process(&serde_json::json!({}), 42));
+    }
+
+    #[test]
+    fn the_test_escape_hatch_needs_a_test_build_and_the_exact_value() {
+        assert!(own_windows_allowed(true, Some("1")));
+        assert!(!own_windows_allowed(false, Some("1")), "a released app ignores it");
+        assert!(!own_windows_allowed(true, None));
+        assert!(!own_windows_allowed(true, Some("true")));
+        assert!(!own_windows_allowed(true, Some("")));
     }
 
     #[test]
