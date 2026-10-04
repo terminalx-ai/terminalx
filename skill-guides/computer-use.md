@@ -109,6 +109,7 @@ printf '%s' "$TEXT" | terminalx computer set-value --app <app> --element-index <
 - Prefer `set-value` for text fields that expose values; it can report verified value writes when the provider can read the refreshed value.
 - Coordinates are window-local; use coordinates from the latest screenshot/state for the same target window.
 - Password managers are blocked (`app_blocked`); secure text fields are never read.
+- TerminalX's own confirmations are the person's to answer. While one is open, every action (click, type, key, paste, set-value, scroll, drag, secondary action) on any app answers `confirmation_pending`; reading state still works. Never answer one, and never turn on a TerminalX setting that asks for the person's confirmation.
 
 ## Screenshots
 
@@ -149,6 +150,7 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 - `app_not_found`: run `list-apps` and retry with the returned app name or `pid:<n>` (or a bundle ID on macOS). If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
 - `app_not_running`: the targeted instance quit, and computer use never launches apps. Ask the reader to start it (or start it yourself only if asked), then run `list-apps` and retry with the new `pid:<n>`.
 - `app_blocked`: stop; the target is intentionally blocked from computer-use.
+- `confirmation_pending`: stop and wait for the person; only they can answer a TerminalX confirmation. Do not retry in a loop.
 - `window_not_found` / `window_stale`: run `list-windows`, choose a current selector, then rerun `get-app-state`.
 - `window_not_focused`: retry once with `--restore-window`; if the message says restore was already requested, stop retrying restore and bring the app forward manually or check permissions. For editable fields prefer `set-value`, then inspect before assuming keyboard input worked.
 - `element_not_found`: index is stale; run `get-app-state` again.

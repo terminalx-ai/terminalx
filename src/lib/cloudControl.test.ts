@@ -29,6 +29,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, open: vi.fn() }));
+// The native question, answered by `mocks.ask` with the text the person would read (commands.rs builds the same).
+vi.mock("@/lib/cloudControlNative", () => ({
+  cloudControlNative: {
+    setting: vi.fn(async () => false),
+    setSetting: vi.fn(async (enabled: boolean) => enabled),
+    confirm: async (what: string, okLabel: string) =>
+      (await mocks.ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" })) ? "accepted" : "declined",
+  },
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
@@ -56,8 +65,7 @@ vi.mock("@/lib/cloudNewSession", async (importOriginal) => {
   return { ...original, startInWorkspace: vi.fn(async (plan: { node: { key: string } }) => `${plan.node.key}:new-session`), prepareCloudCreate: vi.fn(), confirmCloudCreate: vi.fn() };
 });
 
-const { answerCloudControl, handleCloudControl, waitForCloudTab, CloudControlError, setCloudControlPolicy, CLOUD_CONTROL_POLICY, WAIT_CHUNK_SECONDS } = await import("./cloudControl");
-const prefs = await import("@/lib/prefs");
+const { answerCloudControl, handleCloudControl, waitForCloudTab, CloudControlError, setCloudControlPolicy, setCloudControlEnabled, cloudControlEnabled, CLOUD_CONTROL_POLICY, WAIT_CHUNK_SECONDS } = await import("./cloudControl");
 const catalog = await import("@/lib/cloudCatalog");
 const connections = await import("@/lib/cloudConnections");
 const newSession = await import("@/lib/cloudNewSession");
@@ -154,7 +162,7 @@ beforeEach(async () => {
   signIn();
   // The person turned the setting on; "off" and the other option have their own tests below.
   setCloudControlPolicy("setting");
-  prefs.setPrefs({ cloudControlFromAgents: true });
+  setCloudControlEnabled(true);
   mocks.ask.mockReset().mockResolvedValue(true);
   cached = { "ws-1": { "s1-tab": { tab: tabInfo("s1"), events, cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 } }, "ws-stopped": { "s2-tab": { tab: tabInfo("s2"), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 } } };
   enqueued = [];
@@ -185,7 +193,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   setCloudControlPolicy();
-  prefs.setPrefs({ cloudControlFromAgents: false });
+  setCloudControlEnabled(false);
   catalog.resetCloudCatalog();
   resetCloudAgents();
   resetCloudSessions();
@@ -476,7 +484,7 @@ describe("creating a session", () => {
     expect(await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", wake: true })).toMatchObject({ created: "session", resumed: true });
     // And where the window confirms, that too is asked before anything is woken.
     setCloudControlPolicy("both");
-    prefs.setPrefs({ cloudControlFromAgents: true });
+    setCloudControlEnabled(true);
     mocks.ask.mockResolvedValue(false);
     vi.mocked(newSession.startInWorkspace).mockClear();
     expect((await refusal("sessions.create", { project: PROJECT, prompt: "go", wake: true })).code).toBe("declined");
@@ -606,12 +614,12 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
 
   it("ships with both: the setting, which is off by default, and the question in the window", () => {
     expect(CLOUD_CONTROL_POLICY).toBe("both");
-    prefs.setPrefs({ cloudControlFromAgents: false });
-    expect(prefs.getPrefs().cloudControlFromAgents).toBe(false);
+    setCloudControlEnabled(false);
+    expect(cloudControlEnabled()).toBe(false);
   });
 
   describe("option (a), the setting, while it is off", () => {
-    beforeEach(() => prefs.setPrefs({ cloudControlFromAgents: false }));
+    beforeEach(() => setCloudControlEnabled(false));
 
     it("refuses every cloud command and does nothing: no list, no transcript, no message, no wake, no stop", async () => {
       for (const [action, params] of everything) {
@@ -632,7 +640,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
 
     it("turning it on in Settings makes the commands work, with no question asked", async () => {
-      prefs.setPrefs({ cloudControlFromAgents: true });
+      setCloudControlEnabled(true);
       await handleCloudControl("send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" });
       expect(enqueued).toHaveLength(1);
       expect(mocks.ask).not.toHaveBeenCalled();
@@ -643,7 +651,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     beforeEach(() => setCloudControlPolicy("both"));
 
     it("refuses everything while the setting is off, and asks nothing", async () => {
-      prefs.setPrefs({ cloudControlFromAgents: false });
+      setCloudControlEnabled(false);
       for (const [action, params] of everything) expect((await refusal(action, params)).code).toBe("cloud_control_disabled");
       expect(mocks.ask).not.toHaveBeenCalled();
       expect(enqueued).toEqual([]);
@@ -652,7 +660,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
 
     it("with the setting on, looking and a send to a running workspace ask nothing", async () => {
-      prefs.setPrefs({ cloudControlFromAgents: true });
+      setCloudControlEnabled(true);
       await handleCloudControl("projects.list");
       await handleCloudControl("sessions.list");
       await handleCloudControl("read", { target: `cloud:${ORG}:ws-1:s1` });
@@ -662,7 +670,7 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
 
     it("with the setting on, spend, wake and stop still ask in the window, and a refusal there does nothing", async () => {
-      prefs.setPrefs({ cloudControlFromAgents: true });
+      setCloudControlEnabled(true);
       mocks.ask.mockResolvedValue(false);
       for (const [action, params] of [
         ["send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" }],
@@ -686,11 +694,103 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
   });
 
+  describe("send does not trust the list it holds (review: a stop the app has not heard of)", () => {
+    const TARGET = `cloud:${ORG}:ws-1:s1`;
+    beforeEach(() => {
+      setCloudControlPolicy("both");
+      setCloudControlEnabled(true);
+    });
+
+    it("reads the list again when not connected, and asks when the workspace has stopped since", async () => {
+      // The catalog still says ready; the server now says it idle-stopped.
+      mocks.api.cloudWorkspaces.mockImplementation(async () => ({ workspaces: [item("ws-1", ORG, { state: "suspended" })] }));
+      mocks.ask.mockResolvedValue(false);
+      const refused = await refusal("send", { target: TARGET, text: "still there?" });
+      expect(refused.code).toBe("declined");
+      expect(mocks.api.cloudWorkspaces).toHaveBeenCalled();
+      expect(mocks.ask.mock.calls[0][0]).toContain("send a message to the stopped cloud workspace ws-1");
+      expect(enqueued).toEqual([]);
+      expectNoWake();
+    });
+
+    it("asks for a workspace that is on its way down, though it is still listed as ready", async () => {
+      const midStop = { ...item("ws-1", ORG), latestOperation: { id: "op-stop", action: "suspend", state: "running" } } as CloudWorkspaceListItem;
+      mocks.api.cloudWorkspaces.mockImplementation(async () => ({ workspaces: [midStop] }));
+      mocks.ask.mockResolvedValue(false);
+      expect((await refusal("send", { target: TARGET, text: "one more thing" })).code).toBe("declined");
+      expect(mocks.ask).toHaveBeenCalledTimes(1);
+      expect(enqueued).toEqual([]);
+    });
+
+    it("asks when the list cannot be read: not knowing is not the same as running", async () => {
+      mocks.api.cloudWorkspaces.mockRejectedValue({ code: "cloud_workspace_unavailable" });
+      mocks.ask.mockResolvedValue(false);
+      expect((await refusal("send", { target: TARGET, text: "hello" })).code).toBe("declined");
+      expect(mocks.ask).toHaveBeenCalledTimes(1);
+      expect(enqueued).toEqual([]);
+    });
+
+    it("asks nothing when the list, read just now, says running, or when connected to it", async () => {
+      await handleCloudControl("send", { target: TARGET, text: "run the tests" });
+      expect(mocks.api.cloudWorkspaces).toHaveBeenCalled();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(1);
+      // Connected: it is running, and the list is not read for this.
+      mocks.api.cloudWorkspaces.mockClear();
+      vi.mocked(connections.connectedCloudClient).mockReturnValue({ connection: { state: "connected", runtimeGeneration: 1, runtimeVersion: "x", capabilities: [], authority: "manage" }, nudgeMailbox: vi.fn(async () => undefined), hasCapability: () => false } as never);
+      await handleCloudControl("send", { target: TARGET, text: "and lint" });
+      expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expect(enqueued).toHaveLength(2);
+      vi.mocked(connections.connectedCloudClient).mockReturnValue(null as never);
+    });
+  });
+
+  describe("the switch is native code's to keep", () => {
+    it("shows what native code says after asking it to change: a refused turn-on leaves it off", async () => {
+      const { requestCloudControlSetting, loadCloudControlSetting } = await import("./cloudControl");
+      const native = await import("@/lib/cloudControlNative");
+      setCloudControlEnabled(false);
+      // The person refused the native dialog: native answers "still off".
+      vi.mocked(native.cloudControlNative.setSetting).mockResolvedValueOnce(false);
+      expect(await requestCloudControlSetting(true)).toBe(false);
+      expect(cloudControlEnabled()).toBe(false);
+      expect(native.cloudControlNative.setSetting).toHaveBeenLastCalledWith(true);
+      // They agreed.
+      vi.mocked(native.cloudControlNative.setSetting).mockResolvedValueOnce(true);
+      expect(await requestCloudControlSetting(true)).toBe(true);
+      // A native call that fails changes nothing shown.
+      vi.mocked(native.cloudControlNative.setSetting).mockRejectedValueOnce(new Error("unwritable"));
+      expect(await requestCloudControlSetting(false)).toBe(true);
+      // At boot it is read from native code; unreadable means off.
+      vi.mocked(native.cloudControlNative.setting).mockRejectedValueOnce(new Error("no file"));
+      expect(await loadCloudControlSetting()).toBe(false);
+    });
+  });
+
+  describe("a refusal is not asked about again right away", () => {
+    it("answers declined without a question while the app is backing off, and says when to try again", async () => {
+      setCloudControlPolicy("both");
+      setCloudControlEnabled(true);
+      const native = await import("@/lib/cloudControlNative");
+      const confirm = vi.spyOn(native.cloudControlNative, "confirm").mockResolvedValue("backoff:95");
+      const refused = await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` });
+      expect(refused.code).toBe("declined");
+      expect(refused.message).toContain("refused in the TerminalX window a moment ago");
+      expect(refused.recovery).toContain("2 minutes");
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      // A dialog that could not be shown at all is a refusal too.
+      confirm.mockRejectedValue(new Error("no window"));
+      expect((await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped` })).code).toBe("declined");
+      confirm.mockRestore();
+    });
+  });
+
   describe("option (b), a confirmation in the window", () => {
     beforeEach(() => {
       setCloudControlPolicy("confirm");
       // The setting plays no part under this option.
-      prefs.setPrefs({ cloudControlFromAgents: false });
+      setCloudControlEnabled(false);
     });
 
     it("looking asks nothing: lists, read, wait and a send to a running workspace", async () => {

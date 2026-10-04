@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,7 +10,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
-import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING } from "@/lib/cloudControl";
+import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING, cloudControlEnabled, loadCloudControlSetting, requestCloudControlSetting, subscribeCloudControlSetting } from "@/lib/cloudControl";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
@@ -125,6 +125,11 @@ export function SettingsPage({
 
 function GeneralTab() {
   const prefs = usePrefs();
+  // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
+  const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
+  useEffect(() => {
+    void loadCloudControlSetting();
+  }, []);
   const [cli, setCli] = useState<CliToolStatus | null>(null);
   const [cliBusy, setCliBusy] = useState(false);
   const [cliError, setCliError] = useState<string | null>(null);
@@ -151,7 +156,7 @@ function GeneralTab() {
         <SettingRow
           label={CLOUD_CONTROL_SETTING}
           description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
-          control={<Switch aria-label={CLOUD_CONTROL_SETTING} checked={prefs.cloudControlFromAgents} onCheckedChange={(v) => setPrefs({ cloudControlFromAgents: v })} />}
+          control={<Switch aria-label={CLOUD_CONTROL_SETTING} checked={cloudControlOn} onCheckedChange={(v) => void requestCloudControlSetting(v)} />}
         />
       )}
       <SettingRow

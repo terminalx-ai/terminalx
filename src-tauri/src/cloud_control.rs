@@ -113,6 +113,165 @@ fn parse_answer(answer: Value) -> Result<Value, ControlError> {
     ))
 }
 
+// ---- The person's switch and their answers --------------------------------
+//
+// Both are kept here, in native code, and not in the window:
+//
+// - The switch ("Let agents in local sessions control cloud workspaces") is a
+//   file under the app's home, read by the control socket itself before a
+//   `cloud.*` command reaches the window. Turning it on asks the person in a
+//   native dialog. A local process that can write files in the app's home can
+//   still edit it: this guards against an agent using the app, not against
+//   one that already has the person's files.
+// - A question is a native dialog whose default button refuses. While one is
+//   open, computer-use actions are refused (`confirming`), so an agent that
+//   can click and type cannot answer its own request. After a refusal no new
+//   question is shown for a while (`backoff`).
+
+
+const SETTING_FILE: &str = "cloud-control.json";
+/// After a refusal: no question for a minute, then two, four, eight, at most fifteen.
+const BACKOFF_FIRST: Duration = Duration::from_secs(60);
+const BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+
+// One counter for the process. In tests it is per thread, so a test that
+// opens a question does not pause the computer-use tests running beside it.
+#[cfg(not(test))]
+static CONFIRMING: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg(test)]
+thread_local! {
+    static CONFIRMING: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+fn open_questions(change: isize) -> isize {
+    CONFIRMING.fetch_add(change, std::sync::atomic::Ordering::SeqCst) + change
+}
+
+#[cfg(test)]
+fn open_questions(change: isize) -> isize {
+    CONFIRMING.with(|count| {
+        count.set(count.get() + change);
+        count.get()
+    })
+}
+
+/// Whether a question of this app is waiting for the person right now.
+pub fn confirming() -> bool {
+    open_questions(0) > 0
+}
+
+/// Held while a question is on screen.
+pub struct Confirming(());
+
+impl Confirming {
+    pub fn begin() -> Self {
+        open_questions(1);
+        Self(())
+    }
+}
+
+impl Drop for Confirming {
+    fn drop(&mut self) {
+        open_questions(-1);
+    }
+}
+
+#[derive(Default)]
+struct Refusals {
+    strikes: u32,
+    until: Option<Instant>,
+}
+
+fn refusals() -> &'static Mutex<Refusals> {
+    static REFUSALS: OnceLock<Mutex<Refusals>> = OnceLock::new();
+    REFUSALS.get_or_init(Mutex::default)
+}
+
+/// What became of a question.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Answer {
+    Accepted,
+    Declined,
+    /// Not asked: the person refused a moment ago. Seconds until a question may be shown again.
+    Backoff(u64),
+}
+
+impl Answer {
+    pub fn wire(&self) -> String {
+        match self {
+            Self::Accepted => "accepted".into(),
+            Self::Declined => "declined".into(),
+            Self::Backoff(seconds) => format!("backoff:{seconds}"),
+        }
+    }
+}
+
+/// Ask the person with `ask` (true: they agreed), unless they refused
+/// recently. Computer use is paused for as long as `ask` runs.
+pub fn confirm_with(ask: impl FnOnce() -> bool) -> Answer {
+    confirm_at(Instant::now(), ask)
+}
+
+fn confirm_at(now: Instant, ask: impl FnOnce() -> bool) -> Answer {
+    if let Some(until) = refusals().lock().unwrap().until {
+        if until > now {
+            return Answer::Backoff(until.duration_since(now).as_secs().max(1));
+        }
+    }
+    let agreed = {
+        let _open = Confirming::begin();
+        ask()
+    };
+    let mut refusals = refusals().lock().unwrap();
+    if agreed {
+        *refusals = Refusals::default();
+        return Answer::Accepted;
+    }
+    refusals.strikes = refusals.strikes.saturating_add(1);
+    let wait = BACKOFF_FIRST.saturating_mul(1 << (refusals.strikes - 1).min(4)).min(BACKOFF_MAX);
+    refusals.until = Some(now + wait);
+    Answer::Declined
+}
+
+fn setting_path() -> Option<std::path::PathBuf> {
+    crate::store::root().ok().map(|root| root.join(SETTING_FILE))
+}
+
+fn enabled_at(path: &std::path::Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Whether the person lets the command line use cloud workspaces. Off unless the file says on.
+pub fn enabled() -> bool {
+    setting_path().is_some_and(|path| enabled_at(&path))
+}
+
+fn write_enabled(path: &std::path::Path, enabled: bool) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        crate::store::ensure_dir(dir.to_path_buf()).map_err(|_| "cloud_control_setting_unwritable".to_string())?;
+    }
+    crate::store::write_atomic(path, json!({ "enabled": enabled }).to_string().as_bytes()).map_err(|_| "cloud_control_setting_unwritable".to_string())
+}
+
+/// Store the switch. Turning it on is the caller's to confirm with the person first.
+pub fn set_enabled(enabled: bool) -> Result<(), String> {
+    write_enabled(&setting_path().ok_or_else(|| "cloud_control_setting_unwritable".to_string())?, enabled)
+}
+
+/// The refusal of a `cloud.*` command while the switch is off, before the window is asked anything.
+pub fn disabled_error() -> ControlError {
+    ControlError::new(
+        "cloud_control_disabled",
+        "Cloud workspaces cannot be used from the command line until that is turned on in TerminalX.",
+        Some("In TerminalX, open Settings and turn on \"Let agents in local sessions control cloud workspaces\".".to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +334,55 @@ mod tests {
         assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": 10 })), Duration::from_secs(30));
         // However long the caller asks for, one call is one short wait.
         assert_eq!(timeout_for("wait", &json!({ "timeoutSeconds": u64::MAX })), Duration::from_secs(WAIT_CHUNK_SECONDS + 20));
+    }
+
+    #[test]
+    fn the_switch_is_off_until_its_file_says_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(SETTING_FILE);
+        assert!(!enabled_at(&path));
+        write_enabled(&path, true).unwrap();
+        assert!(enabled_at(&path));
+        write_enabled(&path, false).unwrap();
+        assert!(!enabled_at(&path));
+        // Anything but a plain `true` is off.
+        for junk in ["", "{", r#"{"enabled":"yes"}"#, r#"{"enabled":1}"#, "true"] {
+            std::fs::write(&path, junk).unwrap();
+            assert!(!enabled_at(&path), "{junk}");
+        }
+    }
+
+    #[test]
+    fn a_question_pauses_computer_use_while_it_is_open_and_backs_off_after_a_refusal() {
+        // One test: the question state is process-wide.
+        *refusals().lock().unwrap() = Refusals::default();
+        let start = Instant::now();
+        assert!(!confirming());
+        // Open: computer use is paused. Closed again afterwards, whatever the answer.
+        assert_eq!(confirm_at(start, || { assert!(confirming()); true }), Answer::Accepted);
+        assert!(!confirming());
+
+        // Refused: the next request is not shown at all for a minute...
+        assert_eq!(confirm_at(start, || false), Answer::Declined);
+        let mut asked = false;
+        assert_eq!(confirm_at(start + Duration::from_secs(10), || { asked = true; true }), Answer::Backoff(50));
+        assert!(!asked);
+        // ...and a second refusal doubles the wait.
+        assert_eq!(confirm_at(start + Duration::from_secs(61), || false), Answer::Declined);
+        assert!(matches!(confirm_at(start + Duration::from_secs(61 + 100), || true), Answer::Backoff(_)));
+        assert_eq!(confirm_at(start + Duration::from_secs(61 + 121), || true), Answer::Accepted);
+        // Agreeing clears the count: the next refusal waits a minute again.
+        assert_eq!(confirm_at(start + Duration::from_secs(200), || false), Answer::Declined);
+        assert_eq!(confirm_at(start + Duration::from_secs(261), || true), Answer::Accepted);
+
+        // It never grows past fifteen minutes.
+        let mut now = start + Duration::from_secs(1_000);
+        for _ in 0..12 {
+            assert_eq!(confirm_at(now, || false), Answer::Declined);
+            now += BACKOFF_MAX + Duration::from_secs(1);
+        }
+        assert_eq!(confirm_at(now, || true), Answer::Accepted);
+        assert_eq!(Answer::Backoff(7).wire(), "backoff:7");
+        *refusals().lock().unwrap() = Refusals::default();
     }
 }

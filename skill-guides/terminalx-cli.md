@@ -157,9 +157,20 @@ command; an app that does not know one answers `unsupported`.
 signed-in person's account, and any agent in a local session can run them. They are all refused
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
 cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
-command that starts billed compute or stops a workspace is still confirmed by the person in the
-app window first, and answers `declined` if they refuse. Do not try to work around either: ask
+command that starts billed compute or stops a workspace is still confirmed by the person in a
+native dialog first, and answers `declined` if they refuse. After a refusal the app does not ask
+again for a while (a minute, growing to fifteen): the command answers `declined` at once. While
+such a dialog is open, `terminalx computer` actions answer `confirmation_pending`: only the
+person can answer it. Do not try to work around any of this, and do not answer it for them: ask
 the person.
+
+`send` to a workspace the app is not connected to reads the workspace list again first. If the
+workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the
+message would start it.
+
+The switch is kept in a file in the app's home (`cloud-control.json`), not in the window. That
+protects it from an agent that uses the app; it does not protect it from a process that already
+has the person's files, which could edit it directly.
 
 **Looking never starts compute.** `projects list`, `sessions list`, `read` and `wait` never
 resume a stopped workspace. Lists come from what the app already holds. `read` returns the

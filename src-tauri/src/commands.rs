@@ -1850,6 +1850,64 @@ pub fn terminal_perf_reply(id: String, result: serde_json::Value) {
     crate::terminal_perf::reply(&id, result);
 }
 
+/// Whether the person lets the command line use cloud workspaces (PRO-40).
+#[tauri::command]
+pub fn cloud_control_setting() -> bool {
+    crate::cloud_control::enabled()
+}
+
+/// Turn the switch on or off. Turning it on asks the person in a native
+/// dialog first, which neither the window nor computer use can answer.
+#[tauri::command]
+pub async fn cloud_control_set_setting(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    if enabled && !crate::cloud_control::enabled() {
+        let answer = cloud_control_question(
+            app,
+            "Let agents in local sessions control cloud workspaces?".to_string(),
+            "Any agent running in a local session will be able to list your organizations' cloud workspaces, read their conversations and send messages to running ones. Starting, stopping or creating a workspace will still ask you each time.".to_string(),
+            "Turn on".to_string(),
+        )
+        .await;
+        if answer != crate::cloud_control::Answer::Accepted {
+            return Ok(false);
+        }
+    }
+    crate::cloud_control::set_enabled(enabled)?;
+    Ok(crate::cloud_control::enabled())
+}
+
+/// Ask the person about a cloud request that came from the command line.
+/// Answers `accepted`, `declined`, or `backoff:<seconds>` when they refused a
+/// moment ago and are not asked again yet.
+#[tauri::command]
+pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label: String) -> String {
+    let message = format!("A terminalx command (run by you or by an agent in a local session) asks to {what}");
+    cloud_control_question(app, "Cloud workspace request".to_string(), message, ok_label).await.wire()
+}
+
+/// One native question. "Refuse" is the first, default button, so Return
+/// refuses; agreeing takes a click on the other one. Shown off the main
+/// thread; while it is open, computer-use actions are refused.
+async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // Kept short and on one line: the label comes from this app, but never trust its length.
+    let ok_label: String = ok_label.chars().filter(|c| !c.is_control()).take(40).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::cloud_control::confirm_with(|| {
+            let refused = app
+                .dialog()
+                .message(message)
+                .title(title)
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom("Refuse".to_string(), ok_label))
+                .blocking_show();
+            !refused
+        })
+    })
+    .await
+    .unwrap_or(crate::cloud_control::Answer::Declined)
+}
+
 /// The window's answer to a `cloud_control_request` event (PRO-40).
 #[tauri::command]
 pub fn cloud_control_reply(id: String, result: serde_json::Value) {

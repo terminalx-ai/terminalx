@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { api, type CloudWorkspaceListItem } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { getTabLog } from "@/lib/agentEvents";
@@ -24,6 +23,7 @@ import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspac
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
@@ -73,6 +73,13 @@ export const CLOUD_CONTROL_VERSION = 1;
  *   workspace still asks the person in the window first.
  * - `"setting"`: the setting alone. Once on, the commands run as asked.
  * - `"confirm"`: the question in the window alone, with no setting.
+ *
+ * Both parts are enforced in native code (`cloud_control.rs`), not only here:
+ * the control socket reads the switch itself and refuses `cloud.*` before
+ * this window hears of it, and the question is a native dialog whose default
+ * button refuses, that computer use cannot act on while it is open, and that
+ * is not shown again for a while after a refusal. The policy below still
+ * decides what this module asks and when.
  */
 export type CloudControlPolicy = "both" | "setting" | "confirm";
 export const CLOUD_CONTROL_POLICY: CloudControlPolicy = "both";
@@ -87,9 +94,49 @@ export const CLOUD_CONTROL_HAS_SETTING = (CLOUD_CONTROL_POLICY as CloudControlPo
 
 export const CLOUD_CONTROL_SETTING = "Let agents in local sessions control cloud workspaces";
 
+/**
+ * The person's switch, as native code last said it. It lives in a file the
+ * control socket reads itself (it refuses `cloud.*` while off, before this
+ * window is asked anything); this copy is for `status` and for the same
+ * refusal here, should a request arrive by another way.
+ */
+let settingOn = false;
+const settingListeners = new Set<() => void>();
+
+export function cloudControlEnabled(): boolean {
+  return settingOn;
+}
+
+export function subscribeCloudControlSetting(listener: () => void): () => void {
+  settingListeners.add(listener);
+  return () => settingListeners.delete(listener);
+}
+
+/** What native code says the switch is (read at boot, and after it was changed). Also how tests set it. */
+export function setCloudControlEnabled(enabled: boolean) {
+  if (settingOn === enabled) return;
+  settingOn = enabled;
+  for (const listener of [...settingListeners]) listener();
+}
+
+/** Read the switch from native code. Off when it cannot be read. */
+export async function loadCloudControlSetting(): Promise<boolean> {
+  setCloudControlEnabled(await cloudControlNative.setting().catch(() => false));
+  return settingOn;
+}
+
+/**
+ * The Settings switch. Turning it on is confirmed by the person in a native
+ * dialog, which this window cannot answer; the result is what it then is.
+ */
+export async function requestCloudControlSetting(enabled: boolean): Promise<boolean> {
+  setCloudControlEnabled(await cloudControlNative.setSetting(enabled).catch(() => settingOn));
+  return settingOn;
+}
+
 /** With the setting: nothing of the cloud is reachable from the command line until the person allows it. */
 function allowed(): boolean {
-  return policy === "confirm" || getPrefs().cloudControlFromAgents === true;
+  return policy === "confirm" || settingOn;
 }
 
 function assertAllowed() {
@@ -99,16 +146,26 @@ function assertAllowed() {
 }
 
 /**
- * Ask the person, in the window, before something that starts billed
- * compute or stops a workspace. The question says it came from the command
- * line. Having turned the setting on is not an answer to it: the setting
- * lets agents ask, the person still decides each time. Only under
- * `"setting"` alone is nothing asked.
+ * Ask the person before something that starts billed compute or stops a
+ * workspace. The question says it came from the command line. Having turned
+ * the setting on is not an answer to it: the setting lets agents ask, the
+ * person still decides each time. Only under `"setting"` alone is nothing
+ * asked.
+ *
+ * The question is a native dialog (`cloud_control_confirm`): its default
+ * button refuses, computer use is paused while it is open, and after a
+ * refusal the app does not ask again for a while, so a caller cannot answer
+ * it itself or wear the person down.
  */
 async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   if (policy === "setting") return;
-  const yes = await ask(`A terminalx command (run by you or by an agent in a local session) asks to ${what}`, { title: "Cloud workspace request", kind: "warning", okLabel, cancelLabel: "Refuse" }).catch(() => false);
-  if (!yes) throw new CloudControlError("declined", "The request was refused in the TerminalX window.");
+  const answer = await cloudControlNative.confirm(what, okLabel).catch(() => "declined" as const);
+  if (answer === "accepted") return;
+  if (answer.startsWith("backoff:")) {
+    const minutes = Math.max(1, Math.ceil(Number(answer.slice("backoff:".length)) / 60));
+    throw new CloudControlError("declined", "A request like this was refused in the TerminalX window a moment ago, so the person is not asked again yet.", `Do not retry now. Ask the person, or try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`);
+  }
+  throw new CloudControlError("declined", "The request was refused in the TerminalX window.", "Do not retry: ask the person instead.");
 }
 export const CLOUD_CONTROL_CAPABILITIES = ["projects.list", "sessions.list", "sessions.create", "send", "read", "wait", "stop", "resume"] as const;
 
@@ -335,6 +392,28 @@ function send(params: Params): Promise<unknown> {
   return attempt;
 }
 
+/**
+ * Whether a message to this workspace may start it. The server resumes a
+ * stopped workspace for any message, so this must not go by what the list
+ * said a while ago:
+ *
+ * - connected to it: it is running;
+ * - otherwise the list is read again now. Stopped, on its way down (a stop
+ *   still running), or a list that could not be read: it may be stopped.
+ */
+async function mayBeStopped(target: Target, state: WorkspaceConnectionState): Promise<boolean> {
+  if (state.state === "connected") return false;
+  const asked = Date.now();
+  await refreshCloudCatalog(target.orgId).catch(() => undefined);
+  const catalog = getCloudCatalog();
+  const org = catalog.orgs[target.orgId];
+  const fresh = !!org && org.source === "live" && org.error === null && (org.fetchedAt ?? 0) >= asked;
+  const item = findCloudWorkspace(catalog, target.orgId, target.workspaceId);
+  if (!item) throw notFound(`No cloud session ${target.key}.`, "List them with terminalx sessions list --cloud.");
+  if (!fresh) return true;
+  return cloudAsleep(state, item.workspace.state) || stopping(item) || item.workspace.state !== "ready";
+}
+
 async function sendOnce(params: Params) {
   const target = resolveSession(required(params, "target"));
   const message = required(params, "text");
@@ -369,7 +448,7 @@ async function sendOnce(params: Params) {
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
   // The message resumes a stopped workspace, which starts billing its compute.
-  if (cloudAsleep(state, target.item.workspace.state)) await confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
+  if (await mayBeStopped(target, state)) await confirmInWindow(`send a message to the stopped cloud workspace ${target.item.workspace.name}. Sending resumes it, which starts billing its compute.`, "Resume and send");
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
   await backend.send(tab.tabId, message, []);
   const entry = getCloudAgents(scope).outbox.find((candidate) => !before.has(candidate.clientCommandId) && candidate.tabId === tab.tabId);
@@ -626,6 +705,7 @@ let booted: Promise<void> | null = null;
 export function bootCloudControl(): Promise<void> {
   return (booted ??= (async () => {
     try {
+      void loadCloudControlSetting();
       await listen<ControlRequest>("cloud_control_request", (event) => {
         const { id, action, params } = event.payload;
         void answerCloudControl(action, params).then((result) => invoke("cloud_control_reply", { id, result }).catch(() => undefined));

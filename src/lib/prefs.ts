@@ -58,12 +58,6 @@ export interface Prefs {
    */
   shortcuts: Record<string, string[]>;
   /**
-   * Whether the `terminalx` command line may act on cloud workspaces
-   * (PRO-40). Every agent in a local tab can run that command line, so this
-   * is off until the person turns it on.
-   */
-  cloudControlFromAgents: boolean;
-  /**
    * The sidebar's session filter per person, by account email (`local` while
    * signed out). Only a filter that is on is kept; someone not listed sees
    * every session. One person's choice never carries over to another.
@@ -99,7 +93,6 @@ const DEFAULTS: Prefs = {
   cloudPinned: {},
   cloudCollapsed: {},
   shortcuts: {},
-  cloudControlFromAgents: false,
   sidebarFilters: {},
 };
 
