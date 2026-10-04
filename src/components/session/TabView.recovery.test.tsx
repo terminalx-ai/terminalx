@@ -62,6 +62,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("TabView recovery lifecycle", () => {
+  it("shows one delivery notice with resend instructions and clears it when activity arrives", async () => {
+    render(<Harness />);
+    emit({ type: "user_message", text: "Implement my change", queued: false });
+    emit({ type: "recovery", kind: "delivery_unconfirmed" });
+    expect(screen.getAllByLabelText("Session recovery")).toHaveLength(1);
+    expect(screen.getByText(/Prompt delivery could not be confirmed.*press Up in the composer/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Stop session" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
+    expect(screen.queryByText(/No progress was confirmed before the timeout/)).toBeNull();
+    emit({ type: "recovery", kind: null });
+    act(() => setTabStatus(session.id, session.tabs[0].id, "in_progress"));
+    expect(screen.queryByLabelText("Session recovery")).toBeNull();
+    expect(screen.getByText("Terminal view · Working")).toBeTruthy();
+    expect(getDraft(session.tabs[0].id)).toBe("Keep this unsent prompt");
+  });
+
   it("updates the actual sidebar, terminal header and dashboard count on capacity, then settles Stop", async () => {
     render(<Harness />);
     await screen.findByText("Terminal view · Working");
