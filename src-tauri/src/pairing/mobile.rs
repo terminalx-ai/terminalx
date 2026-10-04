@@ -13,6 +13,7 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -318,7 +319,9 @@ pub(super) async fn dispatch(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink.get().cloned();
     let result = match method {
-        "sessions.summaries" => no_params(&params).and_then(|_| session_summaries()),
+        "sync.capabilities" => no_params(&params).map(|_| json!({ "transcript": 1, "conditionalLists": 1 })),
+        "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
+        "session.sync" => parse_params(params).and_then(|params| session_sync(manager, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(manager, request_id(request), params)),
         "session.subscribe" => sink
             .as_ref()
@@ -432,6 +435,130 @@ fn file_name(path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("Project")
         .into()
+}
+
+// A content checkpoint, not a maximum event sequence: rewrites, reconciliation,
+// truncation and replacement logs must never silently keep stale cached events.
+const SYNC_PAGE_EVENTS: usize = 500;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SyncCursor {
+    offset: usize,
+    digest: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionSyncParams {
+    session_id: String,
+    tab_id: String,
+    cursor: Option<SyncCursor>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConditionalParams {
+    version: Option<String>,
+}
+
+fn conditional(mut value: Value, previous: Option<String>) -> Result<Value> {
+    let version = format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?));
+    if previous.as_deref() == Some(&version) {
+        return Ok(json!({ "notModified": true, "version": version }));
+    }
+    value["version"] = json!(version);
+    Ok(value)
+}
+
+fn session_sync(manager: &PairingManager, request_id: &str, params: SessionSyncParams) -> Result<Value> {
+    // Read errors are not deletions. Only an authoritative index absence clears
+    // the phone's copy.
+    let present = index::load()?.iter().any(|session|
+        session.id == params.session_id && session.tab(&params.tab_id).is_some());
+    if !present {
+        return Ok(json!({ "deleted": true }));
+    }
+    let path = store::log_path(&params.session_id, &params.tab_id)?;
+    let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
+    sessions(manager)?.reconcile_lapsed_events(&params.session_id, &params.tab_id, &mut events)?;
+    // Reconciliation publishes to the log. Read canonical file order again:
+    // another publisher may have appended between the first read and publish.
+    let events: Vec<AgentEvent> = store::read_lines(&path)?;
+    sync_page(&events, params.cursor.as_ref(), &params.session_id, &params.tab_id, request_id)
+}
+
+fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str) -> Result<Value> {
+    // Hash canonical records with explicit boundaries, including conversation
+    // identity and protocol generation. Stable across desktop restarts.
+    let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&(1, session, tab))?);
+    let offset = cursor.map_or(0, |c| c.offset);
+    for event in events.iter().take(offset) {
+        hash.update(serde_json::to_vec(event)?);
+        hash.update(b"\n");
+    }
+    let valid = cursor.is_some_and(|c| c.offset <= events.len()
+        && c.digest == format!("{:x}", hash.clone().finalize()));
+    let mut start = if valid { offset } else {
+        let mut start = events.len();
+        let mut turns = 0;
+        for event in events.iter().rev().take(SYNC_PAGE_EVENTS) {
+            start -= 1;
+            if matches!(event.payload, Payload::UserMessage { .. }) { turns += 1; }
+            if turns == 20 { break; }
+        }
+        start
+    };
+    // Count the escaped request id and worst-case sync metadata too. The
+    // largest possible offset is the log length, and false is longer than true.
+    let envelope = success_response(request_id, json!({
+        "events": [], "reset": false, "hasMore": false, "hasEarlier": false,
+        "cursor": SyncCursor { offset: events.len(), digest: "0".repeat(64) },
+    }));
+    let budget = TAIL_RESPONSE_BYTES_LIMIT.checked_sub(serde_json::to_vec(&envelope)?.len())
+        .context("transcript request envelope is too large")?;
+    let end = if valid {
+        start + sync_event_count(events[start..].iter().take(SYNC_PAGE_EVENTS), budget)?
+    } else {
+        // A reset is a recent contiguous suffix; forward pages are prefixes of
+        // the remaining records. Neither direction can skip an oversized event.
+        start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
+        events.len()
+    };
+    if !valid {
+        hash = Sha256::new();
+        hash.update(serde_json::to_vec(&(1, session, tab))?);
+        for event in events.iter().take(start) {
+            hash.update(serde_json::to_vec(event)?);
+            hash.update(b"\n");
+        }
+    }
+    for event in &events[start..end] {
+        hash.update(serde_json::to_vec(event)?);
+        hash.update(b"\n");
+    }
+    Ok(json!({
+        "events": &events[start..end], "reset": !valid,
+        "cursor": SyncCursor { offset: end, digest: format!("{:x}", hash.finalize()) },
+        "hasMore": end < events.len(), "hasEarlier": start > 0,
+    }))
+}
+
+fn sync_event_count<'a>(events: impl Iterator<Item = &'a AgentEvent>, budget: usize) -> Result<usize> {
+    let mut count = 0;
+    let mut bytes = 0;
+    for event in events {
+        let size = serde_json::to_vec(event)?.len() + usize::from(count > 0);
+        if bytes + size > budget {
+            if count == 0 {
+                bail!("Transcript event {} is too large to load on mobile. Open this conversation on your Mac.", event.seq);
+            }
+            break;
+        }
+        bytes += size;
+        count += 1;
+    }
+    Ok(count)
 }
 
 #[derive(Deserialize)]
@@ -641,6 +768,7 @@ struct NotesFile {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatListParams {
+    version: Option<String>,
     worktree_id: String,
     limit: usize,
 }
@@ -658,7 +786,7 @@ fn list_notes(manager: &PairingManager, params: ChatListParams) -> Result<Value>
     if notes.len() > params.limit {
         notes.drain(..notes.len() - params.limit);
     }
-    Ok(json!({ "messages": notes }))
+    conditional(json!({ "messages": notes }), params.version)
 }
 
 #[derive(Deserialize)]
@@ -1121,6 +1249,130 @@ mod tests {
             host_display_name: None,
             binding_generation: 0,
         }
+    }
+
+    fn cursor(page: &Value) -> SyncCursor {
+        serde_json::from_value(page["cursor"].clone()).unwrap()
+    }
+
+    #[test]
+    fn sync_cold_unchanged_and_large_gap_are_contiguous() {
+        let mut events: Vec<_> = (1..=100).map(prompt).collect();
+        let cold = sync_page(&events, None, "session", "tab", "test").unwrap();
+        assert_eq!(cold["events"].as_array().unwrap().len(), 20);
+        assert_eq!(cold["reset"], true);
+        let mut checkpoint = cursor(&cold);
+        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+        assert_eq!(warm["events"], json!([]));
+        assert_eq!(warm["reset"], false);
+        events.extend((101..=6200).map(prompt));
+        let mut received = Vec::new();
+        loop {
+            let page = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+            assert_eq!(page["reset"], false);
+            received.extend(page["events"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()));
+            checkpoint = cursor(&page);
+            if page["hasMore"] == false { break; }
+        }
+        assert_eq!(received, (101..=6200).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sync_rewrites_truncations_and_wrong_generation_reset_boundedly() {
+        let mut events: Vec<_> = (1..=600).map(prompt).collect();
+        let checkpoint = cursor(&sync_page(&events, None, "session", "tab", "test").unwrap());
+        // Same seq/id and length, different content: max-seq cursors miss this.
+        events[599].ts = "changed".into();
+        for (history, session) in [(&events[..], "session"), (&events[..10], "session"), (&events[..], "other")] {
+            let reset = sync_page(history, Some(&checkpoint), session, "tab", "test").unwrap();
+            assert_eq!(reset["reset"], true);
+            assert!(reset["events"].as_array().unwrap().len() <= SYNC_PAGE_EVENTS);
+        }
+        let empty = sync_page(&[], Some(&checkpoint), "session", "tab", "test").unwrap();
+        assert_eq!(empty["events"], json!([]));
+        assert_eq!(empty["reset"], true);
+    }
+
+    #[test]
+    fn sync_pages_bound_the_rpc_response_without_skipping_forward_records() {
+        let events: Vec<_> = std::iter::once(prompt(1))
+            .chain((2..=17).map(|seq| output(seq, "🦝\n\"".repeat(128 * 1024))))
+            .collect();
+        let request_id = "\"\n🦝".repeat(20);
+        let cold = sync_page(&events, None, "session", "tab", &request_id).unwrap();
+        assert_eq!(cold["reset"], true);
+        assert_eq!(cold["hasEarlier"], true);
+        assert_eq!(cold["events"].as_array().unwrap().last().unwrap()["seq"], 17);
+        assert!(success_response(&request_id, cold).to_string().len() <= TAIL_RESPONSE_BYTES_LIMIT);
+
+        let mut checkpoint = cursor(&sync_page(&[], None, "session", "tab", &request_id).unwrap());
+        let mut received = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = sync_page(&events, Some(&checkpoint), "session", "tab", &request_id).unwrap();
+            assert_eq!(page["reset"], false);
+            assert!(success_response(&request_id, page.clone()).to_string().len() <= TAIL_RESPONSE_BYTES_LIMIT);
+            let rows = page["events"].as_array().unwrap();
+            assert!(!rows.is_empty());
+            let next = cursor(&page);
+            assert_eq!(next.offset, checkpoint.offset + rows.len());
+            received.extend(rows.iter().map(|event| event["seq"].as_u64().unwrap()));
+            checkpoint = next;
+            pages += 1;
+            if page["hasMore"] == false { break; }
+        }
+        assert!(pages > 1);
+        assert_eq!(received, (1..=17).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sync_refuses_an_oversized_event_without_advancing_past_it() {
+        let initial = cursor(&sync_page(&[], None, "session", "tab", "test").unwrap());
+        let events = vec![prompt(1), output(2, "x".repeat(TAIL_RESPONSE_BYTES_LIMIT)), prompt(3)];
+        let first = sync_page(&events, Some(&initial), "session", "tab", "test").unwrap();
+        assert_eq!(first["events"].as_array().unwrap().len(), 1);
+        assert_eq!(first["hasMore"], true);
+        let checkpoint = cursor(&first);
+        assert_eq!(checkpoint.offset, 1);
+        let message = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap_err().to_string();
+        assert!(message.contains("event 2 is too large"));
+        assert!(message.contains("Open this conversation on your Mac"));
+        assert!(sync_page(&events[..2], None, "session", "tab", "test").is_err());
+    }
+
+    #[test]
+    fn conditional_lists_return_only_versions_when_unchanged() {
+        let initial = conditional(json!({"messages": [{"body": "synthetic"}]}), None).unwrap();
+        let version = initial["version"].as_str().unwrap().to_string();
+        let same = conditional(json!({"messages": [{"body": "synthetic"}]}), Some(version.clone())).unwrap();
+        assert_eq!(same, json!({"notModified": true, "version": version}));
+        assert!(conditional(json!({"messages": []}), Some(version)).unwrap().get("messages").is_some());
+    }
+
+    #[test]
+    fn synthetic_sync_payload_measurement() {
+        // 2,000 turns, six events per turn, no private content.
+        let events: Vec<_> = (1..=12000).map(|seq| {
+            if seq % 6 == 1 { prompt(seq) }
+            else { event(seq, Payload::AssistantText { text: "x".repeat(512), block: None }) }
+        }).collect();
+        let cold = sync_page(&events, None, "session", "tab", "test").unwrap();
+        let checkpoint = cursor(&cold);
+        let warm = sync_page(&events, Some(&checkpoint), "session", "tab", "test").unwrap();
+        let mut changed = events.clone();
+        changed.push(prompt(12001));
+        let delta = sync_page(&changed, Some(&checkpoint), "session", "tab", "test").unwrap();
+        let (tail, more) = select_event_tail(events.into_iter().rev().map(Ok), None, 20, tail_event_byte_limit("test").unwrap()).unwrap();
+        let legacy = json!({ "events": tail, "hasMore": more });
+        let bytes = |v: &Value| serde_json::to_vec(v).unwrap().len();
+        let request = |method: &str, params: Value| bytes(&json!({ "method": method, "params": params }));
+        let cold_request = request("session.sync", json!({"sessionId": "session", "tabId": "tab"}));
+        let warm_request = request("session.sync", json!({"sessionId": "session", "tabId": "tab", "cursor": checkpoint}));
+        let tail_request = request("session.tail", json!({"sessionId": "session", "tabId": "tab", "limit": 20}));
+        println!("synthetic transcript result bytes (one page each): legacy={}, cold={}, warm={}, delta={}", bytes(&legacy), bytes(&cold), bytes(&warm), bytes(&delta));
+        println!("synthetic request bytes (method + params): legacy={tail_request}, cold={cold_request}, warm={warm_request}, delta={warm_request}");
+        assert!(bytes(&warm) * 100 < bytes(&legacy));
+        assert!(bytes(&delta) * 50 < bytes(&legacy));
     }
 
     fn event(seq: u64, payload: Payload) -> AgentEvent {

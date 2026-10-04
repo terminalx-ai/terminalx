@@ -7,7 +7,8 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-native";
 import { buildTranscript, type PendingAsk, type Turn } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
-import { mergeEvents, readTranscriptCache, writeTranscriptCache, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
+import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
+import { watchTranscript } from "@mobile/data/transcript-sync";
 import { useApp } from "@mobile/state/AppProvider";
 import { Button, Card, EmptyState } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
@@ -86,38 +87,36 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
   const transcript = useMemo(() => buildTranscript(events, connected), [connected, events]);
 
   useEffect(() => {
-    let active = true;
+    let receivedPage = false;
     setLoading(true);
     setLoadingEarlier(false);
     setEarlierError(null);
-    if (connected) setLoadError(null);
-    void (async () => {
-      try {
-        const cached = await readTranscriptCache(hostId, sessionId, tabId);
-        if (!active) return;
-        setEvents((existing) => mergeEvents(cached, existing));
-        if (!connected) {
-          setLoadError((current) => current ?? "Reconnect to your Mac to load the transcript.");
-          return;
+    setLoadError(connected ? null : "Reconnect to your Mac to load the transcript.");
+    const stop = watchTranscript(app.api, hostId, sessionId, tabId, connected, (cache, replace, source) => {
+      setEvents((existing) => replace ? cache.events : source === "cache" ? mergeEvents(cache.events, existing) : mergeEvents(existing, cache.events));
+      if (source === "page") {
+        // Only an authoritative page establishes the backward cursor. Live
+        // events and cache eviction must not move it past unrequested history.
+        if (!receivedPage || replace) {
+          setBefore(cache.events[0]?.seq);
+          setHasMore(cache.hasEarlier);
+          earlierRequest.current = null;
+          setLoadingEarlier(false);
+          setEarlierError(null);
         }
-        const page = await app.api.tail(sessionId, tabId);
-        if (!active) return;
-        setEvents((existing) => mergeEvents(existing, page.events));
-        setHasMore(page.hasMore);
-        // Cache/live events can precede this page. Only its cursor tells us
-        // where to resume without skipping a gap in the saved history.
-        setBefore(page.events[0]?.seq);
-        void app.api.listNotes(sessionId).then((notes) => { if (active) setNotes(notes); }).catch(() => undefined);
-      } catch (error) {
-        if (active) setLoadError(error instanceof Error ? error.message : "Could not load the transcript. Try again.");
-      } finally {
-        if (active) setLoading(false);
+        receivedPage = true;
+        setLoadError(null);
+        setLoading(false);
+      } else if (!connected) {
+        setLoading(false);
       }
-    })();
-    return () => { active = false; earlierRequest.current = null; };
-    // `epoch`: after a reconnect that was never shown (a short trip to the home screen) the tail is read again,
-    // merged into what is on screen, so nothing that happened meanwhile is missing and nothing jumps.
-  }, [app.api, connected, epoch, hostId, sessionId, tabId, retry, setEvents, setHasMore, setBefore, setNotes]);
+    }, (cause) => {
+      setLoading(false);
+      setLoadError(cause instanceof Error ? cause.message : "Could not load the transcript. Try again.");
+      app.connection.reportError("Transcript sync failed", cause);
+    });
+    return () => { stop(); earlierRequest.current = null; };
+  }, [app.api, app.connection, connected, epoch, hostId, sessionId, tabId, retry, setEvents, setHasMore, setBefore]);
 
   useEffect(() => {
     let active = true;
@@ -126,20 +125,35 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     });
     return () => { active = false; };
   }, [cacheKey, setDraft]);
-  useEffect(() => { if (events.length) void writeTranscriptCache(hostId, sessionId, tabId, events); }, [events, hostId, sessionId, tabId]);
   useEffect(() => {
     let active = true;
-    const stream = app.api.subscribeSession(tabId, (event) => { if (active) setEvents((existing) => mergeEvents(existing, [event])); });
-    const events = app.connection.onEvent((message) => {
-    if (!active) return;
-    if (message.method === "session.event") {
-      const event = (message.params as { event?: unknown } | null)?.event;
-      if (isAgentEvent(event) && event.tabId === tabId) setEvents((existing) => mergeEvents(existing, [event]));
-    }
-    if (message.method === "chat.changed") void app.api.listNotes(sessionId).then((notes) => { if (active) setNotes(notes); });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    let dirty = false;
+    const refresh = async () => {
+      if (!active || !connected) return;
+      dirty = true;
+      if (running) return;
+      running = true;
+      try {
+        while (dirty && active) {
+          dirty = false;
+          const notes = await app.api.listNotes(sessionId);
+          if (active) setNotes(notes);
+        }
+      } catch (cause) { app.connection.reportError("Notes refresh failed", cause); }
+      finally { running = false; }
+    };
+    void refresh();
+    const detach = app.connection.onEvent((message) => {
+      if (message.method !== "chat.changed") return;
+      const worktreeId = (message.params as { worktreeId?: string } | null)?.worktreeId;
+      if (worktreeId && worktreeId !== sessionId) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => void refresh(), 150);
     });
-    return () => { active = false; stream(); events(); };
-  }, [app.api, app.connection, sessionId, tabId, setEvents, setNotes]);
+    return () => { active = false; clearTimeout(timer); detach(); };
+  }, [app.api, app.connection, connected, epoch, sessionId, setNotes]);
 
   const loadEarlier = async () => {
     if (before === undefined || !connected || loading || earlierRequest.current) return;
@@ -353,7 +367,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
 }
 
 function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.prompt?.ts ?? item.turn.completed?.ts ?? "") || item.turn.seq : item.note.createdAt; }
-function isAgentEvent(value: unknown): value is AgentEvent { return !!value && typeof value === "object" && Number.isSafeInteger((value as AgentEvent).seq) && typeof (value as AgentEvent).tabId === "string"; }
 
 const styles = StyleSheet.create({
   page: { flex: 1 },

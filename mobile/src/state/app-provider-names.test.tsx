@@ -16,6 +16,8 @@ const fake = vi.hoisted(() => ({
 }));
 vi.mock("@react-native-async-storage/async-storage", () => ({
   default: {
+    getAllKeys: async () => [...fake.storage.keys()],
+    multiRemove: async (keys: string[]) => { for (const key of keys) fake.storage.delete(key); },
     getItem: async (key: string) => fake.storage.get(key) ?? null,
     setItem: async (key: string, value: string) => void fake.storage.set(key, value),
     removeItem: async (key: string) => void fake.storage.delete(key),
@@ -58,7 +60,7 @@ vi.mock("../transport/connection", () => ({
   },
 }));
 vi.mock("../data/host-api", () => ({
-  HostApi: class {
+  HostApi: class { resetConnection() {}
     describe = fake.describe;
     forgetPairing = fake.forgetPairing;
     summaries = async () => [];

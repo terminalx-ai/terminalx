@@ -1,3 +1,5 @@
+import { forgetConversationState } from "./conversation-state";
+import { clearTranscriptCaches } from "../data/transcript-cache";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AppState, Linking } from "react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from "react";
@@ -108,6 +110,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       setActiveHost(null);
       setSessions([]);
       setAvailableHosts([]);
+      forgetConversationState("");
+      await clearTranscriptCaches();
+      api.resetConnection(true);
       await signOutPairing(stored);
       setSession(null);
       await loadHosts();
@@ -115,7 +120,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
     if (outcome.status === "refreshed") setSession(outcome.session);
     return outcome.session;
-  }, [connection, loadHosts]);
+  }, [api, connection, loadHosts]);
 
   const refreshMachines = useCallback(async () => {
     if (!session) return;
@@ -135,15 +140,25 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [loadHosts, refreshCloudSession, session]);
 
+  const summariesRunning = useRef(false);
+  const summariesDirty = useRef(false);
   const refreshSessions = useCallback(async () => {
     if (!activeHostRef.current) return;
+    summariesDirty.current = true;
+    if (summariesRunning.current) return;
+    summariesRunning.current = true;
     setLoadingSessions(true);
     try {
-      const values = await api.summaries();
-      if (values) setSessions(values);
+      while (summariesDirty.current && activeHostRef.current) {
+        summariesDirty.current = false;
+        const host: string = activeHostRef.current.id;
+        const values = await api.summaries();
+        if (values && activeHostRef.current?.id === host) setSessions(values);
+      }
     } catch (cause) {
       setError(readableError(cause));
     } finally {
+      summariesRunning.current = false;
       setLoadingSessions(false);
     }
   }, [api]);
@@ -154,6 +169,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (storedSession) {
         const outcome = await refreshStoredSession(storedSession);
         if (outcome.status === "rejected") {
+          forgetConversationState("");
+          await clearTranscriptCaches();
+          api.resetConnection(true);
           await signOutPairing(storedSession);
           effectiveSession = null;
           storedHosts = await readHosts();
@@ -177,7 +195,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
     });
     return () => linking.remove();
-  }, [loadHosts]);
+  }, [api, loadHosts]);
 
   useEffect(() => {
     const stage = connection.onStage((next, attempt) => {
@@ -185,7 +203,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       setConnectionStage(next);
       setConnectionAttempt(attempt);
       if (next === "connected") {
-        void refreshSessions();
+        api.resetConnection();
         void refreshHostName();
         if (activeHostRef.current) void restoreLocalNotifications(connection, activeHostRef.current.id);
       }
@@ -197,13 +215,19 @@ export function AppProvider({ children }: PropsWithChildren) {
         return next;
       });
     });
+    let summariesTimer: ReturnType<typeof setTimeout> | undefined;
     const event = connection.onEvent((message) => {
       if (message.method === "notifications.event" && activeHostRef.current) void handleNotificationEvent(activeHostRef.current.id, message.params);
-      if (message.method === "sessions.changed") void refreshSessions();
+      if (message.method === "sessions.changed") {
+        summariesTimer ??= setTimeout(() => { summariesTimer = undefined; void refreshSessions(); }, 200);
+      }
     });
-    const resumed = connection.onConnected(() => setConnectionEpoch((epoch) => epoch + 1));
-    return () => { stage(); log(); event(); resumed(); connection.stop(); };
-  }, [connection, refreshHostName, refreshSessions]);
+    const resumed = connection.onConnected(() => {
+      setConnectionEpoch((epoch) => epoch + 1);
+      void refreshSessions();
+    });
+    return () => { clearTimeout(summariesTimer); stage(); log(); event(); resumed(); connection.stop(); };
+  }, [api, connection, refreshHostName, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -234,13 +258,16 @@ export function AppProvider({ children }: PropsWithChildren) {
     connection.stop();
     activeHostRef.current = null;
     setActiveHost(null);
+    forgetConversationState("");
+    await clearTranscriptCaches();
+    api.resetConnection(true);
     await signOutPairing(session);
     await revokeCloudSession(session);
     setSession(null);
     setAvailableHosts([]);
     setSessions([]);
     await loadHosts();
-  }, [connection, loadHosts, session]);
+  }, [api, connection, loadHosts, session]);
 
   const pairAvailable = useCallback(async (host: AccountHost) => {
     if (!session) return;
@@ -297,11 +324,12 @@ export function AppProvider({ children }: PropsWithChildren) {
       setError("The device credential is unavailable. Pair this computer again.");
       return;
     }
+    api.resetConnection(true);
     activeHostRef.current = host;
     setActiveHost(host);
     setSessions([]);
     connection.start(host, credential);
-  }, [connection]);
+  }, [api, connection]);
 
   const disconnectHost = useCallback(() => {
     connection.stop();
@@ -317,6 +345,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       if (connectionStageRef.current === "connected") await api.forgetPairing().catch(() => false);
       disconnectHost();
     }
+    forgetConversationState(JSON.stringify([hostId]).slice(0, -1) + ",");
     await removeHost(hostId);
     await loadHosts();
   }, [api, disconnectHost, loadHosts]);

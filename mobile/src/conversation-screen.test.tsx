@@ -75,6 +75,7 @@ beforeEach(() => {
     ] }],
     connection: { onEvent: () => () => {}, reportError: vi.fn() },
     api: {
+      features: async () => ({}),
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
       subscribeSession: vi.fn((tab, listener) => { mocks.sessionListeners.set(tab, listener); return () => { mocks.sessionListeners.delete(tab); }; }),
@@ -288,14 +289,43 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).not.toContain("Load earlier");
   });
 
-  it("uses the page cursor even when cached events are older", async () => {
+  it("retries a failed incremental page and keeps the earlier cursor during live catch-up", async () => {
+    mocks.app.api.features = async () => ({ transcript: 1 });
+    const page = (seq: number, reset = false) => ({
+      events: [event("claude", `synced ${seq}`, seq)], reset,
+      cursor: { offset: seq, digest: "a".repeat(64) }, hasMore: false, hasEarlier: true,
+    });
+    mocks.app.api.syncTranscript = vi.fn().mockRejectedValueOnce(new Error("Event too large. Open this conversation on your Mac."));
+    await render();
+    expect(container.textContent).toContain("Could not load transcript");
+    expect(container.textContent).toContain("Event too large");
+    mocks.app.api.syncTranscript.mockResolvedValueOnce(page(10, true));
+    await click("Retry loading transcript");
+    expect(container.textContent).toContain("synced 10");
+    expect(container.textContent).not.toContain("Could not load transcript");
+
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "earlier", 5)], hasMore: true });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 10);
+    mocks.app.api.syncTranscript.mockResolvedValueOnce(page(11));
+    await act(async () => {
+      mocks.sessionListeners.get("claude")!(event("claude", "live", 11));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    expect(container.textContent).toContain("synced 11");
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "oldest", 1)], hasMore: false });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 5);
+  });
+
+  it("uses the page cursor and replaces an unverified older cached range", async () => {
     mocks.storage.set(`terminalx:transcript:${mocks.params.hostId}:worktree:claude`, JSON.stringify([event("claude", "cached", 1)]));
     mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "latest", 10)], hasMore: true });
     await render();
     mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "gap", 5)], hasMore: true });
     await click("Load earlier");
     expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 10);
-    expect(container.textContent).toContain("cached");
+    expect(container.textContent).not.toContain("cached");
     expect(container.textContent).toContain("gap");
     await click("Load earlier");
     expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 5);

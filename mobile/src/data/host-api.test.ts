@@ -79,3 +79,37 @@ describe("the computer's name and unpairing", () => {
     await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).forgetPairing()).resolves.toBe(false);
   });
 });
+
+describe("conditional lists", () => {
+  it("negotiates once, coalesces concurrent reads, and reuses unchanged notes", async () => {
+    const note = { id: "n", body: "synthetic", createdAt: 1, author: { userId: "synthetic" } };
+    const request = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { conditionalLists: 1 } })
+      .mockResolvedValueOnce({ ok: true, value: { messages: [note], version: "v1" } })
+      .mockResolvedValueOnce({ ok: true, value: { notModified: true, version: "v1" } });
+    const api = hostApi(request);
+    expect(await Promise.all([api.listNotes("session"), api.listNotes("session")])).toEqual([[note], [note]]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(await api.listNotes("session")).toEqual([note]);
+    expect(request).toHaveBeenLastCalledWith("chat.list", { worktreeId: "session", limit: 100, version: "v1" });
+  });
+
+  it("renegotiates after reconnect and drops conditional versions on host switches", async () => {
+    const request = vi.fn(async (method: string) => ({ ok: true, value: method === "sync.capabilities" ? { conditionalLists: 1 } : { sessions: [], version: "v1" } }));
+    const api = hostApi(request);
+    await api.summaries(); api.resetConnection(); await api.summaries();
+    expect(request).toHaveBeenLastCalledWith("sessions.summaries", { version: "v1" });
+    api.resetConnection(true); await api.summaries();
+    expect(request).toHaveBeenLastCalledWith("sessions.summaries", {});
+    expect(request.mock.calls.filter(([method]) => method === "sync.capabilities")).toHaveLength(3);
+  });
+
+  it("never sends conditional fields to an older host", async () => {
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: false, refusal: { code: "forbidden", message: "unsupported" } }
+      : { ok: true, value: { messages: [], version: "ignored" } });
+    const api = hostApi(request);
+    await api.listNotes("session"); await api.listNotes("session");
+    expect(request).toHaveBeenLastCalledWith("chat.list", { worktreeId: "session", limit: 100 });
+  });
+});

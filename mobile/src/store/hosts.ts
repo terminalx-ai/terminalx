@@ -1,3 +1,4 @@
+import { clearTranscriptCaches } from "../data/transcript-cache";
 import { DirectEndpointsSchema } from "../pairing/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
@@ -98,6 +99,7 @@ export async function setHostNames(hostId: string, change: { hostName?: string; 
 }
 
 export async function removeHost(hostId: string): Promise<void> {
+  await clearTranscriptCaches(hostId);
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify((await readHosts()).filter((host) => host.id !== hostId)));
   await SecureStore.deleteItemAsync(credentialKey(hostId), OPTIONS).catch(() => undefined);
 }
@@ -106,6 +108,7 @@ export async function removeAutomaticHosts(userId: string): Promise<void> {
   const hosts = await readHosts();
   const automatic = hosts.filter((host) => host.provenance.kind === "automatic" && host.provenance.userId === userId);
   await AsyncStorage.setItem(HOSTS_KEY, JSON.stringify(hosts.filter((host) => !automatic.includes(host))));
+  await Promise.all(automatic.map((host) => clearTranscriptCaches(host.id)));
   await Promise.all(automatic.map((host) => SecureStore.deleteItemAsync(credentialKey(host.id), OPTIONS).catch(() => undefined)));
 }
 
