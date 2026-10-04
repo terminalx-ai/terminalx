@@ -29,6 +29,8 @@ export interface OutboxEntry {
   kind: OutboxKind;
   /** From the local plaintext, for display. */
   text?: string | null;
+  /** How many images the message carries (PRO-22); absent when none. */
+  images?: number;
   requestId?: string | null;
   state: OutboxState;
   wake?: WakeResult | null;

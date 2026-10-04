@@ -327,7 +327,11 @@ instead of from this computer.
 
   In the transcript, an image sent to a cloud tab shows by name: its file
   is on the workspace, not on this computer, so there is no thumbnail.
-  "Send again" on a message whose outcome is unknown resends its text only.
+  "Send again" on a message whose outcome is unknown uploads its images
+  again and sends it with them. The app holds a message's images in memory
+  until the message is applied, rejected or cancelled; the outbox on disk
+  keeps only their count. After a restart the images are gone, and "Send
+  again" then says so instead of sending the text alone (or nothing).
   Nothing strips an image's metadata (EXIF, location). Once sent, the image
   is archived on the workspace under `<store root>/attachments/<sessionId>/`,
   as a local tab's is on this computer, until the session is deleted.

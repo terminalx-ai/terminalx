@@ -168,6 +168,7 @@ export function getCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
 
 /** Forget every workspace's tabs and stop polling (sign-out, organization switch, tests). */
 export function resetCloudAgents() {
+  sentImages.clear();
   for (const s of stores.values()) {
     if (s.poll) clearTimeout(s.poll);
     for (const timer of s.saves.values()) clearTimeout(timer);
@@ -734,6 +735,8 @@ function upsert(s: Store, entry: OutboxEntry) {
     }
   }
   s.outbox = at >= 0 ? s.outbox.map((existing, i) => (i === at ? entry : existing)) : [...s.outbox, entry];
+  // Settled for good: its images are not needed for a "Send again".
+  if (entry.state === "applied" || entry.state === "rejected" || entry.state === "cancelled") sentImages.delete(entry.clientCommandId);
 }
 
 /** A decision for this request that is, or may be, on its way: never enqueue another. */
@@ -783,6 +786,7 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
   const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client);
+  if (images.length) sentImages.set(entry.clientCommandId, images);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
   if (current && sent && current.pendingConfig === sent) {
@@ -861,8 +865,33 @@ export function isDeciding(scope: CloudAgentScope, requestId: string): boolean {
 export function sendAgain(scope: CloudAgentScope, entry: OutboxEntry, client: WorkspaceRpcClient | null) {
   if (entry.kind === "stop") return stopCloudAgent(scope, entry.tabId, client);
   if (entry.kind === "permission-decision") throw new Error("A decision is never sent twice");
+  // A message with images goes again with its images (uploaded again: the runtime may have
+  // dropped them), or not at all. It is never sent as its text alone, or as nothing.
+  if (entry.kind === "send" && (entry.images ?? 0) > 0) {
+    const images = sentImages.get(entry.clientCommandId);
+    if (!images) return Promise.reject(new CloudImageError(SEND_AGAIN_IMAGES_GONE));
+    return sendToCloudAgent(scope, entry.tabId, entry.text ?? "", client, images).then((again) => {
+      // The new command holds them now.
+      sentImages.delete(entry.clientCommandId);
+      return again;
+    });
+  }
   return enqueue(scope, entry.tabId, entry.kind, { text: entry.text ?? "" }, client);
 }
+
+/**
+ * Said when "Send again" is pressed on a message whose images this app no
+ * longer holds (it was restarted since): the outbox keeps their count, not
+ * the images.
+ */
+export const SEND_AGAIN_IMAGES_GONE = "This message had images, which are no longer held here. Attach them again and send it from the composer.";
+
+/**
+ * The images of messages whose fate is not known yet, by command, for "Send
+ * again". In memory only, and let go as soon as the message is applied,
+ * rejected or cancelled.
+ */
+const sentImages = new Map<string, ImageInput[]>();
 
 export async function cancelCloudAgentCommand(scope: CloudAgentScope, clientCommandId: string) {
   const s = store(scope);

@@ -145,6 +145,28 @@ fn an_unreadable_key_store_is_reported_as_unavailable_not_as_a_missing_key() {
     assert_eq!(client.has_key(ORG, WS).unwrap_err(), "cloud_agent_key_store_unavailable");
 }
 
+/// PRO-22: the outbox keeps how many images a message names, for its row and
+/// for "Send again"; never the images or their ids.
+#[test]
+fn an_outbox_entry_says_how_many_images_its_message_names() {
+    // Every answer is lost: entries stay unsent, which is all this needs.
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    give_key(&fixture);
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests" })).unwrap();
+    assert_eq!(entry.images, 0);
+    assert!(serde_json::to_value(&entry).unwrap().get("images").is_none(), "a message without images says nothing about them");
+    // A message that names images says how many, for the list and for "Send again"; never which.
+    let with_images = json!({ "text": "", "images": [{ "id": "att-0001", "mediaType": "image/png" }, { "id": "att-0002", "mediaType": "image/png" }] });
+    let pictured = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_images).unwrap();
+    assert_eq!(serde_json::to_value(&pictured).unwrap()["images"], 2);
+    assert!(!serde_json::to_string(&pictured).unwrap().contains("att-0001"));
+    assert_eq!(fixture.client.outbox(ORG, WS, None).unwrap().iter().map(|entry| entry.images).collect::<Vec<_>>(), vec![0, 2], "the count survives a reload");
+    // Images alone are a message (the line above sent one); nothing at all is not, and a steer is always text.
+    for (kind, payload) in [("send", json!({ "text": "" })), ("send", json!({ "text": " ", "images": [] })), ("steer", json!({ "text": "", "images": [{ "id": "att-0003" }] }))] {
+        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload).unwrap_err(), "cloud_agent_request_invalid");
+    }
+}
+
 #[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
@@ -568,6 +590,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         iv: String::new(),
         ciphertext: String::new(),
         text: None,
+        images: 0,
         request_id: None,
         state: state.into(),
         wake: None,
