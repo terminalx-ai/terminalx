@@ -228,6 +228,44 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
   });
 
+  describe("the list says running, the runtime has stopped by itself", () => {
+    // What the native side does on attach: parked as suspended on `connect`, resumed on `wake`.
+    const idleStopped = () =>
+      mocks.workspaceConnection.mockImplementation(async (target: { workspaceId: string }, activation: string) => {
+        let runtime = runtimes.get(target.workspaceId);
+        if (!runtime) runtimes.set(target.workspaceId, (runtime = fakeRuntime(target.workspaceId, { state: "suspended" })));
+        if (activation === "wake") queueMicrotask(() => runtime!.set(connected));
+        return runtime.connection;
+      });
+    const wakes = (id: string) => mocks.workspaceConnection.mock.calls.filter((call) => call[1] === "wake").length + (runtimes.get(id)?.connection.activate.mock.calls.length ?? 0);
+
+    it("the app's form wakes it: starting a session there is the person's own action", async () => {
+      await place([item("dozed", { repositories: [api] })]);
+      idleStopped();
+      const plan = flow.planCloudStart(project("github.com/acme/api"));
+      expect(plan.kind).toBe("reuse");
+      expect(await flow.startInWorkspace(plan as never, request)).toBe(`cloud:${ORG}:dozed:dozed-s1`);
+      expect(wakes("dozed")).toBe(1);
+    });
+
+    it("a caller that was not told to wake gets cloud_workspace_stopped, and nothing is woken or created (PRO-40)", async () => {
+      await place([item("dozed", { repositories: [api] })]);
+      idleStopped();
+      const plan = flow.planCloudStart(project("github.com/acme/api"));
+      await expect(flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: false })).rejects.toThrow("cloud_workspace_stopped");
+      const asked = vi.fn(async () => false);
+      await expect(flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: asked })).rejects.toThrow("cloud_workspace_stopped");
+      expect(asked).toHaveBeenCalledTimes(1);
+      expect(wakes("dozed")).toBe(0);
+      expect(runtimes.get("dozed")!.created).toEqual([]);
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      // Told to: one wake, and the session is not selected in the window.
+      expect(await flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: async () => true })).toBe(`cloud:${ORG}:dozed:dozed-s1`);
+      expect(wakes("dozed")).toBe(1);
+      expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+    });
+  });
+
   it("puts two sessions in one project on the same workspace and connection", async () => {
     await place([item("recent", { repositories: [api] })]);
     const node = project("github.com/acme/api");

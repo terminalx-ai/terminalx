@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { agent } from "@/lib/api";
+import { agent, api } from "@/lib/api";
 import { getSessions, patchTab } from "@/lib/sessions";
 import { noteStatusChange } from "@/lib/notify";
+import { onAppResume } from "@/lib/appResume";
 import type { AgentEvent, BlockRef } from "@/types/events";
 import type { SessionEntry, TabStatus } from "@/types/session";
 
@@ -239,9 +240,51 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
 }
 
 let subscribed = false;
+let reconciling = false;
+
+/** Read saved history again after suspension; never send input or restart work. */
+export async function reconcileAgentEvents() {
+  if (reconciling) return;
+  reconciling = true;
+  // A frame requested before suspension need not be delivered on resume.
+  if (frame !== null) cancelAnimationFrame(frame);
+  flush();
+  try {
+    const before = getSessions().sessions;
+    try {
+      const sessions = await api.listSessions();
+      for (const session of sessions) {
+        for (const tab of session.tabs) {
+          const old = before.find((s) => s.id === session.id)?.tabs.find((t) => t.id === tab.id);
+          const current = getSessions().sessions.find((s) => s.id === session.id)?.tabs.find((t) => t.id === tab.id);
+          // A live update during the read wins over its snapshot. Only status
+          // is reconciled here; recovery must not close panes or change drafts.
+          if (old && old === current && old.status !== tab.status) setTabStatus(session.id, tab.id, tab.status);
+        }
+      }
+    } catch { /* Keep the last verified state when the backend is unavailable. */ }
+    for (const session of getSessions().sessions) {
+      for (const tab of session.tabs) {
+        const k = key(session.id, tab.id);
+        if (!logs.get(k)?.loaded || !listeners.get(k)?.size) continue;
+        try {
+          const events = await agent.loadEvents(session.id, tab.id);
+          // Navigation/closure while the read was pending must not resurrect a log.
+          if (logs.has(k)) mergeTabEvents(session.id, tab.id, events);
+        } catch {
+          // Keep the existing conversation; a later resume retries the read.
+        }
+      }
+    }
+  } finally {
+    reconciling = false;
+  }
+}
+
 export async function subscribeAgentEvents() {
   if (subscribed) return;
   subscribed = true;
+  onAppResume(() => void reconcileAgentEvents());
   try {
     const liveTab = (sessionId: string, tabId: string) => getSessions().sessions.some((session) => session.id === sessionId && session.tabs.some((tab) => tab.id === tabId));
     await listen<AgentEvent>("agent_event", ({ payload }) => {

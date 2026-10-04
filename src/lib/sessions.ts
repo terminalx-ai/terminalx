@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api } from "@/lib/api";
+import { api, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
@@ -382,13 +382,17 @@ export async function setProjectLogo(path: string, source: string | null) {
   return p;
 }
 
-/** Delete a workspace; the sessions that ran in it are removed with it. */
-export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const report = await api.deleteWorkspace(projectPath, path, deleteBranch);
+/**
+ * Remove a workspace. Deleting it removes the sessions that ran in it;
+ * settling (`keepSessions`) keeps them and moves them to the project.
+ */
+export async function removeWorkspace(projectPath: string, path: string, options: WorkspaceRemoveOptions) {
+  const report = await api.removeWorkspace(projectPath, path, options);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
-  removeSessions(report.sessions.map((s) => s.id));
+  if (options.keepSessions) for (const session of report.sessions) upsertSession(session);
+  else removeSessions(report.sessions.map((s) => s.id));
   await refreshWorkspaces(projectPath);
   return report;
 }
@@ -450,17 +454,17 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
-export async function deleteSession(id: string, removeWorktree: boolean) {
-  const report = await api.deleteSession(id, removeWorktree);
-  // Siblings taken along with a removed worktree arrive as session_deleted events.
+/** Delete one session. Its workspace stays, and so does every other session. */
+export async function deleteSession(id: string) {
+  await api.deleteSession(id);
   removeSessions([id]);
-  return report;
 }
 
-export async function settleSession(id: string, action: "delete" | "relocate") {
-  const report = await api.settleSession(id, action);
-  upsertSession(report.session);
-  return report;
+/** Keep the worktree on disk but run the session in the project itself from now on. */
+export async function relocateSession(id: string) {
+  const session = await api.relocateSession(id);
+  upsertSession(session);
+  return session;
 }
 
 export async function forkSession(id: string, tabId: string) {

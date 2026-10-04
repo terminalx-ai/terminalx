@@ -1,155 +1,229 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionEntry, WorkspaceDisposition, WorktreeDisposition } from "@/types/session";
+import type { Landed, SessionEntry, WorkspaceDisposition } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({
   ask: vi.fn(),
   message: vi.fn(),
-  worktreeDisposition: vi.fn(),
   workspaceDisposition: vi.fn(),
-  settleSession: vi.fn(),
-  deleteWorkspace: vi.fn(),
+  removeWorkspace: vi.fn(),
+  relocateSession: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({
-  api: { worktreeDisposition: mocks.worktreeDisposition, workspaceDisposition: mocks.workspaceDisposition },
+  api: { workspaceDisposition: mocks.workspaceDisposition },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
-const session = { id: "s1", title: "Fix login", cwd: "/p/.raccoon/worktrees/quiet-amber-fox", worktreeName: "quiet-amber-fox", branch: "raccoon/quiet-amber-fox" } as SessionEntry;
-vi.mock("@/lib/sessions", () => ({
-  settleSession: mocks.settleSession,
-  deleteWorkspace: mocks.deleteWorkspace,
-  useSessionStore: () => ({ sessions: [session] }),
-}));
+vi.mock("@/lib/sessions", () => ({ removeWorkspace: mocks.removeWorkspace, relocateSession: mocks.relocateSession }));
 
-import { closeSettle, closeWorkspaceDelete, openSettle, openWorkspaceDelete } from "@/lib/dialogs";
-import { SettleDialog } from "./SettleDialog";
-import { WorkspaceDeleteDialog } from "./WorkspaceDeleteDialog";
+import { closeWorkspaceRemove, openSettle, openWorkspaceDelete } from "@/lib/dialogs";
+import { WorkspaceRemoveDialog } from "./WorkspaceRemoveDialog";
 
-const clean: WorktreeDisposition = { exists: true, checked: true, uncommitted: 0, unpushed: 0, branch: "raccoon/quiet-amber-fox" };
-const workspace: WorkspaceDisposition = {
-  exists: true,
+const path = "/p/.raccoon/worktrees/quiet-amber-fox";
+const session = { id: "s1", title: "Fix login", projectPath: "/p", cwd: path, worktreeName: "quiet-amber-fox" } as SessionEntry;
+const safe: Landed = {
   checked: true,
-  isMain: false,
   branch: "raccoon/quiet-amber-fox",
+  head: "0123abcd",
+  base: "origin/main",
   uncommitted: 0,
+  stashes: 0,
+  clean: true,
+  merged: "squash",
+  unmergedCommits: 0,
+  pushed: true,
+  fresh: true,
+  notVerified: null,
+  safe: true,
+  losses: [],
+  digest: "safe-digest",
+};
+const workspace = (landed: Landed, extra: Partial<WorkspaceDisposition> = {}): WorkspaceDisposition => ({
+  exists: true,
+  checked: landed.checked,
+  isMain: false,
+  branch: landed.branch,
+  uncommitted: landed.uncommitted,
   unpushed: 0,
   aheadOfBase: 0,
   pr: null,
   prChecked: true,
   sessions: 2,
   sessionTitles: ["Fix login", "Review the fix"],
-};
-const deleteButton = () => screen.getByRole("button", { name: /Delete (worktree|workspace|anyway)/ }) as HTMLButtonElement;
+  sessionIds: ["s1", "s9"],
+  landed,
+  ...extra,
+});
+const dirty: Landed = { ...safe, digest: "dirty-digest", uncommitted: 2, clean: false, safe: false, losses: ["2 uncommitted files would be lost."] };
+const unmerged: Landed = { ...safe, digest: "unmerged-digest", merged: null, unmergedCommits: 3, safe: false, losses: ["3 commits are not in origin/main. The branch is pushed, but not merged."] };
+const unverified: Landed = { ...safe, digest: "unverified-digest", merged: "ancestor", notVerified: "origin/main could not be fetched (timed out).", safe: false, losses: ["Not verified: origin/main could not be fetched (timed out)."] };
+const unchecked: Landed = { ...safe, digest: "unchecked-digest", checked: false, clean: false, merged: null, safe: false, losses: ["This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work."] };
+
+const removeButton = () => screen.getByRole("button", { name: /^(Delete|Settle) (workspace|anyway…)$/ }) as HTMLButtonElement;
+const openDelete = () => act(() => openWorkspaceDelete("/p", path, "quiet-amber-fox"));
 
 beforeEach(() => {
   for (const mock of Object.values(mocks)) mock.mockReset();
   mocks.message.mockResolvedValue(undefined);
+  mocks.removeWorkspace.mockResolvedValue({ sessions: [], keptBranch: null, rescuedBranch: null });
 });
 afterEach(() => {
-  act(() => {
-    closeSettle();
-    closeWorkspaceDelete();
-  });
+  act(() => closeWorkspaceRemove());
   cleanup();
 });
 
-describe("SettleDialog", () => {
-  it("keeps Delete disabled until the tree's state is known", async () => {
-    let resolve!: (d: WorktreeDisposition) => void;
-    mocks.worktreeDisposition.mockReturnValue(new Promise<WorktreeDisposition>((r) => (resolve = r)));
-    render(<SettleDialog />);
-    act(() => openSettle("s1"));
-    expect(deleteButton().disabled).toBe(true);
-    await act(async () => resolve(clean));
-    expect(deleteButton().disabled).toBe(false);
-    expect(deleteButton().textContent).toContain("Delete worktree");
+describe("WorkspaceRemoveDialog", () => {
+  it("keeps the button disabled until the check has answered", async () => {
+    let resolve!: (d: WorkspaceDisposition) => void;
+    mocks.workspaceDisposition.mockReturnValue(new Promise<WorkspaceDisposition>((r) => (resolve = r)));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    expect(removeButton().disabled).toBe(true);
+    await act(async () => resolve(workspace(safe)));
+    expect(removeButton().disabled).toBe(false);
   });
 
-  it("treats a state that cannot be read as unchecked and asks a second time, naming the path", async () => {
-    mocks.worktreeDisposition.mockRejectedValue(new Error("git exploded"));
+  it("deletes a clean, merged workspace with one confirmation, naming the sessions that go", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText("Clean and merged: safe to remove.");
+    expect(screen.getByText("Merged: the branch was squash-merged into origin/main.")).toBeTruthy();
+    expect(screen.getByText("2 sessions and their transcripts will be deleted:")).toBeTruthy();
+    const sessions = within(screen.getByRole("list", { name: "Sessions in this workspace" }));
+    expect(sessions.getByText("Fix login")).toBeTruthy();
+    expect(sessions.getByText("Review the fix")).toBeTruthy();
+    expect(removeButton().textContent).toContain("Delete workspace");
+    // This dialog is the caller that asks for the fetch.
+    expect(mocks.workspaceDisposition).toHaveBeenCalledWith("/p", path, { fetch: true });
+
+    fireEvent.click(removeButton());
+    // The sessions it named are the ones the removal is told to expect.
+    await waitFor(() =>
+      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
+    );
+    expect(mocks.ask).not.toHaveBeenCalled();
+  });
+
+  for (const [name, landed, line] of [
+    ["uncommitted changes", dirty, "2 uncommitted files would be lost."],
+    ["unmerged commits", unmerged, "3 commits are not in origin/main. The branch is pushed, but not merged."],
+    ["a check that could not be verified", unverified, "Not verified: origin/main could not be fetched (timed out)."],
+    ["a folder that cannot be checked", unchecked, "This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work."],
+  ] as const) {
+    it(`shows what would be lost and asks a second time for ${name}`, async () => {
+      mocks.workspaceDisposition.mockResolvedValue(workspace(landed));
+      mocks.ask.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      render(<WorkspaceRemoveDialog />);
+      openDelete();
+      await screen.findByText("Removing it now needs a second confirmation.");
+      expect(within(screen.getByRole("list", { name: "What would be lost" })).getByText(line)).toBeTruthy();
+      expect(removeButton().textContent).toContain("Delete anyway…");
+
+      // Declining the second confirmation removes nothing.
+      fireEvent.click(removeButton());
+      await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
+      expect(mocks.ask.mock.calls[0][0]).toContain(path);
+      expect(mocks.ask.mock.calls[0][0]).toContain(line);
+      expect(mocks.removeWorkspace).not.toHaveBeenCalled();
+
+      // The branch is not deleted by default with a workspace that is not
+      // safe, and the confirmation says what really happens to it.
+      expect(mocks.ask.mock.calls[0][0]).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
+      expect((screen.getByRole("switch") as HTMLButtonElement).getAttribute("aria-checked")).toBe("false");
+
+      fireEvent.click(removeButton());
+      // The second confirmation is sent as the digest of what was shown.
+      await waitFor(() =>
+        expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: false, confirmedDigest: landed.digest, expectedSessions: ["s1", "s9"] }),
+      );
+    });
+  }
+
+  it("removes nothing when the check fails outright: there is nothing to confirm against", async () => {
+    mocks.workspaceDisposition.mockRejectedValue(new Error("git exploded"));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText(/could not be checked, so it cannot be removed from here/);
+    expect(removeButton().disabled).toBe(true);
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("names the sessions of a folder that is not on disk and asks the second time", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(unchecked, { exists: false, branch: null }));
     mocks.ask.mockResolvedValue(false);
-    render(<SettleDialog />);
-    act(() => openSettle("s1"));
-    await screen.findByText("The worktree could not be checked for uncommitted or unpushed work.");
-    expect(deleteButton().textContent).toContain("Delete anyway");
-    fireEvent.click(deleteButton());
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText(/The workspace folder is not on disk/);
+    expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
+    expect(removeButton().textContent).toContain("Delete anyway…");
+    fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
-    expect(mocks.ask.mock.calls[0][0]).toContain("/p/.raccoon/worktrees/quiet-amber-fox");
-    expect(mocks.settleSession).not.toHaveBeenCalled();
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
   });
 
-  it("asks a second time for a tree git cannot check, and settles once confirmed", async () => {
-    mocks.worktreeDisposition.mockResolvedValue({ ...clean, checked: false });
-    mocks.ask.mockResolvedValue(true);
-    mocks.settleSession.mockResolvedValue({ session, keptBranch: "raccoon/quiet-amber-fox", rescuedBranch: null });
-    render(<SettleDialog />);
-    act(() => openSettle("s1"));
-    await screen.findByText(/not a working git checkout of this project/);
-    fireEvent.click(deleteButton());
-    await waitFor(() => expect(mocks.settleSession).toHaveBeenCalledWith("s1", "delete"));
-    // The kept branch is said, not just logged.
+  it("settles through the same check, keeping the sessions and saying how that differs from deleting", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+    mocks.removeWorkspace.mockResolvedValue({ sessions: [session], keptBranch: "raccoon/quiet-amber-fox", rescuedBranch: null });
+    render(<WorkspaceRemoveDialog />);
+    act(() => openSettle(session));
+    await screen.findByText("Clean and merged: safe to remove.");
+    expect(screen.getByText(/its sessions are kept, with their conversations/)).toBeTruthy();
+    expect(screen.getByText(/Deleting the workspace instead would delete its sessions too/)).toBeTruthy();
+    expect(screen.getByText("2 sessions are kept and move to the project:")).toBeTruthy();
+    expect(removeButton().textContent).toContain("Settle workspace");
+
+    fireEvent.click(removeButton());
+    await waitFor(() =>
+      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: true, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
+    );
+    // A kept branch is said, not just logged.
     await waitFor(() => expect(mocks.message).toHaveBeenCalled());
     expect(mocks.message.mock.calls[0][0]).toContain("raccoon/quiet-amber-fox was kept");
   });
 
-  it("does not ask twice for a checked tree, and reads the state again after a failure", async () => {
-    mocks.worktreeDisposition.mockResolvedValueOnce(clean).mockResolvedValueOnce({ ...clean, uncommitted: 2 });
-    mocks.settleSession.mockRejectedValue(new Error("Could not remove the worktree"));
-    render(<SettleDialog />);
-    act(() => openSettle("s1"));
-    await screen.findByText("Everything is committed and pushed. Safe to delete.");
-    fireEvent.click(deleteButton());
-    await screen.findByText("Could not remove the worktree");
-    expect(mocks.ask).not.toHaveBeenCalled();
-    expect(mocks.worktreeDisposition).toHaveBeenCalledTimes(2);
-    expect(screen.getByText(/2 files have uncommitted changes/)).toBeTruthy();
-    expect(deleteButton().textContent).toContain("Delete anyway");
-  });
-});
-
-describe("WorkspaceDeleteDialog", () => {
-  const open = () => act(() => openWorkspaceDelete("/p", "/p/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox"));
-
-  it("asks a second time for a directory that cannot be checked, naming the path", async () => {
-    mocks.workspaceDisposition.mockResolvedValue({ ...workspace, checked: false, branch: null });
+  it("settling an unmerged workspace asks the same second confirmation", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(unmerged));
     mocks.ask.mockResolvedValue(false);
-    render(<WorkspaceDeleteDialog />);
-    open();
-    await screen.findByText(/not a working git checkout of this project/);
-    fireEvent.click(deleteButton());
+    render(<WorkspaceRemoveDialog />);
+    act(() => openSettle(session));
+    await screen.findByText("Removing it now needs a second confirmation.");
+    expect(removeButton().textContent).toContain("Settle anyway…");
+    fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
-    expect(mocks.ask.mock.calls[0][0]).toContain("/p/.raccoon/worktrees/quiet-amber-fox");
-    expect(mocks.deleteWorkspace).not.toHaveBeenCalled();
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
   });
 
-  it("deletes a checked workspace without the second question and says when the branch was kept", async () => {
-    mocks.workspaceDisposition.mockResolvedValue(workspace);
-    mocks.deleteWorkspace.mockResolvedValue({ sessions: [], keptBranch: "raccoon/quiet-amber-fox", rescuedBranch: null });
-    render(<WorkspaceDeleteDialog />);
-    open();
-    await screen.findByText("No uncommitted changes.");
-    // Every session that goes is named, not just counted.
-    expect(screen.getByText("2 sessions and their transcripts will be removed:")).toBeTruthy();
-    expect(screen.getByText("Fix login")).toBeTruthy();
-    expect(screen.getByText("Review the fix")).toBeTruthy();
-    fireEvent.click(deleteButton());
-    await waitFor(() => expect(mocks.deleteWorkspace).toHaveBeenCalledWith("/p", "/p/.raccoon/worktrees/quiet-amber-fox", true));
-    expect(mocks.ask).not.toHaveBeenCalled();
-    await waitFor(() => expect(mocks.message).toHaveBeenCalled());
+  it("can move the session to the project and leave the workspace on disk", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(unmerged));
+    mocks.relocateSession.mockResolvedValue(session);
+    render(<WorkspaceRemoveDialog />);
+    act(() => openSettle(session));
+    await screen.findByText("Removing it now needs a second confirmation.");
+    fireEvent.click(screen.getByRole("button", { name: /Move session to project/ }));
+    await waitFor(() => expect(mocks.relocateSession).toHaveBeenCalledWith("s1"));
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
   });
 
-  it("reads the state again after a failure", async () => {
-    mocks.workspaceDisposition.mockResolvedValueOnce(workspace).mockResolvedValueOnce({ ...workspace, uncommitted: 1 });
-    mocks.deleteWorkspace.mockRejectedValue(new Error("Could not remove the worktree"));
-    render(<WorkspaceDeleteDialog />);
-    open();
-    await screen.findByText("No uncommitted changes.");
-    fireEvent.click(deleteButton());
-    await screen.findByText("Could not remove the worktree");
+  it("offers no move for a plain workspace delete", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(safe, { sessions: 0, sessionTitles: [] }));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText("No sessions run here.");
+    expect(screen.queryByRole("button", { name: /Move session to project/ })).toBeNull();
+  });
+
+  it("shows the reason and reads the state again when the removal is refused", async () => {
+    mocks.workspaceDisposition.mockResolvedValueOnce(workspace(safe)).mockResolvedValueOnce(workspace(dirty));
+    mocks.removeWorkspace.mockRejectedValue(new Error("This workspace needs a second confirmation before it is removed:\n• 2 uncommitted files would be lost."));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText("Clean and merged: safe to remove.");
+    fireEvent.click(removeButton());
+    await screen.findByText(/needs a second confirmation before it is removed/);
     expect(mocks.workspaceDisposition).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("1 file with uncommitted changes.")).toBeTruthy();
+    expect(removeButton().textContent).toContain("Delete anyway…");
   });
 });
