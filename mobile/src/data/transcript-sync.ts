@@ -17,6 +17,7 @@ export function watchTranscript(
   let initialized = false;
   let incremental: boolean | undefined;
   let legacyDuringRead: AgentEvent[] | null = null;
+  let legacyPage: AgentEvent[] | undefined;
   let running = false;
   let dirty = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -51,11 +52,14 @@ export function watchTranscript(
           legacyDuringRead = [];
           const page = await api.tail(session, tab);
           if (!current() || !page) return;
-          // An old host cannot prove continuity. Replace its bounded window
-          // rather than visually joining two ranges that may have a gap.
+          // The first page replaces an unverified cache. A subscription catch-up
+          // with unchanged overlap belongs to the same history: merge it into
+          // the pane so a late response cannot discard Load earlier pages.
+          const replace = !legacyPage || !hasUnchangedOverlap(legacyPage, page.events);
           state = { events: mergeEvents(page.events, legacyDuringRead), hasEarlier: page.hasMore };
           legacyDuringRead = null;
-          update(state, true, "page");
+          legacyPage = page.events;
+          update(state, replace, "page");
           await save();
           continue;
         }
@@ -99,4 +103,16 @@ export function watchTranscript(
   // Also repairs missed stream notifications and host-side reconciliations.
   const poll = connected ? setInterval(() => { if (incremental !== false) invalidate(); }, 15_000) : undefined;
   return () => { active = false; unsubscribe(); clearTimeout(timer); clearInterval(poll); };
+}
+
+function hasUnchangedOverlap(existing: AgentEvent[], incoming: AgentEvent[]): boolean {
+  const bySequence = new Map(existing.map((event) => [event.seq, event]));
+  let overlap = false;
+  for (const event of incoming) {
+    const previous = bySequence.get(event.seq);
+    if (!previous) continue;
+    if (JSON.stringify(previous) !== JSON.stringify(event)) return false;
+    overlap = true;
+  }
+  return overlap;
 }

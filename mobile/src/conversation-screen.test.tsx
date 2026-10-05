@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   setParams: vi.fn(),
   sessionListeners: new Map<string, (event: unknown) => void>(),
+  sessionReady: new Map<string, () => void>(),
   terminalListeners: new Map<string, (event: unknown) => void>(),
   listProps: {} as any,
   scrollToOffset: vi.fn(),
@@ -72,6 +73,7 @@ beforeEach(() => {
   mocks.params = { sessionId: "worktree", tabId: "claude", hostId: `mac-${++hostCounter}` };
   mocks.storage.clear();
   mocks.sessionListeners.clear();
+  mocks.sessionReady.clear();
   mocks.terminalListeners.clear();
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
@@ -87,7 +89,7 @@ beforeEach(() => {
       features: async () => ({}),
       tail: vi.fn(async (_session: string, tab: string) => ({ events: [event(tab, `${tab} transcript`)], hasMore: false })),
       listNotes: vi.fn(async () => []),
-      subscribeSession: vi.fn((tab, listener) => { mocks.sessionListeners.set(tab, listener); return () => { mocks.sessionListeners.delete(tab); }; }),
+      subscribeSession: vi.fn((tab, listener, ready) => { mocks.sessionListeners.set(tab, listener); if (ready) mocks.sessionReady.set(tab, ready); return () => { mocks.sessionListeners.delete(tab); mocks.sessionReady.delete(tab); }; }),
       subscribeTerminal: vi.fn((_session, tab, listener) => { mocks.terminalListeners.set(tab, listener); return () => { mocks.terminalListeners.delete(tab); }; }),
       readTerminal: vi.fn(async (_session, tab) => `${tab} output`),
       respondPermission: vi.fn(async () => ({ answered: true })),
@@ -496,5 +498,30 @@ describe("mobile latest conversation edge", () => {
     expect(mocks.listProps.maintainVisibleContentPosition).toBe(position);
     expect(mocks.scrollToOffset).not.toHaveBeenCalled();
     expect(button("Jump to latest")).toBeTruthy();
+  });
+
+  it("retains earlier history when subscription catch-up finishes after pagination", async () => {
+    vi.useFakeTimers();
+    try {
+      const current = Array.from({ length: 20 }, (_, i) => event("claude", `current ${100 + i}`, 100 + i));
+      mocks.app.api.tail.mockResolvedValueOnce({ events: current, hasMore: true });
+      await render(); await scroll(900);
+      let finish!: (value: unknown) => void;
+      mocks.app.api.tail.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      await act(async () => { mocks.sessionReady.get("claude")?.(); await vi.advanceTimersByTimeAsync(100); });
+      const earlier = Array.from({ length: 20 }, (_, i) => event("claude", `earlier ${80 + i}`, 80 + i));
+      mocks.app.api.tail.mockResolvedValueOnce({ events: earlier, hasMore: true });
+      await click("Load earlier");
+      expect(mocks.listProps.data).toHaveLength(40);
+      await act(async () => finish({ events: current, hasMore: true }));
+      expect(mocks.listProps.data).toHaveLength(40);
+      expect(container.textContent).toContain("earlier 80");
+      expect(button("Jump to latest")).toBeTruthy();
+      expect(mocks.scrollToOffset).not.toHaveBeenCalled();
+      mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "oldest", 60)], hasMore: false });
+      await click("Load earlier");
+      expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 80);
+      expect(mocks.listProps.data).toHaveLength(41);
+    } finally { vi.useRealTimers(); }
   });
 });

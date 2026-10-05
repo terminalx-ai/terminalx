@@ -148,6 +148,27 @@ describe("incremental transcript sync", () => {
     expect((await readCache("host", "session", "tab")).cursor).toBeUndefined();
   });
 
+  it("merges an overlapping old-host catch-up but replaces an unverified cache on reconnect", async () => {
+    const h = host(100, false); const stop = h.start(); await settle();
+    expect(h.updates.at(-1)!.replace).toBe(true);
+    // Live envelopes do not decide whether authoritative history was rewritten.
+    h.live({ ...event(100), id: "live-100" });
+    h.append(2); h.ready(); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.updates.at(-1)!.replace).toBe(false);
+    expect(h.updates.at(-1)!.state.events.at(-1)?.seq).toBe(102);
+    stop(); h.start(); await settle();
+    expect(h.updates.at(-1)!.replace).toBe(true);
+  });
+
+  it.each(["changed overlap", "missing overlap"])("replaces an old-host catch-up with %s", async (kind) => {
+    const h = host(100, false); h.start(); await settle();
+    if (kind === "changed overlap") h.edit();
+    else h.append(20);
+    h.ready(); await vi.advanceTimersByTimeAsync(100); await settle();
+    expect(h.updates.at(-1)!.replace).toBe(true);
+    expect(h.updates.at(-1)!.state.events.at(-1)?.seq).toBe(kind === "changed overlap" ? 100 : 120);
+  });
+
   it("does not advance the checkpoint on a malformed or non-contiguous page", async () => {
     const h = host(); const stop = h.start(); await settle(); stop();
     const original = await readCache("host", "session", "tab");
