@@ -241,6 +241,14 @@ Relay mint failure is surfaced as a refusal with a LAN alternative; it never
 silently produces a direct-only code under the Relay label. Changing policies
 rotates the pending credential, invalidating the code made for the old policy.
 
+At launch, the desktop removes unused pairing credentials and starts the direct
+listener when a claimed, unrevoked device remains. This also works without an
+account: restarting the Mac app does not require creating another LAN code.
+A busy port does not block app startup; the listener retries in the background
+until the port is released, using the same exclusive binding as code creation.
+The phone automatically reconnects to its most recently connected saved Mac
+on launch and refreshes the machine list's connection time after each reconnect.
+
 Both direct and relay transports then run the same E2EE v2 state machine. The
 mobile `e2ee_hello` offers framing 2 and text/binary payload kinds with context
 `terminalx-mobile-e2ee`; `e2ee_ready` selects those exact values. The transcript

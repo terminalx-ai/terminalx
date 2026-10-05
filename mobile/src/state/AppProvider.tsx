@@ -75,7 +75,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConnectionLogEntry[]>([]);
 
-  const loadHosts = useCallback(async () => setHosts(await readHosts()), []);
+  const loadHosts = useCallback(async () => {
+    const storedHosts = await readHosts();
+    setHosts(storedHosts);
+    const active = storedHosts.find((host) => host.id === activeHostRef.current?.id);
+    if (active) {
+      activeHostRef.current = active;
+      setActiveHost(active);
+    }
+  }, []);
 
   /** A stored host changed (a name): the list, and the active host when it is that one, follow. */
   const adoptHost = useCallback((next: StoredHost | null) => {
@@ -163,7 +171,23 @@ export function AppProvider({ children }: PropsWithChildren) {
     }
   }, [api]);
 
+  const connectHost = useCallback(async (host: StoredHost, signal?: AbortSignal) => {
+    setError(null);
+    const credential = await readHostCredential(host.id);
+    if (signal?.aborted) return;
+    if (!credential) {
+      setError("The device credential is unavailable. Pair this computer again.");
+      return;
+    }
+    api.resetConnection(true);
+    activeHostRef.current = host;
+    setActiveHost(host);
+    setSessions([]);
+    connection.start(host, credential);
+  }, [api, connection]);
+
   useEffect(() => {
+    const startup = new AbortController();
     void Promise.all([readSession(), readHosts(), AsyncStorage.getItem(LOG_KEY)]).then(async ([storedSession, storedHosts, rawLogs]) => {
       let effectiveSession = storedSession;
       if (storedSession) {
@@ -179,23 +203,38 @@ export function AppProvider({ children }: PropsWithChildren) {
           effectiveSession = outcome.session;
         }
       }
+      if (startup.signal.aborted) return;
       setSession(effectiveSession);
       setHosts(storedHosts);
-      void recoverPendingPairing().then(() => loadHosts()).catch((cause: unknown) => setError(readableError(cause)));
+      void recoverPendingPairing()
+        .then(() => { if (!startup.signal.aborted) return loadHosts(); })
+        .catch((cause: unknown) => { if (!startup.signal.aborted) setError(readableError(cause)); });
       if (rawLogs) {
         try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
       }
       const initialUrl = await Linking.getInitialURL();
+      if (startup.signal.aborted) return;
       if (!effectiveSession && initialUrl && isAuthCallbackUrl(initialUrl)) {
         try { setSession(await finishSignIn(initialUrl)); } catch (cause) { setError(readableError(cause)); }
       }
+      if (startup.signal.aborted) return;
+      // Saved pairings already hold the pinned key and credential. Resume the
+      // most recently connected Mac without another selection or pairing code.
+      const recentHost = storedHosts.reduce<StoredHost | null>((recent, host) =>
+        !recent || host.lastConnectedAt > recent.lastConnectedAt ? host : recent, null);
+      if (recentHost) await connectHost(recentHost, startup.signal);
+      if (startup.signal.aborted) return;
+      setReady(true);
+    }).catch((cause: unknown) => {
+      if (startup.signal.aborted) return;
+      setError(readableError(cause));
       setReady(true);
     });
     const linking = Linking.addEventListener("url", ({ url }) => {
       if (isAuthCallbackUrl(url)) void finishSignIn(url).then(setSession).catch((cause: unknown) => setError(readableError(cause)));
     });
-    return () => linking.remove();
-  }, [api, loadHosts]);
+    return () => { startup.abort(); linking.remove(); };
+  }, [api, connectHost, loadHosts]);
 
   useEffect(() => {
     const stage = connection.onStage((next, attempt) => {
@@ -224,10 +263,12 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     const resumed = connection.onConnected(() => {
       setConnectionEpoch((epoch) => epoch + 1);
+      // The transport has saved lastConnectedAt and any learned endpoints.
+      void loadHosts().catch((cause: unknown) => setError(readableError(cause)));
       void refreshSessions();
     });
     return () => { clearTimeout(summariesTimer); stage(); log(); event(); resumed(); connection.stop(); };
-  }, [api, connection, refreshHostName, refreshSessions]);
+  }, [api, connection, loadHosts, refreshHostName, refreshSessions]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -316,20 +357,6 @@ export function AppProvider({ children }: PropsWithChildren) {
       setLoadingMachines(false);
     }
   }, [loadHosts]);
-
-  const connectHost = useCallback(async (host: StoredHost) => {
-    setError(null);
-    const credential = await readHostCredential(host.id);
-    if (!credential) {
-      setError("The device credential is unavailable. Pair this computer again.");
-      return;
-    }
-    api.resetConnection(true);
-    activeHostRef.current = host;
-    setActiveHost(host);
-    setSessions([]);
-    connection.start(host, credential);
-  }, [api, connection]);
 
   const disconnectHost = useCallback(() => {
     connection.stop();

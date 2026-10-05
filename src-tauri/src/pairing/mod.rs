@@ -1,7 +1,7 @@
 //! Optional account binding, pairing, and end-to-end encrypted transport.
 //!
-//! Nothing in this module performs network I/O until an account session exists
-//! or the user explicitly asks for a pairing code.
+//! Network I/O starts for saved pairings, an account session, or an explicitly
+//! requested pairing code.
 
 mod cloud;
 mod crypto;
@@ -66,6 +66,8 @@ pub struct PairingManager {
     diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
     registry: DeviceRegistry,
+    /// Fixed in the app; startup fixtures use an isolated port.
+    direct_port: u16,
     sink: OnceLock<Arc<dyn EventSink>>,
     /// Set once the session manager exists, which is after `configure`.
     sessions: OnceLock<SessionManager>,
@@ -96,6 +98,7 @@ impl PairingManager {
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
             registry: DeviceRegistry::default(),
+            direct_port: direct::PORT,
             sink: OnceLock::new(),
             sessions: OnceLock::new(),
             inner: Mutex::new(Inner::default()),
@@ -148,6 +151,20 @@ impl PairingManager {
                 statuses.mobile.broadcast_sessions_changed();
             }),
         );
+        if !self.registry.list()?.is_empty() {
+            // Tauri setup runs outside Tokio. Restore the listener on the
+            // runtime so saved LAN pairings work without a new code or Relay.
+            let manager = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if manager.is_stopped() {
+                    return;
+                }
+                if let Err(error) = manager.ensure_direct_listener() {
+                    log::debug!("saved-device LAN listener unavailable: {error}");
+                    manager.retry_direct_listener();
+                }
+            });
+        }
         let manager = self.clone();
         tauri::async_runtime::spawn(async move { relay::supervise(manager).await });
         Ok(())
@@ -809,7 +826,7 @@ impl PairingManager {
         if inner.direct_listener_started {
             return Ok(());
         }
-        let listener = direct::bind(direct::PORT)?;
+        let listener = direct::bind(self.direct_port)?;
         inner.direct_listener_started = true;
         drop(inner);
         let manager = self.clone();
@@ -1600,6 +1617,9 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }
+
+#[cfg(test)]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {
