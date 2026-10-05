@@ -44,14 +44,18 @@ shows the winning address. On failure, check the attempted addresses and reasons
 
 | Initial state | Change | Expected recovery |
 | --- | --- | --- |
+| LAN pairing, signed out on both apps | Quit and reopen Mac app | Saved phone pairing connects without a new code |
+| Saved LAN pairing, Mac open | Kill and relaunch phone app | Most recently connected Mac reconnects without a tap |
+| Saved LAN pairing, port 6768 occupied | Launch Mac app, then release port | App launches and saved pairing connects after background retry |
 | Paired on Wi-Fi, Tailscale off | Enable Tailscale on Mac | LAN or Tailscale |
 | Paired with Tailscale on | Disconnect phone from tailnet, keep same Wi-Fi | LAN |
 | Connected over LAN with Tailscale available | Move Mac to hotspot | Tailscale or configured relay |
 | Connected on LAN | Change Mac's LAN IPv4 | Bonjour name resolves new LAN address |
 | Connected over direct or relay | Blackhole that connection without closing TCP | Probe detects failure and another path connects |
 
-Repeat the first three rows in the iPhone simulator, which shares the Mac's
-network stack. Wait for one address refresh after enabling a new interface before
-removing the previous path when testing learned numeric candidates. Also test an
-immediate change with relay available. Physical phone and simulator verification
+Repeat the LAN restart rows and the network-switch rows in the iPhone simulator,
+which shares the Mac's network stack. Wait for one address refresh after enabling
+a new interface before removing the previous path when testing learned numeric
+candidates. Also test an immediate change with relay available.
+Physical phone and simulator verification
 must be recorded separately from the automated tests.

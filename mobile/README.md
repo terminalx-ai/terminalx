@@ -53,8 +53,12 @@ pnpm --dir mobile ios:simulator --verify-only /path/to/TerminalX.app
 For an end-to-end check, open desktop Settings → Devices, generate a fresh LAN
 pairing code, and use mobile Machines → Use QR code or pairing code → Type code.
 Confirm pairing succeeds and Sessions shows a live encrypted connection and the
-Mac's sessions. Terminate and relaunch the mobile app, then confirm it reconnects
-without another code. Also check that malformed codes show a recoverable error.
+Mac's sessions. Quit and reopen the desktop without creating another code, then
+confirm the saved phone pairing reconnects. Terminate and relaunch the mobile
+app, then confirm it automatically reconnects to the most recently connected
+Mac without another tap or code. After disconnecting, check that the machine
+row's last-connection time reflects the latest successful connection. Also
+check that malformed codes show a recoverable error.
 Keep pairing codes and QR screenshots private. JavaScript unit tests alone cannot
 catch a missing entitlement in a packaged native executable.
 
