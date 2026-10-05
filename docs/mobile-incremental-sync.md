@@ -47,10 +47,13 @@ notifications, transient failures, and silent host-side changes while the pane
 is connected. Repeated resets are limited to two per drain; errors retain the
 last checkpoint and retry later. Navigation/reconnection cancels late results.
 
-On an older host, the phone replaces the recent window with `session.tail`,
-buffering live events arriving during that read. Replacing the window avoids
-joining an old cached range to a recent tail across an unprovable gap. Older
-hosts are not polled repeatedly. `Load earlier` retains its existing `before`
+On an older host, the first `session.tail` on each connection replaces the
+unverified cached window, buffering live events arriving during that read. A
+subscription catch-up merges into the pane when it shares unchanged events with
+the previous authoritative tail. This keeps a late catch-up response from
+discarding pages loaded through `Load earlier` (#386). Changed or missing overlap
+still replaces the window rather than joining ranges across an unprovable gap.
+Older hosts are not polled repeatedly. `Load earlier` retains its existing `before`
 pagination and does not advance the forward checkpoint. Its cursor comes from
 the authoritative history window and remains stable during live catch-up;
 failed backward reads retain that cursor and offer a retry.
@@ -152,3 +155,18 @@ with `-D warnings` passed. Mobile lint had no errors and one pre-existing
 `import/first` warning in `transport/connection.test.ts`. The full Rust suite passed with `--test-threads=4`. Local Rust commands used SDK 26.5 via
 `SDKROOT` / `CMAKE_OSX_SYSROOT` and `MACOSX_DEPLOYMENT_TARGET=14.0` because the
 installed SDK 27 stub files were incompatible with the default linker.
+
+For #386, the conversation-screen regression delays an old-host subscription
+catch-up until after backward pagination. Before the fix, its 40 displayed turns
+shrank to 20; afterward, all turns and the backward cursor remain available.
+Additional sync tests cover unchanged overlap, live envelopes, reconnects,
+rewritten events, and missing overlap.
+
+A separate synthetic check exercised the production conversation pane on an
+iPhone 17 / iOS 26.5 simulator with two pages of 20 turns and 200-line responses.
+After the delayed catch-up, the native offset stayed at 180,394.33 px and the
+oldest loaded turn stayed `t240`; **Jump to latest** remained visible.
+[Native measurements](testing/mobile-pagination-386.json) contain synthetic data
+only. The temporary driver reused an existing simulator binary and stubbed its
+unavailable clipboard module; pairing and clipboard behavior were outside this
+check. The driver and instrumentation were removed afterward.
