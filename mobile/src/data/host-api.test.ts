@@ -12,6 +12,18 @@ function hostApi(request: ReturnType<typeof vi.fn>) {
 }
 
 describe("mobile transcript pages", () => {
+  it("loads large histories one turn at a time, including earlier pages", async () => {
+    const page = { events: [{ id: "event-1", sessionId: "session-1", tabId: "tab-1", harness: "codex", seq: 99, ts: "2026-09-15T00:00:00Z", payload: { type: "user_message", text: "Synthetic turn", queued: false } }], hasMore: true };
+    const request = vi.fn(async (_method: string, params: { limit: number }) => {
+      if (params.limit > 1) throw new Error("transcript response exceeds the host transport limit");
+      return { ok: true, value: page };
+    });
+    const api = hostApi(request);
+    await expect(api.tail("session-1", "tab-1")).resolves.toEqual(page);
+    await expect(api.tail("session-1", "tab-1", 100)).resolves.toEqual(page);
+    expect(request).toHaveBeenLastCalledWith("session.tail", { sessionId: "session-1", tabId: "tab-1", before: 100, limit: 1 });
+  });
+
   it("preserves refusals and transport failures instead of reporting empty history", async () => {
     const request = vi.fn().mockResolvedValue({ ok: false, refusal: { code: "unavailable", message: "Transcript event 12 is too large to load on mobile." } });
     await expect(hostApi(request).tail("session", "tab")).rejects.toThrow("event 12 is too large");
@@ -27,7 +39,7 @@ describe("mobile transcript pages", () => {
   it("accepts empty history and forwards the exclusive event cursor", async () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
     await expect(hostApi(request).tail("session", "tab", 12)).resolves.toEqual({ events: [], hasMore: false });
-    expect(request).toHaveBeenCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 12, limit: 20 });
+    expect(request).toHaveBeenCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 12, limit: 1 });
   });
 });
 

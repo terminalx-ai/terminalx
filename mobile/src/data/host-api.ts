@@ -94,7 +94,9 @@ export class HostApi {
   }
 
   async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
-    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 20 });
+    // Load the newest turn first and page backwards. Older Macs do not bound
+    // transcript bytes, so asking for many tool-heavy turns can close the socket.
+    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 1 });
     if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
     if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {

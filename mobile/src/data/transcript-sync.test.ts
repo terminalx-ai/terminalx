@@ -144,7 +144,7 @@ describe("incremental transcript sync", () => {
   it("uses only the supported bounded-tail fields on old hosts", async () => {
     const h = host(100, false); h.start(); await settle();
     expect(h.request.mock.calls.map(([m]) => m)).toEqual(["sync.capabilities", "session.tail"]);
-    expect(h.request.mock.calls[1][1]).toEqual({ sessionId: "session", tabId: "tab", limit: 20 });
+    expect(h.request.mock.calls[1][1]).toEqual({ sessionId: "session", tabId: "tab", limit: 1 });
     expect((await readCache("host", "session", "tab")).cursor).toBeUndefined();
   });
 

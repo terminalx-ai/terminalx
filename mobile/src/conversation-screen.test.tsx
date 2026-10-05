@@ -23,6 +23,7 @@ vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
+vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: vi.fn(async (key: string) => mocks.storage.get(key) ?? null),
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
@@ -161,6 +162,20 @@ describe("mobile transcript presentation (#388)", () => {
 });
 
 describe("mobile conversation navigation", () => {
+  it("keeps the composer placeholder and draft stable while reconnecting", async () => {
+    await render(); await type("Keep my draft");
+    expect(input().placeholder).toBe("Message this session");
+    const placeholder = input().placeholder;
+    for (const stage of ["reconnecting", "connected", "cant-connect", "connected"]) {
+      mocks.app.connectionStage = stage;
+      await render();
+      expect(input().placeholder).toBe(placeholder);
+      expect(input().value).toBe("Keep my draft");
+      expect(button("Send").disabled).toBe(stage !== "connected");
+      expect(container.textContent).toContain("claude transcript");
+    }
+  });
+
   it("opens each list row with the exact conversation and searches by agent", async () => {
     await render(true);
     const rows = [...container.querySelectorAll("button")].filter((item) => item.textContent?.includes("Create a new issue"));
