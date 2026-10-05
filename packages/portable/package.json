@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./dashboard": "./src/dashboard.ts",
     "./events": "./src/events.ts",
+    "./textLinks": "./src/textLinks.ts",
     "./repositoryIdentity": "./src/repositoryIdentity.ts",
     "./rpc": "./src/rpc.ts",
     "./transcript": "./src/transcript.ts",
@@ -15,5 +16,11 @@
     "./workspaceFiles": "./src/workspaceFiles.ts",
     "./workspaceGit": "./src/workspaceGit.ts",
     "./workspaceMirror": "./src/workspaceMirror.ts"
+  },
+  "dependencies": {
+    "linkify-it": "5.0.0"
+  },
+  "devDependencies": {
+    "@types/linkify-it": "5.0.0"
   }
 }

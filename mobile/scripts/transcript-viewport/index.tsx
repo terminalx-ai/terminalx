@@ -6,10 +6,12 @@ import { Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet,
 import { TranscriptList } from "../../src/ui/TranscriptList";
 import { ThemeProvider, useTheme } from "../../src/ui/theme";
 import { TurnCard } from "../../src/ui/transcript";
+import { ConversationPicker } from "../../src/ui/ConversationPicker";
 import { buildTranscript } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 
-type Row = { id: number; text: string; image?: boolean };
+type Row = { id: number; text: string; image?: boolean; assistant?: boolean };
+const markdownExample = "# Markdown on mobile\n\n**Bold**, *italic*, and `inline code`.\n\n[Documentation](https://example.com/docs?q=a%20b#section) and `https://example.com/code`.\n\n[Copyable host file](file:///workspace/example%20file.md#L12)\n\n- First item\n- Second item\n  - Nested item\n\n```ts\nconst url = 'https://example.com/output';\n```\n\n| Name | Count | Status | Detail |\n| --- | ---: | --- | --- |\n| **Answer** | 42 | Ready | `value` |\n| Other | 1 | Working | Scroll sideways |";
 const rows = (start: number, count: number): Row[] => Array.from({ length: count }, (_, i) => ({
   id: start + i,
   text: `Synthetic turn ${start + i}\n${"Variable height conversation content. ".repeat(1 + (i % 7) * 3)}\nEND ${start + i}`,
@@ -61,6 +63,7 @@ function Fixture() {
             case "permission": setFooter(true); break;
             case "empty": setConversation((c) => c + 1); scroll.current = { offset: 0, height: 0, contentHeight: 0 }; setItems([]); setFooter(false); break;
             case "short": setConversation((c) => c + 1); scroll.current = { offset: 0, height: 0, contentHeight: 0 }; setItems(rows(1, 1)); setFooter(false); break;
+            case "markdown": setConversation((c) => c + 1); scroll.current = { offset: 0, height: 0, contentHeight: 0 }; setItems([{ id: 1, text: markdownExample, assistant: true }]); setFooter(false); break;
           }
           setLabel(command.action);
         }
@@ -80,6 +83,7 @@ function Fixture() {
 
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Text style={[styles.title, { color: palette.ink }]}>Synthetic viewport · {label} · Agent {conversation}</Text>
+    {label === "markdown" ? <ConversationPicker horizontal selectedTabId="claude" onSelect={() => {}} session={{ id: "synthetic", title: "Markdown fixture", project: "Synthetic", worktree: "fixture", modified: "today", tabs: [{ id: "claude", harness: "claude", status: "waiting" }, { id: "codex", harness: "codex", status: "in_progress" }] }} /> : null}
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={0}>
       <View ref={viewport} collapsable={false} style={styles.flex}>
         <TranscriptList onScroll={({ nativeEvent: e }) => { scroll.current = { offset: e.contentOffset.y, height: e.layoutMeasurement.height, contentHeight: e.contentSize.height }; }} key={conversation} data={items} keyExtractor={(row) => String(row.id)}
@@ -87,8 +91,9 @@ function Fixture() {
           earlier={items.length ? <Pressable accessibilityRole="button" onPress={() => setItems((data) => [...rows(data[0].id - 30, 30), ...data])}><Text style={{ color: palette.ink }}>Load earlier</Text></Pressable> : null}
           latest={footer ? <View style={{ padding: 16, backgroundColor: palette.raised }}><Text style={{ color: palette.ink }}>{"Dynamic permission card\n".repeat(12)}</Text><View ref={footerMarker} collapsable={false}><Text style={{ color: palette.ink }}>PERMISSION END</Text></View></View> : null}
           renderItem={({ item }) => {
-            const event: AgentEvent = { id: String(item.id), tabId: "synthetic", sessionId: "synthetic", seq: item.id, ts: new Date(item.id * 1000).toISOString(), harness: "codex", payload: { type: "user_message", text: item.text, queued: false } };
-            return <View><TurnCard turn={buildTranscript([event], false).turns[0]} />
+            const event: AgentEvent = { id: String(item.id), tabId: "synthetic", sessionId: "synthetic", seq: item.id, ts: new Date(item.id * 1000).toISOString(), harness: "codex", payload: { type: "user_message", text: item.assistant ? "Show a markdown example." : item.text, queued: false } };
+            const events: AgentEvent[] = item.assistant ? [event, { ...event, id: "harness", seq: item.id + 1, payload: { type: "user_message", queued: false, text: "<task-notification><task-id>hidden-fixture-id</task-id></task-notification>\n<system-reminder>hidden fixture reminder</system-reminder>" } }, { ...event, id: "reply", seq: item.id + 2, payload: { type: "assistant_text", text: item.text } }] : [event];
+            return <View><TurnCard turn={buildTranscript(events, false).turns[0]} />
               {item.image ? <Image source={{ uri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=" }} style={{ height: imageHeight, backgroundColor: palette.accent }} /> : null}
               <View collapsable={false} ref={(node) => { if (node) markers.current.set(item.id, node); else markers.current.delete(item.id); }}><Text style={{ color: palette.accent }}>MARKER {item.id}</Text></View>
             </View>;

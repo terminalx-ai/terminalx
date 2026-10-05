@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "lucide-react";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
+import { LinkedText } from "@/components/chat/LinkedText";
 import { Composer } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
@@ -787,7 +788,7 @@ export function CloudOutbox({
             data-state={entry.state}
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text ? <span className="min-w-0 truncate">{entry.text}</span> : null}
+            {entry.text ? <span className="min-w-0 truncate"><LinkedText text={entry.text} /></span> : null}
             {entry.kind === "send" && (entry.images || !entry.text) ? (
               <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
                 {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}

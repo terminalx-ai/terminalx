@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ACCESS_REMOVED_TITLE, type AccessLoss, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
+import { LinkedText } from "@/components/chat/LinkedText";
 
 const ROLE_BADGE: Record<string, string> = { manager: "Admin", driver: "Driver", viewer: "Viewer", none: "No access" };
 
@@ -371,7 +372,7 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
               <span className="text-foreground">{note.authorId === collab.you?.userId ? "You" : nameOf(note.authorId)}</span> ·{" "}
               {new Date(note.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
             </span>
-            <span className="whitespace-pre-wrap break-words">{note.text}</span>
+            <span className="whitespace-pre-wrap break-words"><LinkedText text={note.text} /></span>
           </li>
         ))}
       </ol>

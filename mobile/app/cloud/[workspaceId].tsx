@@ -12,6 +12,7 @@ import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
+import { linkedText } from "@mobile/ui/LinkedText";
 
 /**
  * One cloud workspace: its agent tabs and the conversation of the chosen one.
@@ -199,7 +200,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
     </View> : null}
     {shared && notesOpen ? <View style={[styles.notes, { backgroundColor: palette.card, borderBottomColor: palette.border }]}>
       <Text style={[styles.notesHint, { color: palette.muted }]}>Notes are for the people here. They are not sent to the agent.</Text>
-      <ScrollView style={styles.notesList}>{notes.length ? notes.map((entry) => <Text key={entry.id} selectable style={[styles.noteLine, { color: palette.ink }]}><Text style={{ color: palette.accent, fontWeight: "700" }}>{entry.authorId === snapshot.collab.userId ? "You" : nameOf(entry.authorId)}</Text>{`  ${entry.text}`}</Text>) : <Text style={[styles.notesHint, { color: palette.muted }]}>No notes yet.</Text>}</ScrollView>
+      <ScrollView style={styles.notesList}>{notes.length ? notes.map((entry) => <Text key={entry.id} selectable style={[styles.noteLine, { color: palette.ink }]}><Text style={{ color: palette.accent, fontWeight: "700" }}>{entry.authorId === snapshot.collab.userId ? "You" : nameOf(entry.authorId)}</Text>{"  "}{linkedText(entry.text)}</Text>) : <Text style={[styles.notesHint, { color: palette.muted }]}>No notes yet.</Text>}</ScrollView>
       <View style={styles.composeLine}>
         <TextInput value={note} onChangeText={setNote} multiline maxLength={NOTE_MAX_CHARS} placeholder="Add a note for people here" placeholderTextColor={palette.faint} style={[styles.input, { color: palette.ink }]} />
         <Button label="Add note" kind="secondary" disabled={!note.trim() || sending} onPress={addNote} />
