@@ -141,7 +141,7 @@ fn an_unreadable_key_store_is_reported_as_unavailable_not_as_a_missing_key() {
         .store_keys(USER, ORG, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
         .unwrap();
     // The workspace has a key; it just cannot be read. Connecting again would not fix that.
-    assert_eq!(client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err(), "cloud_agent_key_store_unavailable");
+    assert_eq!(client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap_err(), "cloud_agent_key_store_unavailable");
     assert_eq!(client.has_key(ORG, WS).unwrap_err(), "cloud_agent_key_store_unavailable");
 }
 
@@ -152,25 +152,25 @@ fn an_outbox_entry_says_how_many_images_its_message_names() {
     // Every answer is lost: entries stay unsent, which is all this needs.
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests" }), true).unwrap();
     assert_eq!(entry.images, 0);
     assert!(serde_json::to_value(&entry).unwrap().get("images").is_none(), "a message without images says nothing about them");
     // A message that names images says how many, for the list and for "Send again"; never which.
     let with_images = json!({ "text": "", "images": [{ "id": "att-0001", "mediaType": "image/png" }, { "id": "att-0002", "mediaType": "image/png" }] });
-    let pictured = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_images).unwrap();
+    let pictured = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_images, true).unwrap();
     assert_eq!(serde_json::to_value(&pictured).unwrap()["images"], 2);
     assert!(!serde_json::to_string(&pictured).unwrap().contains("att-0001"));
     assert_eq!(fixture.client.outbox(ORG, WS, None).unwrap().iter().map(|entry| entry.images).collect::<Vec<_>>(), vec![0, 2], "the count survives a reload");
     // Images alone are a message (the line above sent one); nothing at all is not, and a steer is always text.
     for (kind, payload) in [("send", json!({ "text": "" })), ("send", json!({ "text": " ", "images": [] })), ("steer", json!({ "text": "", "images": [{ "id": "att-0003" }] }))] {
-        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload).unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload, true).unwrap_err(), "cloud_agent_request_invalid");
     }
 }
 
 #[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
-    let error = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err();
+    let error = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap_err();
     assert_eq!(error, "cloud_agent_key_missing");
     assert!(!fixture.client.has_key(ORG, WS).unwrap());
     give_key(&fixture);
@@ -204,7 +204,7 @@ fn a_lost_response_is_resent_with_the_same_bytes_and_never_re_encrypted() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests", "model": "opus" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests", "model": "opus" }), true).unwrap();
     assert_eq!(entry.state, "unsent");
     assert_eq!(entry.error.as_deref(), Some("cloud_agent_command_pending_retry"));
     assert_eq!(entry.text.as_deref(), Some("run the tests"));
@@ -233,7 +233,7 @@ fn an_unsent_command_survives_a_restart_of_the_client() {
     let base = serve(Arc::new(|_, _, _| None));
     let fixture = fixture(&base);
     give_key(&fixture);
-    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({}), true).unwrap();
     let reopened = CloudAgentClient::with(fixture.account.clone(), fixture.keys.clone(), Url::parse(&base).unwrap(), fixture._dir.path().join("cloud-agent"));
     let outbox = reopened.outbox(ORG, WS, Some("tab-1")).unwrap();
     assert_eq!(outbox.len(), 1);
@@ -245,7 +245,7 @@ fn a_conflict_or_refusal_settles_the_command_as_rejected() {
     let base = serve(Arc::new(|_, _, _| Some((409, json!({ "error": "cloud_workspace_agent_command_conflict" })))));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "focus on the parser" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "focus on the parser" }), true).unwrap();
     assert_eq!(entry.state, "rejected");
     assert_eq!(entry.category.as_deref(), Some("cloud_workspace_agent_command_conflict"));
     // A settled command is not resent.
@@ -263,7 +263,7 @@ fn a_rate_limit_keeps_the_command_for_a_resend_but_a_full_mailbox_is_final() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let limited = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" })).unwrap();
+    let limited = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" }), true).unwrap();
     assert_eq!(limited.state, "unsent", "a rate limit is not a refusal");
     for status in [408u16, 425, 401, 503] {
         assert!(retryable(status, "x"), "{status}");
@@ -271,8 +271,70 @@ fn a_rate_limit_keeps_the_command_for_a_resend_but_a_full_mailbox_is_final() {
     assert!(!retryable(422, "cloud_workspace_request_invalid"));
     assert!(!retryable(409, "cloud_workspace_agent_command_conflict"));
     *full.lock().unwrap() = true;
-    let refused = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" })).unwrap();
+    let refused = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" }), true).unwrap();
     assert_eq!((refused.state.as_str(), refused.category.as_deref()), ("rejected", Some("cloud_workspace_agent_mailbox_full")));
+}
+
+#[test]
+fn a_do_not_wake_command_is_posted_with_wake_false_and_dropped_when_the_workspace_is_stopped() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let running = Arc::new(Mutex::new(false));
+    let (log, up) = (received.clone(), running.clone());
+    let base = serve(Arc::new(move |method, path, body| {
+        if path.ends_with("/agent-commands/status") {
+            return Some((200, json!({ "commands": [] })));
+        }
+        assert_eq!((method, path), ("POST", commands_path().as_str()));
+        log.lock().unwrap().push(body.clone());
+        if body["wake"] == json!(false) && !*up.lock().unwrap() {
+            return Some((409, json!({ "error": "cloud_workspace_stopped" })));
+        }
+        let wake = if *up.lock().unwrap() { "not-needed" } else { "queued" };
+        Some((202, json!({ "command": command_json(&body, "queued"), "existing": false, "wake": wake })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+
+    // Stopped: refused, and nothing is kept, so asking the person and sending again is a new command.
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "are you up?" }), false).unwrap_err(), WORKSPACE_STOPPED);
+    assert_eq!(received.lock().unwrap()[0]["wake"], json!(false));
+    assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
+    assert!(fixture.client.outbox_sync(ORG, WS).unwrap().is_empty());
+    assert_eq!(received.lock().unwrap().len(), 1, "nothing is resent");
+
+    // The person agreed: the ordinary post, without the key an older API would reject.
+    let woke = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "are you up?" }), true).unwrap();
+    assert_eq!((woke.state.as_str(), woke.wake.as_deref()), ("queued", Some("queued")));
+    assert!(received.lock().unwrap()[1].get("wake").is_none());
+
+    // Running: stored like any other.
+    *running.lock().unwrap() = true;
+    let stored = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hello" }), false).unwrap();
+    assert_eq!((stored.state.as_str(), stored.wake.as_deref()), ("queued", Some("not-needed")));
+    assert_eq!(received.lock().unwrap()[2]["wake"], json!(false));
+}
+
+#[test]
+fn a_do_not_wake_command_whose_answer_was_lost_is_resent_with_wake_false() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let log = received.clone();
+    let base = serve(Arc::new(move |_, path, body| {
+        if path.ends_with("/agent-commands/status") {
+            return Some((200, json!({ "commands": [] })));
+        }
+        log.lock().unwrap().push(body.clone());
+        // The first post gets no answer; by the resend the workspace has stopped.
+        (log.lock().unwrap().len() > 1).then(|| (409, json!({ "error": "cloud_workspace_stopped" })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), false).unwrap();
+    assert_eq!(entry.state, "unsent");
+    let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[1]["wake"], json!(false), "the resend cannot start the workspace either");
+    assert_eq!((synced[0].state.as_str(), synced[0].category.as_deref()), ("rejected", Some("cloud_workspace_stopped")));
 }
 
 #[test]
@@ -292,7 +354,7 @@ fn a_command_cancelled_before_the_api_has_it_is_never_posted_afterwards() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
     assert_eq!(entry.state, "unsent");
     assert_eq!(fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap().state, "cancelled");
     // A resend that took its snapshot before the cancel re-checks under the send lock.
@@ -313,11 +375,11 @@ fn invalid_commands_are_refused_before_anything_is_stored() {
         ("delete-everything", json!({})),
         ("send", json!("hi")),
     ] {
-        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload).unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload, true).unwrap_err(), "cloud_agent_request_invalid");
     }
-    assert_eq!(fixture.client.enqueue(ORG, WS, "../tab", "stop", json!({})).unwrap_err(), "cloud_agent_request_invalid");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "../tab", "stop", json!({}), true).unwrap_err(), "cloud_agent_request_invalid");
     let big = "x".repeat(70 * 1024);
-    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": big })).unwrap_err(), "cloud_agent_command_too_large");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": big }), true).unwrap_err(), "cloud_agent_command_too_large");
     assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
 }
 
@@ -351,7 +413,7 @@ fn status_polling_settles_commands_and_decrypts_their_receipts() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "permission-decision", json!({ "requestId": "perm-7", "optionId": "allow" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "permission-decision", json!({ "requestId": "perm-7", "optionId": "allow" }), true).unwrap();
     assert_eq!(entry.state, "queued");
     assert_eq!(entry.request_id.as_deref(), Some("perm-7"));
     let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
@@ -417,7 +479,7 @@ fn cancel_before_the_api_has_it_settles_locally() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
     let cancelled = fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap();
     assert_eq!(cancelled.state, "cancelled");
     // A settled command is never resent.
@@ -456,7 +518,7 @@ fn an_identity_change_drops_the_previous_identitys_keys_outbox_and_cache() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     fixture.client.observe_identity(kept(&[ORG]));
     give_key(&fixture);
-    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({}), true).unwrap();
     fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({}))).unwrap();
     // Unchanged or not yet loaded: nothing is dropped.
     fixture.client.observe_identity(kept(&[ORG]));
@@ -476,7 +538,7 @@ fn fill(fixture: &Fixture, org: &str) {
         .client
         .store_keys(USER, org, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
         .unwrap();
-    fixture.client.enqueue(org, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(org, WS, "tab-1", "stop", json!({}), true).unwrap();
     fixture.client.cache_save(org, WS, "tab-1", Some(json!({ "seen": org }))).unwrap();
 }
 
@@ -601,6 +663,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         created_at: id as u64,
         updated_at: id as u64,
         error: None,
+        no_wake: false,
     };
     let mut entries: Vec<Stored> = (0..30).map(|id| entry(id, "applied")).collect();
     entries.push(entry(100, "queued"));
@@ -615,7 +678,7 @@ fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     give_key(&fixture);
     // Unsent: the API never answers.
-    fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" })).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" }), true).unwrap();
     fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
     fixture.client.cache_save(ORG, "ws_2", "tab-1", Some(json!({ "events": [] }))).unwrap();
 

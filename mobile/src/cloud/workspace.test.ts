@@ -725,4 +725,85 @@ describe("a cloud workspace on the phone", () => {
       h.session.close();
     });
   });
+
+  describe("with a server that takes wake: false (PRO-89)", () => {
+    /** The server as it is now, whatever the list says: it refuses `wake: false` unless the workspace runs. */
+    const server = (h: ReturnType<typeof harness>, running: () => boolean) => {
+      (h.api as unknown as { doNotWake: () => Promise<boolean> }).doNotWake = async () => true;
+      h.api.enqueue.mockImplementation((async (_org: string, _ws: string, envelope: CommandEnvelope, options: { wake?: boolean } = {}) => {
+        if (options.wake === false && !running()) throw new CloudApiError("cloud_workspace_stopped", 409);
+        h.posted.push(envelope);
+        return { command: { clientCommandId: envelope.clientCommandId, tabId: envelope.tabId, kind: envelope.kind, state: "queued", keyId: envelope.keyId, createdAt: 1, updatedAt: 1 }, existing: false, wake: running() ? "not-needed" : "queued" };
+      }) as never);
+    };
+    const wakeOptions = (h: ReturnType<typeof harness>) => h.api.enqueue.mock.calls.map((call) => (call as unknown[])[3]);
+
+    it("sends to a running workspace with wake: false and reads no list for it", async () => {
+      const h = harness();
+      server(h, () => true);
+      await h.session.start();
+      await connected(h);
+      expect(await h.session.send("t1", "hello")).toMatchObject({ state: "queued", wake: "not-needed" });
+      expect(wakeOptions(h)).toEqual([{ wake: false }]);
+      expect(h.refresh.calls).toBe(0);
+      h.session.close();
+    });
+
+    it("asks before starting a workspace that stopped after the list was read, and stores nothing until the person agrees", async () => {
+      const h = harness({ secrets: (await keyed()).secrets });
+      // The list still says it runs; it was stopped from elsewhere a moment ago.
+      server(h, () => false);
+      h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+      await h.session.start();
+      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      h.refresh.state = "suspended";
+      const reads = h.refresh.calls;
+
+      await expect(h.session.send("t1", "are you there")).rejects.toMatchObject({ code: "would-wake" });
+      await expect(h.session.stop("t1")).rejects.toMatchObject({ code: "would-wake" });
+      expect(wakeOptions(h)[0]).toEqual({ wake: false });
+      expect(h.posted).toHaveLength(0);
+      // Nothing is kept on the phone either, and the list is read again so it catches up.
+      expect(h.session.getSnapshot().outbox).toEqual([]);
+      expect(h.refresh.calls).toBeGreaterThan(reads);
+
+      expect(await h.session.send("t1", "are you there", { allowWake: true })).toMatchObject({ state: "queued", wake: "queued" });
+      expect(wakeOptions(h).at(-1)).toBeUndefined();
+      expect(h.posted).toHaveLength(1);
+      h.session.close();
+    });
+
+    it("asks at once, without a request, for a workspace listed as stopped", async () => {
+      const h = harness({ state: "suspended", secrets: (await keyed()).secrets });
+      server(h, () => false);
+      await h.session.start();
+      await expect(h.session.send("t1", "wake up")).rejects.toMatchObject({ code: "would-wake" });
+      expect(h.api.enqueue).not.toHaveBeenCalled();
+      h.session.close();
+    });
+
+    it("keeps a held message held when the workspace stopped meanwhile, and delivers it once the person agrees", async () => {
+      const before = harness();
+      await before.session.start();
+      await connected(before);
+      before.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+      expect(await before.session.send("t1", "written offline")).toMatchObject({ state: "unsent" });
+      before.session.close();
+
+      const h = harness({ secrets: before.secrets, blobs: before.blobs });
+      server(h, () => false);
+      h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+      await h.session.start();
+      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await expect(h.session.deliverHeld()).rejects.toMatchObject({ code: "would-wake" });
+      expect(h.posted).toHaveLength(0);
+      expect(wakeOptions(h).every((options) => (options as { wake?: boolean }).wake === false)).toBe(true);
+      expect(h.session.getSnapshot().outbox).toMatchObject([{ text: "written offline", state: "unsent" }]);
+
+      await h.session.deliverHeld({ allowWake: true });
+      expect(h.posted).toHaveLength(1);
+      expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "queued" }]);
+      h.session.close();
+    });
+  });
 });

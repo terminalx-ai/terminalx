@@ -755,9 +755,10 @@ async function enqueue(
   kind: OutboxKind,
   payload: OutboxPayload,
   client: WorkspaceRpcClient | null,
+  options: { wake?: boolean } = {},
 ): Promise<OutboxEntry> {
   const s = store(scope);
-  const entry = await cloudAgentApi.enqueue(scope, tabId, kind, payload);
+  const entry = await (options.wake === false ? cloudAgentApi.enqueue(scope, tabId, kind, payload, { wake: false }) : cloudAgentApi.enqueue(scope, tabId, kind, payload));
   upsert(s, entry);
   if (entry.wake) s.wake = entry.wake;
   s.error = null;
@@ -767,8 +768,11 @@ async function enqueue(
   return entry;
 }
 
-/** A prompt: now if the agent is idle, else queued as a follow-up by the runtime. */
-export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = []) {
+/**
+ * A prompt: now if the agent is idle, else queued as a follow-up by the runtime.
+ * With `wake: false` it starts nothing: a workspace that is not running refuses it (`WORKSPACE_STOPPED`) and nothing is kept.
+ */
+export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: ImageInput[] = [], options: { wake?: boolean } = {}) {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   // Images go to the runtime first (PRO-22); the message then names them. A
@@ -785,7 +789,7 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   const sent = tab?.pendingConfig ?? null;
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
-  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client);
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, options);
   if (images.length) sentImages.set(entry.clientCommandId, images);
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);

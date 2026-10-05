@@ -97,7 +97,12 @@ export interface SessionBackend {
   logSessionId: string;
   /** Start showing a tab: load its log (local), or its checkpoint and live stream (cloud). Returns the cleanup. */
   openTab(tabId: string, onError: (error: unknown) => void): (() => void) | void;
-  send(tabId: string, text: string, images: ImageInput[]): Promise<SendResult>;
+  /**
+   * `wake: false` (cloud only; the CLI, against a server that takes it): the
+   * message starts nothing. A workspace that is not running refuses it and
+   * nothing is kept, so the caller can ask the person and send again.
+   */
+  send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
   stop(tabId: string): Promise<void>;
   respondPermission(tabId: string, requestId: string, optionId: string): Promise<void>;
@@ -365,7 +370,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
         setViewing(scope, tabId, false);
       };
     },
-    send: async (tabId, text, images) => {
+    send: async (tabId, text, images, options) => {
       guard();
       // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
@@ -376,7 +381,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       }
       // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
       if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
-      await interactive(() => sendToCloudAgent(scope, tabId, text, client, images));
+      // Told not to start anything: the server refuses a stopped workspace, and no wake follows from here either.
+      if (options?.wake === false) await sendToCloudAgent(scope, tabId, text, client, images, { wake: false });
+      else await interactive(() => sendToCloudAgent(scope, tabId, text, client, images));
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),

@@ -1,6 +1,6 @@
 import type { RandomSource } from "../transport/e2ee-session";
 import { secureRandom } from "../transport/random";
-import { CloudApiError, type CloudApi, type CloudCommand } from "./api";
+import { CloudApiError, WORKSPACE_STOPPED, type CloudApi, type CloudCommand } from "./api";
 import { commandAad, IV_LEN, open, openReceipt, parseV1, sealCommand, type CommandEnvelope, type CommandKind, type CommandReceipt, type CommandScope } from "./crypto";
 import type { WorkspaceKeys } from "./keys";
 import type { BlobStorage } from "./transcripts";
@@ -23,6 +23,11 @@ import type { BlobStorage } from "./transcripts";
  * the caller's decision: `enqueue` posts only with `post`, and `sync`
  * delivers what is unsent only with `deliver`. Without them an entry is
  * held on the phone, and `sync` only reads states.
+ *
+ * With `wake: false` a post starts nothing: the server refuses a workspace
+ * that is not running and stores nothing. A new command refused that way is
+ * dropped (`OutboxError("stopped")`, so the person can be asked and it can be
+ * sent again); one that was already held stays held.
  */
 
 export type OutboxState = "unsent" | "queued" | "leased" | "applied" | "rejected" | "cancelled" | "outcome-unknown";
@@ -64,7 +69,7 @@ export interface OutboxEntry {
 }
 
 export class OutboxError extends Error {
-  constructor(readonly code: "no-key" | "already-decided") {
+  constructor(readonly code: "no-key" | "already-decided" | "stopped") {
     super(code);
     this.name = "OutboxError";
   }
@@ -134,6 +139,11 @@ export class CloudOutbox {
     return this.items.some((item) => item.state === "queued" || item.state === "leased");
   }
 
+  /** Whether a held entry was last refused because the workspace does not run. */
+  get stopped(): boolean {
+    return this.items.some((item) => item.state === "unsent" && item.error === WORKSPACE_STOPPED);
+  }
+
   /** Whether anything has not left the phone. */
   get unsent(): boolean {
     return this.items.some((item) => item.state === "unsent");
@@ -154,7 +164,7 @@ export class CloudOutbox {
    * Seal and keep, then post if `post`. An entry that was not posted, or
    * could not be (offline), stays `unsent` until a `sync` that may deliver.
    */
-  async enqueue(tabId: string, kind: CommandKind, payload: OutboxPayload, options: { post?: boolean } = {}): Promise<OutboxEntry> {
+  async enqueue(tabId: string, kind: CommandKind, payload: OutboxPayload, options: { post?: boolean; wake?: boolean } = {}): Promise<OutboxEntry> {
     await this.load();
     const requestId = kind === "permission-decision" && "requestId" in payload ? payload.requestId : null;
     if (requestId) {
@@ -176,7 +186,13 @@ export class CloudOutbox {
       await this.save();
       this.publish();
       if (options.post !== false) {
-        await this.post(item);
+        if ((await this.post(item, options.wake !== false)) === "stopped") {
+          // The server stored nothing, so nothing is kept here: the person is asked, and it is sent again if they agree.
+          this.items = this.items.filter((entry) => entry !== item);
+          await this.save();
+          this.publish();
+          throw new OutboxError("stopped");
+        }
         await this.save();
         this.publish();
       }
@@ -192,7 +208,7 @@ export class CloudOutbox {
    * `deliver` only while the workspace runs or the person agreed to start it.
    * Returns whether anything changed.
    */
-  async sync(options: { deliver?: boolean | (() => boolean) } = {}): Promise<boolean> {
+  async sync(options: { deliver?: boolean | (() => boolean); wake?: boolean } = {}): Promise<boolean> {
     await this.load();
     const before = this.fingerprint();
     const { deliver } = options;
@@ -200,7 +216,8 @@ export class CloudOutbox {
     const may = () => (typeof deliver === "function" ? deliver() : deliver === true);
     for (const item of this.items.filter((entry) => entry.state === "unsent")) {
       if (!may()) break;
-      await this.post(item);
+      // Stopped: the rest would be refused too. They stay held.
+      if ((await this.post(item, options.wake !== false)) === "stopped") break;
     }
     const open_ = this.items.filter((entry) => entry.state === "queued" || entry.state === "leased");
     if (open_.length) {
@@ -242,18 +259,24 @@ export class CloudOutbox {
     this.publish();
   }
 
-  private async post(item: Stored): Promise<void> {
+  /** Post one entry. "stopped": it was posted with `wake: false` and the workspace does not run; it is still unsent. */
+  private async post(item: Stored, wake: boolean): Promise<"posted" | "stopped"> {
     try {
-      const answer = await this.options.api.enqueue(this.options.scope.organizationId, this.options.scope.workspaceId, item.envelope);
+      const answer = await this.options.api.enqueue(this.options.scope.organizationId, this.options.scope.workspaceId, item.envelope, ...(wake ? [] : [{ wake: false }]));
       item.wake = answer.wake;
       item.error = null;
       this.apply(item, answer.command);
     } catch (error) {
       const api = error instanceof CloudApiError ? error : new CloudApiError("cloud_workspace_unavailable", null);
+      if (!wake && api.code === WORKSPACE_STOPPED) {
+        item.error = api.code;
+        return "stopped";
+      }
       // The service or the network: it stays unsent, to be delivered later. A refusal (no access, viewer, workspace gone) is the answer.
       if (api.unreachable || api.status === 401) item.error = api.code;
       else this.settle(item, "rejected", api.code);
     }
+    return "posted";
   }
 
   private apply(item: Stored, command: CloudCommand): void {

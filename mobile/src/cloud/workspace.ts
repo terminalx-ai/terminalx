@@ -5,7 +5,7 @@ import { CloudApiError, type CloudApi, type CloudRole, type CloudWorkspace } fro
 import type { CommandKind, CommandScope } from "./crypto";
 import { WorkspaceKeys, type SecretStorage } from "./keys";
 import { CloudWorkspaceLink, type CloudLinkOptions, type CloudLinkProblem } from "./link";
-import { CloudOutbox, type OutboxEntry, type OutboxPayload } from "./outbox";
+import { CloudOutbox, OutboxError, type OutboxEntry, type OutboxPayload } from "./outbox";
 import { CloudTranscripts, type BlobStorage } from "./transcripts";
 
 /**
@@ -86,7 +86,7 @@ export const OUTBOX_POLL_MAX_MS = 15_000;
 
 export interface CloudWorkspaceSessionOptions {
   scope: CommandScope;
-  api: Pick<CloudApi, "open" | "enqueue" | "commandStatuses" | "cancelCommand" | "checkpoint" | "checkpoints">;
+  api: Pick<CloudApi, "open" | "enqueue" | "commandStatuses" | "cancelCommand" | "checkpoint" | "checkpoints"> & Partial<Pick<CloudApi, "doNotWake">>;
   secrets: SecretStorage;
   storage: BlobStorage;
   /** The workspace as the list last had it; null when it is not listed. */
@@ -270,7 +270,8 @@ export class CloudWorkspaceSession {
   async deliverHeld(options: { allowWake?: boolean } = {}): Promise<void> {
     const verdict = await this.mayPost(!!options.allowWake);
     if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
-    if (verdict === "post") await this.outbox.sync({ deliver: true });
+    if (verdict === "post" || verdict === "post-no-wake") await this.outbox.sync({ deliver: true, wake: verdict === "post" });
+    if (verdict === "post-no-wake" && this.outbox.stopped) throw this.stoppedMeanwhile();
     if (this.followable()) this.startPolling();
   }
 
@@ -406,7 +407,9 @@ export class CloudWorkspaceSession {
     const verdict = await this.mayPost(!!options.allowWake);
     if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
     // "hold": whether the workspace runs is not known just now, so the command is kept and not posted.
-    const entry = await this.outbox.enqueue(tabId, kind, payload, { post: verdict === "post" });
+    const entry = await this.outbox.enqueue(tabId, kind, payload, { post: verdict !== "hold", wake: verdict !== "post-no-wake" }).catch((error: unknown) => {
+      throw error instanceof OutboxError && error.code === "stopped" ? this.stoppedMeanwhile() : error;
+    });
     if (this.client.connection.state === "connected") void this.client.nudgeMailbox().catch(() => undefined);
     if (this.followable()) this.startPolling();
     return entry;
@@ -415,20 +418,39 @@ export class CloudWorkspaceSession {
   /**
    * Whether a command may be posted now. The server starts a stopped
    * workspace for any command, so without the person's agreement one is
-   * posted only to a workspace seen running: connected to, or listed as
-   * running by a list read for this question (what was read earlier may be
-   * stale: it can have been stopped from elsewhere since).
+   * posted in a way that cannot start it:
+   *
+   * - "post-no-wake": with `wake: false`, to a server that knows it. The
+   *   server refuses a workspace that is not running and stores nothing, so
+   *   one stopped a moment ago is never started by this.
+   * - against an older server, only to a workspace seen running: connected
+   *   to, or listed as running by a list read for this question (what was
+   *   read earlier may be stale: it can have been stopped from elsewhere
+   *   since).
    */
-  private async mayPost(allowWake: boolean): Promise<"post" | "hold" | "would-wake" | "unavailable"> {
+  private async mayPost(allowWake: boolean): Promise<"post" | "post-no-wake" | "hold" | "would-wake" | "unavailable"> {
     const stateNow = () => this.options.listed()?.state ?? null;
     if (stateNow() === null || stateNow() === "archived") return "unavailable";
-    if (this.client.connection.state === "connected") return "post";
     if (allowWake) return "post";
+    if (await this.options.api.doNotWake?.().catch(() => false)) {
+      const listed = stateNow();
+      if (listed === null || listed === "archived") return "unavailable";
+      // Listed as stopped and not connected: ask without a request that would be refused.
+      if (this.client.connection.state !== "connected" && (listed === "suspended" || listed === "suspending")) return "would-wake";
+      return "post-no-wake";
+    }
+    if (this.client.connection.state === "connected") return "post";
     const fresh = this.options.refreshList ? await this.options.refreshList().catch(() => false) : true;
     const state = stateNow();
     if (state === null || state === "archived") return "unavailable";
     if (state === "suspended" || state === "suspending") return "would-wake";
     return fresh ? "post" : "hold";
+  }
+
+  /** The server refused a `wake: false` command: the workspace stopped since the list was read. */
+  private stoppedMeanwhile(): CloudSendError {
+    void this.options.refreshList?.().catch(() => false);
+    return new CloudSendError("would-wake");
   }
 
   /** Whether the outbox has anything to follow or deliver without asking the person. */
@@ -442,11 +464,15 @@ export class CloudWorkspaceSession {
   /** Read command states, and deliver what is unsent only when that starts nothing. */
   private async syncOutbox(): Promise<boolean> {
     if (this.paused) return false;
-    const deliver = this.outbox.unsent && (await this.mayPost(false)) === "post";
+    const verdict = this.outbox.unsent ? await this.mayPost(false) : "hold";
+    const deliver = verdict === "post" || verdict === "post-no-wake";
     // Deciding took a request (the list read). If the app went to the background meanwhile, nothing is
     // posted or polled now; and the check is made again before each message, so none leaves after that moment.
     if (this.paused) return false;
-    return this.outbox.sync({ deliver: deliver && (() => !this.paused) });
+    const changed = await this.outbox.sync({ deliver: deliver && (() => !this.paused), wake: verdict !== "post-no-wake" });
+    // Refused as stopped: the list is behind. Once it says so, nothing is delivered until the person agrees.
+    if (verdict === "post-no-wake" && this.outbox.stopped) void this.options.refreshList?.().catch(() => false);
+    return changed;
   }
 
   private async connectionChanged(state: WorkspaceConnectionState): Promise<void> {

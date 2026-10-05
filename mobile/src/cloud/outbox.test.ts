@@ -218,4 +218,34 @@ describe("the phone's command outbox", () => {
     expect(h.blobs.size).toBe(0);
     expect(seen).toHaveBeenCalled();
   });
+
+  it("drops a new command the server refused as stopped, so it can be sent again after asking", async () => {
+    const h = await harness();
+    h.api.enqueue.mockRejectedValue(new CloudApiError("cloud_workspace_stopped", 409));
+    await expect(h.outbox.enqueue("tab-1", "send", { text: "are you up?" }, { wake: false })).rejects.toMatchObject({ code: "stopped" });
+    await expect(h.outbox.enqueue("tab-1", "permission-decision", { requestId: "r1", optionId: "allow" }, { wake: false })).rejects.toMatchObject({ code: "stopped" });
+    expect(h.api.enqueue.mock.calls.every((call) => (call as unknown[])[3] && ((call as unknown[])[3] as { wake?: boolean }).wake === false)).toBe(true);
+    expect(h.outbox.entries()).toEqual([]);
+    expect([...h.blobs.values()].join("")).not.toContain("unsent");
+    // The request was not decided: the person agrees, and the decision goes with wake allowed.
+    h.api.enqueue.mockImplementation(async (_org: string, _ws: string, envelope) => ({ command: command(envelope), existing: false, wake: "queued" }));
+    expect(await h.outbox.enqueue("tab-1", "permission-decision", { requestId: "r1", optionId: "allow" })).toMatchObject({ state: "queued", wake: "queued" });
+    expect((h.api.enqueue.mock.calls.at(-1) as unknown[])[3]).toBeUndefined();
+  });
+
+  it("keeps held commands held when a delivery with wake: false is refused as stopped", async () => {
+    const h = await harness();
+    for (const text of ["one", "two"]) await h.outbox.enqueue("tab-1", "send", { text }, { post: false });
+    h.api.enqueue.mockRejectedValue(new CloudApiError("cloud_workspace_stopped", 409));
+    await h.outbox.sync({ deliver: true, wake: false });
+    // The first refusal is the answer for all of them.
+    expect(h.api.enqueue).toHaveBeenCalledTimes(1);
+    expect(h.outbox.entries().map((entry) => [entry.state, entry.error])).toEqual([["unsent", "cloud_workspace_stopped"], ["unsent", null]]);
+    expect(h.outbox.stopped).toBe(true);
+    // With wake allowed the same refusal would be an answer like any other; it is not sent that way here.
+    h.api.enqueue.mockImplementation(async (_org: string, _ws: string, envelope) => ({ command: command(envelope), existing: false, wake: "queued" }));
+    await h.outbox.sync({ deliver: true });
+    expect(h.outbox.entries().map((entry) => entry.state)).toEqual(["queued", "queued"]);
+    expect(h.outbox.stopped).toBe(false);
+  });
 });

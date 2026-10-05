@@ -748,6 +748,75 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
   });
 
+  describe("send to a server that takes wake: false (PRO-89): the server decides, not a list read a moment ago", () => {
+    const TARGET = `cloud:${ORG}:ws-1:s1`;
+    /** Whether the server has the workspace running, whatever the catalog here says. */
+    let running = true;
+    beforeEach(() => {
+      setCloudControlPolicy("both");
+      setCloudControlEnabled(true);
+      mocks.status = { ...mocks.status, agentCommandWake: true };
+      running = true;
+      const answer = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+        if (command === "cloud_agent_enqueue" && args.wake === false && !running) {
+          enqueued.push(args);
+          // As native code answers: the refusal's code, and nothing kept in the outbox.
+          return Promise.reject("cloud_workspace_stopped");
+        }
+        return answer(command, args);
+      });
+    });
+
+    it("sends to a running workspace with wake: false, and neither reads the list nor asks", async () => {
+      const sent = (await handleCloudControl("send", { target: TARGET, text: "run the tests" })) as Record<string, unknown>;
+      expect(sent).toMatchObject({ commandId: "cmd-1", state: "queued" });
+      expect(enqueued).toEqual([expect.objectContaining({ workspaceId: "ws-1", kind: "send", wake: false })]);
+      expect(mocks.api.cloudWorkspaces).not.toHaveBeenCalled();
+      expect(mocks.ask).not.toHaveBeenCalled();
+      expectNoWake();
+    });
+
+    it("asks when the workspace stopped after the list was read, and sends nothing if the person refuses", async () => {
+      // The catalog, and a list read just now, still say ready: only the server knows.
+      running = false;
+      mocks.ask.mockResolvedValue(false);
+      const refused = await refusal("send", { target: TARGET, text: "still there?" });
+      expect(refused.code).toBe("declined");
+      expect(mocks.ask.mock.calls[0][0]).toContain("send a message to the stopped cloud workspace ws-1");
+      // The one attempt could start nothing, and nothing followed it.
+      expect(enqueued).toEqual([expect.objectContaining({ wake: false })]);
+      expect(connections.wakeCloudConnection).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    });
+
+    it("sends again with wake allowed once the person agrees", async () => {
+      running = false;
+      const sent = (await handleCloudControl("send", { target: TARGET, text: "still there?" })) as Record<string, unknown>;
+      expect(mocks.ask).toHaveBeenCalledTimes(1);
+      expect(enqueued).toHaveLength(2);
+      expect(enqueued[0]).toMatchObject({ wake: false });
+      expect("wake" in enqueued[1]).toBe(false);
+      expect(sent).toMatchObject({ commandId: "cmd-2", state: "queued" });
+    });
+
+    it("passes any other refusal on without asking", async () => {
+      mocks.invoke.mockImplementation(async (command: string) => {
+        if (command === "cloud_agent_enqueue") return Promise.reject("cloud_workspace_agent_mailbox_full");
+        return command === "cloud_agent_cache_load" ? { tabs: cached["ws-1"] } : [];
+      });
+      await refusal("send", { target: TARGET, text: "hello" });
+      expect(mocks.ask).not.toHaveBeenCalled();
+    });
+  });
+
+  it("never sends the wake key to a server that does not say it takes it", async () => {
+    await handleCloudControl("send", { target: `cloud:${ORG}:ws-1:s1`, text: "run the tests" });
+    await handleCloudControl("send", { target: `cloud:${ORG}:ws-stopped:s2`, text: "continue" });
+    expect(enqueued).toHaveLength(2);
+    expect(enqueued.every((args) => !("wake" in args))).toBe(true);
+  });
+
   describe("the switch is native code's to keep", () => {
     it("shows what native code says after asking it to change, and says why it did not turn on", async () => {
       const { requestCloudControlSetting, loadCloudControlSetting } = await import("./cloudControl");

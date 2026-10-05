@@ -13,8 +13,10 @@
 //! - at most one report per [`MIN_INTERVAL`];
 //! - a report whenever something was noted or the counts changed, and every
 //!   [`KEEPALIVE`] while a turn runs or an approval waits;
-//! - `attachment` every [`KEEPALIVE`] while a client is attached, so a person
-//!   working only over the relay is never suspended as idle.
+//! - `attachment` every [`KEEPALIVE`] while a client that can type is
+//!   attached, so a person working only over the relay is never suspended as
+//!   idle. A viewer or a phone that only reads is not such a client: looking
+//!   does not hold compute (terminalx-saas contract 9.4.1).
 //!
 //! The notes are process-wide and cost an atomic operation, so the desktop
 //! build, which never starts a reporter, pays nothing for them.
@@ -70,7 +72,7 @@ pub fn note(kind: Kind) {
     NOTED.fetch_or(kind.bit(), Ordering::Relaxed);
 }
 
-/// A client is attached over the relay until the guard drops.
+/// A client that can type is attached over the relay until the guard drops.
 #[must_use]
 pub fn attached() -> Attached {
     ATTACHED.fetch_add(1, Ordering::Relaxed);

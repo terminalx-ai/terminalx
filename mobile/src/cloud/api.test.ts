@@ -143,4 +143,33 @@ describe("the phone's cloud API client", () => {
     await expect(client.workspaces("org-1")).rejects.toMatchObject({ code: "account_signed_out" });
     expect(calls).toEqual([]);
   });
+
+  it("posts wake: false only when asked, so an older server never sees the key", async () => {
+    const envelope = { v: 1 as const, clientCommandId: "c1", tabId: "t1", kind: "send" as const, keyId: "k1", iv: "iv", ciphertext: "ct" };
+    const command = { clientCommandId: "c1", tabId: "t1", kind: "send", state: "queued", keyId: "k1", createdAt: 1, updatedAt: 1 };
+    const { client, calls } = api((call) => ((call.body as { wake?: boolean }).wake === false ? { status: 409, body: { error: "cloud_workspace_stopped" } } : { status: 202, body: { command, existing: false, wake: "queued" } }));
+    await expect(client.enqueue("org-1", "ws-1", envelope, { wake: false })).rejects.toMatchObject({ code: "cloud_workspace_stopped", status: 409 });
+    expect(calls[0].body).toEqual({ ...envelope, wake: false });
+    await client.enqueue("org-1", "ws-1", envelope, { wake: true });
+    await client.enqueue("org-1", "ws-1", envelope);
+    expect(calls[1].body).toEqual(envelope);
+    expect(calls[2].body).toEqual(envelope);
+  });
+
+  it("knows wake: false only from the server's capability flag, read once", async () => {
+    const answer = (flags: Record<string, boolean>) => () => ({ body: { cloud: { userId: "u" }, organizations: [], capabilities: { flags, refreshedAt: 1 } } });
+    const knows = api(answer({ "cloud.workspaces.agent-command-wake.v1": true }));
+    expect(await knows.client.doNotWake()).toBe(true);
+    expect(await knows.client.doNotWake()).toBe(true);
+    expect(knows.calls).toHaveLength(1);
+    const older = api(answer({ "relay.use": true }));
+    expect(await older.client.doNotWake()).toBe(false);
+    expect(older.calls).toHaveLength(1);
+    // Unreachable: not known, so the caller falls back; it is asked again next time.
+    let up = false;
+    const flaky = api(() => (up ? answer({ "cloud.workspaces.agent-command-wake.v1": true })() : { status: 503, body: { error: "unavailable" } }));
+    expect(await flaky.client.doNotWake()).toBe(false);
+    up = true;
+    expect(await flaky.client.doNotWake()).toBe(true);
+  });
 });
