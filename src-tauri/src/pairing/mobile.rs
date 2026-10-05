@@ -32,6 +32,9 @@ const ATTACHMENT_BYTES_LIMIT: usize = 5 * 1024 * 1024;
 const ATTACHMENT_COUNT_LIMIT: usize = 8;
 const NOTIFICATION_LIMIT: usize = 512;
 const TAIL_EVENT_LIMIT: usize = 5_000;
+// Bound serialized events, leaving room for the RPC envelope and encrypted
+// base64 framing well below the pairing WebSocket's 10 MiB limit.
+const TAIL_BYTES_LIMIT: usize = 1024 * 1024 - 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -447,11 +450,43 @@ fn session_tail(manager: &PairingManager, params: SessionTailParams) -> Result<V
     }
     let session_manager = sessions(manager)?;
     let path = store::log_path(&params.session_id, &params.tab_id)?;
-    let (mut events, has_more) = read_event_tail(&path, params.before, params.limit)?;
+    let (mut events, mut has_more) = read_event_tail(&path, params.before, params.limit)?;
     if params.before.is_none() {
         session_manager.reconcile_lapsed_events(&params.session_id, &params.tab_id, &mut events)?;
     }
+    // Reconciliation may publish additional events into the saved log.
+    has_more |= bound_tail_bytes(&mut events)?;
     Ok(json!({ "events": events, "hasMore": has_more }))
+}
+
+fn transcript_event_bytes(event: &AgentEvent) -> Result<usize> {
+    Ok(serde_json::to_vec(event)?.len() + 1)
+}
+
+fn ensure_event_fits(bytes: usize) -> Result<()> {
+    if bytes > TAIL_BYTES_LIMIT {
+        bail!("A transcript event is too large to load on mobile. Open this conversation on your Mac.");
+    }
+    Ok(())
+}
+
+fn bound_tail_bytes(events: &mut Vec<AgentEvent>) -> Result<bool> {
+    let mut bytes = 0;
+    let mut keep = 0;
+    for event in events.iter().rev() {
+        let event_bytes = transcript_event_bytes(event)?;
+        if keep == 0 {
+            ensure_event_fits(event_bytes)?;
+        }
+        if bytes + event_bytes > TAIL_BYTES_LIMIT {
+            break;
+        }
+        bytes += event_bytes;
+        keep += 1;
+    }
+    let omitted = events.len() - keep;
+    events.drain(..omitted);
+    Ok(omitted > 0)
 }
 
 fn read_event_tail(path: &Path, before: Option<u64>, turn_limit: usize) -> Result<(Vec<AgentEvent>, bool)> {
@@ -463,10 +498,22 @@ fn read_event_tail(path: &Path, before: Option<u64>, turn_limit: usize) -> Resul
     let mut events = Vec::new();
     let mut turns = 0usize;
     let mut has_more = false;
+    let mut bytes = 0;
     while let Some(event) = next_tail_event(&mut lines)? {
         if before.is_some_and(|before| event.seq >= before) {
             continue;
         }
+        let event_bytes = transcript_event_bytes(&event)?;
+        if events.is_empty() {
+            ensure_event_fits(event_bytes)?;
+        }
+        if bytes + event_bytes > TAIL_BYTES_LIMIT {
+            // The excluded event stays in the log and is reached using the
+            // oldest returned sequence as the next page's exclusive cursor.
+            has_more = true;
+            break;
+        }
+        bytes += event_bytes;
         let is_prompt = matches!(event.payload, Payload::UserMessage { .. });
         events.push(event);
         if is_prompt {
@@ -1124,6 +1171,60 @@ mod tests {
                 cwd: None,
             },
         )
+    }
+
+    #[test]
+    fn transcript_pages_are_byte_bounded_and_preserve_every_event() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut original = vec![prompt(1)];
+        original.extend((2..=65).map(|seq| event(seq, Payload::AssistantText {
+            block: None,
+            text: "x".repeat(256 * 1024),
+        })));
+        let log = original.iter().map(|event| serde_json::to_string(event).unwrap()).collect::<Vec<_>>().join("\n");
+        std::fs::write(file.path(), format!("{log}\n")).unwrap();
+        let mut before = None;
+        let mut collected = Vec::new();
+        loop {
+            let (page, has_more) = read_event_tail(file.path(), before, 20).unwrap();
+            assert!(!page.is_empty());
+            let result = json!({ "events": page, "hasMore": has_more });
+            assert!(serde_json::to_vec(&result).unwrap().len() <= 1024 * 1024);
+            assert!(page.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+            before = Some(page[0].seq);
+            collected.splice(0..0, page);
+            if !has_more { break; }
+        }
+        assert_eq!(collected, original);
+    }
+
+    #[test]
+    fn reconciled_transcript_is_bounded_with_the_same_cursor_semantics() {
+        let mut events = (1..=5).map(|seq| event(seq, Payload::AssistantText {
+            block: None,
+            text: "x".repeat(256 * 1024),
+        })).collect::<Vec<_>>();
+        assert!(bound_tail_bytes(&mut events).unwrap());
+        assert!(serde_json::to_vec(&json!({ "events": events, "hasMore": true })).unwrap().len() <= 1024 * 1024);
+        assert_eq!(events.iter().map(|event| event.seq).collect::<Vec<_>>(), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn oversized_transcript_event_is_refused_without_skipping_it() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let events = [prompt(1), event(2, Payload::AssistantText {
+            block: None,
+            text: "x".repeat(8 * 1024 * 1024),
+        }), prompt(3)];
+        let log = events.iter().map(|event| serde_json::to_string(event).unwrap()).collect::<Vec<_>>().join("\n");
+        std::fs::write(file.path(), format!("{log}\n")).unwrap();
+        let (latest, has_more) = read_event_tail(file.path(), None, 1).unwrap();
+        assert_eq!(latest, vec![prompt(3)]);
+        assert!(has_more);
+        let result = read_event_tail(file.path(), Some(3), 1);
+        assert!(result.is_err(), "An oversized event must be refused, not sent");
+        let error = result.err().unwrap();
+        assert_eq!(error.to_string(), "A transcript event is too large to load on mobile. Open this conversation on your Mac.");
     }
 
     #[test]

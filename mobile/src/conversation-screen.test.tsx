@@ -20,6 +20,7 @@ vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
+vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: vi.fn(async (key: string) => mocks.storage.get(key) ?? null),
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
@@ -91,6 +92,56 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
 describe("mobile conversation navigation", () => {
+  it("keeps the composer placeholder and draft stable while reconnecting", async () => {
+    await render(); await type("Keep my draft");
+    const placeholder = input().placeholder;
+    for (const stage of ["reconnecting", "connected", "cant-connect", "connected"]) {
+      mocks.app.connectionStage = stage;
+      await render();
+      expect(input().placeholder).toBe(placeholder);
+      expect(input().value).toBe("Keep my draft");
+      expect(button("Send").disabled).toBe(stage !== "connected");
+      expect(container.textContent).toContain("claude transcript");
+    }
+  });
+
+  it("shows a recoverable transcript error instead of empty history after a failed load", async () => {
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("connection closed"));
+    await render();
+    expect(container.textContent).toContain("Couldn’t load transcript");
+    expect(container.textContent).not.toContain("No transcript yet");
+    expect(container.textContent).not.toContain("Loading transcript");
+    mocks.app.connectionStage = "reconnecting"; await render();
+    mocks.app.connectionStage = "connected"; await render();
+    expect(mocks.app.api.tail).toHaveBeenCalledTimes(1);
+    await click("Retry transcript");
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).not.toContain("Couldn’t load transcript");
+  });
+
+  it("retains loaded history and offers retry when loading an earlier page fails", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Latest turn", 10)], hasMore: true });
+    await render();
+    mocks.app.api.tail.mockRejectedValueOnce(new Error("connection closed"));
+    await click("Load earlier");
+    expect(container.textContent).toContain("Latest turn");
+    expect(container.textContent).toContain("Couldn’t load earlier messages");
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Earlier turn", 1)], hasMore: false });
+    await click("Load earlier");
+    expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 10);
+    expect(container.textContent).toContain("Latest turn");
+    expect(container.textContent).toContain("Earlier turn");
+    expect(container.textContent).not.toContain("Couldn’t load earlier messages");
+  });
+
+  it("keeps the transcript visible when the independent notes request fails", async () => {
+    mocks.app.api.listNotes.mockRejectedValueOnce(new Error("connection closed"));
+    await render();
+    expect(container.textContent).toContain("claude transcript");
+    expect(container.textContent).not.toContain("Loading transcript");
+    expect(container.textContent).not.toContain("No transcript yet");
+  });
+
   it("opens each list row with the exact conversation and searches by agent", async () => {
     await render(true);
     const rows = [...container.querySelectorAll("button")].filter((item) => item.textContent?.includes("Create a new issue"));
