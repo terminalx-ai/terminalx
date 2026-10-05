@@ -68,7 +68,7 @@ Pairing uses the version 2 desktop offer exactly as issued by TerminalX: the QR 
 
 ## Transcript viewport regression fixture
 
-The synthetic fixture renders the production `TranscriptList` and `TurnCard` with
+The synthetic fixture renders the production `TranscriptList` and `TranscriptRow` with
 real native layout. It does not connect to a host or read session data. Run the
 measurement server and Expo fixture in separate terminals (after `pnpm install`):
 
@@ -91,7 +91,9 @@ node mobile/scripts/transcript-viewport/check.mjs suite
 
 This checks empty/short/long histories, delayed cold loads, cached content followed
 by host data, live output, reconnect data, agent switches, streaming height changes,
-a delayed image resize, and a permission card. Assertions use native scroll events
+a delayed image resize, and a permission card. It also checks a page of 20 prompts
+with 200 long replies (`heavy`) and a history ten times larger (`massive`), requiring
+mounted rows to span fewer than six viewport heights. Assertions use native scroll events
 and measured marker positions within the viewport, not mocked scroll methods.
 Measurements are saved to `mobile/dist/viewport/`. Synthetic simulator screenshots
 are included in [light](scripts/transcript-viewport/screenshots/light.png) and
@@ -122,6 +124,23 @@ exact y coordinate through live/reconnect/growth/image/pagination updates. Andro
 and physical-device validation remain outstanding. The fixture substitutes data
 arrival for transport; cache loading, reconnect epochs, and agent selection are
 also covered by `src/conversation-screen.test.tsx`.
+
+Issue #385 was validated on 2026-10-05 in an iPhone 17 / iOS 26.5 Release
+simulator fixture. Eight whole-turn rows mounted 115 screens of content. Splitting
+turns into message blocks reduced this to 38 mounted rows spanning 3.04 screens;
+the 20-prompt and 200-prompt cases had identical mounted height. All bottom-edge
+scenarios passed. A visible history marker stayed at the same y coordinate through
+host loading, live output, reconnects, streaming growth, image resizing, and loading
+earlier turns. See [native measurements](../docs/screenshots/issue-385/metrics.json).
+The same long transcript is captured in [light](../docs/screenshots/issue-385/light.png)
+and [dark](../docs/screenshots/issue-385/dark.png) appearance.
+These are synthetic layout measurements, not a repeat of the owner's transcript
+or a physical-phone memory measurement. The fixture used a cached native executable;
+clipboard initialization was stubbed only in its test bundle because that executable
+lacked the new clipboard module. Clipboard actions were not part of this check.
+
+If the default measurement port is occupied, set `VIEWPORT_PORT` for the server
+and checker, and the matching `EXPO_PUBLIC_VIEWPORT_PORT` when bundling the fixture.
 
 For the markdown and link regression fixture, send this command while the fixture
 and measurement server are running:

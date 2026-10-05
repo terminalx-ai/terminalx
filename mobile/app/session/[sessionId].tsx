@@ -17,7 +17,9 @@ import { conversationKey } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
 import { LinkedText } from "@mobile/ui/LinkedText";
-import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
+import { PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
+import { turnRows, type TurnRow } from "@mobile/ui/transcript-rows";
+import { textChunks } from "@mobile/ui/markdown-blocks";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
 
@@ -269,10 +271,16 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     }
   };
 
-  const items: ({ kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote })[] = [
-    ...transcript.turns.map((turn) => ({ kind: "turn" as const, turn })),
-    ...notes.map((note) => ({ kind: "note" as const, note })),
-  ].sort((left, right) => itemTime(left) - itemTime(right));
+  type Item = { key: string; kind: "turn"; row: TurnRow } | { key: string; kind: "note"; note: ChatNote; first: boolean };
+  const items = useMemo(() => {
+    const groups: ({ kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote })[] = [
+      ...transcript.turns.map((turn) => ({ kind: "turn" as const, turn })),
+      ...notes.map((note) => ({ kind: "note" as const, note })),
+    ].sort((left, right) => itemTime(left) - itemTime(right));
+    return groups.flatMap<Item>((group) => group.kind === "turn"
+      ? turnRows(group.turn).map((row) => ({ key: row.key, kind: "turn" as const, row }))
+      : textChunks(group.note.body).map((body, index) => ({ key: `note-${group.note.id}:${index}`, kind: "note" as const, note: { ...group.note, body }, first: index === 0 })));
+  }, [notes, transcript.turns]);
 
   const respondPermission = async (ask: PendingAsk, optionId: string) => {
     if (!connected || answeringPermission) return;
@@ -308,7 +316,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
         : <EmptyState title="No transcript yet" detail="This tab has not published any turns." />;
 
   const sendDisabled = !connected || (!draft.trim() && !attachments.length) || sending;
-  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.kind === "turn" ? item.turn.key : `note-${item.note.id}`} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TurnCard turn={item.turn} /> : <NoteCard note={item.note} />} latest={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
+  return <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={92}><TranscriptList data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.pendingAsks.map((ask) => <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission === ask.requestId} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><View style={[styles.composer, { backgroundColor: palette.card, borderColor: palette.border, paddingBottom: insets.bottom + 12 }]}><View style={styles.modeLine}><Pressable onPress={() => { setSendToAgent(true); setSendFeedback(null); }} style={[styles.modeChoice, sendToAgent && { backgroundColor: palette.selected }]}><Radio size={15} color={sendToAgent ? palette.accent : palette.muted} /><Text style={{ color: sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Send to agent</Text></Pressable><Pressable accessibilityState={{ disabled: attachments.length > 0 }} disabled={attachments.length > 0} onPress={() => { setSendToAgent(false); setSendFeedback(null); }} style={[styles.modeChoice, !sendToAgent && { backgroundColor: palette.selected }, attachments.length > 0 && styles.disabled]}><Text style={{ color: !sendToAgent ? palette.ink : palette.muted, fontSize: 12 }}>Add worktree note</Text></Pressable></View>{attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}{attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}{sendFeedback ? <Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: sendFeedback.kind === "error" ? palette.danger : palette.success }]}>{sendFeedback.message}</Text> : null}<View style={styles.composeLine}>{sendToAgent ? <Pressable accessibilityRole="button" accessibilityLabel="Attach file" disabled={sending} onPress={() => void pickAttachments()} style={[styles.attach, { backgroundColor: palette.raised }, sending && styles.disabled]}><Paperclip size={19} color={palette.muted} /></Pressable> : null}<TextInput value={draft} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setSendFeedback(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder="Message this session" placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} /><Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: palette.accent, opacity: sendDisabled ? 0.38 : 1 }]}><Send size={18} color={palette.accentInk} /></Pressable></View></View></KeyboardAvoidingView>;
 }
 
 function base64Size(value: string): number {
@@ -316,9 +324,9 @@ function base64Size(value: string): number {
   return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
 }
 
-function NoteCard({ note }: { note: ChatNote }) {
+function NoteCard({ note, first }: { note: ChatNote; first: boolean }) {
   const { palette } = useTheme();
-  return <Card style={styles.note}><Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text><LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
+  return <Card style={styles.note}>{first ? <Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text> : null}<LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
 }
 
 function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string; sessionId: string; tabId: string; connected: boolean }) {
@@ -373,6 +381,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
 function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.prompt?.ts ?? item.turn.completed?.ts ?? "") || item.turn.seq : item.note.createdAt; }
 
 const styles = StyleSheet.create({
+  transcriptRows: { gap: 0 },
   page: { flex: 1 },
   sessionContext: { fontSize: 13, marginHorizontal: 16, marginTop: 4 },
   flex: { flex: 1 },

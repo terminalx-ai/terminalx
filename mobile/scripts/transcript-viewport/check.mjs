@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-const endpoint = "http://127.0.0.1:18746";
+const endpoint = `http://127.0.0.1:${process.env.VIEWPORT_PORT ?? 18746}`;
 const output = fileURLToPath(new URL("../../dist/viewport/", import.meta.url));
 mkdirSync(output, { recursive: true });
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -21,6 +21,10 @@ async function check(action, mode = "bottom") {
   assert(after.bounds, "Native fixture must be running");
   assert(Date.now() - after.measuredAt < 1500, "Native measurements are stale; check the fixture app");
   if (action !== "measure") assert.equal(after.label, action);
+  if (action === "heavy" || action === "massive") {
+    const mountedHeight = after.mounted.reduce((total, row) => total + (row.rect?.height ?? 0), 0);
+    assert(mountedHeight < after.bounds.height * 6, `Mounted ${after.mounted.length} rows spanning ${Math.round(mountedHeight / after.bounds.height)} screens`);
+  }
   const edge = after.footer ?? after.latest;
   const gap = edge ? after.bounds.y + after.bounds.height - edge.y - edge.height : null;
   if (mode === "bottom" && after.items.length) {
@@ -41,5 +45,5 @@ async function check(action, mode = "bottom") {
 }
 const [action = "suite", mode] = process.argv.slice(2);
 if (action === "suite") {
-  for (const action of ["empty", "short", "cold", "cached", "host", "live", "reconnect", "long", "grow", "image", "permission", "switch"]) await check(action);
+  for (const action of ["empty", "short", "cold", "cached", "host", "live", "reconnect", "long", "heavy", "massive", "grow", "image", "permission", "switch"]) await check(action);
 } else await check(action, mode);

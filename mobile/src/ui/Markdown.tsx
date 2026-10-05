@@ -1,18 +1,22 @@
 import { memo, useMemo, type ReactNode } from "react";
 import { Platform, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Marked, type Token, type Tokens } from "marked";
+import type { Token, Tokens } from "marked";
 import { decodeHTML } from "entities";
 import { useTheme, type Palette } from "./theme";
 import { ChatLink, LinkedText, linkedText } from "./LinkedText";
+import { markdownTokens } from "./markdown-blocks";
 
 // Parse markdown once per changed text, then draw native views. No WebView or
 // HTML is involved, including for streamed text and nested table/list content.
-const parser = new Marked({ gfm: true, breaks: true });
-
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   const { palette } = useTheme();
-  const tokens = useMemo(() => parser.lexer(text), [text]);
+  const tokens = useMemo(() => markdownTokens(text), [text]);
   return <View style={styles.blocks}>{blocks(tokens, palette)}</View>;
+});
+
+export const MarkdownBlock = memo(function MarkdownBlock({ token }: { token: Token }) {
+  const { palette } = useTheme();
+  return <View style={styles.blocks}>{blocks([token], palette)}</View>;
 });
 
 function blocks(tokens: Token[] | undefined, palette: Palette): ReactNode[] {

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   terminalListeners: new Map<string, (event: unknown) => void>(),
   listProps: {} as any,
   scrollToOffset: vi.fn(),
+  initialBatchOnly: false,
 }));
 vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -42,7 +43,8 @@ vi.mock("react-native", () => {
       mocks.listProps = props;
       useImperativeHandle(props.ref, () => ({ scrollToOffset: mocks.scrollToOffset }));
       const { data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent } = props;
-      return <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}<div data-testid="list-footer">{ListFooterComponent}</div></div>;
+      const mounted = mocks.initialBatchOnly ? data.slice(0, props.initialNumToRender ?? 10) : data;
+      return <div>{ListHeaderComponent}{data.length ? mounted.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}<div data-testid="list-footer">{ListFooterComponent}</div></div>;
     },
     SectionList: ({ sections, renderItem, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.flatMap((section: any) => section.data.map((item: any) => <div key={item.key}>{renderItem({ item })}</div>)) : ListEmptyComponent}</div>,
   };
@@ -76,6 +78,7 @@ beforeEach(() => {
   mocks.terminalListeners.clear();
   mocks.push.mockClear();
   mocks.scrollToOffset.mockClear();
+  mocks.initialBatchOnly = false;
   mocks.setParams.mockImplementation((params) => Object.assign(mocks.params, params));
   mocks.app = {
     logs: [],
@@ -158,6 +161,23 @@ describe("mobile transcript presentation (#388)", () => {
     expect(container.textContent).not.toContain("system-reminder");
     expect(container.textContent).not.toContain("Internal harness instructions");
     expect(mocks.listProps.data).toHaveLength(1);
+  });
+});
+
+describe("mobile transcript mount budget (#385)", () => {
+  it("mounts only a small part of a page with twenty long prompts", async () => {
+    mocks.initialBatchOnly = true;
+    mocks.app.api.tail.mockResolvedValueOnce({ events: Array.from({ length: 20 }, (_, turn) => [
+      event("claude", `Prompt ${turn}`, turn * 11 + 1),
+      ...Array.from({ length: 10 }, (_, reply) => ({
+        ...event("claude", "", turn * 11 + reply + 2),
+        payload: { type: "assistant_text", text: `${"Synthetic paragraph.\n\n".repeat(16)}reply-marker-${turn}-${reply}` },
+      })),
+    ]).flat(), hasMore: false });
+    await render();
+    expect(container.textContent).toContain("reply-marker-19-9");
+    expect(container.textContent?.match(/reply-marker-/g)?.length ?? 0).toBeLessThanOrEqual(12);
+    expect(container.textContent).not.toContain("Prompt 0");
   });
 });
 
@@ -442,7 +462,7 @@ describe("mobile latest conversation edge", () => {
   const scroll = async (offset: number) => {
     await act(async () => mocks.listProps.onScroll({ nativeEvent: { contentOffset: { y: offset } } }));
   };
-  const latestText = () => mocks.listProps.data[0]?.turn.prompt.text;
+  const latestText = () => mocks.listProps.data[0]?.row.text;
 
   it("opens cached content and then the newer host tail at the latest edge", async () => {
     const key = `terminalx:transcript:${mocks.params.hostId}:worktree:claude`;
@@ -507,7 +527,7 @@ describe("mobile latest conversation edge", () => {
     mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "earlier", 1)], hasMore: false });
     await click("Load earlier");
     expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 30);
-    expect(mocks.listProps.data.map((item: any) => item.turn.prompt.text)).toEqual(["current", "earlier"]);
+    expect(mocks.listProps.data.map((item: any) => item.row.text)).toEqual(["current", "earlier"]);
     expect(mocks.listProps.maintainVisibleContentPosition).toBe(position);
     expect(mocks.scrollToOffset).not.toHaveBeenCalled();
     expect(button("Jump to latest")).toBeTruthy();

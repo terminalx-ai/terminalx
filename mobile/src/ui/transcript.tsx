@@ -1,10 +1,12 @@
+import { memo } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { Terminal as TerminalIcon } from "lucide-react-native";
 import type { PendingAsk, Turn, WorkItem } from "@terminalx/portable/transcript";
 import { Button, Card } from "./primitives";
 import { useTheme } from "./theme";
-import { Markdown } from "./Markdown";
+import { Markdown, MarkdownBlock } from "./Markdown";
 import { LinkedText } from "./LinkedText";
+import type { TurnRow } from "./transcript-rows";
 
 // How a conversation is drawn: the same cards for a session on a paired Mac
 // and for a tab of a cloud workspace.
@@ -28,6 +30,14 @@ export function TurnCard({ turn }: { turn: Turn }) {
   return <View style={styles.turn}>{turn.prompt ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{turn.prompt.text}</LinkedText></View> : null}<View style={styles.work}>{turn.work.map((item) => <WorkRow key={item.key} item={item} />)}{turn.finalText ? <Markdown text={turn.finalText} /> : null}</View></View>;
 }
 
+export const TranscriptRow = memo(function TranscriptRow({ row }: { row: TurnRow }) {
+  const { palette } = useTheme();
+  return <View style={row.startsTurn ? styles.turnStart : styles.row}>
+    {row.kind === "prompt" ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{row.text}</LinkedText></View>
+      : <View style={styles.work}>{row.kind === "markdown" ? <MarkdownBlock token={row.token} /> : <WorkRow item={row.item} />}</View>}
+  </View>;
+});
+
 function WorkRow({ item }: { item: WorkItem }) {
   const { palette } = useTheme();
   if (item.kind === "text") return <Markdown text={item.text} />;
@@ -46,6 +56,8 @@ function WorkRow({ item }: { item: WorkItem }) {
 function safeJson(value: unknown) { try { return JSON.stringify(value, null, 2).slice(0, 2_000); } catch { return "Input unavailable"; } }
 
 const styles = StyleSheet.create({
+  row: { paddingTop: 10 },
+  turnStart: { paddingTop: 16 },
   turn: { gap: 11 },
   promptBubble: { alignSelf: "flex-end", maxWidth: "88%", borderRadius: 17, borderBottomRightRadius: 5, paddingHorizontal: 14, paddingVertical: 11 },
   work: { gap: 10, paddingHorizontal: 3 },
