@@ -3,13 +3,14 @@ import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
+import type { ShortcutId } from "@/lib/shortcuts";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
-import { openSettle, openWorkspaceDelete } from "@/lib/dialogs";
+import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
@@ -17,11 +18,11 @@ import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 
 export type PanelTab = "changes" | "repo" | "pr" | "files";
-const TABS: { id: PanelTab; label: string; chord: string }[] = [
-  { id: "changes", label: "Changes", chord: "mod+alt+1" },
-  { id: "repo", label: "Repo", chord: "mod+alt+2" },
-  { id: "pr", label: "PR", chord: "mod+alt+3" },
-  { id: "files", label: "Files", chord: "mod+alt+4" },
+const TABS: { id: PanelTab; label: string; shortcut: ShortcutId }[] = [
+  { id: "changes", label: "Changes", shortcut: "panel.changes" },
+  { id: "repo", label: "Repo", shortcut: "panel.repository" },
+  { id: "pr", label: "PR", shortcut: "panel.pullRequests" },
+  { id: "files", label: "Files", shortcut: "panel.files" },
 ];
 
 /**
@@ -98,10 +99,10 @@ export function RightPanel({
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
-  useHotkey(TABS[0].chord, () => setTab("changes"));
-  useHotkey(TABS[1].chord, () => setTab("repo"));
-  useHotkey(TABS[2].chord, () => setTab("pr"));
-  useHotkey(TABS[3].chord, () => setTab("files"));
+  useShortcut(TABS[0].shortcut, () => setTab("changes"));
+  useShortcut(TABS[1].shortcut, () => setTab("repo"));
+  useShortcut(TABS[2].shortcut, () => setTab("pr"));
+  useShortcut(TABS[3].shortcut, () => setTab("files"));
 
   const onDown = useCallback(
     (e: React.PointerEvent) => {
@@ -139,7 +140,7 @@ export function RightPanel({
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
         {TABS.filter((t) => isGit || t.id === "files").map((t) => (
-          <WithTooltip key={t.id} label={t.label} keys={keycaps(t.chord)}>
+          <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
             <button
               type="button"
               onClick={() => setTab(t.id)}
@@ -216,7 +217,11 @@ export function RightPanel({
                 branch={resolvedBranch}
                 active={tab === "pr"}
                 busy={live}
-                onSettle={settleSessionId ? () => openSettle(settleSessionId) : undefined}
+                onSettle={
+                  settleSessionId && workspace
+                    ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })
+                    : undefined
+                }
                 workspace={
                   workspace
                     ? {

@@ -38,8 +38,10 @@ Usage:
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
+      [--title TEXT] [--name NAME]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx sessions rename SESSION --title TEXT [--json]
   terminalx tabs list SESSION [--json]
   terminalx send SESSION_OR_TAB TEXT [--json]
   terminalx read SESSION_OR_TAB [--since SEQ] [--tail COUNT] [--json]
@@ -47,8 +49,20 @@ Usage:
   terminalx permissions list [--json]
   terminalx permissions allow REQUEST [--option OPTION] [--json]
   terminalx permissions deny REQUEST [--json]
+  terminalx projects list --cloud [--org ORG] [--json]
+  terminalx sessions list --cloud [--project CLOUD_PROJECT] [--org ORG] [--json]
+  terminalx sessions create --project CLOUD_PROJECT --prompt TEXT [--agent AGENT]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--on-main]
+      [--wake] [--confirm-spend] [--idempotency-key KEY] [--json]
+  terminalx send CLOUD_SESSION TEXT [--tab TAB] [--idempotency-key KEY] [--json]
+  terminalx read CLOUD_SESSION [--tab TAB] [--since SEQ] [--tail COUNT] [--json]
+  terminalx wait CLOUD_SESSION [--tab TAB] [--timeout SECONDS] [--json]
+  terminalx cloud status [--json]
+  terminalx cloud stop CLOUD_WORKSPACE --yes [--json]
+  terminalx cloud resume CLOUD_WORKSPACE [--json]
   terminalx worktrees list [--project PROJECT] [--json]
-  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--json]
+  terminalx worktrees rename WORKTREE --name NAME [--project PROJECT] [--json]
+  terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
@@ -167,7 +181,7 @@ fn run(args: &[String]) -> i32 {
             command,
             params,
             timeout,
-        } => match control::call(&command, params.clone(), timeout) {
+        } => match if command == "cloud.wait" { cloud_wait(&params, timeout, &mut |command, params, timeout| control::call(command, params, timeout)) } else { control::call(&command, params.clone(), timeout) } {
             Ok(response) => {
                 let ok = response.ok;
                 let readable = (!parsed.json && ok)
@@ -193,6 +207,29 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         },
+    }
+}
+
+/// `wait` on a cloud session: the app waits at most
+/// [`crate::cloud_control::WAIT_CHUNK_SECONDS`] per call, so the wait is asked
+/// for again until the tab settles or the caller's timeout passes. When this
+/// process is interrupted, at most one short wait is left behind in the app.
+fn cloud_wait(
+    params: &Value,
+    timeout: Duration,
+    call: &mut dyn FnMut(&str, Value, Duration) -> Result<ControlResponse, ControlError>,
+) -> Result<ControlResponse, ControlError> {
+    let mut left = params.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600);
+    loop {
+        let chunk = left.min(crate::cloud_control::WAIT_CHUNK_SECONDS);
+        let mut asked = params.clone();
+        asked["timeoutSeconds"] = json!(chunk);
+        let response = call("cloud.wait", asked, timeout)?;
+        left -= chunk;
+        let timed_out = response.ok && response.result.as_ref().and_then(|result| result.get("reason")).and_then(Value::as_str) == Some("timeout");
+        if !timed_out || left == 0 {
+            return Ok(response);
+        }
     }
 }
 
@@ -262,8 +299,14 @@ fn parse_with_stdin(
         "status" => rpc("status", json!({}), &mut tokens),
         "projects" => {
             expect_word(&mut tokens, "list", "projects")?;
-            rpc("projects.list", json!({}), &mut tokens)
+            let org = tokens.option("--org")?;
+            if tokens.flag("--cloud")? || org.is_some() {
+                cloud_rpc("projects.list", json!({"org": org}), &mut tokens)
+            } else {
+                rpc("projects.list", json!({}), &mut tokens)
+            }
         }
+        "cloud" => parse_cloud(&mut tokens),
         "sessions" => parse_sessions(&mut tokens),
         "tabs" => {
             expect_word(&mut tokens, "list", "tabs")?;
@@ -271,32 +314,57 @@ fn parse_with_stdin(
             rpc("tabs.list", json!({"session": session}), &mut tokens)
         }
         "send" => {
+            let tab = tokens.option("--tab")?;
+            let idempotency_key = tokens.option("--idempotency-key")?;
             let target = tokens.required_front("session or tab")?;
             let text = tokens.required_front("text")?;
-            rpc("send", json!({"target": target, "text": text}), &mut tokens)
+            if is_cloud_key(&target) {
+                cloud_rpc("send", json!({"target": target, "text": text, "tab": tab, "idempotencyKey": idempotency_key}), &mut tokens)
+            } else {
+                local_only(&tab, "--tab")?;
+                local_only(&idempotency_key, "--idempotency-key")?;
+                rpc("send", json!({"target": target, "text": text}), &mut tokens)
+            }
         }
         "read" => {
             let since = tokens.option_u64("--since")?;
             let tail = tokens.option_u64("--tail")?;
+            let tab = tokens.option("--tab")?;
             let target = tokens.required_front("session or tab")?;
-            rpc(
-                "read",
-                json!({"target": target, "since": since, "tail": tail}),
-                &mut tokens,
-            )
+            if is_cloud_key(&target) {
+                cloud_rpc("read", json!({"target": target, "since": since, "tail": tail, "tab": tab}), &mut tokens)
+            } else {
+                local_only(&tab, "--tab")?;
+                rpc(
+                    "read",
+                    json!({"target": target, "since": since, "tail": tail}),
+                    &mut tokens,
+                )
+            }
         }
         "wait" if crate::browser::cli::is_browser_wait(&tokens.values) => {
             crate::browser::cli::parse("wait", &mut tokens).expect("wait is a browser verb")
         }
         "wait" => {
             let seconds = tokens.option_u64("--timeout")?.unwrap_or(600);
+            let tab = tokens.option("--tab")?;
             let target = tokens.required_front("session or tab")?;
             tokens.finish()?;
-            Ok(Action::Rpc {
-                command: "wait".into(),
-                params: json!({"target": target, "timeoutSeconds": seconds}),
-                timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
-            })
+            if is_cloud_key(&target) {
+                // Asked in short calls until the timeout (see `cloud_wait`), so nothing outlives this process in the app.
+                Ok(Action::Rpc {
+                    command: "cloud.wait".into(),
+                    params: json!({"target": target, "timeoutSeconds": seconds, "tab": tab}),
+                    timeout: CLOUD_TIMEOUT,
+                })
+            } else {
+                local_only(&tab, "--tab")?;
+                Ok(Action::Rpc {
+                    command: "wait".into(),
+                    params: json!({"target": target, "timeoutSeconds": seconds}),
+                    timeout: Duration::from_secs(seconds.saturating_add(10).max(30)),
+                })
+            }
         }
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
@@ -328,16 +396,30 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
     match tokens.required_front("sessions command")?.as_str() {
         "list" => {
             let project = tokens.option("--project")?;
-            rpc("sessions.list", json!({"project": project}), tokens)
+            let org = tokens.option("--org")?;
+            let cloud = tokens.flag("--cloud")?;
+            if cloud || org.is_some() || project.as_deref().is_some_and(is_cloud_key) {
+                cloud_rpc("sessions.list", json!({"project": project, "org": org}), tokens)
+            } else {
+                rpc("sessions.list", json!({"project": project}), tokens)
+            }
         }
         "show" => {
             let session = tokens.required_front("session")?;
             rpc("sessions.show", json!({"session": session}), tokens)
         }
+        "create" if tokens.peek_option("--project").is_some_and(|project| is_cloud_key(&project)) => parse_cloud_session_create(tokens),
+        "rename" => {
+            let title = tokens.required_option("--title")?;
+            let session = tokens.required_front("session")?;
+            rpc("sessions.rename", json!({"session": session, "title": title}), tokens)
+        }
         "create" => {
             let project = tokens.required_option("--project")?;
             let agent = tokens.required_option("--agent")?;
             let prompt = tokens.required_option("--prompt")?;
+            let title = tokens.option("--title")?;
+            let name = tokens.option("--name")?;
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
@@ -346,12 +428,17 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             if worktree && on_main {
                 return Err(invalid("--worktree and --on-main are mutually exclusive."));
             }
+            if name.is_some() && on_main {
+                return Err(invalid("--name requires a new worktree and cannot be used with --on-main."));
+            }
             rpc(
                 "sessions.create",
                 json!({
                     "project": project,
                     "agent": agent,
                     "prompt": prompt,
+                    "title": title,
+                    "name": name,
                     "useWorktree": !on_main,
                     "onMain": on_main,
                     "model": model.unwrap_or_default(),
@@ -362,6 +449,88 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             )
         }
         other => Err(invalid(format!("Unknown sessions command {other}."))),
+    }
+}
+
+/// A cloud project, workspace or session is named by its key (`cloud:…`).
+fn is_cloud_key(value: &str) -> bool {
+    value.starts_with("cloud:")
+}
+
+/// An option that only a cloud target takes.
+fn local_only(option: &Option<String>, name: &str) -> Result<(), ControlError> {
+    match option {
+        Some(_) => Err(invalid(format!("{name} applies to a cloud session (cloud:…) only."))),
+        None => Ok(()),
+    }
+}
+
+/// How long the CLI waits on the socket for a `cloud.*` command: a little
+/// longer than the app waits for its window, so the app's answer is printed.
+const CLOUD_TIMEOUT: Duration = Duration::from_secs(60);
+const CLOUD_CREATE_TIMEOUT: Duration = Duration::from_secs(340);
+
+fn cloud_rpc(action: &str, params: Value, tokens: &mut Tokens) -> Result<Action, ControlError> {
+    tokens.finish()?;
+    Ok(Action::Rpc {
+        command: format!("cloud.{action}"),
+        params,
+        timeout: if action == "sessions.create" { CLOUD_CREATE_TIMEOUT } else { CLOUD_TIMEOUT },
+    })
+}
+
+/// A new session in a cloud project. It runs in the project's running
+/// workspace; resuming a stopped one (`--wake`) and creating a new machine
+/// (`--confirm-spend`) cost money, so each must be asked for by name.
+fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let project = tokens.required_option("--project")?;
+    let prompt = tokens.required_option("--prompt")?;
+    let agent = tokens.option("--agent")?;
+    let model = tokens.option("--model")?;
+    let effort = tokens.option("--effort")?;
+    let mode = tokens.option("--mode")?;
+    let idempotency_key = tokens.option("--idempotency-key")?;
+    let worktree = tokens.flag("--worktree")?;
+    let on_main = tokens.flag("--on-main")?;
+    let wake = tokens.flag("--wake")?;
+    let confirm_spend = tokens.flag("--confirm-spend")?;
+    if worktree && on_main {
+        return Err(invalid("--worktree and --on-main are mutually exclusive."));
+    }
+    if prompt.trim().is_empty() {
+        return Err(invalid("--prompt cannot be empty."));
+    }
+    cloud_rpc(
+        "sessions.create",
+        json!({
+            "project": project,
+            "prompt": prompt,
+            "agent": agent,
+            "model": model,
+            "effort": effort,
+            "mode": mode,
+            "useWorktree": !on_main,
+            "wake": wake,
+            "confirmSpend": confirm_spend,
+            "idempotencyKey": idempotency_key,
+        }),
+        tokens,
+    )
+}
+
+fn parse_cloud(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    match tokens.required_front("cloud command")?.as_str() {
+        "status" => cloud_rpc("status", json!({}), tokens),
+        "stop" => {
+            let confirmed = tokens.flag("--yes")?;
+            let workspace = tokens.required_front("cloud workspace")?;
+            cloud_rpc("stop", json!({"workspace": workspace, "confirmed": confirmed}), tokens)
+        }
+        "resume" => {
+            let workspace = tokens.required_front("cloud workspace")?;
+            cloud_rpc("resume", json!({"workspace": workspace}), tokens)
+        }
+        other => Err(invalid(format!("Unknown cloud command {other}."))),
     }
 }
 
@@ -391,13 +560,20 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let project = tokens.option("--project")?;
             rpc("worktrees.list", json!({"project": project}), tokens)
         }
+        "rename" => {
+            let project = tokens.option("--project")?;
+            let name = tokens.required_option("--name")?;
+            let worktree = tokens.required_front("worktree")?;
+            rpc("worktrees.rename", json!({"project": project, "worktree": worktree, "name": name}), tokens)
+        }
         "delete" => {
             let project = tokens.option("--project")?;
             let confirmed = tokens.flag("--yes")?;
+            let force = tokens.flag("--force")?;
             let worktree = tokens.required_front("worktree")?;
             rpc(
                 "worktrees.delete",
-                json!({"project": project, "worktree": worktree, "confirmed": confirmed}),
+                json!({"project": project, "worktree": worktree, "confirmed": confirmed, "force": force}),
                 tokens,
             )
         }
@@ -503,6 +679,12 @@ impl Tokens {
         Ok(Some(self.values.remove(position)))
     }
 
+    /// The value `name` would take, without consuming it.
+    pub(crate) fn peek_option(&self, name: &str) -> Option<String> {
+        let position = self.values.iter().position(|value| value == name)?;
+        self.values.get(position + 1).cloned()
+    }
+
     pub(crate) fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
         self.option(name)?
             .ok_or_else(|| invalid(format!("Missing {name}.")))
@@ -533,6 +715,141 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn rpc_of(values: &[&str]) -> (String, Value, Duration) {
+        match parse(&args(values)).unwrap().action {
+            Action::Rpc { command, params, timeout } => (command, params, timeout),
+            other => panic!("expected rpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cloud_key_or_flag_sends_the_same_verbs_to_the_cloud_commands() {
+        let (command, params, _) = rpc_of(&["projects", "list", "--cloud"]);
+        assert_eq!((command.as_str(), params), ("cloud.projects.list", json!({"org": null})));
+        let (command, params, _) = rpc_of(&["sessions", "list", "--cloud", "--org", "Acme"]);
+        assert_eq!((command.as_str(), params), ("cloud.sessions.list", json!({"project": null, "org": "Acme"})));
+        // A cloud project key alone is enough.
+        let (command, _, _) = rpc_of(&["sessions", "list", "--project", "cloud:org-a:github.com/acme/api"]);
+        assert_eq!(command, "cloud.sessions.list");
+
+        let (command, params, _) = rpc_of(&["send", "cloud:org-a:ws-1:s1", "run the tests", "--tab", "t2"]);
+        assert_eq!((command.as_str(), params), ("cloud.send", json!({"target": "cloud:org-a:ws-1:s1", "text": "run the tests", "tab": "t2", "idempotencyKey": null})));
+        assert_eq!(rpc_of(&["send", "cloud:org-a:ws-1:s1", "again", "--idempotency-key", "k-7"]).1["idempotencyKey"], json!("k-7"));
+        let (command, params, _) = rpc_of(&["read", "cloud:org-a:ws-1:s1", "--tail", "5"]);
+        assert_eq!((command.as_str(), params), ("cloud.read", json!({"target": "cloud:org-a:ws-1:s1", "since": null, "tail": 5, "tab": null})));
+        let (command, params, timeout) = rpc_of(&["wait", "cloud:org-a:ws-1:s1", "--timeout", "30"]);
+        assert_eq!((command.as_str(), params), ("cloud.wait", json!({"target": "cloud:org-a:ws-1:s1", "timeoutSeconds": 30, "tab": null})));
+        // The CLI outlasts the app's own wait for its window (one chunk plus 20 s).
+        assert!(timeout > crate::cloud_control::timeout_for("wait", &json!({"timeoutSeconds": 30})));
+
+        let (command, params, _) = rpc_of(&["cloud", "stop", "cloud:org-a:ws-1", "--yes"]);
+        assert_eq!((command.as_str(), params), ("cloud.stop", json!({"workspace": "cloud:org-a:ws-1", "confirmed": true})));
+        // Without --yes the app is still asked: it answers what stopping would do.
+        assert_eq!(rpc_of(&["cloud", "stop", "cloud:org-a:ws-1"]).1["confirmed"], json!(false));
+        let (command, params, _) = rpc_of(&["cloud", "resume", "cloud:org-a:ws-1"]);
+        assert_eq!((command.as_str(), params), ("cloud.resume", json!({"workspace": "cloud:org-a:ws-1"})));
+        assert_eq!(rpc_of(&["cloud", "status"]).0, "cloud.status");
+        assert!(parse(&args(&["cloud", "delete", "cloud:org-a:ws-1"])).is_err());
+    }
+
+    #[test]
+    fn a_cloud_wait_is_asked_in_short_calls_until_the_tab_settles_or_the_timeout_passes() {
+        let params = json!({"target": "cloud:org-a:ws-1:s1", "timeoutSeconds": 70, "tab": null});
+        let answer = |reason: &str| ControlResponse::success("1", json!({"reason": reason, "status": "in_progress"}));
+
+        // Still working for the whole 70 s: 30 + 30 + 10, then the timeout is reported.
+        let mut asked = Vec::new();
+        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |command, params, _| {
+            assert_eq!(command, "cloud.wait");
+            asked.push(params["timeoutSeconds"].as_u64().unwrap());
+            Ok(answer("timeout"))
+        })
+        .unwrap();
+        assert_eq!(asked, vec![30, 30, 10]);
+        assert_eq!(response.result.unwrap()["reason"], "timeout");
+
+        // It settles during the second call: nothing more is asked.
+        let mut calls = 0;
+        let response = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+            calls += 1;
+            Ok(answer(if calls == 2 { "permission" } else { "timeout" }))
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(response.result.unwrap()["reason"], "permission");
+
+        // A refusal ends it at once.
+        let mut calls = 0;
+        let refused = cloud_wait(&params, CLOUD_TIMEOUT, &mut |_, _, _| {
+            calls += 1;
+            Err(ControlError::new("forbidden", "no", None::<String>))
+        });
+        assert_eq!((calls, refused.unwrap_err().code.as_str()), (1, "forbidden"));
+    }
+
+    #[test]
+    fn local_targets_keep_their_commands_and_refuse_cloud_only_options() {
+        assert_eq!(rpc_of(&["projects", "list"]).0, "projects.list");
+        assert_eq!(rpc_of(&["sessions", "list", "--project", "raccoon"]).0, "sessions.list");
+        assert_eq!(rpc_of(&["send", "raccoon-session", "hello"]).0, "send");
+        assert_eq!(rpc_of(&["read", "raccoon-session"]).0, "read");
+        assert_eq!(rpc_of(&["wait", "raccoon-session"]).0, "wait");
+        let error = parse(&args(&["send", "raccoon-session", "hello", "--tab", "t1"])).unwrap_err();
+        assert!(error.message.contains("--tab applies to a cloud session"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_cloud_session_is_created_without_waking_or_spending_unless_asked() {
+        let project = "cloud:org-a:github.com/acme/api";
+        let (command, params, timeout) = rpc_of(&["sessions", "create", "--project", project, "--prompt", "fix the login"]);
+        assert_eq!(command, "cloud.sessions.create");
+        assert_eq!(
+            params,
+            json!({"project": project, "prompt": "fix the login", "agent": null, "model": null, "effort": null, "mode": null, "useWorktree": true, "wake": false, "confirmSpend": false, "idempotencyKey": null})
+        );
+        assert!(timeout > crate::cloud_control::timeout_for("sessions.create", &json!({})));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--wake", "--confirm-spend", "--on-main", "--agent", "codex", "--idempotency-key", "k-1", "--prompt", "go", "--project", project]);
+        assert_eq!((&params["wake"], &params["confirmSpend"], &params["useWorktree"], &params["agent"], &params["idempotencyKey"]), (&json!(true), &json!(true), &json!(false), &json!("codex"), &json!("k-1")));
+        assert!(parse(&args(&["sessions", "create", "--project", project, "--prompt", " "])).is_err());
+        // A local project still needs its agent named, and takes no cloud flag.
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--prompt", "go"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--wake"])).is_err());
+    }
+
+    #[test]
+    fn parses_names_and_rename_commands() {
+        for (argv, expected_command, expected_params) in [
+            (vec!["sessions", "create", "--title", "#203 fix", "--name", "fix-203", "--project", "p", "--agent", "codex", "--prompt", "fix it"],
+             "sessions.create", json!({"title": "#203 fix", "name": "fix-203", "useWorktree": true})),
+            (vec!["sessions", "rename", "s1", "--title", "#203 review"],
+             "sessions.rename", json!({"session": "s1", "title": "#203 review"})),
+            (vec!["worktrees", "rename", "--name", "fix-203", "old", "--project", "p"],
+             "worktrees.rename", json!({"worktree": "old", "name": "fix-203", "project": "p"})),
+            (vec!["worktrees", "rename", "old", "--name", "fix-203"],
+             "worktrees.rename", json!({"worktree": "old", "name": "fix-203", "project": null})),
+        ] {
+            let Action::Rpc { command, params, .. } = parse(&args(&argv)).unwrap().action else { panic!("expected rpc") };
+            assert_eq!(command, expected_command);
+            for (key, value) in expected_params.as_object().unwrap() {
+                assert_eq!(&params[key], value, "{key}");
+            }
+        }
+        for argv in [
+            vec!["sessions", "rename", "s1"],
+            vec!["sessions", "rename", "--title", "t"],
+            vec!["worktrees", "rename", "old"],
+            vec!["worktrees", "rename", "old", "--name"],
+            vec!["sessions", "create", "--project", "p", "--agent", "codex", "--prompt", "fix", "--name", "fix-203", "--on-main"],
+        ] {
+            assert_eq!(parse(&args(&argv)).unwrap_err().code, "invalid_arguments");
+        }
+        for text in [help_text(), GUIDE.to_string()] {
+            for command in ["sessions rename", "worktrees rename", "--title", "--name"] {
+                assert!(text.contains(command), "missing {command}");
+            }
+        }
     }
 
     #[test]

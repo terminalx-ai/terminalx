@@ -30,9 +30,11 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   on Windows. Linux screenshots and hotkeys require X11; Windows cannot reach
   elevated windows from a non-elevated app.
   See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
-- **Dictation** (⌘⇧D) using the Mac's own on-device speech recognition, with
-  optional local models (Parakeet, Nemotron, Canary, Whisper) downloaded on
-  demand. Audio never leaves the machine.
+- **Dictation** (hold Right ⌥, or ⌘⇧D) using the Mac's own on-device speech
+  recognition, with optional local models (Parakeet, Nemotron, Canary,
+  Whisper) downloaded on demand. Audio never leaves the machine.
+- **Keyboard shortcuts you can change** in Settings → Shortcuts: click one,
+  press the new keys, save.
 - **Issues from GitHub and Linear** (⌘I): browse them, read them, and start a
   session on one — the worktree is named after the issue and the header links
   back.
@@ -81,7 +83,8 @@ app. The outbound connections are these nine:
 Some detail on each:
 
 - **TerminalX account.** Sign-in opens the deployed TerminalX console in your
-  default browser, returns through `terminalx://auth/callback`, and exchanges the
+  default browser, returns through `terminalx://auth/callback` (or
+  `terminalx-dev://auth/callback` in Dev), and exchanges the
   one-time code with `login.terminalx.ai`. Access and refresh tokens stay in the
   native process and are stored in macOS Keychain under the app's own
   `com.terminalx.next.account` service (or the corresponding development app

@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
-import { adoptPane, closeTerminal, openTerminal } from "@/lib/terminal";
+import { adoptPane, agentPaneId, closeTerminal, openTerminal } from "@/lib/terminal";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -17,6 +17,10 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  * Those agents are no longer offered for new tabs — the decision lives in
  * `HIDDEN_HARNESSES` in src-tauri/src/harness/mod.rs — so this branch serves
  * only the tabs that were made before, which still open and run.
+ *
+ * A cloud tab (`remote`, PRO-86) only flips the flag: its CLI runs on the VM
+ * and its terminal view attaches to it there, so nothing local is started,
+ * adopted or closed, and looking never wakes or starts anything.
  */
 export type TabViewMode = "chat" | "terminal";
 
@@ -51,8 +55,9 @@ export function useTabViews(): State {
 }
 
 export function terminalPaneId(tabId: string): string {
-  return `tab:${tabId}`;
+  return agentPaneId(tabId);
 }
+
 
 export function tabViewOf(tabId: string): TabViewMode {
   return state.views[tabId] ?? "chat";
@@ -123,9 +128,18 @@ async function adoptTabPane(sessionId: string, tabId: string) {
   set({ info: { ...state.info, [tabId]: { command: pane.command, harness: pane.harness } } });
 }
 
+/** Where a tab's terminal view lives: on this computer, or `remote` in a cloud workspace. */
+export interface TabViewPlace {
+  remote?: boolean;
+}
+
 /** Show the tab's CLI. For a headless agent this stops it and resumes it there. */
-export async function enterTerminalView(session: SessionEntry, tab: TabEntry) {
+export async function enterTerminalView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
   if (state.switching[tab.id] || tabViewOf(tab.id) === "terminal") return;
+  if (place.remote) {
+    set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
+    return;
+  }
   set({ switching: { ...state.switching, [tab.id]: true }, errors: { ...state.errors, [tab.id]: null } });
   try {
     if (isPtyFirst(tab.harness)) {
@@ -147,8 +161,14 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry) {
 }
 
 /** Show the transcript again. A PTY-first tab leaves its CLI running. */
-export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry) {
+export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
   if (tabViewOf(tab.id) !== "terminal") return;
+  if (place.remote) {
+    const views = { ...state.views };
+    delete views[tab.id];
+    set({ views });
+    return;
+  }
   set({ switching: { ...state.switching, [tab.id]: true } });
   try {
     if (!isPtyFirst(tab.harness)) await closeTerminal(terminalPaneId(tab.id));
@@ -161,9 +181,14 @@ export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry) {
   }
 }
 
-export async function toggleTabView(session: SessionEntry, tab: TabEntry) {
-  if (tabViewOf(tab.id) === "terminal") await leaveTerminalView(session, tab);
-  else await enterTerminalView(session, tab);
+export async function toggleTabView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
+  if (tabViewOf(tab.id) === "terminal") await leaveTerminalView(session, tab, place);
+  else await enterTerminalView(session, tab, place);
+}
+
+/** Tests only. */
+export function resetTabViews() {
+  set({ views: {}, info: {}, errors: {}, switching: {} });
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

@@ -1,0 +1,11 @@
+{
+  "name": "terminalx-transcript-viewport-fixture",
+  "private": true,
+  "version": "1.0.0",
+  "main": "index.tsx",
+  "dependencies": {
+    "expo": "~57.0.19",
+    "react": "19.2.3",
+    "react-native": "0.86.3"
+  }
+}

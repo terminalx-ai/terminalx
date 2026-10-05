@@ -86,7 +86,8 @@ pub const READY_SETTLE: Duration = Duration::from_millis(300);
 /// and never goes quiet at all.
 pub const READY_QUIET: Duration = Duration::from_millis(3000);
 /// The give-up. Long, because it is only reached when every signal failed, and
-/// what follows is typing anyway and saying so — never dropping the prompt.
+/// what follows is typing anyway and checking delivery through the normal
+/// transcript, hooks and terminal activity — never a permanent warning.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// When a pane's CLI said it was up. Shared with the thread that types into
@@ -384,6 +385,12 @@ impl Default for TurnTail {
 }
 
 impl TurnTail {
+    /// The last reply already delivered for this turn. A watcher closing a
+    /// turn uses it to complete an automation without publishing it again.
+    pub fn last_assistant_message(&self) -> Option<&str> {
+        self.said.as_deref()
+    }
+
     /// Note an assistant message from the transcript. `false` means this is a
     /// record the app has already published and the caller must drop it.
     pub fn observe(&mut self, text: &str) -> bool {
@@ -413,6 +420,12 @@ impl TurnTail {
     pub fn opened(&mut self) {
         self.said = None;
         self.closed = false;
+    }
+
+    /// Whether the turn's boundary has been published (or no turn has been
+    /// opened yet): whatever is read next belongs to a turn after it.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Take the right to close the turn. `false` means it is already closed

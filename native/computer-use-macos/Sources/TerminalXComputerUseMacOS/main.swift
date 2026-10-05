@@ -6,8 +6,12 @@ import Foundation
 import ImageIO
 import TerminalXComputerUseMacOSCore
 import ScreenCaptureKit
+import Security
 
 private let providerName = "terminalx-computer-use-macos"
+// Why: read before anything else runs. Once the launcher dies this process is
+// re-parented to launchd, and a later getppid() would name the wrong process.
+private let helperLauncherPid: pid_t = getppid()
 private let providerVersion = "1.0.0"
 private let providerProtocolVersion = 1
 
@@ -196,6 +200,7 @@ struct CapturedImage {
 enum ScreenshotStatus {
     case captured
     case skipped
+    case withheld(String)
     case failed(String)
 }
 
@@ -208,10 +213,57 @@ private struct CachedSnapshotEntry {
 final class Provider {
     private var snapshots: [String: Snapshot] = [:]
     private var snapshotEntries: [CachedSnapshotEntry] = []
+    private let trustMode: HelperTrustMode
+    private var owner: ComputerUseOwner?
+    private var ownWindowsAllowedForTests = false
+
+    init(trustMode: HelperTrustMode) {
+        self.trustMode = trustMode
+    }
+
+    /// The authenticated peer: the app whose windows this helper never acts on.
+    func setOwner(_ owner: ComputerUseOwner) {
+        self.owner = owner
+    }
+
+    private func protectedReason(pid: pid_t, bundleId: String?) -> OwnAppProtection.Reason? {
+        OwnAppProtection.protectedReason(
+            targetPid: pid,
+            targetBundleId: bundleId,
+            owner: owner,
+            ownWindowsAllowedForTests: ownWindowsAllowedForTests
+        )
+    }
+
+    /// Synthetic keys go to whatever holds the keyboard focus, not to the app
+    /// named in the request. Checked before every key so a TerminalX dialog
+    /// that takes the focus mid-way receives nothing further.
+    private func refuseKeyboardIntoProtectedApp() throws {
+        // Why: the accessibility focus is what the target-focus check before
+        // this one read, so the two cannot disagree about a window that was
+        // only just brought forward; the workspace answers when it is silent.
+        let focusedApp = copyElement(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute as String)
+        guard let pid = focusedApp.flatMap(pidAttribute)
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        else {
+            return
+        }
+        let bundleId = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        if protectedReason(pid: pid, bundleId: bundleId) != nil {
+            throw ProviderError.coded(OwnAppProtection.errorCode, OwnAppProtection.keyboardRefusal)
+        }
+    }
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
         switch method {
         case "handshake":
+            // Why: only the handshake, which the app sends itself and never
+            // forwards from a command-line caller, can ask for the test
+            // escape hatch; a released helper ignores it.
+            ownWindowsAllowedForTests = OwnAppProtection.honorsTestEscapeHatch(
+                mode: trustMode,
+                requested: params["allowOwnWindowsForTests"]?.bool == true
+            )
             return providerHandshake()
         case "listApps":
             return ["apps": listApps().map(renderListedApp)]
@@ -257,17 +309,25 @@ final class Provider {
         }
     }
 
-    private func observe(params: [String: JSONValue]) throws -> Snapshot {
+    private func observe(params: [String: JSONValue], forAction: Bool = false) throws -> Snapshot {
         let query = try requiredString(params, "app")
         let windowId = try requestedWindowId(params)
         let windowIndex = try requestedWindowIndex(params)
         let app = try resolveApp(query)
+        // Why: decided on the resolved process, before anything touches it
+        // (restoring a window already activates the app). Every action reaches
+        // its target through here, so none can act on a protected app.
+        let protection = protectedReason(pid: app.pid, bundleId: app.bundleId)
+        if forAction, protection != nil {
+            throw ProviderError.coded(OwnAppProtection.errorCode, OwnAppProtection.actionRefusal(targetName: app.name))
+        }
         if params["restoreWindow"]?.bool == true {
             try recoverWindow(app)
         }
         let snapshot = try buildSnapshot(
             app: app,
             includeScreenshot: params["noScreenshot"]?.bool != true,
+            screenshotWithheld: protection != nil,
             windowId: windowId,
             windowIndex: windowIndex,
             restoreWindow: params["restoreWindow"]?.bool == true
@@ -366,7 +426,10 @@ final class Provider {
         let cached = try cachedSnapshot(params: params)
         // Why: cached AX frames can be stale after a window move or resize, and
         // stale geometry can turn an intended action into a misclick.
-        let snapshot = try observe(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement })
+        let snapshot = try observe(
+            params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement },
+            forAction: true
+        )
         try validateRequestedElements(cached: cached, current: snapshot, params: params)
         return snapshot
     }
@@ -500,6 +563,10 @@ final class Provider {
                     "elementFrames": true,
                     "ocr": false,
                 ],
+                "safety": [
+                    "ownAppProtection": true,
+                    "ownWindowsAllowedForTests": ownWindowsAllowedForTests,
+                ],
                 "actions": [
                     "click": true,
                     "typeText": true,
@@ -615,6 +682,7 @@ final class Provider {
     private func buildSnapshot(
         app: AppDescriptor,
         includeScreenshot: Bool,
+        screenshotWithheld: Bool,
         windowId: CGWindowID?,
         windowIndex: Int?,
         restoreWindow: Bool
@@ -637,7 +705,8 @@ final class Provider {
             allowRecovery: restoreWindow
         )
         let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
-        let canCaptureScreenshot = includeScreenshot && screenCaptureTrustedSettled()
+        let wantsScreenshot = includeScreenshot && !screenshotWithheld
+        let canCaptureScreenshot = wantsScreenshot && screenCaptureTrustedSettled()
         guard let capture = WindowCapture.resolve(
             candidates: windowCandidates,
             titleHint: focusedTitle,
@@ -657,9 +726,11 @@ final class Provider {
             compactBrowserTabs: app.isKnownBrowser
         )
         renderer.render(window)
-        let screenshot = includeScreenshot ? capture.screenshotPayload() : nil
+        let screenshot = wantsScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
+        } else if includeScreenshot && screenshotWithheld {
+            .withheld(OwnAppProtection.screenshotRefusal)
         } else if includeScreenshot && !canCaptureScreenshot {
             .failed("Screen Recording permission is required for TerminalX Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
         } else if includeScreenshot {
@@ -863,7 +934,7 @@ final class Provider {
             return actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification)
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
-        try Input.typeText(text, pid: snapshot.app.pid)
+        try Input.typeText(text, pid: snapshot.app.pid, fence: refuseKeyboardIntoProtectedApp)
         return actionMetadata(
             path: "synthetic",
             actionName: "typeText",
@@ -874,7 +945,7 @@ final class Provider {
     private func pressKey(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentKeyboardSnapshot(params: params)
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
-        try Input.pressKey(try requiredString(params, "key"), pid: snapshot.app.pid)
+        try Input.pressKey(try requiredString(params, "key"), pid: snapshot.app.pid, fence: refuseKeyboardIntoProtectedApp)
         return actionMetadata(
             path: "synthetic",
             actionName: "pressKey",
@@ -893,7 +964,7 @@ final class Provider {
             )
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
-        try Input.pressKey(key, pid: snapshot.app.pid)
+        try Input.pressKey(key, pid: snapshot.app.pid, fence: refuseKeyboardIntoProtectedApp)
         return actionMetadata(
             path: "synthetic",
             actionName: "hotkey",
@@ -908,7 +979,7 @@ final class Provider {
             return actionMetadata(path: "accessibility", actionName: "AXReplaceSelection", verification: verification)
         }
         try requireTargetWindowFocused(snapshot, restoreWindowRequested: params["restoreWindow"]?.bool == true)
-        try Input.pasteText(text, pid: snapshot.app.pid)
+        try Input.pasteText(text, pid: snapshot.app.pid, fence: refuseKeyboardIntoProtectedApp)
         return actionMetadata(
             path: "clipboard",
             actionName: "paste",
@@ -1794,6 +1865,8 @@ private func renderScreenshotStatus(_ status: ScreenshotStatus, snapshot: Snapsh
         return ["state": "captured", "metadata": metadata]
     case .skipped:
         return ["state": "skipped", "reason": "no_screenshot_flag"]
+    case let .withheld(message):
+        return ["state": "skipped", "reason": OwnAppProtection.errorCode, "message": message]
     case let .failed(message):
         return ["state": "failed", "code": "screenshot_failed", "message": message, "metadata": metadata]
     }
@@ -2681,8 +2754,9 @@ private enum Input {
         try mouse(.leftMouseUp, source: source, point: end, button: .left, pid: pid)
     }
 
-    static func typeText(_ text: String, pid: pid_t) throws {
+    static func typeText(_ text: String, pid: pid_t, fence: () throws -> Void) throws {
         for unit in text.utf16 {
+            try fence()
             var char = unit
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)
@@ -2696,8 +2770,9 @@ private enum Input {
         }
     }
 
-    static func pressKey(_ key: String, pid: pid_t) throws {
+    static func pressKey(_ key: String, pid: pid_t, fence: () throws -> Void) throws {
         let parsed = try KeyMap.parse(key)
+        try fence()
         var flags = CGEventFlags()
         var pressedModifiers: [KeyModifier] = []
         defer {
@@ -2711,11 +2786,16 @@ private enum Input {
             try keyEvent(modifier.keyCode, down: true, flags: flags, pid: pid)
             pressedModifiers.append(modifier)
         }
+        // Why: holding the modifiers took time; look once more before the key
+        // that makes the chord act.
+        try fence()
         try keyEvent(parsed.keyCode, down: true, flags: flags, pid: pid)
         try keyEvent(parsed.keyCode, down: false, flags: flags, pid: pid)
     }
 
-    static func pasteText(_ text: String, pid: pid_t) throws {
+    static func pasteText(_ text: String, pid: pid_t, fence: () throws -> Void) throws {
+        // Why: checked before the clipboard is touched, and again by pressKey.
+        try fence()
         let pasteboard = NSPasteboard.general
         let previousItems: [NSPasteboardItem] = pasteboard.pasteboardItems?.map { item in
             let copy = NSPasteboardItem()
@@ -2734,7 +2814,7 @@ private enum Input {
                 pasteboard.writeObjects(previousItems)
             }
         }
-        try pressKey("cmd+v", pid: pid)
+        try pressKey("cmd+v", pid: pid, fence: fence)
     }
 
     private static func mouse(
@@ -3911,7 +3991,8 @@ private final class SocketListener: @unchecked Sendable {
     private let token: String?
     private let onSessionClaimed: () -> Void
     private let onSessionClosed: () -> Void
-    private let provider = Provider()
+    private let trust = HelperTrust.detect()
+    private let provider: Provider
     private let providerLock = NSLock()
     private let sessionLock = NSLock()
     private var sessionOwnership = AgentSessionOwnership()
@@ -3929,6 +4010,7 @@ private final class SocketListener: @unchecked Sendable {
         self.token = token
         self.onSessionClaimed = onSessionClaimed
         self.onSessionClosed = onSessionClosed
+        self.provider = Provider(trustMode: trust.mode)
         try bindSocket()
     }
 
@@ -4032,7 +4114,8 @@ private final class SocketListener: @unchecked Sendable {
             }
             close(fd)
         }
-        let authorizedPeer = peerProcessId(fd).map(isAuthorizedAgentPeer) == true
+        let peerOwner = trust.authorizedOwner(ofConnection: fd)
+        let authorizedPeer = peerOwner != nil
         let decoder = JSONDecoder()
         while let line = readLine(from: fd) {
             guard let data = line.data(using: .utf8),
@@ -4068,6 +4151,11 @@ private final class SocketListener: @unchecked Sendable {
                     return
                 }
                 registeredSession = true
+                if let peerOwner {
+                    providerLock.lock()
+                    provider.setOwner(peerOwner)
+                    providerLock.unlock()
+                }
                 hangupMonitor = monitor
                 monitor.start()
                 if registration == .claimed {
@@ -4103,68 +4191,135 @@ private func existingPathMode(_ path: String) -> mode_t? {
     return statInfo.st_mode
 }
 
-private func peerProcessId(_ fd: Int32) -> pid_t? {
-    var pid = pid_t(0)
-    var length = socklen_t(MemoryLayout<pid_t>.size)
-    let result = withUnsafeMutablePointer(to: &pid) { pointer in
-        getsockopt(fd, 0, 2, pointer, &length)
+/// Who this helper serves. See `PeerTrust` for the rules; this is the part
+/// that asks the system.
+private struct HelperTrust {
+    let mode: HelperTrustMode
+    let launcherPid: pid_t
+    private let appRequirement: SecRequirement?
+
+    static func detect() -> HelperTrust {
+        let mode = detectMode()
+        var requirement: SecRequirement?
+        if case let .developerID(teamID) = mode {
+            requirement = PeerTrust.appRequirement(teamID: teamID).flatMap(makeRequirement)
+        }
+        return HelperTrust(mode: mode, launcherPid: helperLauncherPid, appRequirement: requirement)
     }
-    return result == 0 && pid > 0 ? pid : nil
+
+    /// The app this connection belongs to, or `nil` when the peer is not
+    /// allowed to drive this helper.
+    func authorizedOwner(ofConnection fd: Int32) -> ComputerUseOwner? {
+        let token = peerAuditToken(fd)
+        let peerPid = token.map { pid_t(bitPattern: $0.val.5) }
+        var satisfiesAppRequirement = false
+        if let token, let appRequirement {
+            satisfiesAppRequirement = runningCode(token, satisfies: appRequirement)
+        }
+        let decision = PeerTrust.decide(
+            mode: mode,
+            peerPid: peerPid,
+            launcherPid: launcherPid,
+            peerSatisfiesAppRequirement: satisfiesAppRequirement
+        )
+        guard decision == .trusted, let peerPid else {
+            if case let .rejected(reason) = decision {
+                fputs("computer-use connection refused: \(reason)\n", stderr)
+            }
+            return nil
+        }
+        return ComputerUseOwner(
+            pid: peerPid,
+            bundleId: NSRunningApplication(processIdentifier: peerPid)?.bundleIdentifier
+        )
+    }
+
+    private static func detectMode() -> HelperTrustMode {
+        var selfCode: SecCode?
+        guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode else {
+            return .unverifiable
+        }
+        // Why: the signature is read from the file on disk, which could have
+        // been swapped after this process started. Read it first, then have
+        // the system compare it with the code that is actually running; a
+        // helper that cannot vouch for itself serves nobody.
+        var staticCode: SecStaticCode?
+        var information: CFDictionary?
+        guard SecCodeCopyStaticCode(selfCode, [], &staticCode) == errSecSuccess,
+              let staticCode,
+              SecCodeCopySigningInformation(
+                  staticCode,
+                  SecCSFlags(rawValue: kSecCSSigningInformation),
+                  &information
+              ) == errSecSuccess,
+              SecCodeCheckValidity(selfCode, [], nil) == errSecSuccess
+        else {
+            return .unverifiable
+        }
+        let details = information as? [String: Any]
+        guard let teamID = details?[kSecCodeInfoTeamIdentifier as String] as? String,
+              let requirement = PeerTrust.developerIDRequirement(teamID: teamID).flatMap(makeRequirement),
+              SecCodeCheckValidity(selfCode, [], requirement) == errSecSuccess
+        else {
+            return .development
+        }
+        return .developerID(teamID: teamID)
+    }
 }
 
-private func isAuthorizedAgentPeer(_ pid: pid_t) -> Bool {
-    // Why: TerminalX spawns this helper directly, so the process that launched
-    // it owns the session. `tauri dev` binaries carry no bundle identifier, so
-    // the launcher relationship is the only identity a dev build can offer.
-    if pid == getppid() {
-        return true
+private func makeRequirement(_ text: String) -> SecRequirement? {
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else {
+        return nil
     }
-    if isTrustedTerminalXApplication(pid) {
-        return true
-    }
-    guard let parentPid = parentProcessId(pid) else { return false }
-    return isTrustedTerminalXApplication(parentPid)
+    return requirement
 }
 
-private func isTrustedTerminalXApplication(_ pid: pid_t) -> Bool {
-    guard let app = NSRunningApplication(processIdentifier: pid),
-          let bundleId = app.bundleIdentifier
-    else {
+/// Check the code a process is running, named by audit token so a recycled
+/// process id cannot stand in for it.
+private func runningCode(_ token: audit_token_t, satisfies requirement: SecRequirement) -> Bool {
+    let tokenData = withUnsafeBytes(of: token) { Data($0) }
+    let attributes = [kSecGuestAttributeAudit as String: tokenData] as CFDictionary
+    var code: SecCode?
+    guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else {
         return false
     }
-    // Why: the release app is com.terminalx.next and the dev build is
-    // com.terminalx.next.dev; both may own a computer-use session. The
-    // helper's own bundle ids are deliberately not trusted.
-    return bundleId == "com.terminalx.next" || bundleId == "com.terminalx.next.dev"
+    return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
 }
 
-private func parentProcessId(_ pid: pid_t) -> pid_t? {
-    guard let output = processField(pid: pid, field: "ppid=") else {
+private func peerAuditToken(_ fd: Int32) -> audit_token_t? {
+    // SOL_LOCAL and LOCAL_PEERTOKEN from <sys/un.h>.
+    let solLocal: Int32 = 0
+    let localPeerToken: Int32 = 0x006
+    var token = audit_token_t()
+    var length = socklen_t(MemoryLayout<audit_token_t>.size)
+    let result = withUnsafeMutablePointer(to: &token) { pointer in
+        getsockopt(fd, solLocal, localPeerToken, pointer, &length)
+    }
+    guard result == 0, length == socklen_t(MemoryLayout<audit_token_t>.size) else {
         return nil
     }
-    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let parentPid = pid_t(trimmed), parentPid > 1 else {
-        return nil
-    }
-    return parentPid
+    return token
 }
 
-private func processField(pid: pid_t, field: String) -> String? {
-    let process = Process()
-    let pipe = Pipe()
-    process.executableURL = URL(fileURLWithPath: "/bin/ps")
-    process.arguments = ["-p", "\(pid)", "-o", field]
-    process.standardOutput = pipe
-    process.standardError = Pipe()
-    do {
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
-    } catch {
-        return nil
+/// The per-launch secret arrives on a pipe the app keeps the other end of.
+/// It is never a file, so no other process can read it.
+private func readAgentToken(fromDescriptor fd: Int32) -> String? {
+    guard fd > 2 else { return nil }
+    defer { close(fd) }
+    var bytes: [UInt8] = []
+    var buffer = [UInt8](repeating: 0, count: 256)
+    while bytes.count <= 4096 {
+        let count = read(fd, &buffer, buffer.count)
+        if count < 0 {
+            if errno == EINTR { continue }
+            return nil
+        }
+        if count == 0 { break }
+        bytes.append(contentsOf: buffer[0..<count])
     }
+    guard bytes.count <= 4096 else { return nil }
+    return String(bytes: bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 @MainActor
@@ -4306,19 +4461,17 @@ private func writeAll(_ data: Data, to fd: Int32) -> Bool {
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments.first == "--agent" {
     guard arguments.count >= 2 else {
-        fputs("usage: terminalx-computer-use-macos --agent <socket-path> --token-file <token-path>\n", stderr)
+        fputs("usage: terminalx-computer-use-macos --agent <socket-path> --token-fd <descriptor>\n", stderr)
         exit(2)
     }
-    let tokenFileIndex = arguments.firstIndex(of: "--token-file")
-    let token = tokenFileIndex.flatMap { index -> String? in
+    let tokenDescriptorIndex = arguments.firstIndex(of: "--token-fd")
+    let token = tokenDescriptorIndex.flatMap { index -> String? in
         let valueIndex = index + 1
-        guard valueIndex < arguments.count else { return nil }
-        let tokenPath = arguments[valueIndex]
-        return try? String(contentsOfFile: tokenPath, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard valueIndex < arguments.count, let descriptor = Int32(arguments[valueIndex]) else { return nil }
+        return readAgentToken(fromDescriptor: descriptor)
     }
     guard let token, !token.isEmpty else {
-        fputs("terminalx-computer-use-macos --agent requires a non-empty --token-file\n", stderr)
+        fputs("terminalx-computer-use-macos --agent requires a token on --token-fd\n", stderr)
         exit(2)
     }
     MainActor.assumeIsolated {

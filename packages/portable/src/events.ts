@@ -56,6 +56,8 @@ export interface Usage {
   contextUsed?: number;
   contextMax?: number;
   costUsd?: number;
+  /** The full id of the model that produced this reading, when the agent says. */
+  model?: string;
 }
 
 export type TurnStatus = "ok" | "error" | "aborted";
@@ -108,11 +110,11 @@ export type Delta =
   | { delta: "input_delta"; block: BlockRef; partialJson: string }
   | { delta: "block_stop"; block: BlockRef };
 
-export type RecoveryKind = "capacity" | "tool" | "timeout" | "disconnected" | "permission_expired" | "failed";
+export type RecoveryKind = "capacity" | "tool" | "timeout" | "delivery_unconfirmed" | "disconnected" | "permission_expired" | "failed";
 
 export type Payload =
   | { type: "recovery"; kind: RecoveryKind | null }
-  | { type: "turn_started"; model?: string; providerSessionId?: string }
+  | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number }
   | {
       type: "turn_completed";
       status: TurnStatus;

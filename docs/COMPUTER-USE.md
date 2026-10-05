@@ -24,10 +24,12 @@ terminalx computer … ──control socket──▶ TerminalX app ──unix so
   is what lets a plain agent shell, whose own `screencapture` would be
   refused, drive desktop apps. Nothing in the app or the CLI needs the
   permissions itself, and no restart is required after a grant.
-- The app spawns the helper on first use with `--agent <socket> --token-file
-  <path>`, connects over a private unix socket, checks the handshake
-  (`protocolVersion` 1 plus the capability matrix), and sends every request
-  with the token on one JSON line. Requests time out after 60 s. On quit the
+- The app spawns the helper on first use with `--agent <socket> --token-fd 3`,
+  hands it a per-launch token on an inherited pipe (never a file), connects
+  over a private unix socket, checks the handshake (`protocolVersion` 1 plus
+  the capability matrix), and sends every request with the token on one JSON
+  line. The helper serves only the process that started it; see
+  [Security](#security). Requests time out after 60 s. On quit the
   app sends `terminate` and removes the socket directory; the helper also
   exits by itself when its owning socket hangs up, so no
   `terminalx-computer-use-macos` process outlives TerminalX.
@@ -76,6 +78,96 @@ field, and `type-text` when the focused field is readable), `unverified
 without a post-state check, and `unverified (synthetic input)` for keyboard
 and mouse events that could not be read back.
 
+## Security
+
+Who is kept out, and from what. The attacker considered here is an agent that
+TerminalX itself runs: a process with a shell, the person's user id, and
+TerminalX as its ancestor. It is not root and cannot change a signed app.
+
+**What the helper refuses (macOS).**
+
+- *Whom it serves.* Only the process that started it, checked on the socket
+  peer's audit token. A released helper (signed with a Developer ID) also
+  requires that process to be the TerminalX app signed by the same team:
+  `identifier "com.terminalx.next"` plus the team's Developer ID certificate,
+  verified against the code the peer is running. Being a child of TerminalX,
+  or carrying its bundle id, earns nothing. So an agent that connects to the
+  app's helper is refused even with the token, a copy of the helper that an
+  agent starts refuses the agent, and a copy started through LaunchServices
+  (`open`) has no launcher and serves nobody. A helper that cannot confirm its
+  own signature serves nobody.
+- *The token.* It travels on a pipe only the helper inherits. There is no
+  token file to read.
+- *TerminalX's own windows.* Every action (click, type, key, hotkey, paste,
+  set-value, secondary action, scroll, drag) whose target is the app that
+  started the helper answers `own_app_protected`, always, not only while a
+  confirmation is open. The match is by process id, so the app's dialogs and
+  sheets are covered and a build without a bundle id (`tauri dev`) is too.
+  The released app (`com.terminalx.next`) is refused as a target by every
+  instance's helper, so a second TerminalX started by an agent cannot press
+  buttons in the person's app. Another running Dev build stays drivable from
+  a different instance (that is how the smoke tests work), even when it shares
+  a bundle id with the driver.
+- *Keys that would land on TerminalX.* Synthetic keys go to whatever has the
+  keyboard focus. Before every key the helper checks the focused and the
+  frontmost app and stops with `own_app_protected` if it is a protected one.
+  Synthetic clicks were already fenced to the target window.
+- *Reading.* The accessibility tree of TerminalX's own windows can still be
+  read (secure text fields are never read). Its windows are never
+  screenshotted: `screenshotStatus` says `skipped` with reason
+  `own_app_protected`, so a pairing QR code or a secret on screen does not
+  leave as pixels. Text the app shows in clear is still in the tree.
+- The app also answers `own_app_protected` itself for `--app pid:<its own
+  pid>` on every platform, and keeps answering `confirmation_pending` for
+  every action while one of its questions is open.
+
+**The escape hatch, for TerminalX's own UI tests only.** A debug build of the
+app started with `TERMINALX_COMPUTER_USE_TEST_ALLOW_OWN_WINDOWS=1` may drive
+its own windows. The app reads the variable from its own environment, once,
+and passes the request in the helper handshake. A child process cannot set it
+for the app, no `terminalx computer` request carries it, a release build of
+the app does not read it, and a released helper ignores it. It never lifts
+the rule for the released app. Starting another test build with it set only
+lets that build drive itself.
+
+**What a local build cannot promise.** A helper that is ad-hoc or development
+signed has no signing identity to check the app against, so it trusts its
+launcher, whoever that is; and an agent with a shell on a development machine
+can rebuild the helper anyway. Dev builds can no longer borrow the released
+helper (`TERMINALX_COMPUTER_MACOS_HELPER_APP_PATH` pointing into
+`/Applications`): it refuses a peer that is not the released app. A Dev
+instance can also be driven by another Dev instance.
+
+**What is outside the app's control.** None of the above stops software that
+drives the screen without the helper:
+
+- macOS attributes a process started from a TerminalX terminal to TerminalX
+  for privacy permissions. If *TerminalX itself* has been given Accessibility
+  or Screen Recording in System Settings, every program an agent runs has
+  them too and can post events or read the screen directly (measured: an
+  unsigned test binary run from an agent shell reported
+  `AXIsProcessTrusted() == true`, and `false` once started with the
+  responsibility disclaimed). TerminalX does not need either permission for
+  itself; only "TerminalX Computer Use" should be listed. Remove TerminalX
+  from both lists if it is there.
+- `osascript` / System Events, or any other app the person has granted
+  Accessibility, can press the same buttons.
+- For the same reason a copy of the helper started from an agent shell is
+  granted Accessibility by macOS; the peer check above is what stops it being
+  used, not the permission system.
+
+Closing those needs the system: a way for an app to mark a window or control
+as not operable by synthetic input and accessibility clients (as secure text
+entry does for reading keystrokes), or a per-process rather than
+per-responsible-app Accessibility grant. Until then the person's switch and
+their answer are a control against mistakes and against agents that use
+TerminalX's own tools, not a boundary against arbitrary software running as
+them.
+
+Linux and Windows have no privileged helper: the provider runs the platform
+accessibility API as the user, which an agent can call just as well. Only the
+`pid:<own pid>` refusal and the confirmation pause apply there.
+
 ## Permissions
 
 Settings → General → Computer use shows the Accessibility and Screen
@@ -118,7 +210,9 @@ At runtime the helper is looked up in this order:
   export, CLI parsing and output.
 - `cargo test real_helper -- --ignored --nocapture`: drives the built helper
   for real (capabilities, app listing, error codes, clean shutdown).
-- `pnpm test:computer-macos`: the Swift package's unit tests.
+- `pnpm test:computer-macos`: the Swift package's unit tests, including who
+  the helper serves (`PeerTrustTests`) and which targets it refuses
+  (`OwnAppProtectionTests`).
 - `pnpm smoke:computer [-- --screenshot --actions --apps Finder,TextEdit]`:
   end-to-end through the CLI against a running TerminalX.
 

@@ -6,6 +6,7 @@ import {
   WORKSPACE_CAPABILITIES,
   WorkspaceRpcClient,
   WorkspaceRpcError,
+  agentPtyId,
   type RuntimeSession,
   type WorkspaceConnectionState,
   type WorkspaceTransport,
@@ -72,6 +73,13 @@ class FakeRuntime implements WorkspaceTransport {
   }
   deliver(message: unknown) {
     for (const listener of this.messages) listener(message);
+  }
+  /**
+   * The workspace stopped and woke: this client is a new device now, and the
+   * runtime counts writes per device, so it knows none of its writers any more.
+   */
+  newDevice() {
+    this.applied.clear();
   }
   typeOutput(text: string) {
     const offset = this.output.length;
@@ -166,7 +174,7 @@ class FakeRuntime implements WorkspaceTransport {
         return ok(result);
       }
       case "runtime.agents":
-        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
+        return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5.5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
       case "pty.list":
         return ok({ epoch: this.epoch, terminals: [{ ptyId: "p1", epoch: this.epoch, sessionId: "s1" }, { ptyId: "p2", epoch: this.epoch }] });
       default:
@@ -242,6 +250,47 @@ describe("workspace RPC client", () => {
     expect(runtime.writes).toEqual(["q"]);
     const seqs = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => (frame.params as { seq: number }).seq);
     expect(seqs).toEqual([1, 1, 1], "a refusal does not spend the seq");
+    client.close();
+  });
+
+  it("types again after it became a new device to the runtime", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "one\n");
+    await client.write("p1", "two\n");
+    // Stop and wake: the same client object, a new device on the runtime.
+    runtime.drop();
+    runtime.newDevice();
+    runtime.connect();
+    // The first key after the wake was refused, not applied: it is typed once, under a new writer.
+    await expect(client.write("p1", "three\n")).resolves.toBeUndefined();
+    await client.write("p1", "four\n");
+    expect(runtime.writes).toEqual(["one\n", "two\n", "three\n", "four\n"]);
+    const writes = runtime.sent.filter((frame) => frame.method === "pty.write").map((frame) => frame.params as { seq: number; writerId: string });
+    expect(writes.map((write) => write.seq)).toEqual([1, 2, 3, 1, 2]);
+    expect(writes[3]!.writerId).not.toBe(writes[0]!.writerId);
+    expect(writes[4]!.writerId).toBe(writes[3]!.writerId);
+    client.close();
+  });
+
+  it("never types twice what may have landed before it became a new device", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "one\n");
+    // Sent, applied, and its answer lost with the connection; then the wake.
+    runtime.loseAnswers = true;
+    const doubtful = client.write("p1", "rm -rf build\n");
+    await settle();
+    runtime.drop();
+    runtime.newDevice();
+    runtime.connect();
+    await expect(doubtful).rejects.toMatchObject({ code: "conflict" });
+    expect(runtime.writes).toEqual(["one\n", "rm -rf build\n"]);
+    // It was reported, and what is typed next goes through.
+    await client.write("p1", "ls\n");
+    expect(runtime.writes).toEqual(["one\n", "rm -rf build\n", "ls\n"]);
     client.close();
   });
 
@@ -372,6 +421,40 @@ describe("workspace RPC client", () => {
     expect(gone).toEqual(["runtime-restarted"]);
     expect(runtime.sent.filter((frame) => frame.method === "pty.attach")).toHaveLength(1);
     expect(runtime.writes).toEqual([]);
+    client.close();
+  });
+
+  it("refuses input that was waiting out a drop once the drop is a stop, and never sends it after the wake", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    await client.write("p1", "ls\n");
+    // The connection goes first (the stop revoked the attachment); a key lands in that moment.
+    runtime.drop();
+    const held = client.write("p1", "y\n");
+    const refused = expect(held).rejects.toThrow(/suspended/);
+    await settle();
+    // Then the client learns the workspace is stopped: the key is refused now, not kept for the reconnect.
+    for (const listener of (runtime as unknown as { states: Set<(state: WorkspaceConnectionState) => void> }).states) listener({ state: "suspended" });
+    await refused;
+    // Woken: nothing typed before the stop arrives, and what is typed now arrives once.
+    runtime.connect();
+    await settle();
+    await client.write("p1", "pwd\n");
+    expect(runtime.writes).toEqual(["ls\n", "pwd\n"]);
+    client.close();
+  });
+
+  it("still holds input through a drop that is only a drop", async () => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect();
+    runtime.drop();
+    const held = client.write("p1", "ls\n");
+    await settle();
+    runtime.connect();
+    await expect(held).resolves.toBeUndefined();
+    expect(runtime.writes).toEqual(["ls\n"]);
     client.close();
   });
 
@@ -543,6 +626,30 @@ describe("workspace RPC client", () => {
       expect(runtime.sent.find((frame) => frame.method === "pty.create")!.params).toMatchObject({ sessionId: "s1" });
       const listed = await client.listPtys();
       expect(listed.terminals.map((terminal) => terminal.sessionId)).toEqual(["s1", undefined]);
+      client.close();
+    });
+  });
+
+  describe("PRO-86: agent-pty/1", () => {
+    it("addresses an agent tab's terminal by its tab, and asks for a start only when told to", async () => {
+      expect(agentPtyId("t1")).toBe("tab:t1");
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect(["pty/1", "session/1"]);
+      // An older runtime: the capability says so before anything is sent.
+      expect(client.hasCapability("agent-pty/1")).toBe(false);
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(client.hasCapability("agent-pty/1")).toBe(true);
+      await client.controlPty(agentPtyId("t1"), 100, 40).catch(() => undefined);
+      await client.controlPty(agentPtyId("t1"), 100, 40, { start: true }).catch(() => undefined);
+      const controls = runtime.sent.filter((frame) => frame.method === "pty.control").map((frame) => frame.params);
+      expect(controls).toEqual([
+        { ptyId: "tab:t1", cols: 100, rows: 40 },
+        { ptyId: "tab:t1", cols: 100, rows: 40, start: true },
+      ]);
+      // It adds no method: the terminal calls are the shells'.
+      expect(protocolSource).not.toMatch(/method\("[^"]+", "agent-pty\/1"/);
       client.close();
     });
   });

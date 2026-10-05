@@ -186,11 +186,11 @@ describe("complete navigation hierarchy", () => {
     mount();
     expect(screen.getByRole("treeitem", { name: "deleted-feature" })).toBeTruthy();
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "delete_workspace") return doomed;
+      if (command === "remove_workspace") return { sessions: doomed, keptBranch: null, rescuedBranch: null };
       if (command === "list_workspaces") return [workspace("/alpha")];
       throw new Error(`Unexpected command: ${command}`);
     });
-    await act(async () => store.deleteWorkspace("/alpha", path, false));
+    await act(async () => store.removeWorkspace("/alpha", path, { keepSessions: false, deleteBranch: false, confirmedDigest: null, expectedSessions: [] }));
     expect(screen.queryByRole("treeitem", { name: "deleted-feature" })).toBeNull();
     expect(screen.queryByText("Session one")).toBeNull();
     expect(screen.queryByText("Session other")).toBeNull();
@@ -216,7 +216,7 @@ describe("complete navigation hierarchy", () => {
     act(() => store.patchTab(fresh.id, fresh.tabs[0].id, { title: "Renamed conversation" }));
     expect(screen.queryByText("Conversation fresh")).toBeNull();
     expect(screen.getByText("Renamed conversation")).toBeTruthy();
-    await act(async () => store.deleteSession(fresh.id, false));
+    await act(async () => store.deleteSession(fresh.id));
     expect(screen.queryByText("Renamed conversation")).toBeNull();
     expect(within(screen.getByRole("tree")).getByRole("button", { name: "Session one" })).toBeTruthy();
   });
@@ -260,6 +260,34 @@ describe("complete navigation hierarchy", () => {
     expect(store.getSessionStore().selectedSessionId).toBe("one");
   });
 
+  it("lists a workspace with no sessions, with its state, its size and the actions to open or delete it", async () => {
+    const empty: Workspace = { ...workspace("/alpha/.raccoon/worktrees/idle-plum-wren"), name: "idle-plum-wren", branch: "raccoon/idle-plum-wren", isMain: false, managed: true, state: "merged" };
+    const byHand: Workspace = { ...workspace("/elsewhere/by-hand"), name: "by-hand", branch: "feature/by-hand", isMain: false, managed: false, state: "unmerged" };
+    workspaces["/alpha"] = [{ ...workspace("/alpha"), state: "clean" }, empty, byHand];
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, string>) => {
+      if (command === "list_workspaces") return [...workspaces[args!.projectPath]];
+      if (command === "workspace_size") return args!.path === empty.path ? 2_500_000_000 : 40_000_000;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await act(async () => { await store.refreshWorkspaces("/alpha"); });
+    mount();
+
+    // No session runs in either worktree, and both are there.
+    const idle = screen.getByRole("treeitem", { name: "idle-plum-wren" });
+    expect(within(idle).queryByText(/^Session /)).toBeNull();
+    expect(within(idle).getByText("merged")).toBeTruthy();
+    expect(await within(idle).findByText("2.5 GB")).toBeTruthy();
+    expect(within(idle).getByRole("button", { name: "New session in idle-plum-wren" })).toBeTruthy();
+    expect(within(idle).getByRole("button", { name: "Workspace menu for idle-plum-wren" })).toBeTruthy();
+
+    // One made outside the app is listed too, and marked as such.
+    const external = screen.getByRole("treeitem", { name: "feature/by-hand" });
+    expect(within(external).getByText("external").getAttribute("title")).toBe("A worktree not created by TerminalX");
+    expect(within(external).getByText("unmerged")).toBeTruthy();
+    expect(await within(external).findByText("40 MB")).toBeTruthy();
+    expect(mocks.invoke).toHaveBeenCalledWith("workspace_size", { projectPath: "/alpha", path: empty.path });
+  });
+
   it("follows a renamed pre-session workspace and falls back to main after deletion", async () => {
     const managed = { ...workspace("/alpha/old"), name: "old", isMain: false, managed: true };
     workspaces["/alpha"].push(managed);
@@ -271,14 +299,14 @@ describe("complete navigation hierarchy", () => {
         return { name: "renamed", path: "/alpha/renamed", branch: "renamed", sessions: [] };
       }
       if (command === "list_workspaces") return [...workspaces[args!.projectPath]];
-      if (command === "delete_workspace") { workspaces["/alpha"] = [workspace("/alpha")]; return []; }
+      if (command === "remove_workspace") { workspaces["/alpha"] = [workspace("/alpha")]; return { sessions: [], keptBranch: null, rescuedBranch: null }; }
       throw new Error(`Unexpected command: ${command}`);
     });
     await act(async () => store.renameWorkspace("/alpha", managed.path, "renamed"));
     expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/alpha/renamed");
     expect(screen.getByRole("button", { name: /Workspace renamed/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Workspace old/ })).toBeNull();
-    await act(async () => store.deleteWorkspace("/alpha", "/alpha/renamed", false));
+    await act(async () => store.removeWorkspace("/alpha", "/alpha/renamed", { keepSessions: false, deleteBranch: false, confirmedDigest: null, expectedSessions: [] }));
     expect(screen.queryByRole("button", { name: /Workspace renamed/ })).toBeNull();
     expect(store.getSessionStore().newSessionPreset?.cwd).toBe("/alpha");
   });

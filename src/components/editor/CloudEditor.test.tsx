@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { searchPanelOpen } from "@codemirror/search";
 import { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { closeAllEditors, getEditors, openFile } from "@/lib/editors";
+import { setPrefs } from "@/lib/prefs";
 import { registerFileSource, type FileSource, type FileState } from "@/lib/workspaceFiles";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { EditorPane } from "./EditorPane";
 
 vi.mock("@/lib/api", () => ({ api: { headTree: vi.fn(), fileContentsAt: vi.fn() }, fs: {} }));
@@ -61,8 +64,6 @@ beforeEach(() => {
   cloud = new FakeCloud();
   cloud.files.set("src/main.rs", { text: "fn main() {}\n", version: 1 });
   unregister = registerFileSource(cloud);
-  Range.prototype.getClientRects = () => ({ length: 0, item: () => null, [Symbol.iterator]: [][Symbol.iterator] }) as unknown as DOMRectList;
-  Range.prototype.getBoundingClientRect = () => ({ x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, toJSON() {} }) as DOMRect;
 });
 
 afterEach(async () => {
@@ -90,9 +91,17 @@ async function mount(rel = "src/main.rs") {
   return { ...rendered, entry };
 }
 
-/** The editor is shown (and follows the file) once it is ready. */
+/**
+ * The editor is shown once it is ready, and follows the file once it has
+ * subscribed to changes. The subscription is made in an effect that runs
+ * after the pane appears, so a test that makes "the agent" write must wait
+ * for both, or its notification can arrive before anyone is listening.
+ */
 async function ready(container: HTMLElement) {
-  await waitFor(() => expect(container.querySelector(".editor-pane:not(.hidden) .cm-editor")).not.toBeNull());
+  await waitFor(() => {
+    expect(container.querySelector(".editor-pane:not(.hidden) .cm-editor")).not.toBeNull();
+    expect(cloud.listeners.size).toBeGreaterThan(0);
+  });
 }
 
 function type(container: HTMLElement, text: string) {
@@ -121,6 +130,23 @@ describe("a cloud workspace file in the editor", () => {
     act(() => cloud.agentWrites("src/main.rs", "fn main() { agent2(); }\n"));
     await screen.findByText("This file changed on disk while you were editing.");
     expect(view(container).state.doc.toString()).toBe("fn main() { agent(); }\n// mine\n");
+  });
+
+  it("catches up on a change that landed before it began watching", async () => {
+    // The agent's edit lands after the file was read and before the editor
+    // has subscribed to changes, so its notification reaches no one.
+    const watch = cloud.watch;
+    let subscriptions = 0;
+    cloud.watch = (listener) => {
+      subscriptions += 1;
+      cloud.files.set("src/main.rs", { text: "fn main() { agent(); }\n", version: 2 });
+      return watch(listener);
+    };
+    const { container } = await mount();
+    // It was read as it was before the edit: the edit is not what was loaded.
+    expect(subscriptions).toBe(1);
+    await waitFor(() => expect(view(container).state.doc.toString()).toBe("fn main() { agent(); }\n"));
+    expect(screen.queryByText("This file changed on disk while you were editing.")).toBeNull();
   });
 
   it("never overwrites a concurrent edit without an explicit choice", async () => {
@@ -175,6 +201,50 @@ describe("a cloud workspace file in the editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByTestId("editor-conflict");
     expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() { agent(); }\n");
+  });
+
+  it("saves and finds on the reader's shortcuts, in the editor that has the focus", async () => {
+    // `mod` is Ctrl in jsdom, which is not a Mac. The find bar has tooltips, so they get their provider.
+    const { container } = render(
+      <TooltipProvider>
+        <EditorPane entry={open()} visible />
+      </TooltipProvider>,
+    );
+    await ready(container);
+    const content = view(container).contentDOM;
+    type(container, "// mine\n");
+
+    // The pane focuses its editor a frame after it is shown. Let that
+    // happen, then move the focus away, so "elsewhere" does not depend on
+    // whether the frame has run yet.
+    await waitFor(() => expect(content.contains(document.activeElement)).toBe(true));
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+
+    // Not this editor's keys while the focus is elsewhere.
+    expect(fireEvent.keyDown(document.body, { key: "s", code: "KeyS", ctrlKey: true })).toBe(true);
+    expect(cloud.writes).toHaveLength(0);
+
+    act(() => content.focus());
+    expect(fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true })).toBe(false);
+    await waitFor(() => expect(cloud.files.get("src/main.rs")!.text).toBe("fn main() {}\n// mine\n"));
+
+    // Moved in Settings: the old key no longer saves, the new one does.
+    act(() => setPrefs({ shortcuts: { "files.save": ["mod+alt+s"], "files.find": ["mod+shift+y"] } }));
+    expect(screen.getByRole("button", { name: "Save" }).textContent).toContain("CtrlAltS");
+    type(container, "// more\n");
+    act(() => content.focus());
+    fireEvent.keyDown(content, { key: "s", code: "KeyS", ctrlKey: true });
+    fireEvent.keyDown(content, { key: "f", code: "KeyF", ctrlKey: true });
+    await act(async () => {});
+    expect(cloud.writes).toHaveLength(1);
+    expect(searchPanelOpen(view(container).state)).toBe(false);
+
+    fireEvent.keyDown(content, { key: "ß", code: "KeyS", ctrlKey: true, altKey: true });
+    await waitFor(() => expect(cloud.writes).toHaveLength(2));
+    act(() => content.focus());
+    act(() => void fireEvent.keyDown(content, { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true }));
+    expect(searchPanelOpen(view(container).state)).toBe(true);
+    act(() => setPrefs({ shortcuts: {} }));
   });
 
   it("is read-only for a participant", async () => {

@@ -86,6 +86,8 @@ pub trait KeyStore: Send + Sync {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()>;
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>>;
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()>;
+    /// Drop whatever is held in memory (the identity changed). Stored keys stay.
+    fn forget(&self) {}
 }
 
 /// macOS keychain generic passwords under `<app identifier>.cloud-agent-keys`.
@@ -119,30 +121,23 @@ fn key_account(organization_id: &str, workspace_id: &str, key_id: &str) -> Strin
     format!("{organization_id}/{workspace_id}/{key_id}")
 }
 
+// Through `crate::keychain`, which makes Keychain calls one at a time.
 #[cfg(target_os = "macos")]
 impl KeyStore for KeychainKeys {
     fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
-        security_framework::passwords::set_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id), key)
-            .context("save a workspace key to Keychain")
+        crate::keychain::set(self.service()?, &key_account(organization_id, workspace_id, key_id), key).context("save a workspace key to Keychain")
     }
 
     fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
-        match security_framework::passwords::get_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
-            Ok(bytes) => {
-                let bytes = Zeroizing::new(bytes);
-                Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
-            }
-            Err(error) if error.code() == -25300 => Ok(None), // errSecItemNotFound
-            Err(error) => Err(error).context("read a workspace key from Keychain"),
-        }
+        let Some(bytes) = crate::keychain::get(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("read a workspace key from Keychain")? else {
+            return Ok(None);
+        };
+        let bytes = Zeroizing::new(bytes);
+        Ok(Some(bytes.as_slice().try_into().map_err(|_| anyhow!("a stored workspace key is not 32 bytes"))?))
     }
 
     fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
-        match security_framework::passwords::delete_generic_password(self.service()?, &key_account(organization_id, workspace_id, key_id)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == -25300 => Ok(()),
-            Err(error) => Err(error).context("delete a workspace key from Keychain"),
-        }
+        crate::keychain::delete(self.service()?, &key_account(organization_id, workspace_id, key_id)).context("delete a workspace key from Keychain")
     }
 }
 
@@ -176,6 +171,107 @@ fn secret_file(organization_id: &str, workspace_id: &str) -> Result<PathBuf> {
     let dir = crate::store::root()?.join("cloud-agent-keys");
     crate::cloud_bootstrap::ensure_private_dir(&dir)?;
     Ok(dir.join(format!("{organization_id}--{workspace_id}.json")))
+}
+
+/// A [`KeyStore`] in front of another that remembers, in this process's
+/// memory, each key it stored or read.
+///
+/// A send, a checkpoint and a receipt each need the workspace key, and every
+/// connect is answered (`keys.get`) with keys this Mac nearly always has
+/// already. Without this each of those is a Keychain call, several at once
+/// after a wake; with it a key is read from the Keychain once per run and
+/// written only when it is new or changed.
+///
+/// Nothing about where keys are kept changes: the Keychain stays the only
+/// place a key is stored, and a key already crosses this process's memory
+/// each time it is used (it arrives over the relay channel and is handed to
+/// AES-GCM here). The copies held are zeroed when dropped; a key's copy is
+/// dropped when the key is deleted, and all of them when the identity changes.
+pub struct CachedKeys {
+    store: Arc<dyn KeyStore>,
+    held: Mutex<Held>,
+}
+
+/// A held key lives in its own allocation: the map moves only the pointer
+/// when it grows, so no copy of the key is left behind un-zeroed.
+type HeldKey = Box<Zeroizing<[u8; crypto::KEY_LEN]>>;
+
+#[derive(Default)]
+struct Held {
+    keys: HashMap<String, HeldKey>,
+    /// Counts puts, deletes and forgets, so a read that was under way during
+    /// one does not keep what it read.
+    changes: u64,
+}
+
+impl CachedKeys {
+    pub fn new(store: Arc<dyn KeyStore>) -> Self {
+        Self { store, held: Mutex::new(Held::default()) }
+    }
+
+    /// Drop the held copy before the stored key changes. Never held across a
+    /// call to the store.
+    fn invalidate(&self, account: &str) -> u64 {
+        let mut held = self.held.lock().unwrap();
+        held.keys.remove(account);
+        held.changes = held.changes.wrapping_add(1);
+        held.changes
+    }
+
+    fn keep(&self, account: String, key: &[u8; crypto::KEY_LEN], as_of: u64) {
+        let mut held = self.held.lock().unwrap();
+        if held.changes == as_of {
+            held.keys.insert(account, Box::new(Zeroizing::new(*key)));
+        }
+    }
+}
+
+impl KeyStore for CachedKeys {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        use subtle::ConstantTimeEq;
+        let account = key_account(organization_id, workspace_id, key_id);
+        if self.held.lock().unwrap().keys.get(&account).is_some_and(|held| bool::from(held.as_slice().ct_eq(key.as_slice()))) {
+            return Ok(());
+        }
+        let as_of = self.invalidate(&account);
+        self.store.put(organization_id, workspace_id, key_id, key)?;
+        self.keep(account, key, as_of);
+        Ok(())
+    }
+
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        let account = key_account(organization_id, workspace_id, key_id);
+        let as_of = {
+            let held = self.held.lock().unwrap();
+            if let Some(key) = held.keys.get(&account) {
+                return Ok(Some(***key));
+            }
+            held.changes
+        };
+        let found = self.store.get(organization_id, workspace_id, key_id)?;
+        if let Some(key) = &found {
+            self.keep(account, key, as_of);
+        }
+        Ok(found)
+    }
+
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        let account = key_account(organization_id, workspace_id, key_id);
+        self.invalidate(&account);
+        let deleted = self.store.delete(organization_id, workspace_id, key_id);
+        // Again once the key is gone: a read that began after the first and
+        // found the key still stored must not leave it held.
+        self.invalidate(&account);
+        deleted
+    }
+
+    fn forget(&self) {
+        let mut held = self.held.lock().unwrap();
+        held.keys.clear();
+        held.changes = held.changes.wrapping_add(1);
+        drop(held);
+        self.store.forget();
+    }
 }
 
 /// For tests.
@@ -228,6 +324,10 @@ struct Stored {
     ciphertext: String,
     #[serde(default)]
     text: Option<String>,
+    /// How many images the message names (PRO-22): a count for display,
+    /// never the images or their ids.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    images: u32,
     #[serde(default)]
     request_id: Option<String>,
     state: String,
@@ -245,11 +345,20 @@ struct Stored {
     updated_at: u64,
     #[serde(default)]
     error: Option<String>,
+    /// Posted with `wake: false` (PRO-89): the API starts nothing for it and
+    /// refuses a workspace that is not running. Kept so a resend after a
+    /// lost answer cannot start one either.
+    #[serde(default, skip_serializing_if = "is_false")]
+    no_wake: bool,
 }
+
+/// The API's refusal of a `wake: false` command for a workspace that is not
+/// running. It stored nothing.
+pub const WORKSPACE_STOPPED: &str = "cloud_workspace_stopped";
 
 impl Stored {
     fn envelope(&self) -> Value {
-        json!({
+        let mut envelope = json!({
             "v": 1,
             "clientCommandId": self.client_command_id,
             "tabId": self.tab_id,
@@ -257,7 +366,12 @@ impl Stored {
             "keyId": self.key_id,
             "iv": self.iv,
             "ciphertext": self.ciphertext,
-        })
+        });
+        // Only when asked for: an API that does not know the key rejects it.
+        if self.no_wake {
+            envelope["wake"] = json!(false);
+        }
+        envelope
     }
 
     fn pending(&self) -> bool {
@@ -270,6 +384,7 @@ impl Stored {
             tab_id: self.tab_id.clone(),
             kind: self.kind.clone(),
             text: self.text.clone(),
+            images: self.images,
             request_id: self.request_id.clone(),
             state: self.state.clone(),
             wake: self.wake.clone(),
@@ -293,6 +408,14 @@ pub struct Purged {
     pub cached_tabs: usize,
 }
 
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
 /// What the UI sees of an outbox entry: never the envelope.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -302,6 +425,9 @@ pub struct OutboxEntry {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// How many images the message carries; left out when none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub images: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// `unsent`, or the server's `queued | leased | applied | rejected | cancelled | outcome-unknown`.
@@ -532,7 +658,13 @@ impl CloudAgentClient {
     /// Encrypt a command, store its envelope, then hand it to the API. A
     /// command the API could not be asked about stays `unsent` and is resent
     /// by `outbox_sync`; it is never re-encrypted.
-    pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value) -> Result<OutboxEntry, String> {
+    ///
+    /// With `wake` false (the CLI, which must ask the person before starting
+    /// compute; only against an API that knows the option) nothing is
+    /// started: for a workspace that is not running the API stores nothing,
+    /// the entry is dropped here too and the error is [`WORKSPACE_STOPPED`],
+    /// so the caller can ask and send again.
+    pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value, wake: bool) -> Result<OutboxEntry, String> {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
         if !valid_id(tab_id) || !KINDS.contains(&kind) {
@@ -540,8 +672,11 @@ impl CloudAgentClient {
         }
         let Value::Object(mut plaintext) = payload else { return Err("cloud_agent_request_invalid".into()) };
         let text = plaintext.get("text").and_then(Value::as_str).map(str::to_string);
+        let images = plaintext.get("images").and_then(Value::as_array).map_or(0, |images| images.len().min(u32::MAX as usize) as u32);
         let request_id = plaintext.get("requestId").and_then(Value::as_str).map(str::to_string);
         let valid = match kind {
+            // A prompt is text, images, or both (PRO-22); a steer is always text.
+            "send" if images > 0 => text.is_some(),
             "send" | "steer" => text.as_deref().is_some_and(|text| !text.trim().is_empty()),
             "permission-decision" => {
                 request_id.as_deref().is_some_and(|id| !id.is_empty())
@@ -571,6 +706,7 @@ impl CloudAgentClient {
             iv,
             ciphertext,
             text,
+            images,
             request_id,
             state: "unsent".into(),
             wake: None,
@@ -581,10 +717,18 @@ impl CloudAgentClient {
             created_at: now,
             updated_at: now,
             error: None,
+            no_wake: !wake,
         };
         // Durable before the network: a crash after the POST still resends it.
         self.edit_outbox(&dir, |entries| entries.push(stored.clone()))?;
-        self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".into())
+        let entry = self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".to_string())?;
+        if !wake && entry.state == "rejected" && entry.category.as_deref() == Some(WORKSPACE_STOPPED) {
+            // Nothing was stored there, so nothing is kept here: it was not sent.
+            let id = stored.client_command_id.clone();
+            self.edit_outbox(&dir, |entries| entries.retain(|entry| entry.client_command_id != id))?;
+            return Err(WORKSPACE_STOPPED.into());
+        }
+        Ok(entry)
     }
 
     /// POST a stored envelope if it is still unsent. `None` when it is not
@@ -917,6 +1061,9 @@ impl CloudAgentClient {
 
     fn retain_only(&self, keep: Option<&KeptIdentity>) {
         let _guard = self.lock.lock().unwrap();
+        // No key of the previous identity stays in memory; the ones still
+        // kept are read again when next used.
+        self.keys.forget();
         let Ok(users) = std::fs::read_dir(&self.root) else { return };
         for user in users.flatten() {
             let user_id = user.file_name().to_string_lossy().into_owned();
@@ -1021,9 +1168,17 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + 
 }
 
 #[tauri::command]
-pub async fn cloud_agent_enqueue(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, kind: String, payload: Value) -> Result<OutboxEntry, String> {
+pub async fn cloud_agent_enqueue(
+    client: Client<'_>,
+    organization_id: String,
+    workspace_id: String,
+    tab_id: String,
+    kind: String,
+    payload: Value,
+    wake: Option<bool>,
+) -> Result<OutboxEntry, String> {
     let client = client.inner().clone();
-    blocking(move || client.enqueue(&organization_id, &workspace_id, &tab_id, &kind, payload)).await
+    blocking(move || client.enqueue(&organization_id, &workspace_id, &tab_id, &kind, payload, wake.unwrap_or(true))).await
 }
 
 #[tauri::command]

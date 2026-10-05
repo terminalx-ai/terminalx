@@ -64,7 +64,8 @@ The Rust desktop client uses the shipped desktop exchange contract with the
 scheme the app already owns:
 
 1. Generate fresh `state`, `nonce`, and a PKCE S256 challenge, and use the
-   registered `terminalx://auth/callback` redirect.
+   registered `terminalx://auth/callback` redirect for release, or
+   `terminalx-dev://auth/callback` for the Dev bundle.
 2. Open `/v1/desktop/auth/authorize` in the system browser with client id
    `terminalx-desktop`, response type `code`, scope
    `openid profile email offline_access`, a fresh `state`, `nonce`, and PKCE
@@ -74,6 +75,14 @@ scheme the app already owns:
    minutes.
 4. Exchange the code at `/v1/desktop/auth/session` using the original verifier,
    nonce, redirect URI, state, and local profile id.
+
+Dev authorize URLs include `app=dev`; this app does not request Legacy buttons.
+The console preserves the flag through login and offers the Dev callback
+alongside the main app button. `legacy=1` independently requests a Legacy
+hand-off button. The flags affect visibility only, not the redirect allowlist.
+The server must accept the Dev callback before the app update ships. The
+bundle identity selects the scheme, independently of Cargo's build profile;
+each app rejects the other app's callback scheme.
 
 The client stores the full returned desktop session: access token, rotating
 refresh token, expiry, user, cloud/local profile ids, active organization, and
@@ -232,6 +241,14 @@ Relay mint failure is surfaced as a refusal with a LAN alternative; it never
 silently produces a direct-only code under the Relay label. Changing policies
 rotates the pending credential, invalidating the code made for the old policy.
 
+At launch, the desktop removes unused pairing credentials and starts the direct
+listener when a claimed, unrevoked device remains. This also works without an
+account: restarting the Mac app does not require creating another LAN code.
+A busy port does not block app startup; the listener retries in the background
+until the port is released, using the same exclusive binding as code creation.
+The phone automatically reconnects to its most recently connected saved Mac
+on launch and refreshes the machine list's connection time after each reconnect.
+
 Both direct and relay transports then run the same E2EE v2 state machine. The
 mobile `e2ee_hello` offers framing 2 and text/binary payload kinds with context
 `terminalx-mobile-e2ee`; `e2ee_ready` selects those exact values. The transcript
@@ -352,6 +369,40 @@ encrypted `status.get` frame and, when a relay invite is present, installs and
 reconciles a hashed resume credential through `pairing.getEndpoints`. The newly
 authenticated device then appears in Settings → Devices; use Revoke to remove
 the row, close its live connection, and let the script finish.
+
+## What a paired computer is called on the phone (PRO-87)
+
+The phone shows a paired computer by its own name instead of "Paired Mac".
+
+- **With the pairing link.** The desktop appends its name to the link as a
+  second query parameter: `terminalx://pair?code=<offer>&name=<name>`. It is
+  deliberately not a field of the offer: phones parse the offer strictly, so
+  a new field would make every phone build before this one refuse to pair,
+  while an extra parameter is simply not read by them. A code pasted without
+  the link has no name.
+- **On every connection.** The phone asks `host.describe` and stores the
+  answer (`{ "name": … }`). That gives an entry paired as "Paired Mac" its
+  real name without pairing again, and follows a computer renamed in System
+  Settings. A desktop that predates the method refuses it and the fallback
+  stays.
+- The name is the macOS computer name (`scutil --get ComputerName`); the host
+  name on other systems.
+- A name typed on the phone (device menu → Rename) wins over the computer's
+  and is kept through reconnects, renames of the computer and app restarts;
+  clearing it goes back to the computer's name. It is local to the phone.
+- A name is a label from another device: both sides strip control and
+  invisible formatting characters, collapse whitespace and cap it at 64
+  characters, and nothing identifies or authenticates by it. Two computers
+  with the same name are told apart on the phone by a short ending of their
+  ids.
+
+**Unpairing from the phone.** The device menu's Remove asks the connected
+computer to drop this phone (`pairing.forget`) and then forgets the computer
+on the phone whatever the answer. `pairing.forget` takes no argument and
+revokes only the device the connection authenticated as, so a phone can
+unpair itself and nothing else. A computer the phone is not connected to
+cannot be asked; its entry stays in the desktop's Settings → Devices until
+it is revoked there.
 
 ## Cloud diagnostics and export
 

@@ -3,13 +3,17 @@ import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { pty } from "@/lib/api";
+import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
+import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
 
 /**
- * Terminal panes per session, and one bridge for the PTY events.
+ * Terminal panes per session, and the live xterm of each one that has been
+ * shown.
  *
- * Output arrives base64-encoded; it is decoded only for panes this window
- * opened, and a pane that has no view mounted keeps a bounded replay buffer
- * (newest bytes win) so switching sessions never loses the tail.
+ * A pane's output comes straight to its xterm over its own channel, attached
+ * when the xterm is made (`TerminalView`). A pane that no view has shown yet
+ * costs this window nothing: the backend keeps its bounded scrollback and
+ * hands it over at attach, so switching to it never loses the tail.
  */
 export interface TerminalPane {
   id: string;
@@ -65,45 +69,133 @@ export function getTerminalState(): TerminalState {
 }
 
 /**
- * Live xterm instances outlive their views: a pane's element is re-parented
- * into whichever view is showing it, so a session switch keeps scrollback,
- * cursor and running programs exactly as they were.
+ * Recently used xterms outlive their views: a pane's element is re-parented
+ * into whichever view shows it. Local instances beyond the idle budget are
+ * restored from backend scrollback; their processes remain alive.
  */
 export interface TerminalInstance {
   el: HTMLDivElement;
   term: Terminal;
   fit: FitAddon;
+  /** Stops whatever feeds it output; called when the instance is disposed. */
+  release?: () => void;
+  /** May be rebuilt from the backend's bounded scrollback without ending the process. */
+  restorable?: boolean;
 }
 const instances = new Map<string, TerminalInstance>();
-const REPLAY_MAX = 256 * 1024;
-const replay = new Map<string, { chunks: Uint8Array[]; size: number }>();
+const sizes = new Map<string, { cols: number; rows: number }>();
+/** Recently used, hidden local terminals. Visible and remote terminals are not evicted. */
+export const IDLE_TERMINAL_LIMIT = 8;
+let archivedSessions = new Set<string>();
+let evictedInstances = 0;
 
-function decode(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+export function trimTerminalInstances(keep?: string) {
+  const archivedPanes = new Set(state.panes.filter((pane) => archivedSessions.has(pane.sessionId)).map((pane) => pane.id));
+  const idle = [...instances].filter(([, inst]) => inst.restorable && !isOnScreen(inst.term) && !inst.el.isConnected);
+  let remaining = idle.length;
+  for (const [id] of idle) {
+    if (id === keep) continue;
+    if (remaining <= IDLE_TERMINAL_LIMIT && !archivedPanes.has(id)) continue;
+    disposeInstance(id);
+    evictedInstances++;
+    remaining--;
+  }
 }
 
-export function getInstance(id: string, create: () => TerminalInstance): TerminalInstance {
+/** Archiving releases hidden views, while a terminal still being read stays intact. */
+export function setArchivedTerminalSessions(ids: readonly string[]) {
+  archivedSessions = new Set(ids);
+  trimTerminalInstances();
+}
+/** The live instance of a pane, if it has one. Never makes one: a view that is on its way out must not bring a closed terminal back. */
+export function peekInstance(id: string): TerminalInstance | undefined {
+  return instances.get(id);
+}
+
+/** Mount before trimming when a view is acquiring a visible terminal. */
+export function getInstance(id: string, create: () => TerminalInstance, host?: HTMLElement): TerminalInstance {
   let inst = instances.get(id);
   if (!inst) {
     inst = create();
+    const size = sizes.get(id);
+    // Replay must use the grid the PTY printed into, before a view refits it.
+    if (size) inst.term.resize(size.cols, size.rows);
     instances.set(id, inst);
-    const r = replay.get(id);
-    if (r) {
-      for (const c of r.chunks) inst.term.write(c);
-      replay.delete(id);
-    }
   }
+  // Map order is the last use order, not the order terminals were created in.
+  instances.delete(id);
+  instances.set(id, inst);
+  // The visible instance does not spend an instant in the idle budget. If
+  // eight terminals are cached, trimming before mounting the ninth needlessly
+  // evicts one of them and forces a scrollback replay on the next switch.
+  host?.appendChild(inst.el);
+  trimTerminalInstances(id);
   return inst;
+}
+
+export interface TerminalCounters {
+  /** Live xterm instances, local and cloud, and how many are in the document. */
+  instances: number;
+  idleInstances: number;
+  idleLimit: number;
+  evictedInstances: number;
+  /** Raw local output received but not yet parsed, including hidden-window output. */
+  queuedOutputBytes: number;
+  attached: number;
+  /** Live instances by the renderer they are on now. A hidden terminal needs none, so `dom` counts those too. */
+  webgl: number;
+  dom: number;
+  /** Terminals a view is showing, and how many of those are on the DOM fallback: should be none. */
+  onScreen: number;
+  domOnScreen: number;
+  /** Terminals in the document that no view is showing. They would draw every frame of output for nobody: should be none. */
+  hiddenInDocument: number;
+  webglContexts: typeof webglContexts;
+  /** Lines held across every live instance's buffers. */
+  bufferLines: number;
+  panes: number;
+  data: { local: DataRate; cloud: DataRate };
+}
+
+/** What this window's terminals hold right now, for `terminalx status --json`. */
+export function terminalCounters(): TerminalCounters {
+  const live = [...instances.values()];
+  const webgl = live.filter((inst) => rendererOf(inst.term) === "webgl").length;
+  return {
+    instances: live.length,
+    idleInstances: live.filter((inst) => inst.restorable && !isOnScreen(inst.term) && !inst.el.isConnected).length,
+    idleLimit: IDLE_TERMINAL_LIMIT,
+    evictedInstances,
+    queuedOutputBytes: queuedLocalOutputBytes(),
+    attached: live.filter((inst) => inst.el.isConnected).length,
+    webgl,
+    dom: live.length - webgl,
+    onScreen: live.filter((inst) => isOnScreen(inst.term)).length,
+    domOnScreen: live.filter((inst) => isOnScreen(inst.term) && rendererOf(inst.term) === "dom").length,
+    hiddenInDocument: live.filter((inst) => inst.el.isConnected && !isOnScreen(inst.term)).length,
+    webglContexts: { ...webglContexts },
+    bufferLines: live.reduce((lines, inst) => lines + inst.term.buffer.normal.length + inst.term.buffer.alternate.length, 0),
+    panes: state.panes.length,
+    data: { local: dataRate("local"), cloud: dataRate("cloud") },
+  };
+}
+
+const disposals = new Set<(inst: TerminalInstance) => void>();
+/** Call `listener` with each instance right after its xterm is disposed (the renderer releases what it holds). */
+export function onInstanceDisposed(listener: (inst: TerminalInstance) => void) {
+  disposals.add(listener);
 }
 
 /** Drop a live instance and its element; its process is the caller's to end. */
 export function disposeInstance(id: string) {
   const inst = instances.get(id);
+  const paneExists = state.panes.some((pane) => pane.id === id);
+  if (!paneExists) sizes.delete(id);
   if (inst) {
+    if (inst.restorable && paneExists) sizes.set(id, { cols: inst.term.cols, rows: inst.term.rows });
+    inst.release?.();
     inst.term.dispose();
+    for (const listener of disposals) listener(inst);
     inst.el.remove();
     instances.delete(id);
   }
@@ -119,27 +211,18 @@ export function subscribeTerminals(): Promise<void> {
 
 async function register() {
   try {
-    await listen<{ id: string; data: string }>("pty_data", (e) => {
-      const { id, data } = e.payload;
-      const bytes = decode(data);
-      const inst = instances.get(id);
-      if (inst) {
-        inst.term.write(bytes);
-        return;
-      }
-      let r = replay.get(id);
-      if (!r) replay.set(id, (r = { chunks: [], size: 0 }));
-      r.chunks.push(bytes);
-      r.size += bytes.length;
-      while (r.size > REPLAY_MAX && r.chunks.length > 1) {
-        const dropped = r.chunks.shift()!;
-        r.size -= dropped.length;
-      }
-    });
     await listen<{ id: string; code: number | null }>("pty_exit", (e) => {
       const { id, code } = e.payload;
       set({ panes: state.panes.map((p) => (p.id === id ? { ...p, exited: true, exitCode: code } : p)) });
     });
+  } catch {
+    /* outside a webview */
+  }
+  try {
+    // A reloaded window: the backend may still be sending to the old page's
+    // views. A view attaches only after this (`createInstance` waits for
+    // `subscribeTerminals`), or it would be dropped with them.
+    await pty.detachAll();
   } catch {
     /* outside a webview */
   }
@@ -194,7 +277,6 @@ export async function closeTerminal(id: string) {
   await pty.kill(id).catch(() => {});
   if (pane.hidden) {
     set({ panes: state.panes.filter((p) => p.id !== id) });
-    replay.delete(id);
     disposeInstance(id);
     return;
   }
@@ -213,8 +295,52 @@ export async function closeTerminal(id: string) {
     active: { ...state.active, [pane.sessionId]: nextTerminal?.id ?? "" },
     selected,
   });
-  replay.delete(id);
   disposeInstance(id);
+}
+
+/**
+ * The sessions are gone (deleted, or their workspace was): close every
+ * terminal they had, shells and agent panes alike. Nothing else would: a
+ * session that is no longer listed has no tab strip to close them from.
+ */
+export function dropSessionTerminals(sessionIds: readonly string[]) {
+  const gone = new Set(sessionIds);
+  const doomed = state.panes.filter((pane) => gone.has(pane.sessionId));
+  for (const id of gone) terminalNumbers.delete(id);
+  const remembered = (record: Record<string, unknown>) => Object.keys(record).some((id) => gone.has(id));
+  if (!doomed.length && !remembered(state.active) && !remembered(state.selected)) return;
+  const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => !gone.has(id)));
+  set({ panes: state.panes.filter((pane) => !gone.has(pane.sessionId)), active: without(state.active), selected: without(state.selected) });
+  for (const pane of doomed) {
+    void pty.kill(pane.id).catch(() => {});
+    disposeInstance(pane.id);
+  }
+}
+
+/** The pane an agent tab's CLI runs in. */
+export function agentPaneId(tabId: string): string {
+  return `tab:${tabId}`;
+}
+
+export function isAgentPane(id: string): boolean {
+  return id.startsWith("tab:");
+}
+
+/**
+ * The agent tabs are gone (closed here, or removed by the backend): let go of
+ * their panes and xterms. The backend stops the CLI when it removes a tab, but
+ * nothing told this window, so every closed tab kept its terminal and its
+ * scrollback until its session was deleted.
+ */
+export function dropTabTerminals(tabIds: readonly string[]) {
+  const gone = new Set(tabIds.map(agentPaneId));
+  if (state.panes.some((pane) => gone.has(pane.id))) set({ panes: state.panes.filter((pane) => !gone.has(pane.id)) });
+  for (const id of gone) disposeInstance(id);
+}
+
+/** Close a session's shells and leave its agent panes: its checkout was removed, so a shell there has nowhere to be. */
+export async function closeSessionShells(sessionId: string) {
+  for (const pane of state.panes.filter((item) => item.sessionId === sessionId && !item.hidden)) await closeTerminal(pane.id);
 }
 
 export function setActiveTerminal(sessionId: string, id: string) {
@@ -263,8 +389,8 @@ export function clearSelectedBrowser(sessionId: string, id: string) {
 
 /**
  * Take over a pane the backend opened — an agent tab's own CLI. The pane may
- * already have produced output before this window heard about it, which is why
- * the replay buffer is kept for ids no pane claims yet.
+ * already have produced output before this window heard about it; the view
+ * gets that from the backend's scrollback when it attaches.
  */
 export async function adoptPane(pane: Omit<TerminalPane, "created" | "exited" | "exitCode">) {
   await subscribeTerminals();

@@ -12,7 +12,7 @@ import { SessionView } from "@/components/session/SessionView";
 import { CloudSessionHost } from "@/components/session/CloudSessionHost";
 import { isCloudKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
@@ -23,9 +23,10 @@ import { subscribeTabPty } from "@/lib/tabViews";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
+import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
+import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
 import { BypassDialog } from "@/components/session/BypassDialog";
-import { SettleDialog } from "@/components/session/SettleDialog";
-import { WorkspaceDeleteDialog } from "@/components/session/WorkspaceDeleteDialog";
+import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
@@ -34,13 +35,17 @@ import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
 import { bootPairing } from "@/lib/pairing";
+import { bootTerminalPerf } from "@/lib/terminalPerf";
+import { bootCloudControl } from "@/lib/cloudControl";
 import { useEditors } from "@/lib/editors";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
 const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
-const CloudSessionPage = lazy(() => import("@/components/cloud/CloudSessionPage").then((module) => ({ default: module.CloudSessionPage })));
+const DevRuntimeMain = lazy(() => import("@/components/cloud/DevRuntime").then((module) => ({ default: module.DevRuntimeMain })));
+/** Where Settings opens when no section is asked for: Account (PRO-81). SettingsPage falls back to the same one. */
+const GENERAL_SETTINGS_TAB: SettingsTab = "account";
 const SettingsPage = lazy(() => import("@/components/settings/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const statusBarFallback = <div aria-hidden className="h-[22px] shrink-0 border-t border-hairline bg-background/70" />;
 const viewFallback = <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-faint">Loading view…</div>;
@@ -64,9 +69,10 @@ export function AppShell() {
   const status = useStatus();
   const store = useSessionStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(GENERAL_SETTINGS_TAB);
+  // Every request for Settings, so asking again with it open still lands on the section asked for.
+  const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [cloudSessionOpen, setCloudSessionOpen] = useState(false);
 
   useEffect(() => {
     void subscribeAgentEvents();
@@ -79,6 +85,8 @@ export function AppShell() {
     void bootAccount();
     bootCloudCatalog();
     void bootPairing();
+    void bootTerminalPerf();
+    void bootCloudControl();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -91,17 +99,24 @@ export function AppShell() {
 
   const toggleSidebar = useCallback(() => setPrefs({ sidebarOpen: !prefs.sidebarOpen }), [prefs.sidebarOpen]);
   const togglePanel = useCallback(() => setPrefs({ panelOpen: !prefs.panelOpen }), [prefs.panelOpen]);
-  const openSettings = useCallback((tab: SettingsTab = "general") => {
-    setSettingsTab(tab);
+  // The general way in (the Settings button, the shortcut) names no section and opens Account,
+  // whichever section was open last; an action that names one (Agent settings, the palette) gets it.
+  // Also a click handler, which is handed the click's event: anything that is not a section's
+  // name opens Account too, never a blank page.
+  const openSettings = useCallback((tab?: unknown) => {
+    setSettingsTab(typeof tab === "string" ? (tab as SettingsTab) : GENERAL_SETTINGS_TAB);
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAccountSettings = useCallback(() => {
     setSettingsTab("account");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const openAgentSettings = useCallback(() => {
     setSettingsTab("agents");
     setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
   }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
@@ -110,23 +125,23 @@ export function AppShell() {
   const showSkills = useCallback(() => openSkills(), []);
   const showAutomations = useCallback(() => openAutomations(), []);
 
-  useHotkey("mod+b", toggleSidebar);
-  useHotkey("mod+e", togglePanel);
-  useHotkey("mod+,", () => openSettings());
-  useHotkey("mod+n", newSession);
-  useHotkey("mod+i", showIssues);
-  useHotkey("mod+shift+a", showAgents);
-  useHotkey("mod+shift+u", showStats);
-  useHotkey("mod+shift+k", showSkills);
-  useHotkey("mod+shift+r", showAutomations);
-  useHotkey("mod+k", () => setPaletteOpen(true), { global: true });
+  useShortcut("app.toggleSidebar", toggleSidebar);
+  useShortcut("app.togglePanel", togglePanel);
+  useShortcut("app.settings", () => openSettings());
+  useShortcut("app.newSession", newSession);
+  useShortcut("app.issues", showIssues);
+  useShortcut("app.agentDashboard", showAgents);
+  useShortcut("app.stats", showStats);
+  useShortcut("app.skills", showSkills);
+  useShortcut("app.automations", showAutomations);
+  useShortcut("app.commandPalette", () => setPaletteOpen(true), { global: true });
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
-  // A cloud workspace in the main slot (PRO-23), unless the kill switch hides cloud rows.
-  const cloudWorkspace = prefs.cloudSidebar ? (store.selectedCloudWorkspace ?? null) : null;
+  // A cloud workspace in the main slot (PRO-23).
+  const cloudWorkspace = store.selectedCloudWorkspace ?? null;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
-  const cloudKey = prefs.cloudSidebar && isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
+  const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
@@ -136,16 +151,12 @@ export function AppShell() {
       </div>
       <BypassDialog />
       <CloudShareDialogHost />
-      <SettleDialog />
-      <WorkspaceDeleteDialog />
+      <NewCloudWorkspaceDialogHost />
+      <WorkspaceRemoveDialog />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
-            <SettingsPage initialTab={settingsTab} onBack={() => setSettingsOpen(false)} />
-          </Suspense>
-        ) : cloudSessionOpen ? (
-          <Suspense fallback={viewFallback}>
-            <CloudSessionPage onBack={() => setCloudSessionOpen(false)} />
+            <SettingsPage initialTab={settingsTab} openRequest={settingsRequest} onBack={() => setSettingsOpen(false)} />
           </Suspense>
         ) : (
           <>
@@ -160,7 +171,6 @@ export function AppShell() {
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
                 onSearch={() => setPaletteOpen(true)}
-                onOpenCloudPage={() => setCloudSessionOpen(true)}
               />
             )}
 
@@ -179,7 +189,11 @@ export function AppShell() {
             ) : cloudWorkspace ? (
               <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
                 <Suspense fallback={viewFallback}>
-                  <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  {cloudWorkspace === DEV_RUNTIME_KEY ? (
+                    <DevRuntimeMain sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  ) : (
+                    <CloudWorkspaceMain workspaceKey={cloudWorkspace} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                  )}
                 </Suspense>
               </ErrorBoundary>
             ) : (
@@ -203,7 +217,7 @@ export function AppShell() {
         </ErrorBoundary>
       ) : null}
 
-      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onOpenCloudSession={() => setCloudSessionOpen(true)} onCreated={onCreated} /> : null}
+      {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
     </div>
   );
 }
@@ -248,7 +262,7 @@ function UnselectedWorkspace({
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && (
-            <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+            <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
               </Button>
@@ -265,7 +279,7 @@ function UnselectedWorkspace({
                   : "New session"}
           </span>
           {panelAvailable && (
-            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
+            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
               <Button variant="ghost" size="icon-sm" aria-label="Toggle panel" onClick={onTogglePanel}>
                 <PanelRight />
               </Button>

@@ -31,6 +31,7 @@ const mergedPr: PullRequest = {
 
 const cleanMerged: WorkspaceDisposition = {
   exists: true,
+  checked: true,
   isMain: false,
   branch: mergedPr.head,
   uncommitted: 0,
@@ -45,6 +46,8 @@ const cleanMerged: WorkspaceDisposition = {
   },
   prChecked: true,
   sessions: 0,
+  sessionTitles: [],
+  sessionIds: [],
 };
 
 function mockBackend(disposition: WorkspaceDisposition, shouldFailDisposition: () => boolean = () => false) {
@@ -98,7 +101,7 @@ describe("merged workspace action", () => {
 
     expect(openDelete).toHaveBeenCalledOnce();
     await waitFor(() => {
-      expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd });
+      expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd, fetch: false });
     });
     expect(screen.queryByRole("button", { name: "Settle worktree" })).toBeNull();
   });
@@ -125,7 +128,7 @@ describe("merged workspace action", () => {
 
     await screen.findByText("This branch has been merged.");
     await waitFor(() => {
-      expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd });
+      expect(mocks.invoke).toHaveBeenCalledWith("workspace_disposition", { projectPath, path: cwd, fetch: false });
     });
     expect(screen.queryByRole("button", { name: "Delete workspace" })).toBeNull();
   });

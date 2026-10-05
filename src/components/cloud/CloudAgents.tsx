@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "lucide-react";
-import type { WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
+import { LinkedText } from "@/components/chat/LinkedText";
 import { Composer } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { Button } from "@/components/ui/button";
 import { runningLimitReached } from "@/lib/runningLimit";
+import { useAccount } from "@/lib/account";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
+import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
+import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -40,8 +46,9 @@ import { TERMINAL_OUTBOX_STATES, type CloudAgentScope, type OutboxEntry, type Wa
 import type { ImageInput } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
 import { cn } from "@/lib/cn";
-import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
+import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, inputRefusalText, sharingKnown, effectiveYou, knownYou, notShared, presenceTab, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
+import { CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked } from "@/lib/cloudComposer";
 import { LeaseBar, NotesPanel, NotSharedNotice, useNowUntil } from "./CloudCollab";
 
 /**
@@ -56,6 +63,7 @@ export function CloudAgentsView({
   state,
   workspaceState,
   wakeWorkspace,
+  waking = false,
   collabKey,
   active: shown = true,
 }: {
@@ -66,12 +74,16 @@ export function CloudAgentsView({
   workspaceState: string | null;
   /** Raise the connection to `wake` after an interactive command. */
   wakeWorkspace?: () => void;
+  /** This window asked for the workspace to be woken (it was opened with a resume, or a command went out). */
+  waking?: boolean;
   /** Where this workspace's presence, notes and leases are kept (cloudCollab); defaults to its target key. */
   collabKey?: string;
   /** The agent view is the one on screen (presence reports its tab). */
   active?: boolean;
 }) {
   const snapshot = useCloudAgents(scope);
+  const { status: account } = useAccount();
+  const mayManage = mayStartCloudSessions(account, scope.organizationId);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +144,7 @@ export function CloudAgentsView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="cloud-agents">
-      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} />
+      <StatusBar state={state} tab={active} snapshot={snapshot} workspaceState={workspaceState} orgId={scope.organizationId} waking={waking} />
       <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-hairline px-3 py-1" role="tablist" aria-label="Agent tabs">
         {tabs.map((tab, index) => (
           <div key={tab.tabId} className="flex items-center" data-testid="cloud-agent-tab">
@@ -144,7 +156,7 @@ export function CloudAgentsView({
               onClick={() => setSelected(tab.tabId)}
             >
               <Bot className="size-3.5" /> {tabTitle(tab, index)}
-              {tab.info.status === "in_progress" && tab.info.process !== "exited" && <Loader2 className="size-3 animate-spin" aria-label="working" />}
+              {tab.info.status === "in_progress" && tab.info.process !== "exited" && !tab.info.signIn && <Loader2 className="size-3 animate-spin" aria-label="working" />}
               {tab.unread && <span className="size-1.5 rounded-full bg-accent" data-testid="cloud-agent-unread" aria-label="unread" />}
             </Button>
             {manage && (
@@ -162,6 +174,7 @@ export function CloudAgentsView({
       </div>
       {creating && manage && (
         <NewAgentForm
+          client={workspaceState === "suspended" || workspaceState === "archived" ? null : client}
           onCancel={() => setCreating(false)}
           onCreate={async (params) => {
             setError(null);
@@ -176,6 +189,11 @@ export function CloudAgentsView({
         />
       )}
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
+      {active?.info.signIn && (
+        <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
+          {signInMessage(active.info, mayManage)}
+        </p>
+      )}
       {active ? (
         <CloudAgentPane
           key={active.tabId}
@@ -220,20 +238,47 @@ function StatusBar({
   snapshot,
   workspaceState,
   orgId,
+  waking,
 }: {
   state: WorkspaceConnectionState;
   tab: CloudAgentTab | null;
   snapshot: CloudAgentsSnapshot;
   workspaceState: string | null;
   orgId: string;
+  waking: boolean;
 }) {
+  // Somebody is waking it: this window, or a command the server woke it for. A wake the server refused is not one.
+  const wakingNow = snapshot.wake !== "unavailable" && (waking || snapshot.wake === "queued" || snapshot.wake === "in-progress");
+  const asleep = stoppedAndStaying(state, workspaceState, wakingNow);
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-1 text-[11px] text-muted-foreground">
-      <Chip label="Connection" value={connectionLabel(state)} testId="cloud-agent-connection" />
+      <Chip label="Connection" value={connectionLabel(state, asleep ? (workspaceState === "archived" ? "archived" : "asleep") : false)} testId="cloud-agent-connection" />
       <Chip label="Agent" value={tab ? turnLabel(tab) : "No tab"} testId="cloud-agent-turn" />
-      <Chip label="Workspace" value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId))} testId="cloud-agent-provisioning" />
+      <Chip
+        label="Workspace"
+        value={provisioningLabel(workspaceState, snapshot.wake, state, snapshot.wake === "unavailable" && runningLimitReached(orgId), wakingNow)}
+        testId="cloud-agent-provisioning"
+      />
     </div>
   );
+}
+
+/** The connection is still trying to attach (each try reads "opening", then "waitingForRuntime" again). */
+function attaching(state: WorkspaceConnectionState): boolean {
+  return state.state === "opening" || state.state === "waitingForRuntime";
+}
+
+/**
+ * The workspace is stopped and nothing is waking it. The connection keeps
+ * trying in the background, which used to flip both chips every few seconds
+ * ("Asleep"/"Starting", "Checking"/"Waiting for runtime"); a stopped
+ * workspace reads one way until someone resumes it. An archived workspace
+ * opened to read is stopped the same way.
+ */
+export function stoppedAndStaying(state: WorkspaceConnectionState, workspaceState: string | null, waking: boolean): boolean {
+  if (waking || state.state === "connected") return false;
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  return state.state === "suspended" || (stopped && (attaching(state) || state.state === "idle"));
 }
 
 function Chip({ label, value, testId }: { label: string; value: string; testId: string }) {
@@ -244,7 +289,8 @@ function Chip({ label, value, testId }: { label: string; value: string; testId: 
   );
 }
 
-export function connectionLabel(state: WorkspaceConnectionState): string {
+export function connectionLabel(state: WorkspaceConnectionState, stopped: false | "asleep" | "archived" = false): string {
+  if (stopped) return stopped === "archived" ? "Offline (workspace archived)" : "Offline (workspace asleep)";
   switch (state.state) {
     case "connected":
       return "Live";
@@ -252,8 +298,8 @@ export function connectionLabel(state: WorkspaceConnectionState): string {
       return "Connecting";
     case "reconnecting":
       return "Reconnecting";
+    // One wait, however many times the connection asks again.
     case "opening":
-      return "Checking";
     case "waitingForRuntime":
       return "Waiting for runtime";
     case "suspended":
@@ -267,8 +313,44 @@ export function connectionLabel(state: WorkspaceConnectionState): string {
   }
 }
 
+/**
+ * What to tell someone whose agent has no way to sign in (PRO-78): what is
+ * wrong and who can fix it where. `mayManage` is the viewer's owner-or-admin
+ * role in the organization, null while it is not known.
+ */
+/** The server's words for a login it will not hand out. A word this app does not know is never shown as is. */
+const SIGN_IN_STATES: Record<string, string> = {
+  revoked: "was revoked",
+  disconnected: "was disconnected",
+  unavailable: "is not available",
+};
+
+export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, mayManage: boolean | null): string | null {
+  const signIn = info.signIn;
+  if (!signIn) return null;
+  const agent = cloudAgentLabel(info.harness);
+  const what =
+    signIn.reason === "token-expired"
+      ? `The organization's ${agent} login has expired`
+      : signIn.reason === "shared-use-policy"
+        ? `The organization's ${agent} login is limited to its owners and admins`
+        : signIn.state === "not-connected"
+          ? `${agent} isn't connected for this organization`
+          : `The organization's ${agent} login ${SIGN_IN_STATES[signIn.state] ?? "is not available"}`;
+  const fix =
+    signIn.reason === "shared-use-policy"
+      ? mayManage
+        ? `Allow it for the whole organization in ${AGENT_LOGIN_PLACE}.`
+        : "An owner or admin can allow it for the whole organization."
+      : mayManage
+        ? `Connect it in ${AGENT_LOGIN_PLACE}, then send again.`
+        : "Ask an owner or admin to connect it, then send again.";
+  return `Needs sign-in: ${what}, so it can't take prompts here. ${fix}`;
+}
+
 export function turnLabel(tab: CloudAgentTab): string {
   const { status, process } = tab.info;
+  if (tab.info.signIn) return "Needs sign-in";
   if (process === "exited" && (status === "in_progress" || status === "waiting")) return "Process ended mid-turn";
   if (process === "exited") return "Process ended";
   switch (status) {
@@ -288,13 +370,15 @@ export function turnLabel(tab: CloudAgentTab): string {
  * but when the organization's last list shows its running limit reached,
  * that is the likely reason, and stopping a workspace is the way out.
  */
-export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false): string {
+export function provisioningLabel(workspaceState: string | null, wake: WakeResult | null, state: WorkspaceConnectionState, runningLimitReached = false, waking = false): string {
   if (wake === "queued") return "Waking";
   if (wake === "in-progress" && state.state !== "connected") return "Starting";
   if (wake === "unavailable" && runningLimitReached) return "Cannot wake: the running limit is reached. Stop a workspace (commands stay queued)";
   if (wake === "unavailable") return "Cannot wake (commands stay queued)";
-  // A running workspace this window is still attaching to is Ready, not starting.
-  if (state.state === "waitingForRuntime" && workspaceState !== "ready") return "Starting";
+  // A running workspace this window is still attaching to is Ready, not starting,
+  // and a stopped one nobody is waking stays Asleep.
+  const stopped = workspaceState === "suspended" || workspaceState === "archived";
+  if (attaching(state) && workspaceState !== "ready" && (!stopped || waking)) return "Starting";
   if (state.state === "connected") return "Ready";
   switch (workspaceState) {
     case "suspended":
@@ -314,19 +398,22 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
 }
 
 function NewAgentForm({
+  client,
   onCreate,
   onCancel,
 }: {
+  client: WorkspaceRpcClient | null;
   onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => Promise<void>;
   onCancel: () => void;
 }) {
   const [agent, setAgent] = useState("claude");
-  const models = useModels(agent);
+  const { models, refresh } = usePickerModels(useModels(agent), true, client, agent);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
   const [busy, setBusy] = useState(false);
-  const chosen = models.find((m) => m.id === model) ?? models.find((m) => m.isDefault);
+  const modelId = models.some((m) => m.id === model) ? model : "";
+  const chosen = models.find((m) => m.id === modelId) ?? models.find((m) => m.isDefault);
   const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
   return (
     <form
@@ -335,18 +422,18 @@ function NewAgentForm({
       onSubmit={(event) => {
         event.preventDefault();
         setBusy(true);
-        void onCreate({ agent, model: model || undefined, effort: effort || undefined, mode }).finally(() => setBusy(false));
+        void onCreate({ agent, model: modelId || undefined, effort: effort || undefined, mode }).finally(() => setBusy(false));
       }}
     >
       <select aria-label="Agent" className={select} value={agent} onChange={(e) => (setAgent(e.target.value), setModel(""), setEffort(""))}>
         <option value="claude">Claude</option>
         <option value="codex">Codex</option>
       </select>
-      <select aria-label="Model" className={select} value={model} onChange={(e) => setModel(e.target.value)}>
+      <select aria-label="Model" onFocus={refresh} onPointerDown={refresh} className={select} value={modelId} onChange={(e) => setModel(e.target.value)}>
         <option value="">Default model</option>
         {models.map((m) => (
           <option key={m.id} value={m.id}>
-            {m.label}
+            {modelOptionText(m, models)}
           </option>
         ))}
       </select>
@@ -381,6 +468,8 @@ const KEY_MISSING = "cloud_agent_key_missing";
 const KEY_STORE_UNAVAILABLE = "cloud_agent_key_store_unavailable";
 
 export function commandError(e: unknown): string {
+  // Why a message's images did not go, already in words.
+  if (e instanceof CloudImageError) return e.message;
   const code = errorText(e);
   if (code === KEY_MISSING) return "Connect to this workspace once so this device can encrypt commands for it.";
   // The key is there but could not be read: connecting again would not help.
@@ -493,13 +582,16 @@ function CloudAgentPane({
   );
 
   const send = async (text: string, images: ImageInput[]) => {
-    if (images.length) {
-      setError("Images cannot be sent to cloud agent tabs yet.");
-      throw new Error("images unsupported");
+    // Images are uploaded straight to the runtime: a stopped workspace is started for them and the message stays here.
+    const imagesBlocked = images.length ? cloudImagesBlocked(connected ? client : null, sleeping) : null;
+    if (imagesBlocked) {
+      setError(imagesBlocked);
+      if (imagesBlocked === CLOUD_IMAGES_NEED_RUNNING && sleeping) wakeWorkspace?.();
+      throw new CloudImageError(imagesBlocked);
     }
     // Settings chosen while this person could approve are not sent once they cannot.
     if (!mayConfigure) discardPendingConfig(scope, tab.tabId);
-    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null));
+    await interactive(() => sendToCloudAgent(scope, tab.tabId, text, connected ? client : null, images));
   };
 
   const steer = async () => {
@@ -609,6 +701,13 @@ function CloudAgentPane({
                 )}
                 <Composer
                   tab={entry}
+                  commands={
+                    info.sessionId && !blocked
+                      ? cloudComposerCommands({ workspaceKey: collabKey, sessionId: info.sessionId, tabId: tab.tabId, harness: entry.harness, client: connected ? client : null, you })
+                      : null
+                  }
+                  files={info.sessionId && !blocked ? cloudComposerFiles({ workspaceKey: collabKey, sessionId: info.sessionId, client: connected ? client : null }) : null}
+                  remote
                   busy={live}
                   draft={draft}
                   onDraftChange={changeDraft}
@@ -618,6 +717,9 @@ function CloudAgentPane({
                   onSetModel={(model) => configure({ model })}
                   onSetEffort={(effort) => configure({ effort })}
                   onSetMode={(mode) => configure({ mode })}
+                  reportedModel={transcript.model}
+                  modelsAreLocal={false}
+                  modelClient={sleeping || !connected ? null : client}
                   disabled={!!blocked}
                   settingsLockedReason={mayConfigure ? null : SETTINGS_LOCKED_REASON}
                   settingsNote={tab.settingsIgnored ? SETTINGS_IGNORED_REASON : tab.pendingConfig && mayConfigure ? SETTINGS_WITH_NEXT_MESSAGE : null}
@@ -671,7 +773,8 @@ export function CloudOutbox({
       {followUps.map((f) => (
         <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
           <span className="text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
-          <span className="min-w-0 truncate">{f.text}</span>
+          {/* A queued message of images alone has no text to show. */}
+          {f.text ? <span className="min-w-0 truncate">{f.text}</span> : <span className="min-w-0 truncate text-muted-foreground">(images)</span>}
           <span className="ml-auto text-faint">sends when the agent finishes its turn</span>
         </li>
       ))}
@@ -685,7 +788,12 @@ export function CloudOutbox({
             data-state={entry.state}
           >
             <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text && <span className="min-w-0 truncate">{entry.text}</span>}
+            {entry.text ? <span className="min-w-0 truncate"><LinkedText text={entry.text} /></span> : null}
+            {entry.kind === "send" && (entry.images || !entry.text) ? (
+              <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
+                {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}
+              </span>
+            ) : null}
             <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
               <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>
@@ -705,6 +813,10 @@ function outboxStateText(entry: OutboxEntry, nameOf: (userId: string | null | un
     return `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving — your message was not sent`;
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return "Not sent: your access changed";
+  // The runtime could not write its record of the command (a full disk, most often), so it did not touch the agent.
+  if (entry.state === "rejected" && entry.category === "receipt-store-failed") return "Not sent: the workspace could not record it (its disk may be full)";
+  const refused = entry.state === "rejected" ? inputRefusalText(entry.category, entry.receipt) : null;
+  if (refused) return refused;
   const text = STATE_TEXT[entry.state] ?? entry.state;
   return entry.state === "rejected" && entry.category ? `${text} (${entry.category})` : text;
 }

@@ -4,6 +4,8 @@ import { cn } from "@/lib/cn";
 import { callTarget, groupTargets, type ToolCall } from "@/lib/transcript";
 import { fileName, shortPath } from "@/lib/paths";
 import { DiffBlock, UnifiedBlock } from "./DiffBlock";
+import { LinkedText } from "./LinkedText";
+import type { ChatLinkContext } from "@/lib/chatLinks";
 
 function iconFor(toolType: string) {
   switch (toolType) {
@@ -69,7 +71,7 @@ function targetOf(call: ToolCall, cwd?: string): string {
   return t;
 }
 
-export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: string; defaultOpen?: boolean }) {
+export function ToolCallRow({ call, cwd, defaultOpen, linkContext }: { call: ToolCall; cwd?: string; defaultOpen?: boolean; linkContext?: ChatLinkContext }) {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const done = !!call.result || !!call.abandoned;
   const pending = !done;
@@ -81,15 +83,14 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
 
   return (
     <div className="group/tool">
-      <button
-        type="button"
-        disabled={!hasBody || isWholeRead}
-        onClick={() => setOpen((o) => !o)}
+      <div
+        onClick={() => { if (hasBody && !isWholeRead) setOpen((o) => !o); }}
         className={cn(
-          "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+          "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px]",
           hasBody && !isWholeRead && "hover:bg-veil-raised",
         )}
       >
+        <button type="button" disabled={!hasBody || isWholeRead} onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={`${open ? "Collapse" : "Expand"} ${toolVerb(call.name, done)} ${target}`} className="flex shrink-0 items-center gap-2 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {pending ? (
           <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
         ) : failed ? (
@@ -100,14 +101,15 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
         <span className={cn("shrink-0", pending ? "text-shimmer" : failed ? "text-destructive" : "text-muted-foreground")}>
           {call.abandoned && !call.result ? "Interrupted" : toolVerb(call.name, done)}
         </span>
+        </button>
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-foreground/90" title={target}>
-          {target}
+          <LinkedText text={target} context={linkContext} />
         </span>
         {call.edits?.length ? <EditCounts edits={call.edits} /> : null}
         {hasBody && !isWholeRead && (
-          <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
+          <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse tool output" : "Expand tool output"} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40"><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
         )}
-      </button>
+      </div>
       {open && hasBody && (
         <div className="mb-1 ml-6 mr-1">
           {call.edits?.length ? (
@@ -124,8 +126,8 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
           {(call.name === "Bash" || call.name === "shell") && (
             <pre className="mt-1 max-h-72 overflow-auto scrollbar-thin rounded-md bg-well px-2.5 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap select-text">
               <span className="text-faint">$ </span>
-              {callTarget(call)}
-              {call.result?.text ? `\n${call.result.text}` : ""}
+              <LinkedText text={callTarget(call) ?? ""} context={linkContext} />
+              {call.result?.text ? <><br /><LinkedText text={call.result.text} context={linkContext} /></> : null}
             </pre>
           )}
           {call.name !== "Bash" && call.name !== "shell" && call.result?.text && (
@@ -135,7 +137,7 @@ export function ToolCallRow({ call, cwd, defaultOpen }: { call: ToolCall; cwd?: 
                 failed && "text-destructive",
               )}
             >
-              {call.result.text.slice(0, 20000)}
+              <LinkedText text={call.result.text.slice(0, 20000)} context={linkContext} />
             </pre>
           )}
         </div>
@@ -158,7 +160,7 @@ function EditCounts({ edits }: { edits: { oldText?: string; newText?: string }[]
   );
 }
 
-export function ToolGroupRow({ name, calls, cwd }: { name: string; calls: ToolCall[]; cwd?: string }) {
+export function ToolGroupRow({ name, calls, cwd, linkContext }: { name: string; calls: ToolCall[]; cwd?: string; linkContext?: ChatLinkContext }) {
   const [open, setOpen] = useState(false);
   const done = calls.every((c) => c.result || c.abandoned);
   const targets = groupTargets(calls);
@@ -171,11 +173,11 @@ export function ToolGroupRow({ name, calls, cwd }: { name: string; calls: ToolCa
   const anyFailed = calls.some((c) => c.result?.isError);
   return (
     <div>
-      <button
-        type="button"
+      <div
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-veil-raised outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] hover:bg-veil-raised"
       >
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={`${open ? "Collapse" : "Expand"} ${label}`} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
         {!done ? (
           <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
         ) : anyFailed ? (
@@ -183,18 +185,19 @@ export function ToolGroupRow({ name, calls, cwd }: { name: string; calls: ToolCa
         ) : (
           <Icon className="size-3.5 shrink-0 text-muted-foreground" />
         )}
-        <span className={cn("min-w-0 flex-1 truncate", !done ? "text-shimmer" : "text-muted-foreground")}>{label}</span>
+        </button>
+        <span className={cn("min-w-0 flex-1 truncate", !done ? "text-shimmer" : "text-muted-foreground")}><LinkedText text={label} context={linkContext} /></span>
         {targets.length > 1 && (
           <span className="hidden max-w-[40%] truncate font-mono text-[11px] text-faint sm:inline">
             {targets.map((t) => fileName(t)).slice(0, 4).join(", ")}
           </span>
         )}
-        <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
-      </button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse tool group" : "Expand tool group"} className="rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40"><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
+      </div>
       {open && (
         <div className="ml-3 border-l border-hairline pl-1">
           {calls.map((c) => (
-            <ToolCallRow key={c.callId} call={c} cwd={cwd} />
+            <ToolCallRow key={c.callId} call={c} cwd={cwd} linkContext={linkContext} />
           ))}
         </div>
       )}

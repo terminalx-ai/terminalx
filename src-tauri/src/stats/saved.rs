@@ -49,6 +49,7 @@ pub struct StatsUsageState {
     pub generation: u64,
     pub snapshot: Option<StatsUsageSnapshot>,
     pub activity: Option<super::AppStats>,
+    pub activity_error: Option<String>,
     pub refreshing: bool,
     pub error: Option<String>,
 }
@@ -58,13 +59,17 @@ impl StatsUsageState {
     // the independently committed lifetime counters with an older app summary.
     fn with_activity(mut self, activity: Result<super::AppStats>) -> Self {
         match activity {
-            Ok(activity) => self.activity = Some(activity),
+            Ok(activity) => {
+                self.activity = Some(activity);
+                self.activity_error = None;
+            }
             Err(error) => {
-                let message = format!("Activity history unavailable: {error:#}");
-                self.error = Some(match self.error {
-                    Some(previous) => format!("{previous}; {message}"),
-                    None => message,
-                });
+                self.activity_error =
+                    Some(if error.is::<crate::store::activity::OwnershipConflict>() {
+                        crate::store::activity::OwnershipConflict.to_string()
+                    } else {
+                        format!("Activity history unavailable: {error:#}")
+                    });
             }
         }
         if let (Some(snapshot), Some(activity)) = (self.snapshot.as_mut(), self.activity.as_ref()) {
@@ -103,6 +108,7 @@ impl StatsUsageStore {
                 generation: state.view.generation + 1,
                 snapshot,
                 activity: None,
+                activity_error: None,
                 refreshing: false,
                 error,
             };
@@ -129,13 +135,23 @@ impl StatsUsageStore {
         Ok(self.attach_activity(view, super::app_stats))
     }
 
-    fn attach_activity(&self, mut view: StatsUsageState, activity: impl FnOnce() -> Result<super::AppStats>) -> StatsUsageState {
+    fn attach_activity(
+        &self,
+        mut view: StatsUsageState,
+        activity: impl FnOnce() -> Result<super::AppStats>,
+    ) -> StatsUsageState {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Read under the publication lock so an older concurrent response
         // cannot overwrite a newer last-known activity summary.
         let activity = activity();
         if state.view.scope == view.scope {
             view.activity = state.view.activity.clone();
+            if activity.is_err() && view.activity.is_none() {
+                view.activity = state
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| crate::store::activity::saved_summary(&scope.root));
+            }
             view = view.with_activity(activity);
             // Keep the latest known counters across failed reads and provider
             // publications; neither depends on a valid provider display cache.
@@ -190,6 +206,16 @@ impl StatsUsageStore {
             return;
         }
         let result = result.and_then(|mut snapshot| {
+            // Provider candidates do not own activity. Preserve last-known
+            // counters even when this refresh cannot acquire the activity lease.
+            if let Some(activity) = state
+                .view
+                .activity
+                .as_ref()
+                .or_else(|| state.view.snapshot.as_ref().map(|saved| &saved.app))
+            {
+                snapshot.app = activity.clone();
+            }
             snapshot.updated_at = super::now_ms();
             save(&scope, &snapshot)?;
             Ok(snapshot)
@@ -303,9 +329,8 @@ mod tests {
         assert!(current.refreshing);
         let failed = current.with_activity(Err(anyhow::anyhow!("unreadable ledger")));
         assert_eq!(failed.snapshot.unwrap().app.prs_created, 9);
-        let error = failed.error.unwrap();
-        assert!(error.contains("provider scan failed"));
-        assert!(error.contains("unreadable ledger"));
+        assert!(failed.error.unwrap().contains("provider scan failed"));
+        assert!(failed.activity_error.unwrap().contains("unreadable ledger"));
     }
 
     #[test]
@@ -314,17 +339,83 @@ mod tests {
         let store = StatsUsageStore::default();
         let scope = scope(dir.path());
         let empty = store.read_at(scope.clone()).unwrap();
-        let current = store.attach_activity(empty, || Ok(super::super::AppStats {
-            agents_spawned: 42,
-            prs_created: 9,
-            ..Default::default()
-        }));
+        let current = store.attach_activity(empty, || {
+            Ok(super::super::AppStats {
+                agents_spawned: 42,
+                prs_created: 9,
+                ..Default::default()
+            })
+        });
         assert!(current.snapshot.is_none());
         assert_eq!(current.activity.unwrap().agents_spawned, 42);
-        let failed = store.attach_activity(store.read_at(scope).unwrap(), || Err(anyhow::anyhow!("unreadable ledger")));
+        let failed = store.attach_activity(store.read_at(scope).unwrap(), || {
+            Err(anyhow::anyhow!("unreadable ledger"))
+        });
         assert!(failed.snapshot.is_none());
         assert_eq!(failed.activity.unwrap().prs_created, 9);
-        assert!(failed.error.unwrap().contains("unreadable ledger"));
+        assert!(failed.activity_error.unwrap().contains("unreadable ledger"));
+    }
+
+    #[test]
+    fn ownership_conflict_keeps_saved_activity_and_allows_provider_refresh_then_recovers() {
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let scope = Scope::current().unwrap();
+        let lease = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("stats-activity.lock"))
+            .unwrap();
+        lease.try_lock().unwrap();
+        let ledger = serde_json::json!({
+            "schemaVersion": 1, "generation": 1, "agentsSpawned": 7,
+            "agentTimeMs": 1000, "firstActivityAt": 1700000000000_i64,
+            "prs": [], "recovered": [], "recoveryVersion": 1,
+            "recoveryBefore": 1700000000000_i64, "events": []
+        });
+        for file in ["stats-activity.json", "stats-activity.backup.json"] {
+            fs::write(root.join(file), serde_json::to_vec(&ledger).unwrap()).unwrap();
+        }
+        let store = Arc::new(StatsUsageStore::default());
+        let first = store.read().unwrap();
+        assert!(first.snapshot.is_none());
+        assert_eq!(first.activity.as_ref().unwrap().agents_spawned, 7);
+        assert!(first.error.is_none());
+        assert!(first
+            .activity_error
+            .as_ref()
+            .unwrap()
+            .contains("Quit the other runtime"));
+        for _ in 0..2 {
+            let view = store.read().unwrap();
+            store
+                .start(scope.clone(), &view.scope, view.generation, || {
+                    Ok(snapshot(42))
+                })
+                .unwrap();
+            settled(&store, &scope);
+            let view = store.read().unwrap();
+            assert!(view.error.is_none());
+            assert!(view.activity_error.is_some());
+            assert_eq!(view.snapshot.as_ref().unwrap().total_tokens, 42);
+            assert_eq!(view.snapshot.as_ref().unwrap().app.agents_spawned, 7);
+        }
+        assert_eq!(load(&scope).unwrap().unwrap().app.agents_spawned, 7);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(root.join("stats-activity.json")).unwrap()
+            )
+            .unwrap(),
+            ledger
+        );
+        // Retry reopens the ledger once the other runtime's lease is released.
+        drop(lease);
+        let recovered = store.read().unwrap();
+        assert!(recovered.activity_error.is_none());
+        assert!(recovered.error.is_none());
+        assert_eq!(recovered.activity.unwrap().agents_spawned, 7);
     }
 
     #[test]
@@ -387,13 +478,19 @@ mod tests {
     }
 
     #[test]
-    fn both_provider_scans_wait_for_app_reads_before_persistence_and_publication() {
+    fn provider_publication_preserves_independently_read_activity() {
         use super::super::{scan_snapshot_with, AppStats, Provider, UsageScope};
         let dir = tempfile::tempdir().unwrap();
         let scope = scope(dir.path());
         save(&scope, &snapshot(17)).unwrap();
         let store = Arc::new(StatsUsageStore::default());
         let first = store.read_at(scope.clone()).unwrap();
+        store.attach_activity(first.clone(), || {
+            Ok(super::super::AppStats {
+                agents_spawned: 42,
+                ..Default::default()
+            })
+        });
         let root = scope.root.clone();
         let (ready, reached_app_reads) = mpsc::channel();
         let (release, app_reads) = mpsc::channel();
@@ -432,7 +529,7 @@ mod tests {
         assert_eq!(load(&scope).unwrap().unwrap().updated_at, 1234);
         release.send(()).unwrap();
         let completed = settled(&store, &scope).snapshot.unwrap();
-        assert_eq!(completed.app.agents_spawned, 99);
+        assert_eq!(completed.app.agents_spawned, 42);
         let persisted = load(&scope).unwrap().unwrap();
         assert_eq!(
             serde_json::to_value(&completed).unwrap(),

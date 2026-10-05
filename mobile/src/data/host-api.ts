@@ -1,6 +1,6 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Crypto from "expo-crypto";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
+import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
 
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
@@ -24,36 +24,98 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
 export class HostApi {
   private readonly clientId = `mobile-${Crypto.randomUUID()}`;
 
+  private capabilities?: Promise<{ transcript?: number; conditionalLists?: number }>;
+  private lists = new Map<string, { version: string; value: unknown }>();
+  private pendingLists = new Map<string, Promise<unknown>>();
+
   constructor(private readonly connection: HostConnection) {}
 
-  async summaries(): Promise<SessionSummary[] | null> {
-    const result = await this.connection.request<unknown>("sessions.summaries");
+  resetConnection(hostChanged = false): void {
+    this.capabilities = undefined;
+    if (hostChanged) { this.lists = new Map(); this.pendingLists = new Map(); }
+  }
+
+  features(): Promise<{ transcript?: number; conditionalLists?: number }> {
+    if (this.capabilities) return this.capabilities;
+    const pending = this.connection.request<{ transcript?: number; conditionalLists?: number }>("sync.capabilities")
+      .then((result) => result.ok ? result.value : {})
+      .catch((cause) => { if (this.capabilities === pending) this.capabilities = undefined; throw cause; });
+    this.capabilities = pending;
+    return pending;
+  }
+
+  private async list(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    const key = JSON.stringify([method, params]);
+    const pending = this.pendingLists.get(key);
+    if (pending) return pending;
+    const cache = this.lists;
+    const requests = this.pendingLists;
+    const task = (async () => {
+      const supported = (await this.features()).conditionalLists === 1;
+      if (cache !== this.lists) return null;
+      const previous = cache.get(key);
+      const result = await this.connection.request<Record<string, unknown>>(method, supported && previous ? { ...params, version: previous.version } : params);
+      if (!result.ok) return null;
+      if (result.value.notModified === true) return previous?.value ?? null;
+      if (supported && typeof result.value.version === "string") cache.set(key, { version: result.value.version, value: result.value });
+      return result.value;
+    })();
+    requests.set(key, task);
+    try { return await task; } finally { requests.delete(key); }
+  }
+
+  async syncTranscript(sessionId: string, tabId: string, cursor?: SyncCursor): Promise<SyncPage> {
+    const result = await this.connection.request<unknown>("session.sync", { sessionId, tabId, ...(cursor ? { cursor } : {}) });
+    if (!result.ok) throw new Error(result.refusal.message);
+    const page = result.value as SyncPage;
+    if (page?.deleted === true) return page;
+    if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
+    if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
+    return page;
+  }
+
+  /** What the computer calls itself (PRO-87). Null from a desktop that predates the question, or when it has no name to give. */
+  async describe(): Promise<string | null> {
+    const result = await this.connection.request<unknown>("host.describe");
     if (!result.ok) return null;
-    const value = result.value as { sessions?: unknown };
+    const name = (result.value as { name?: unknown } | null)?.name;
+    return typeof name === "string" ? name : null;
+  }
+
+  /** Ask the computer to drop this phone from its paired devices. Best effort: true only when it said it did. */
+  async forgetPairing(): Promise<boolean> {
+    const result = await this.connection.request<unknown>("pairing.forget");
+    return result.ok && (result.value as { forgotten?: unknown } | null)?.forgotten === true;
+  }
+
+  async summaries(): Promise<SessionSummary[] | null> {
+    const value = await this.list("sessions.summaries") as { sessions?: unknown } | null;
     return Array.isArray(value?.sessions) ? value.sessions.filter(isSessionSummary) : null;
   }
 
-  async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean } | null> {
-    // Load the newest turn first and page backwards. Older Macs don't bound
+  async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
+    // Load the newest turn first and page backwards. Older Macs do not bound
     // transcript bytes, so asking for many tool-heavy turns can close the socket.
     const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 1 });
-    if (!result.ok) return null;
+    if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
-    if (!Array.isArray(value?.events)) return null;
-    return { events: value.events.filter(isAgentEvent), hasMore: value.hasMore === true };
+    if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {
+      throw new Error("The Mac returned an invalid transcript page. Try loading it again.");
+    }
+    return { events: value.events, hasMore: value.hasMore };
   }
 
-  subscribeSession(tabId: string, listener: (event: AgentEvent) => void): () => void {
+  subscribeSession(tabId: string, listener: (event: AgentEvent) => void, ready?: () => void): () => void {
     return this.connection.subscribe("session.subscribe", { tabId }, (result) => {
+      if (result && typeof result === "object" && "subscriptionId" in result) ready?.();
       const event = result && typeof result === "object" && "event" in result ? (result as { event?: unknown }).event : result;
       if (isAgentEvent(event) && event.tabId === tabId) listener(event);
     });
   }
 
   async listNotes(sessionId: string): Promise<ChatNote[]> {
-    const result = await this.connection.request<unknown>("chat.list", { worktreeId: sessionId, limit: 100 });
-    if (!result.ok) return [];
-    const messages = (result.value as { messages?: unknown })?.messages;
+    const value = await this.list("chat.list", { worktreeId: sessionId, limit: 100 }) as { messages?: unknown } | null;
+    const messages = value?.messages;
     return Array.isArray(messages) ? messages.filter(isChatNote).sort((left, right) => left.createdAt - right.createdAt) : [];
   }
 
@@ -128,21 +190,7 @@ export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): Age
   return mergeAgentEvents(existing, incoming);
 }
 
-export async function readTranscriptCache(hostId: string, sessionId: string, tabId: string): Promise<AgentEvent[]> {
-  try {
-    const raw = await AsyncStorage.getItem(cacheKey(hostId, sessionId, tabId));
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter(isAgentEvent) : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function writeTranscriptCache(hostId: string, sessionId: string, tabId: string, events: AgentEvent[]): Promise<void> {
-  await AsyncStorage.setItem(cacheKey(hostId, sessionId, tabId), JSON.stringify(events.slice(-500)));
-}
-
-const cacheKey = (hostId: string, sessionId: string, tabId: string) => `terminalx:transcript:${hostId}:${sessionId}:${tabId}`;
+export type SyncPage = { deleted: true } | { deleted?: false; events: AgentEvent[]; cursor: SyncCursor; reset: boolean; hasMore: boolean; hasEarlier: boolean };
 
 function isSessionSummary(value: unknown): value is SessionSummary {
   if (!value || typeof value !== "object") return false;
@@ -154,12 +202,6 @@ function isSummaryTab(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return typeof record.id === "string" && typeof record.harness === "string" && ["idle", "in_progress", "completed", "waiting"].includes(String(record.status));
-}
-
-function isAgentEvent(value: unknown): value is AgentEvent {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.id === "string" && typeof record.sessionId === "string" && typeof record.tabId === "string" && typeof record.harness === "string" && Number.isSafeInteger(record.seq) && typeof record.ts === "string" && !!record.payload && typeof record.payload === "object" && typeof (record.payload as Record<string, unknown>).type === "string";
 }
 
 function isChatNote(value: unknown): value is ChatNote {

@@ -8,6 +8,7 @@ import {
   createWorkspace,
   launchInput,
   phaseOf,
+  preflightCreate,
   repositoriesInput,
   savePending,
   usableProviders,
@@ -53,9 +54,25 @@ function usable(node: CloudWorkspaceNode): boolean {
   return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && phaseOf(item) !== "failed";
 }
 
-/** Where Start runs a new session of this project. Workspaces are already ordered by last activity. */
+/**
+ * Whether this person manages the workspace, which is what adding a session
+ * to it (and resuming it) takes: an owner or admin for any workspace, a
+ * member for the ones they created (PRO-73). The list's role says so; a
+ * server that reports no role says it by the attachment it would grant.
+ */
+function manages(node: CloudWorkspaceNode): boolean {
+  const { workspace } = node.item;
+  return workspace.you ? workspace.you.role === "manager" : workspace.authority !== "participate";
+}
+
+/**
+ * Where Start runs a new session of this project. Workspaces are already
+ * ordered by last activity. Only one this person manages is reused or woken:
+ * a member's new session never lands in, or starts, someone else's
+ * workspace; with none of their own it creates one.
+ */
 export function planCloudStart(project: CloudProject): CloudStartPlan {
-  const candidates = project.workspaces.filter(usable);
+  const candidates = project.workspaces.filter((node) => usable(node) && manages(node));
   const running = candidates.find((node) => node.item.workspace.state === "ready" && !isChanging(node.item));
   if (running) return { kind: "reuse", node: running };
   // Starting or resuming: waiting on it costs nothing more than it already does.
@@ -82,7 +99,19 @@ function worktreeRefused(error: unknown): boolean {
  * A new session in an existing workspace: connect (or wake it once), then
  * `session.create`. Returns the new session's key, which is selected.
  */
-export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "reuse" | "wake" }>, request: CloudSessionRequest): Promise<string> {
+export async function startInWorkspace(
+  plan: Extract<CloudStartPlan, { kind: "reuse" | "wake" }>,
+  request: CloudSessionRequest,
+  /**
+   * `select: false` leaves the window where it is (the CLI starts sessions
+   * without moving the reader). `wakeIfStopped` decides what happens when the
+   * list said running and the runtime turns out to be stopped: the app's form
+   * wakes it (starting a session there is the person's own action); a caller
+   * that was not told to wake passes false, or a question to ask first, and
+   * gets `cloud_workspace_stopped` instead.
+   */
+  options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>) } = {},
+): Promise<string> {
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
   const target = { orgId, workspaceId };
@@ -95,6 +124,8 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
     } catch (error) {
       // The list said running, the runtime says stopped: starting a session is an action, so wake it (once).
       if (!(error instanceof Error) || error.message !== "cloud_workspace_stopped") throw error;
+      const wake = options.wakeIfStopped ?? true;
+      if (!(typeof wake === "function" ? await wake() : wake)) throw error;
       lease.release();
       lease = await wakeCloudConnection(target);
       client = await waitCloudConnected(lease, WAKE_WITHIN_MS);
@@ -122,7 +153,7 @@ export async function startInWorkspace(plan: Extract<CloudStartPlan, { kind: "re
     // The list follows `session.sessions` on session/2 runtimes; read it now either way so the row is there.
     void refreshCloudSessions(target, client).catch(() => undefined);
     const key = cloudSessionKey(orgId, workspaceId, sessionId);
-    selectCloudSession(key);
+    if (options.select !== false) selectCloudSession(key);
     return key;
   } finally {
     lease.release();
@@ -155,7 +186,7 @@ function cloneUrlOf(project: CloudProject): string | null {
 }
 
 /** Providers in the order the desktop prefers them when the organization's provider list cannot be read. */
-const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "local-docker"];
+const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", "hetzner", "local-docker"];
 
 /**
  * The provider a new workspace in this organization uses. In the default
@@ -212,11 +243,7 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
   const errors = Object.values(validateForm(form));
   if (errors[0]) throw new CreateRefused("cloud_workspace_form_invalid", errors[0]);
   const repositories = repositoriesInput(form);
-  if (repositories.length) {
-    const preflight = await api.cloudWorkspacePreflight(repositories, org);
-    const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
-    if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
-  }
+  await preflightCreate(api, form, org);
   const setup = provider.setup ?? (await api.cloudWorkspaceSetup(provider.id, org));
   const quote = await api.cloudWorkspaceQuote({ provider: provider.id, ...setup.defaults }, org);
   const idempotencyKey = crypto.randomUUID();
@@ -240,14 +267,15 @@ export async function prepareCloudCreate(project: CloudProject, request: CloudSe
  * Create the confirmed workspace (the same request and key on a retry), then
  * select its first session once its runtime names it.
  */
-export async function confirmCloudCreate(prepared: PreparedCreate): Promise<CloudWorkspaceSnapshot> {
+export async function confirmCloudCreate(prepared: PreparedCreate, options: { follow?: boolean } = {}): Promise<CloudWorkspaceSnapshot> {
   const snapshot = await createWorkspace(api, prepared.form, {
     orgId: cloudOrgArg(prepared.orgId),
     pending: prepared.pending,
     onPending: (pending) => savePending(prepared.orgId, pending),
     onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
   });
-  followLaunch(prepared.orgId, snapshot.workspace.id, prepared.project.key);
+  // `follow: false` (the CLI) leaves the window's selection alone.
+  if (options.follow !== false) followLaunch(prepared.orgId, snapshot.workspace.id, prepared.project.key);
   return snapshot;
 }
 

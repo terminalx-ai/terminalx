@@ -13,6 +13,8 @@ import type {
   CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import { roleRefusedMessage } from "@/lib/accountRoles";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { formatDuration } from "@/lib/time";
 
 /**
  * Creating a cloud workspace from repositories and a first prompt (PRO-21,
@@ -91,9 +93,29 @@ export function launchInput(form: CreateForm): CloudWorkspaceLaunchInput {
   };
 }
 
+/**
+ * Check the repositories and, when there is a first prompt, that the
+ * organization has a login for its agent (PRO-78): a prompt sent to an agent
+ * at its sign-in screen is never read. A workspace without a first prompt
+ * needs no agent login. Throws the refusal; nothing is quoted or created.
+ */
+export async function preflightCreate(api: Pick<CreateApi, "cloudWorkspacePreflight">, form: CreateForm, orgId: string | null): Promise<void> {
+  const repositories = repositoriesInput(form);
+  const agent = form.prompt.trim() ? form.agent : null;
+  if (!repositories.length && !agent) return;
+  const preflight = await api.cloudWorkspacePreflight(repositories, orgId, agent);
+  // An `agent-credential` check counts only when it names this agent: an
+  // older API sends one about the setup's credential ids on every desktop
+  // create, which says nothing about the organization's logins.
+  const failed = preflight.checks.find((check) => check.status === "failed" && (check.kind !== "agent-credential" || (agent !== null && check.agent === agent)));
+  if (!failed) return;
+  if (failed.kind === "agent-credential") throw new CreateRefused("cloud_workspace_agent_credential_required", agent);
+  throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
+}
+
 /** What the API calls look like to the flow; the page passes `api`. */
 export interface CreateApi {
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) => Promise<CloudWorkspacePreflight>;
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null, agent?: string | null) => Promise<CloudWorkspacePreflight>;
   cloudWorkspaceSetup: (provider: CloudWorkspaceProviderId, orgId?: string | null) => Promise<CloudWorkspaceSetup>;
   cloudWorkspaceQuote: (input: CloudWorkspaceQuoteInput, orgId?: string | null) => Promise<CloudWorkspaceQuote>;
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) => Promise<CloudWorkspaceSnapshot>;
@@ -148,11 +170,9 @@ export async function createWorkspace(
     const first = Object.values(errors)[0];
     if (first) throw new CreateRefused("cloud_workspace_form_invalid", first);
     const repositories = repositoriesInput(form);
-    if (repositories.length) {
+    if (repositories.length || form.prompt.trim()) {
       onStep?.("checking");
-      const preflight = await api.cloudWorkspacePreflight(repositories, options.orgId ?? null);
-      const failed = preflight.checks.find((check) => check.status === "failed" && check.kind !== "agent-credential");
-      if (failed) throw new CreateRefused(failed.errorCode ?? "cloud_workspace_request_invalid", failed.cloneUrl);
+      await preflightCreate(api, form, options.orgId ?? null);
     }
     onStep?.("quoting");
     const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
@@ -347,14 +367,32 @@ export function launchLatency(item: CloudWorkspaceListItem | CloudWorkspaceSnaps
   return timings.runningAt - timings.requestedAt;
 }
 
+/** Past this, the time since the request is not how long one start took. */
+const LAUNCH_LATENCY_SHOWN_MS = 10 * 60 * 1000;
+
+/**
+ * "Ready in 6s", for a launch that started in one go. The server only keeps
+ * when the launch was first asked for, so a launch that failed and was
+ * retried measures the failed attempt and the wait before the retry too
+ * ("Ready in 1032.4 s"); a figure that long says nothing true and is left out.
+ */
+export function launchLatencyText(item: CloudWorkspaceListItem | CloudWorkspaceSnapshot): string | null {
+  const latency = launchLatency(item);
+  if (latency === null || latency < 0 || latency > LAUNCH_LATENCY_SHOWN_MS) return null;
+  return `Ready in ${formatDuration(latency)}.`;
+}
+
 // ---- Words -----------------------------------------------------------------
 
-// Offered only to an owner or admin: a refusal means the role this app held has changed.
+// Any member creates a workspace (PRO-73). This refusal comes only from a server from before
+// that rule, where the app offered it to an owner or admin: the role it held has changed.
 const ROLE_REFUSED_WORKSPACE = roleRefusedMessage("create a cloud workspace");
 
 const MESSAGES: Record<string, string> = {
   cloud_workspace_quota_exceeded: "Your organization is at its cloud workspace limit. Suspend or delete a workspace, or ask an admin to raise the limit.",
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
+  cloud_workspace_create_budget_exceeded: "You have created as many cloud workspaces as your organization allows one person for now. Try again later, or ask an owner or admin to raise the limit.",
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
   cloud_workspace_policy_denied: "Your organization's compute policy does not allow this provider, location or machine size.",
   cloud_provisioning_paused: "An admin has paused new cloud workspaces for this organization.",
   // Offered because the app still held an owner's or admin's role: it changed since.
@@ -386,17 +424,34 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_launch_invalid: "Choose a valid agent, model and effort.",
 };
 
+/** Where an organization's agent logins are connected. Only an owner or admin can. */
+export const AGENT_LOGIN_PLACE = "the web console under Compute setup → Agent logins";
+
 export function createErrorMessage(code: string, detail: string | null = null): string {
   if (code === "cloud_workspace_form_invalid") return detail ?? "Check the form.";
+  // Only an owner or admin creates workspaces, so the fix is theirs to make.
+  if (code === "cloud_workspace_agent_credential_required") {
+    const agent = detail ? cloudAgentLabel(detail) : "The agent";
+    return `${agent} isn't connected for this organization, so it can't run a first prompt. Connect it in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`;
+  }
   const message = MESSAGES[code] ?? `The workspace could not be created (${code}).`;
   return detail && code.startsWith("cloud_workspace_repository") ? `${message} (${detail.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")})` : message;
 }
 
 const FAILURES: Record<string, string> = {
   "agent-unavailable": "The agent is not installed in the workspace image.",
+  "repository-clone-failed": "A repository could not be cloned.",
+  "repository-access-denied": "GitHub refused the clone. Check that the organization's GitHub access covers the repository.",
+  "repository-branch-not-found": "The base branch does not exist in the repository.",
+  "repository-clone-timed-out": "Cloning a repository took too long or stalled, so it was stopped.",
+  "repository-path-occupied": "A folder with the repository's name is already in the workspace and is not that repository. Nothing was changed.",
+  "repository-empty": "The repository has no commits yet, so there is nothing to start from.",
+  "workspace-disk-full": "The workspace ran out of disk space while cloning a repository.",
   "repository-sync-failed": "A repository could not be switched to its branch.",
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
+  "agent-model-unavailable": "The chosen Claude model is not available in this workspace. Choose a model listed by the workspace's Claude CLI.",
+  "agent-sign-in-required": `The agent isn't connected for this organization, so the first prompt was not sent. An owner or admin can connect it in ${AGENT_LOGIN_PLACE}.`,
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",
   "payload-invalid": "The launch settings were not accepted by the workspace.",

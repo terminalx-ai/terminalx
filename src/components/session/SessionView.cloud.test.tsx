@@ -37,7 +37,9 @@ vi.mock("@/lib/theme", () => ({ useTheme: () => ({ resolvedMode: "dark" }) }));
 vi.mock("@/lib/prefs", () => ({ usePrefs: () => mocks.prefs, getPrefs: () => mocks.prefs, setPrefs: vi.fn() }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string>() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   DEFAULT_PERMISSION_MODE: "bypassPermissions",
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass permissions", hint: "" }],
@@ -62,6 +64,8 @@ vi.mock("@/components/chat/Composer", () => ({
     settingsNote?: string | null;
     settingsNoteWarning?: boolean;
     canStop?: boolean;
+    commands?: { key: string; load(): Promise<{ commands: { name: string }[]; note: string | null }> } | null;
+    files?: { key: string; search(query: string, limit: number): Promise<{ path: string }[]> } | null;
     cwd?: string;
   }) => (
     <div data-testid="composer" data-cwd={props.cwd ?? ""}>
@@ -71,7 +75,34 @@ vi.mock("@/components/chat/Composer", () => ({
       <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
       <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).then(() => props.onDraftChange(""), () => undefined)}>{props.busy ? "Queue" : "Send"}</button>
       {props.busy && props.canStop !== false && <button onClick={props.onStop}>Stop</button>}
+      {/* A message with one attached image; a failed send keeps the draft, as the composer does. */}
+      <button onClick={() => void Promise.resolve(props.onSend(props.draft, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }])).then(() => props.onDraftChange(""), () => undefined)}>Send with image</button>
       <button onClick={() => props.onSetModel("opus")}>Use opus</button>
+      {/* What the `@` list would hold for "login". */}
+      {props.files && (
+        <button
+          data-testid="find-files"
+          onClick={(event) => {
+            const button = event.currentTarget;
+            void props.files!.search("login", 30).then((hits) => (button.dataset.found = hits.map((hit) => hit.path).join("|")));
+          }}
+        >
+          Files
+        </button>
+      )}
+      {/* What the `/` list would hold: the names the source gives, then its note. */}
+      {props.commands && (
+        <button
+          data-testid="list-commands"
+          data-key={props.commands.key}
+          onClick={(event) => {
+            const button = event.currentTarget;
+            void props.commands!.load().then((list) => (button.dataset.listed = [...list.commands.map((command) => `/${command.name}`), list.note ?? ""].join("|")));
+          }}
+        >
+          Commands
+        </button>
+      )}
       <button onClick={() => props.onSetEffort("high")}>Effort high</button>
       <button onClick={() => props.onSetMode("plan")}>Plan mode</button>
     </div>
@@ -81,13 +112,13 @@ vi.mock("@/components/chat/Composer", () => ({
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
 import { CloudSessionHost } from "./CloudSessionHost";
-import { cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
+import { IN_PROGRESS_LABELS, cloudConnectionChip, useCloudSession, workspaceStarting } from "@/lib/cloudSession";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { TERMINAL_POLL_MS, cloudTerminalsOf, resetCloudTerminals, sessionTerminals } from "@/lib/cloudTerminals";
 import { closeCloudConnection, resetCloudConnections } from "@/lib/cloudConnections";
 import { resetCollab } from "@/lib/cloudCollab";
 import { resetPeople } from "@/lib/cloudPeople";
-import { selectSessionTab } from "@/lib/terminal";
+import { clearSessionTabsUnder, selectSessionTab } from "@/lib/terminal";
 import { resetCloudWakes } from "@/lib/sessionBackend";
 import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessions";
 import { api } from "@/lib/api";
@@ -161,6 +192,8 @@ class FakeRuntime implements WorkspaceTransport {
   up = false;
   sent: RpcWireRequest[] = [];
   tabs: AgentTabInfo[] = [tabInfo()];
+  /** What `session.list` answers. */
+  sessions: RuntimeSession[] = [runtimeSession()];
   events: AgentEvent[] = [];
   repositories = [
     { repo: "api", branch: "tx/login-fix", head: "abc", remote: "origin", defaultBranch: "main" },
@@ -208,9 +241,18 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1"],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer()],
       authority,
     });
+  }
+  /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
+  commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
+  /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
+  files: { path: string; name: string; score: number }[] | null = null;
+  /** PRO-22: whether the runtime takes images (`composer/3`). */
+  images = false;
+  private composer(): ("composer/1" | "composer/2" | "composer/3")[] {
+    return [...(this.commands ? (["composer/1"] as const) : []), ...(this.files ? (["composer/2"] as const) : []), ...(this.images ? (["composer/3"] as const) : [])];
   }
   /** PRO-30: what `collab.state` answers on a runtime that granted `collab/1`. */
   collab: { you: Record<string, unknown>; participants: unknown[]; leases: unknown[] } | null = null;
@@ -222,7 +264,7 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1"],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", ...this.composer()],
       authority,
       you: { ...you, listed: true },
     } as WorkspaceConnectionState);
@@ -245,10 +287,16 @@ class FakeRuntime implements WorkspaceTransport {
       case "session.tabs":
         return ok({ tabs: this.tabs });
       case "session.list":
-        return ok({ sessions: [runtimeSession()] });
+        return ok({ sessions: this.sessions });
       case "session.subscribe":
         this.sessionSubscription = `sub-${++this.subscription}`;
         return ok({ subscriptionId: this.sessionSubscription, events: this.events.map((event) => ({ cursor: `${this.generation}:${event.seq}`, event })), cursor: `${this.generation}:${this.events.at(-1)?.seq ?? 0}` });
+      case "session.commands":
+        return ok(this.commands);
+      case "session.files":
+        return ok({ files: this.files });
+      case "session.attach":
+        return ok({ attachmentId: params.attachmentId, size: 3, complete: params.last });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -458,6 +506,51 @@ describe("cloud session actions", () => {
     }
   });
 
+  // O7 of the live check: Bob had the session open on its first tab without having picked a tab.
+  // Alice added a tab; the runtime made it the session's active tab, and Bob's view moved to it.
+  for (const order of ["the tab list first", "the session list first"] as const) {
+    it(`stays on the tab it shows when someone else adds a tab (${order})`, async () => {
+      // This person opened the session from its row: no tab was picked here.
+      clearSessionTabsUnder(KEY);
+      runtime.sessions = [{ ...runtimeSession(), activeTab: "t-1" }];
+      await openConnected("participate");
+      const panel = (tabId: string) => `session-agent-panel-${tabId}`;
+      const shown = () => [...document.querySelectorAll('[role="tabpanel"]:not([aria-hidden="true"])')].map((node) => node.id);
+      await waitFor(() => expect(runtime.methods("session.list").length).toBeGreaterThan(0));
+      await act(async () => {});
+      expect(shown()).toEqual([panel("t-1")]);
+
+      // Someone else adds an agent tab. The runtime makes it the session's active tab and tells everyone.
+      const listed = runtimeSession();
+      const session: RuntimeSession = { ...listed, activeTab: "t-2", tabs: [...listed.tabs, { ...listed.tabs[0], id: "t-2" }] };
+      runtime.tabs = [tabInfo(), tabInfo({ tabId: "t-2", title: null, process: "not-started" })];
+      runtime.sessions = [session];
+      const updates = [() => runtime.notify("session.tabs", { tabs: runtime.tabs }), () => runtime.notify("session.sessions", { sessions: [session] })];
+      if (order === "the session list first") updates.reverse();
+      for (const update of updates) await act(async () => update());
+      // The new tab is there, and this view is still on the one it showed.
+      await waitFor(() => expect(document.getElementById(panel("t-2"))).not.toBeNull());
+      expect(shown()).toEqual([panel("t-1")]);
+
+      // Picking the new tab here still opens it, and then it is the one kept.
+      act(() => selectSessionTab(KEY, { kind: "agent", id: "t-2" }));
+      expect(shown()).toEqual([panel("t-2")]);
+      await act(async () => runtime.notify("session.sessions", { sessions: [{ ...session, activeTab: "t-1" }] }));
+      expect(shown()).toEqual([panel("t-2")]);
+    });
+  }
+
+  it("opens on the session's active tab when no tab was picked here", async () => {
+    clearSessionTabsUnder(KEY);
+    const listed = runtimeSession();
+    runtime.sessions = [{ ...listed, activeTab: "t-2", tabs: [...listed.tabs, { ...listed.tabs[0], id: "t-2" }] }];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    runtime.tabs = [tabInfo(), tabInfo({ tabId: "t-2", title: "Second" })];
+    await act(async () => runtime.connect("participate"));
+    await waitFor(() => expect([...document.querySelectorAll('[role="tabpanel"]:not([aria-hidden="true"])')].map((node) => node.id)).toEqual(["session-agent-panel-t-2"]));
+  });
+
   it("keeps the chat inside the window: the tab's body is a flex column the transcript scrolls in", async () => {
     runtime.events = [ev({ type: "user_message", text: "a long transcript", queued: false })];
     await openConnected();
@@ -563,6 +656,108 @@ describe("cloud session actions", () => {
     expect(guard.violations).toEqual([]);
   });
 
+  it("PRO-22: a runtime from before composer/1 offers no command list", async () => {
+    await openConnected();
+    expect(screen.queryByTestId("list-commands")).toBeNull();
+    expect(runtime.methods("session.commands")).toEqual([]);
+  });
+
+  it("PRO-22: a stopped workspace is not woken, or asked, for its command list", async () => {
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }], restricted: false };
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "cached question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    selectCloudSession(KEY);
+    render(wrap(<CloudSessionHost sessionKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    const button = await screen.findByTestId("list-commands");
+    fireEvent.click(button);
+    await waitFor(() => expect(button.dataset.listed).toBe(""));
+    expect(runtime.methods("session.commands")).toEqual([]);
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
+  });
+
+  it("PRO-22: a view-only reader is offered no commands and no file list", async () => {
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }], restricted: false };
+    runtime.files = [{ path: "src/auth/login.rs", name: "login.rs", score: 1 }];
+    setCatalog(workspaceItem("ready", "participate"));
+    await openConnected("participate");
+    expect(screen.queryByTestId("list-commands")).toBeNull();
+    expect(screen.queryByTestId("find-files")).toBeNull();
+    expect(runtime.methods("session.commands")).toEqual([]);
+  });
+
+  it("PRO-22: the composer's @ list searches the session's files on the runtime, and only while it is connected", async () => {
+    runtime.files = [{ path: "src/auth/login.rs", name: "login.rs", score: 1 }];
+    await openConnected();
+    const button = screen.getByTestId("find-files");
+    fireEvent.click(button);
+    await waitFor(() => expect(button.dataset.found).toBe("src/auth/login.rs"));
+    expect(runtime.methods("session.files").map((frame) => frame.params)).toEqual([{ sessionId: "s-1", query: "login", limit: 30 }]);
+    // Stopped: the list is gone, and nothing wakes the workspace to bring it back.
+    await act(async () => runtime.emit({ state: "suspended" }));
+    await waitFor(() => expect(screen.queryByTestId("find-files")).toBeNull());
+    expect(activate).not.toHaveBeenCalled();
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: an image is uploaded to the runtime, then the message names it", async () => {
+    runtime.images = true;
+    await openConnected();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "what is this?" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "send")).toBeTruthy());
+    const attach = runtime.methods("session.attach").map((frame) => frame.params as Record<string, unknown>);
+    expect(attach).toEqual([expect.objectContaining({ sessionId: "s-1", tabId: "t-1", mediaType: "image/png", name: "shot.png", offset: 0, data: "YWJj", last: true })]);
+    expect(enqueued.find((entry) => entry.kind === "send")!.payload).toEqual({ text: "what is this?", images: [{ id: attach[0]!.attachmentId, mediaType: "image/png", name: "shot.png" }] });
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("PRO-22: a runtime that takes no images says so, and the message is not sent without them", async () => {
+    await openConnected();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "what is this?" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(screen.getAllByRole("note").some((note) => note.textContent?.startsWith("Images need a newer workspace runtime"))).toBe(true));
+    expect(enqueued).toEqual([]);
+    expect(runtime.methods("session.attach")).toEqual([]);
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("what is this?");
+  });
+
+  it("PRO-22: images to a stopped workspace start it once and keep the message in the composer", async () => {
+    runtime.images = true;
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "cached question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    selectCloudSession(KEY);
+    render(wrap(<CloudSessionHost sessionKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    fireEvent.change(await screen.findByLabelText("Prompt"), { target: { value: "what is this?" } });
+    for (let attempt = 0; attempt < 2; attempt++) fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await waitFor(() => expect(screen.getAllByRole("note").some((note) => note.textContent?.startsWith("Starting the workspace: images are uploaded straight to it"))).toBe(true));
+    await waitFor(() => expect(activate).toHaveBeenCalledTimes(1));
+    expect(activate).toHaveBeenCalledWith("wake");
+    expect(enqueued).toEqual([]);
+    expect((screen.getByLabelText("Prompt") as HTMLTextAreaElement).value).toBe("what is this?");
+  });
+
+  it("PRO-22: a view-only reader's images go nowhere and wake nothing", async () => {
+    runtime.images = true;
+    setCatalog(workspaceItem("ready", "participate"));
+    await openConnected("participate");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send with image" }));
+    await act(async () => undefined);
+    expect(runtime.methods("session.attach")).toEqual([]);
+    expect(enqueued).toEqual([]);
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it("PRO-22: a runtime from before composer/2 offers no file list", async () => {
+    await openConnected();
+    expect(screen.queryByTestId("find-files")).toBeNull();
+    expect(runtime.methods("session.files")).toEqual([]);
+  });
+
   it("gates a view-only attachment and says why", async () => {
     setCatalog(workspaceItem("ready", "participate"));
     await openConnected("participate");
@@ -617,7 +812,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…"]);
   });
 
   // PRO-38: the organization's diagnostics, from where the session runs.
@@ -640,7 +835,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Cloud diagnostics…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…", "Cloud diagnostics…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Cloud diagnostics/ }));
     const dialog = await screen.findByTestId("cloud-diagnostics-dialog");
     expect(within(dialog).getByText("Cloud diagnostics · Acme")).toBeTruthy();
@@ -691,7 +886,7 @@ describe("the session header's location and connection chips", () => {
     runtime.tabs = [tabInfo()];
     await act(async () => runtime.connect("manage"));
     seen.push(screen.getByTestId("session-connection").textContent ?? "");
-    expect(seen).toEqual(["Resuming", "Connecting…", "Connecting…", "Connecting…", "Live"]);
+    expect(seen).toEqual(["Resuming…", "Connecting…", "Connecting…", "Connecting…", "Live"]);
   });
 
   it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {
@@ -717,19 +912,37 @@ describe("the session header's location and connection chips", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.emit({ state: "waitingForRuntime" }));
-    expect(screen.getByTestId("session-connection").textContent).toBe("Starting");
+    expect(screen.getByTestId("session-connection").textContent).toBe("Starting…");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready").label).toBe("Connecting…");
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, null).label).toBe("Connecting…");
     // Stopped by the list and nothing resumes it: the transport is still finding out. Nothing is starting.
     expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended").label).toBe("Stopped");
-    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { starting: true }).label).toBe("Starting");
-    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "suspended", { starting: true }).label).toBe("Starting…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "ready", { starting: true }).label).toBe("Starting…");
     const resuming = { ...workspaceItem("suspended"), latestOperation: { state: "running", action: "resume" } } as CloudWorkspaceListItem;
     const stopping = { ...workspaceItem("ready"), latestOperation: { state: "running", action: "suspend" } } as CloudWorkspaceListItem;
     expect(workspaceStarting(resuming)).toBe(true);
     expect(workspaceStarting(stopping)).toBe(false);
     expect(workspaceStarting(workspaceItem("ready"))).toBe(false);
     expect(workspaceStarting(null)).toBe(false);
+  });
+
+  it("ends every in-progress label in an ellipsis, and no settled one (Resuming… like Stopping…, Connecting… and Reconnecting…)", () => {
+    const states = ["idle", "opening", "connecting", "reconnecting", "waitingForRuntime", "connected", "suspended", "stopped", "updateRequired"];
+    const flags = [false, true];
+    const seen = new Map<string, string>();
+    for (const state of states) {
+      for (const workspaceState of [null, "provisioning", "ready", "suspended", "archived", "attention-required"]) {
+        for (const woke of flags) for (const starting of flags) for (const stopping of flags) for (const reattaching of flags) for (const wakeFloor of [0, 1]) {
+          const chip = cloudConnectionChip({ state } as WorkspaceConnectionState, workspaceState, { woke, starting, stopping, reattaching, wakeFloor });
+          seen.set(chip.label, chip.tone);
+        }
+      }
+    }
+    const pending = [...seen].filter(([, tone]) => tone === "pending").map(([label]) => label).sort();
+    expect(pending).toEqual([...IN_PROGRESS_LABELS].sort());
+    expect(pending).toEqual(["Connecting…", "Reconnecting…", "Resuming…", "Starting…", "Stopping…"]);
+    for (const [label, tone] of seen) expect([label, label.endsWith("…")]).toEqual([label, tone === "pending"]);
   });
 
   it("says Stopping… while a stop runs, whoever asked, then Stopped: never Starting or Live", async () => {
@@ -1181,6 +1394,49 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     expect(enqueued).toEqual([]);
   });
 
+  it("PRO-88: a driver takes control of a terminal only with the right to approve permissions", async () => {
+    names();
+    runtime.terminals = [{ ...runtime.terminals[0]!, control: "other", controllerId: "u-alice" }];
+    const terminal = { kind: "terminal" as const, id: `cloud:cloud:${ORG}:${WS}:p1` };
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    await openShared(ME);
+    await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+    act(() => selectSessionTab(KEY, terminal));
+    const viewer = await screen.findByTestId("cloud-terminal-viewer");
+    expect(viewer.textContent).toContain("You can watch; typing in a terminal needs the right to approve permissions");
+    expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
+    // The runtime says they may approve now: the same view offers control.
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, canApprove: true } }));
+    expect(await screen.findByRole("button", { name: "Take control" })).toBeTruthy();
+    expect(runtime.methods("pty.control")).toEqual([]);
+  });
+
+  it("PRO-22: the composer lists the runtime's slash commands, and a plain driver is told why theirs are fewer", async () => {
+    names();
+    setCatalog(shared("driver"));
+    runtime.collab = { you: ME, participants: [], leases: [] };
+    runtime.commands = { commands: [{ name: "compact", description: "Shorten the conversation", source: "builtin" }], restricted: true };
+    await openShared(ME);
+    const listed = async () => {
+      const button = screen.getByTestId("list-commands");
+      delete button.dataset.listed;
+      fireEvent.click(button);
+      await waitFor(() => expect(button.dataset.listed).toBeDefined());
+      return button.dataset.listed;
+    };
+    expect(await listed()).toBe("/compact|Other commands need someone who can approve permissions.");
+    expect(runtime.methods("session.commands").map((frame) => frame.params)).toEqual([{ sessionId: "s-1", tabId: "t-1" }]);
+    const restrictedKey = screen.getByTestId("list-commands").dataset.key;
+    // They may approve now: the list is another one, read again as the runtime gives it to an approver.
+    runtime.commands = { commands: [{ name: "compact", description: "", source: "builtin" }, { name: "review", description: "", source: "builtin" }], restricted: false };
+    await act(async () => runtime.notify("collab.you", { you: { ...ME, canApprove: true } }));
+    await waitFor(() => expect(screen.getByTestId("list-commands").dataset.key).not.toBe(restrictedKey));
+    expect(await listed()).toBe("/compact|/review|");
+    expect(runtime.methods("session.commands")).toHaveLength(2);
+    expect(guard.violations).toEqual([]);
+  });
+
   it("hides Stop from a driver while someone else drives the running turn", async () => {
     names();
     setCatalog(shared("driver", true));
@@ -1579,7 +1835,9 @@ describe("sharing states found in the live two-user test", () => {
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual([
       "Who has access…2",
-      "Only an organization owner or admin can stop, archive or delete a cloud workspace",
+      "Only this workspace's creator or an organization owner or admin can stop, archive or delete it",
+      // A viewer can read the files, so they can mirror them (PRO-25).
+      "Local mirror…",
     ]);
     expect(within(menu).queryByRole("menuitem", { name: /^(Stop|Archive|Delete)/ })).toBeNull();
     cleanup();
@@ -1604,6 +1862,7 @@ describe("sharing states found in the live two-user test", () => {
       "Stop",
       "Archive… (stops compute, deleted after 30 days)",
       "Delete…",
+      "Local mirror…",
     ]);
   });
 

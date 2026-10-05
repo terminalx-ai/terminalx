@@ -1,5 +1,5 @@
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { dispositionFacts, hasUnpublishedWork, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
+import { dispositionFacts, gitErrorMessage, hasUnpublishedWork, RemoteGit, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
   api,
   closeWorkspaceConnection,
@@ -11,7 +11,7 @@ import {
   type CloudWorkspaceOperation,
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
-import { roleRefusedMessage } from "@/lib/accountRoles";
+import { managerRefusedMessage, roleRefusedMessage } from "@/lib/accountRoles";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
@@ -132,6 +132,42 @@ export function checkpointText(checkpoint: CloudWorkspaceOperation["checkpoint"]
   }
 }
 
+/**
+ * What a stopped workspace's last stop saved, from the stop itself: when its
+ * conversations were saved, or that the save did not finish. Null when the
+ * workspace is not stopped, when something happened to it since, or when the
+ * server said nothing about a save. The disk is kept by a stop either way.
+ */
+export function lastSavedText(item: CloudWorkspaceListItem): string | null {
+  const operation = item.latestOperation;
+  if (item.workspace.state !== "suspended" || operation?.action !== "suspend" || operation.state !== "succeeded") return null;
+  switch (operation.checkpoint) {
+    case "committed":
+      return operation.checkpointAt ? `Last saved ${dateTimeText(operation.checkpointAt)}.` : "Its conversations were saved before it stopped.";
+    case "failed":
+    case "timed-out":
+      return "The save before it stopped did not finish; conversations may end earlier than the work did. The disk was kept as it was.";
+    default:
+      return null;
+  }
+}
+
+export function dateTimeText(at: number): string {
+  return new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * What resuming a stopped workspace brings back, in the provider's terms
+ * (PRO-33): the same processes again, or a cold boot from the disk. `name`
+ * is the provider's display name; `null` is a server that does not say.
+ */
+export function resumeBehaviourText(name: string, preservesProcesses: boolean | null | undefined): string {
+  if (preservesProcesses === true) return `Resume at any time. ${name} freezes the machine as it is: programs and terminals that are running continue where they were.`;
+  if (preservesProcesses === false)
+    return `Resume at any time. ${name} starts the machine again (a cold boot): the files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now do not, and what was installed or written outside the workspace may not.`;
+  return "Resume at any time. The files in the workspace come back, and its saved conversations are shown as before; programs and terminals that are running now may not.";
+}
+
 const MESSAGES: Record<string, string> = {
   cloud_workspace_concurrency_exceeded: "Your organization is running as many cloud workspaces as its limit allows. Stop one to start another.",
   cloud_workspace_active_work: "An agent is still working in this workspace.",
@@ -142,13 +178,18 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_credential_invalid: "The provider credential is no longer valid. An admin can repair it, then retry.",
   cloud_provider_permission_denied: "The provider refused this action, though its credential is still valid. Retry, or check the key's permissions at the provider.",
   cloud_workspace_runtime_bootstrap_failed: "The workspace's runtime could not be set up on its machine. Retry; the provider credential is fine.",
+  cloud_provider_state_conflict: "The provider reports this resource in a state that does not allow the action yet. Retry in a moment; if it keeps failing, check the resource in the provider's console.",
   cloud_provider_unavailable: "The provider did not answer. Retry resumes where it stopped.",
   cloud_provider_rate_limited: "The provider is rate limiting. Retry resumes where it stopped.",
   provider_permanent_delete_unavailable: "This provider connection cannot delete workspaces permanently.",
   provider_cleanup_pending: "The provider is still removing resources.",
   cloud_workspace_request_outcome_unknown: "No answer arrived. The action may have been applied; the list below is the source of truth.",
   cloud_workspace_not_found: "This workspace no longer exists.",
-  // Offered because the app still held an owner's or admin's role: it changed since.
+  // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
+  // thought this person was one of them: the role, or the list, changed since.
+  cloud_workspace_manager_required: managerRefusedMessage("stop, resume, archive or delete it"),
+  cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
+  // A server from before PRO-73 keeps these for owners and admins.
   organization_admin_required: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
   forbidden: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),
 };
@@ -164,6 +205,68 @@ export function lifecycleErrorMessage(code: string): string {
 export function operationFailureText(operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode">): string {
   const message = lifecycleErrorMessage(operation.errorCode ?? "cloud_workspace_unknown_error");
   return operation.providerErrorCode ? `${message} (Provider code: ${operation.providerErrorCode})` : message;
+}
+
+/** Boat's provider id. */
+const BOAT = "box";
+/** Boat accepted a deletion but still reports the sandbox: only Boat can finish it. */
+const DELETED_SANDBOX_PRESENT = "box_deleted_sandbox_present";
+/** What a scoped Boat key needs before TerminalX can delete a sandbox. */
+const BOAT_DELETE_SCOPES = "sandbox.read and sandbox.delete";
+
+/**
+ * Why a permanent delete stopped, and whether deleting again can help
+ * (PRO-52). The sentence names only what the row shows: "Retry delete" is the
+ * one button under it, and it is named only when it is offered.
+ *
+ * - Boat accepted the deletion but still reports the sandbox
+ *   (`box_deleted_sandbox_present`): neither a retry nor a broader key helps,
+ *   so neither is advised and no retry is offered. The deletion's operation
+ *   id is what Boat's support asks for; the server gives it to admins only.
+ * - Boat refused the delete (or the read of its sandbox): the connected key's
+ *   scope is what is missing.
+ */
+export function deleteFailure(
+  operation: Pick<CloudWorkspaceOperation, "errorCode" | "providerErrorCode" | "detailCode" | "cleanup">,
+  provider: string,
+  /**
+   * `idRead`: the operation was read with its cleanup report, so a missing
+   * id means this person may not see it. Until then (a list row, or before
+   * the first read) nothing is said about who can, so the sentence does not
+   * change under an admin once the id arrives.
+   */
+  options: { idRead?: boolean } = {},
+): { text: string; retry: boolean } {
+  if (deleteAwaitsProvider(operation)) {
+    const id = operation.cleanup?.items.find((entry) => entry.providerOperationId)?.providerOperationId;
+    const which = id ? `: ${id}` : options.idRead ? "; an organization owner or admin can see it here" : "";
+    return { text: `Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id${which}.`, retry: false };
+  }
+  if (provider === BOAT && operation.errorCode === "cloud_provider_permission_denied") {
+    return {
+      // Boat's own code when it sent one; never a made-up one in its place.
+      text: `Boat refused to delete this workspace${operation.providerErrorCode ? ` (${operation.providerErrorCode})` : ""}: the connected key is not allowed to read or delete it. An owner or admin can connect a key with ${BOAT_DELETE_SCOPES} that covers all sandboxes in Settings, then press ${RETRY_DELETE}.`,
+      retry: true,
+    };
+  }
+  return { text: operationFailureText(operation), retry: true };
+}
+
+/** The one button under a stopped delete; a failure sentence that names a button names this one. */
+export const RETRY_DELETE = "Retry delete";
+
+/** A delete only the provider can finish: deleting again, from anywhere, cannot help. */
+export function deleteAwaitsProvider(operation: Pick<CloudWorkspaceOperation, "detailCode"> | null | undefined): boolean {
+  return operation?.detailCode === DELETED_SANDBOX_PRESENT;
+}
+
+/**
+ * Why a workspace's last operation failed, wherever it is said (the stopped
+ * delete's own line, the row's tooltip, the main view): a failed delete gets
+ * the same sentence in all of them.
+ */
+export function workspaceFailureText(item: Pick<CloudWorkspaceListItem, "workspace">, operation: CloudWorkspaceOperation): string {
+  return operation.action === "delete" ? deleteFailure(operation, item.workspace.provider).text : operationFailureText(operation);
 }
 
 // ---- what a destructive action would put at risk
@@ -265,6 +368,45 @@ export async function checkRuntime(workspace: CloudWorkspace, server: CloudWorks
   } finally {
     lease?.release();
   }
+}
+
+/**
+ * Push a repository's current branch from a running workspace, so its
+ * commits are on the remote before an archive or delete (PRO-34). Like
+ * `checkRuntime` it only connects, never wakes, and gives its lease back.
+ * Uncommitted files are not touched: they need a commit, which is the
+ * person's to write. Throws the Git view's own words for a refusal.
+ */
+export async function pushRepository(workspace: CloudWorkspace, repo: string, withinMs = 15_000): Promise<void> {
+  const lease = await retainCloudConnection({ orgId: workspace.orgId, workspaceId: workspace.id }, "connect");
+  try {
+    let client: WorkspaceRpcClient;
+    try {
+      client = await waitCloudConnected(lease, withinMs, { stoppedIsError: true });
+    } catch {
+      throw new Error("Couldn't reach the workspace to push. Open it and push from its Git view.");
+    }
+    try {
+      await new RemoteGit(client, repo).push();
+    } catch (error) {
+      throw new Error(gitErrorMessage(error));
+    }
+  } finally {
+    lease.release();
+  }
+}
+
+/**
+ * Whether a repository has commits a push from the dialog would publish. A
+ * detached HEAD has no branch to push: its commits need the workspace opened.
+ */
+export function pushable(repo: RepositoryFacts): boolean {
+  return !!repo.branch && !!(repo.unpushedCommits || repo.localOnlyCommits);
+}
+
+/** "7 days", "1 day". */
+export function daysText(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 // ---- tombstones

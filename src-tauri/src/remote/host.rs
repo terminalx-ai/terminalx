@@ -67,6 +67,8 @@ const SLOW_METHODS: &[&str] = &[
     "session.delete",
     "runtime.agents",
     "fs.search",
+    // Lists every file of every repository.
+    "mirror.manifest",
 ];
 
 /// One pending attachment, as `/v1/cloud-workspace-bootstrap/refresh` lists it.
@@ -83,6 +85,10 @@ pub struct Attachment {
     /// `runtime` (manage) or `session` (participate).
     pub scope: String,
     pub expires_at: i64,
+    /// The same for every attachment minted for this person's client
+    /// installation; sent by an API that knows `attachment-installation-v1`.
+    #[serde(default)]
+    pub installation_key: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -257,6 +263,10 @@ struct Device {
     /// The attachment's person, for roles, presence and attribution.
     #[serde(default)]
     user_id: Option<String>,
+    /// The person's installation, as the API keys it; absent on a device
+    /// saved before the API sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    installation_key: Option<String>,
 }
 
 mod hash_b64 {
@@ -780,6 +790,8 @@ impl RelayHost {
                     authority,
                     attachment_id: attachment.id.clone(),
                     user_id: attachment.user_id.clone(),
+                    // Anything but the API's 43 base64url characters is no key at all.
+                    installation_key: attachment.installation_key.clone().filter(|key| valid_base64url_32(key)),
                 },
             );
             self.save_devices(&state.devices);
@@ -837,12 +849,13 @@ impl RelayHost {
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
         let device = self.admit(&connection.relay_device_id, token, cancel_tx)?;
-        // Counts as use of the workspace for as long as it stays open.
-        let _attached = crate::cloud_activity::attached();
+        // Whether it counts as use of the workspace is decided at `rpc.hello`:
+        // only a client that can type does (`WorkspaceRpc::count_attachment`).
         let authenticated = json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
         send_sealed(&mut socket, &mut session, &authenticated).await?;
 
-        let (peer, mut notifications) = Peer::for_user(connection.relay_device_id.clone(), device.authority, device.user_id.clone());
+        let (peer, mut notifications) =
+            Peer::for_installation(connection.relay_device_id.clone(), device.authority, device.user_id.clone(), device.installation_key.clone());
         // Slow mutations (Git network calls, agent prompts) answer from their
         // own task, so this connection keeps reading, streaming and honouring
         // a revocation meanwhile. Everything else is answered in order, which
@@ -881,6 +894,14 @@ impl RelayHost {
                                 let request: Value = serde_json::from_slice(&plaintext)?;
                                 let response = match request["method"].as_str() {
                                     Some("pairing.provisionRelay") => self.provision_resume(&live, &connection, &request).await,
+                                    // Connecting can take seconds, so from its own
+                                    // task; answered in order with the stream's data.
+                                    Some("ports.open") => {
+                                        let rpc = self.rpc.clone();
+                                        let peer = peer.clone();
+                                        tokio::spawn(async move { rpc.answer_port_open(&peer, &request).await });
+                                        continue;
+                                    }
                                     Some(method) if SLOW_METHODS.contains(&method) => {
                                         let rpc = self.rpc.clone();
                                         let peer = peer.clone();
@@ -1125,6 +1146,22 @@ mod tests {
             general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA"}"#),
             general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
         )
+    }
+
+    #[test]
+    fn an_attachment_may_name_its_installation_and_older_records_have_none() {
+        let base = json!({ "id": "att-1", "deviceId": "dev-1", "deviceToken": "t".repeat(48), "userId": "u-1", "scope": "runtime", "expiresAt": 1 });
+        let plain: Attachment = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(plain.installation_key, None);
+        let mut keyed = base;
+        keyed["installationKey"] = json!("k".repeat(43));
+        let keyed: Attachment = serde_json::from_value(keyed).unwrap();
+        assert_eq!(keyed.installation_key.as_deref(), Some("k".repeat(43).as_str()));
+        // A device saved by a runtime before this one is read back without a key, and saved without the field.
+        let saved = json!({ "tokenHash": general_purpose::STANDARD.encode([7u8; 32]), "authority": "manage", "attachmentId": "att-1", "userId": "u-1" });
+        let device: Device = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(device.installation_key, None);
+        assert_eq!(serde_json::to_value(&device).unwrap(), saved);
     }
 
     #[test]

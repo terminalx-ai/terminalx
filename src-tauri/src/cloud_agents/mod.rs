@@ -9,12 +9,14 @@
 //! receipt; the live workspace RPC reads tabs and changes their settings.
 
 pub mod api;
+pub mod attachments;
 pub mod checkpoints;
 pub mod crypto;
 pub mod keys;
 pub mod launch;
 pub mod mailbox;
 pub mod receipts;
+pub mod slash;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +78,11 @@ pub struct AgentTabInfo {
     pub follow_ups: Vec<FollowUpView>,
     /// Who is driving the tab (contract §21.5), if anyone.
     pub lease: Option<crate::remote::collab::TabLease>,
+    /// Set when the tab's agent has no way to sign in (PRO-78): the
+    /// organization has no usable login for it and the workspace
+    /// configuration sets no key. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<crate::cloud_grants::SignInRequired>,
     pub last_seq: u64,
     pub created: String,
     pub modified: String,
@@ -105,6 +112,14 @@ pub trait AgentOps: Send + Sync {
     fn tabs(&self) -> Vec<AgentTabInfo>;
     fn busy(&self, session_id: &str, tab_id: &str) -> bool;
     fn send(&self, session_id: &str, tab_id: &str, text: &str) -> Result<()>;
+    /// A message with images (PRO-22), handed to the agent as a local
+    /// tab's are. An agent host that cannot take images says so.
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
+        if images.is_empty() {
+            return self.send(session_id, tab_id, text);
+        }
+        anyhow::bail!("this runtime cannot send images to an agent")
+    }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     fn respond(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<(), DecisionError>;
     fn answer(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<(), DecisionError>;
@@ -114,6 +129,11 @@ pub trait AgentOps: Send + Sync {
     fn events(&self, session_id: &str, tab_id: &str) -> Result<Vec<Value>>;
     /// The session a tab belongs to, for the checkpoint projection.
     fn session(&self, _session_id: &str) -> Option<SessionSummary> {
+        None
+    }
+    /// Where the session's agents run: what "inside the project" means for
+    /// a file a message mentions.
+    fn cwd(&self, _session_id: &str) -> Option<PathBuf> {
         None
     }
 }
@@ -228,6 +248,7 @@ impl AgentOps for ManagerOps {
                         .collect(),
                     follow_ups: Vec::new(),
                     lease: None,
+                    sign_in: crate::cloud_grants::sign_in_required_for_launch(&tab.harness, &format!("{}/{}", entry.id, tab.id)),
                     last_seq,
                     created: tab.created.clone(),
                     modified: tab.modified.clone(),
@@ -242,6 +263,10 @@ impl AgentOps for ManagerOps {
         Some(SessionSummary { title: entry.title, branch: entry.branch })
     }
 
+    fn cwd(&self, session_id: &str) -> Option<PathBuf> {
+        index::get(session_id).ok().map(|entry| PathBuf::from(entry.cwd))
+    }
+
     fn busy(&self, session_id: &str, tab_id: &str) -> bool {
         // A tab left `waiting` by a lapsed request after a restart has no
         // process and no turn: it is not busy, and a prompt goes straight in.
@@ -252,6 +277,10 @@ impl AgentOps for ManagerOps {
 
     fn send(&self, session_id: &str, tab_id: &str, text: &str) -> Result<()> {
         self.manager.send(session_id, tab_id, text.to_string(), Vec::new()).map(|_| ())
+    }
+
+    fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
+        self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
     }
 
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
@@ -335,6 +364,8 @@ pub struct CloudAgents {
     pub keys: keys::Keys,
     pub receipts: receipts::Receipts,
     pub follow_ups: receipts::FollowUps,
+    /// Images uploaded for a message that has not been typed yet.
+    pub attachments: attachments::Attachments,
     /// Present when the runtime has an API to lease from and upload to.
     pub identity: Option<Identity>,
     pub api: Option<Arc<dyn api::MailboxApi>>,
@@ -389,6 +420,7 @@ impl CloudAgents {
             keys: keys::Keys::open(dir, now).context("open the workspace content keys")?,
             receipts: receipts::Receipts::open(dir).context("open the receipt store")?,
             follow_ups: receipts::FollowUps::open(dir).context("open the follow-up queue")?,
+            attachments: attachments::Attachments::open(dir).context("open the attachment store")?,
             identity,
             api,
             checkpoints: checkpoints::Checkpoints::open(dir, generation)?,
@@ -482,20 +514,47 @@ impl CloudAgents {
         }
     }
 
-    /// Whether a queued follow-up's sender may still drive. One queued
-    /// before sharing existed, or before the API listed anyone, is kept.
-    fn follow_up_allowed(&self, follow_up: &FollowUp) -> bool {
-        match self.collab.get() {
-            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)).can_drive(),
-            _ => true,
+    /// What `text` would make the agent's CLI do by itself (a slash command,
+    /// a `!` shell command, a file from outside the project) that this
+    /// person may not ask for (PRO-88). `harness` is the tab's agent.
+    pub fn slash_refusal(&self, access: Access, session_id: &str, harness: &str, text: &str) -> Option<slash::Refusal> {
+        if access.can_configure() {
+            return None;
         }
+        slash::check(text, harness, self.ops.cwd(session_id).as_deref()).err()
     }
 
-    /// Drop queued follow-ups whose sender lost driver access, saying so in
+    /// Why a queued follow-up may not be typed any more, as the note its
+    /// transcript gets: its sender no longer drives, or it is a slash or
+    /// shell command and they no longer approve. One queued before sharing
+    /// existed, or before the API listed anyone, is kept.
+    fn follow_up_refusal(&self, tab_id: &str, follow_up: &FollowUp) -> Option<&'static str> {
+        let access = match self.collab.get() {
+            Some(collab) if collab.known() && !follow_up.actor_id.is_empty() => collab.access_of(Some(&follow_up.actor_id)),
+            _ => return None,
+        };
+        if !access.can_drive() {
+            return Some("Dropped a queued message from a person who no longer has driver access.");
+        }
+        if access.can_configure() {
+            return None;
+        }
+        // A tab that is gone has no CLI to name: nothing but prose passes.
+        // (`ops.tabs`, not `self.tab`: this runs while the queue is locked.)
+        let harness = self.ops.tabs().into_iter().find(|tab| tab.tab_id == tab_id).map(|tab| tab.harness).unwrap_or_default();
+        self.slash_refusal(access, &follow_up.session_id, &harness, &follow_up.text)
+            .map(|_| "Dropped a queued command from a person who can no longer approve permissions.")
+    }
+
+    fn follow_up_allowed(&self, tab_id: &str, follow_up: &FollowUp) -> bool {
+        self.follow_up_refusal(tab_id, follow_up).is_none()
+    }
+
+    /// Drop queued follow-ups their sender may no longer send, saying so in
     /// their transcripts (contract §21.5). False when the queue could not
     /// be rewritten.
     pub fn revalidate_follow_ups(&self) -> bool {
-        let dropped = match self.follow_ups.retain(|follow_up| self.follow_up_allowed(follow_up)) {
+        let dropped = match self.follow_ups.retain(|tab_id, follow_up| self.follow_up_allowed(tab_id, follow_up)) {
             Ok(dropped) => dropped,
             Err(error) => {
                 log::warn!("revalidate queued follow-ups: {error:#}");
@@ -503,7 +562,9 @@ impl CloudAgents {
             }
         };
         for (tab_id, follow_up) in dropped {
-            self.ops.note(&follow_up.session_id, &tab_id, "Dropped a queued message from a person who no longer has driver access.");
+            let why = self.follow_up_refusal(&tab_id, &follow_up).unwrap_or("Dropped a queued message its sender may no longer send.");
+            self.ops.note(&follow_up.session_id, &tab_id, why);
+            self.attachments.remove(&follow_up.images);
             self.changed(Some(&tab_id), true);
         }
         true
@@ -606,6 +667,25 @@ impl CloudAgents {
         Ok(key_id)
     }
 
+    /// One part of an image `owner` attaches to a message they are about to
+    /// send (`session.attach`). Uploads nobody sent within a day are dropped
+    /// first, except those a queued message still waits for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
+        if offset == 0 {
+            self.prune_attachments();
+        }
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now_ms())
+    }
+
+    /// Drop uploads nobody sent within a day, except those a queued message
+    /// still waits for. Also run on a timer (`start`), so uploads left by
+    /// messages that never arrived do not fill the store for good.
+    pub fn prune_attachments(&self) {
+        let waiting: Vec<String> = self.follow_ups.tabs().iter().flat_map(|tab_id| self.follow_ups.list(tab_id)).flat_map(|follow_up| follow_up.images).collect();
+        self.attachments.prune(now_ms(), &waiting);
+    }
+
     /// A tab's turn may have ended: send its next follow-up if so.
     pub fn nudge_follow_ups(&self, tab_id: &str) {
         let mut pending = self.dispatch.lock().unwrap();
@@ -633,7 +713,7 @@ impl CloudAgents {
             // may have changed while it waited.
             // Never typed while it may not be; if the queue cannot be
             // rewritten it waits for the next nudge rather than spinning.
-            if !self.follow_up_allowed(&next) {
+            if !self.follow_up_allowed(&tab_id, &next) {
                 if self.revalidate_follow_ups() {
                     self.nudge_follow_ups(&tab_id);
                 }
@@ -643,10 +723,18 @@ impl CloudAgents {
             // the follow-up rather than sending it twice.
             match self.follow_ups.pop(&tab_id) {
                 Ok(Some(follow_up)) => {
-                    if let Err(error) = self.ops.send(&follow_up.session_id, &tab_id, &follow_up.text) {
-                        log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
-                        self.ops.note(&follow_up.session_id, &tab_id, &format!("A queued message could not be sent: {error:#}"));
+                    // Its images were checked when it was queued; if they are
+                    // gone since, it is not sent without them.
+                    match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
+                        Ok(images) => {
+                            if let Err(error) = self.ops.send_with_images(&follow_up.session_id, &tab_id, &follow_up.text, images) {
+                                log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);
+                                self.ops.note(&follow_up.session_id, &tab_id, &format!("A queued message could not be sent: {error:#}"));
+                            }
+                        }
+                        Err(_) => self.ops.note(&follow_up.session_id, &tab_id, "A queued message was not sent: its images are no longer on the workspace. Send it again."),
                     }
+                    self.attachments.remove(&follow_up.images);
                     sent += 1;
                     self.changed(Some(&tab_id), true);
                 }
@@ -711,9 +799,17 @@ impl CloudAgents {
             self.nudge_follow_ups(&tab_id);
         }
         let agents = self.clone();
-        let _ = std::thread::Builder::new().name("cloud-follow-ups".into()).spawn(move || loop {
-            agents.dispatch_signal.wait(Duration::from_secs(5));
-            agents.dispatch_follow_ups();
+        let _ = std::thread::Builder::new().name("cloud-follow-ups".into()).spawn(move || {
+            // Old uploads go at start and then about hourly, whether or not anyone uploads again.
+            let mut pruned: Option<std::time::Instant> = None;
+            loop {
+                if pruned.is_none_or(|at| at.elapsed() >= ATTACHMENT_PRUNE_EVERY) {
+                    agents.prune_attachments();
+                    pruned = Some(std::time::Instant::now());
+                }
+                agents.dispatch_signal.wait(Duration::from_secs(5));
+                agents.dispatch_follow_ups();
+            }
         });
         if self.api.is_some() {
             let agents = self.clone();
@@ -726,18 +822,27 @@ impl CloudAgents {
     /// After a runtime restart: turns that were running died with the
     /// previous process. Say so in their transcripts instead of letting
     /// them look like they are still going.
+    ///
+    /// A workspace restored from a saved state can come back with the same
+    /// turn marked running more than once; the transcript says it once.
     pub fn mark_interrupted_turns(&self, tabs: &[(String, String)]) {
         for (session_id, tab_id) in tabs {
-            self.ops.note(
-                session_id,
-                tab_id,
-                "The workspace runtime restarted and the agent process running this turn ended. \
-                 Its saved conversation resumes when you send the next message.",
-            );
+            let already_said = self.ops.events(session_id, tab_id).ok().is_some_and(|events| {
+                events.last().is_some_and(|event| event["payload"]["type"] == "status" && event["payload"]["text"] == INTERRUPTED_TURN_NOTICE)
+            });
+            if already_said {
+                continue;
+            }
+            self.ops.note(session_id, tab_id, INTERRUPTED_TURN_NOTICE);
             self.changed(Some(tab_id), true);
         }
     }
 }
+
+const ATTACHMENT_PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+const INTERRUPTED_TURN_NOTICE: &str = "The workspace runtime restarted and the agent process running this turn ended. \
+     Its saved conversation resumes when you send the next message.";
 
 /// Tabs of `root` that were mid-turn when the index was last written; call
 /// before `idle_orphaned_tabs` resets them.

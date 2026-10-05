@@ -11,7 +11,7 @@ vi.mock("@/lib/api", () => ({
   files: { search: async () => [{ path: mocks.name, name: mocks.name }] },
 }));
 vi.mock("@/lib/changes", () => ({ useWorkingChanges: () => ({ files: [], loading: false, head: null }) }));
-vi.mock("@/lib/hotkeys", () => ({ useHotkey: (key: string, cb: () => void) => { mocks.hotkeys.set(key, cb); } }));
+vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: (action: string, cb: () => void) => { mocks.hotkeys.set(action, cb); } }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }));
 
@@ -28,7 +28,7 @@ it.each([["透明 image.png", "image"], ["sound.mp3", "audio"], ["clip.mp4", "vi
   fireEvent.contextMenu(screen.getByText(name));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Open" }));
   expect(getEditors().collapsed.opening).toBe(false);
-  act(() => mocks.hotkeys.get("mod+p")!());
+  act(() => mocks.hotkeys.get("files.quickOpen")!());
   await screen.findByRole("button", { name });
   fireEvent.keyDown(screen.getByPlaceholderText("Open file by name"), { key: "Enter" });
   expect(getEditors().editors).toHaveLength(1);

@@ -298,3 +298,57 @@ describe("chat scroll follow", () => {
     expect(latestShown()).toBe(true);
   });
 });
+
+// #250: a prompt typed into the agent's own terminal reaches the chat from
+// the CLI's record of it, so its event has text and nothing the composer adds.
+describe("a prompt the composer never saw", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("reduced-motion"),
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("is drawn as the reader's message, ahead of the reply to it", () => {
+    const base = { sessionId: "s", tabId: "t", harness: "claude" };
+    const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
+    const transcript = buildTranscript(
+      [
+        { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "sent from the composer", queued: false, baseline: "abc", cwd: "/tmp/repo" } },
+        { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "assistant_text", text: "first reply" } },
+        { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "turn_completed", status: "ok", authFailed: false } },
+        // Text only: no baseline, cwd, images or `queued`.
+        { ...base, id: "e4", seq: 4, ts: at(4), payload: { type: "user_message", text: "typed in the terminal" } as never },
+        { ...base, id: "e5", seq: 5, ts: at(5), payload: { type: "assistant_text", text: "second reply" } },
+        { ...base, id: "e6", seq: 6, ts: at(6), payload: { type: "turn_completed", status: "ok", authFailed: false } },
+      ],
+      false,
+    );
+    const view = render(
+      <Chat
+        sessionId="s"
+        transcript={transcript}
+        stream={[]}
+        cwd="/tmp/repo"
+        live={false}
+        progressing={false}
+        answering={false}
+        onAnswerPermission={() => {}}
+        onAnswerQuestions={() => {}}
+        footer={null}
+      />,
+    );
+    const text = view.container.textContent ?? "";
+    const order = ["sent from the composer", "first reply", "typed in the terminal", "second reply"].map((part) => text.indexOf(part));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(text.match(/typed in the terminal/g)).toHaveLength(1);
+  });
+});

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, AtSign, ChevronDown, FileText, SlashSquare, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -14,21 +14,65 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
-import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, refreshModels, upgradeHint, useModels } from "@/lib/models";
+import { useShortcutKeycaps } from "@/lib/hotkeys";
+import { matchesShortcut } from "@/lib/shortcuts";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
+import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
 import { files as filesApi, type FileHit, type ImageInput, type SlashCommand } from "@/lib/api";
 import type { TabEntry } from "@/types/session";
-import { DictationStatus, MicButton, useDictationInto } from "./Dictation";
+import { DictationStatus, MicButton, useDictationInto, useDictationShortcuts } from "./Dictation";
 import { PickerMenu, type PickerItem } from "./PickerMenu";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "./useImageAttachments";
 import { useComposerHistory } from "./useComposerHistory";
 import { tokenAtCaret } from "@/lib/pickers";
+import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
 
-const commandCache = new Map<string, SlashCommand[]>();
+const commandCache = new Map<string, ComposerCommandList>();
+const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
+
+const commandsAsked = new Map<string, Promise<ComposerCommandList>>();
+
+/** A local tab's commands: asked of the harness once per directory. */
+function localCommands(cwd: string, harness: string): ComposerCommands {
+  const key = `${cwd}|${harness}`;
+  return {
+    key,
+    known: () => commandCache.get(key) ?? null,
+    load: () => {
+      const known = commandCache.get(key);
+      if (known) return Promise.resolve(known);
+      const pending = commandsAsked.get(key);
+      if (pending) return pending;
+      const asked = filesApi
+        .slashCommands(cwd, harness)
+        .then((commands) => {
+          const list = { commands, note: null };
+          commandCache.set(key, list);
+          return list;
+        })
+        .finally(() => commandsAsked.delete(key));
+      commandsAsked.set(key, asked);
+      return asked;
+    },
+  };
+}
+
+/** Break the line at the caret, through the input event the draft is read from. */
+export function insertNewLine(el: HTMLTextAreaElement) {
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  const next = el.value.slice(0, start) + "\n" + el.value.slice(end);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(el, next);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.setSelectionRange(start + 1, start + 1);
+}
 // Matches the textarea's max-h-60: about ten lines before it scrolls.
 const MAX_HEIGHT = 240;
 const NO_HISTORY: string[] = [];
+/** The least of its label the permission picker shows: about a first word ("Bypass…"). With less room it shows none. */
+const PERMISSION_LABEL_MIN_CHARS = 9;
 
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
@@ -40,6 +84,9 @@ const NO_HISTORY: string[] = [];
 export function Composer({
   tab,
   cwd,
+  commands: givenCommands,
+  files: givenFiles,
+  remote = false,
   busy,
   draft,
   onDraftChange,
@@ -50,6 +97,9 @@ export function Composer({
   onSetEffort,
   onSetMode,
   contextUsed,
+  reportedModel,
+  modelsAreLocal = true,
+  modelClient,
   contextMax,
   handoffs,
   disabledReason,
@@ -62,6 +112,12 @@ export function Composer({
 }: {
   tab: TabEntry;
   cwd?: string;
+  /** Where the `/` list comes from when the tab does not run in `cwd` on this computer (a cloud tab: its runtime). */
+  commands?: ComposerCommands | null;
+  /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
+  files?: ComposerFiles | null;
+  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  remote?: boolean;
   busy: boolean;
   draft: string;
   onDraftChange: (v: string) => void;
@@ -73,6 +129,12 @@ export function Composer({
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
   contextUsed?: number;
+  /** The full model id the session last said it ran (an alias like `opus` resolved). */
+  reportedModel?: string | null;
+  /** False for cloud: use modelClient, or aliases only until the workspace answers. */
+  modelsAreLocal?: boolean;
+  /** The workspace that supplies cloud model choices, while connected. */
+  modelClient?: WorkspaceRpcClient | null;
   contextMax?: number;
   /** Next-step prompts offered after a turn lands (commit, PR, run). */
   handoffs?: { label: string; prompt: string }[];
@@ -89,19 +151,30 @@ export function Composer({
   canStop?: boolean;
   autoFocus?: boolean;
 }) {
-  const models = useModels(tab.harness);
-  const model = models.find((m) => m.id === tab.model) ?? models.find((m) => m.isDefault);
+  const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
+  const model = modelForTab(listed, tab.model);
+  // What may be chosen here, plus what the tab is already on if that is not among them.
+  const models = useMemo(() => model && !listed.some((m) => m.id === model.id) ? [...listed, model] : listed, [listed, model?.id]);
   const [caret, setCaret] = useState(0);
-  const [commands, setCommands] = useState<SlashCommand[]>(() => commandCache.get(`${cwd}|${tab.harness}`) ?? []);
+  const commandSource = useMemo(() => givenCommands ?? (cwd ? localCommands(cwd, tab.harness) : null), [givenCommands?.key, cwd, tab.harness]);
+  const [commandList, setCommandList] = useState<ComposerCommandList>(() => commandSource?.known() ?? NO_COMMANDS);
+  const firstLoad = useRef<ComposerCommands | null>(null);
+  const commands: SlashCommand[] = commandList.commands;
+  const fileSource = useMemo<ComposerFiles | null>(
+    () => givenFiles ?? (cwd ? { key: cwd, search: (query, limit) => filesApi.search(cwd, query, limit) } : null),
+    [givenFiles?.key, cwd],
+  );
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
-  const [highlighted, setHighlighted] = useState(0);
+  const [highlight, setHighlight] = useState<{ list: string | null; row: number }>({ list: null, row: 0 });
   const [dismissedToken, setDismissedToken] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // The model and permission pickers open on a click and an accessibility press too.
-  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
+  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange });
+  // A file dropped from this computer can be mentioned only to an agent that runs here.
+  const mentionDropped = !remote;
+  const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
   const { attachments } = attach;
 
   // Grow with content, up to ~10 lines. Tabs that are not selected stay
@@ -156,32 +229,54 @@ export function Composer({
     if (autoFocus) ref.current?.focus({ preventScroll: true });
   }, [autoFocus, tab.id]);
 
-  // Slash commands come from the harness once per directory.
+  // Slash commands come from the harness once per directory (a cloud tab's, from its runtime).
   useEffect(() => {
-    if (!cwd) return;
-    const key = `${cwd}|${tab.harness}`;
-    if (commandCache.has(key)) {
-      setCommands(commandCache.get(key)!);
+    if (!commandSource) {
+      setCommandList(NO_COMMANDS);
       return;
     }
+    const known = commandSource.known();
+    setCommandList(known ?? NO_COMMANDS);
     let cancelled = false;
-    filesApi
-      .slashCommands(cwd, tab.harness)
-      .then((c) => {
-        commandCache.set(key, c);
-        if (!cancelled) setCommands(c);
+    firstLoad.current = commandSource;
+    const settled = () => {
+      if (firstLoad.current === commandSource) firstLoad.current = null;
+    };
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled) setCommandList(list);
+      })
+      .catch(() => {})
+      .finally(settled);
+    return () => {
+      cancelled = true;
+    };
+  }, [commandSource]);
+
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
+  useDictationShortcuts(dictation, !!autoFocus);
+  const keysOf = useShortcutKeycaps();
+
+  const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
+  const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  // A list that came back empty or failed (a cloud tab's CLI had not answered yet) is asked for
+  // again when the reader starts a command; a source that already has its list answers from it.
+  const startingCommand = token?.kind === "slash" && commands.length === 0;
+  useEffect(() => {
+    // Its first reading is still on its way: that answer is the one to wait for.
+    if (!startingCommand || !commandSource || firstLoad.current === commandSource) return;
+    let cancelled = false;
+    commandSource
+      .load()
+      .then((list) => {
+        if (!cancelled && list.commands.length) setCommandList(list);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [cwd, tab.harness]);
-
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
-  useHotkey("mod+shift+d", dictation.toggle, { enabled: autoFocus });
-
-  const token = useMemo(() => tokenAtCaret(draft, caret), [draft, caret]);
-  const tokenKey = token ? `${token.kind}:${token.start}` : null;
+  }, [startingCommand, commandSource]);
   const recall = useComposerHistory({
     id: tab.id,
     history,
@@ -195,15 +290,15 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!cwd : commands.length > 0);
+  const pickerOpen = !!token && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || !!commandList.note);
 
   // File hits follow the query, lightly debounced.
   useEffect(() => {
-    if (!token || token.kind !== "mention" || !cwd) return;
+    if (!token || token.kind !== "mention" || !fileSource) return;
     let cancelled = false;
     const id = window.setTimeout(() => {
-      filesApi
-        .search(cwd, token.query, 30)
+      fileSource
+        .search(token.query, 30)
         .then((h) => !cancelled && setFileHits(h))
         .catch(() => {});
     }, 60);
@@ -211,7 +306,7 @@ export function Composer({
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [token?.kind, token?.query, cwd]);
+  }, [token?.kind, token?.query, fileSource]);
 
   const items: PickerItem[] = useMemo(() => {
     if (!token) return [];
@@ -225,7 +320,20 @@ export function Composer({
     return fileHits.map((h) => ({ id: h.path, label: h.name, detail: h.path, icon: <FileText className="size-3.5" /> }));
   }, [token, commands, fileHits]);
 
-  useEffect(() => setHighlighted(0), [items.length, tokenKey]);
+  // The highlighted row belongs to the list it was chosen in: another token, or a list of another
+  // length, starts at its first row. That is read off while rendering, never reset in an effect. A
+  // reset in an effect runs a task after the new rows are on screen, and undid an arrow pressed in
+  // between (the key was answered, then the late reset put the highlight back).
+  const listKey = `${tokenKey}|${items.length}`;
+  const highlighted = highlight.list === listKey ? highlight.row : 0;
+  const setHighlighted = useCallback(
+    (next: number | ((row: number) => number)) =>
+      setHighlight((was) => {
+        const row = was.list === listKey ? was.row : 0;
+        return { list: listKey, row: typeof next === "function" ? next(row) : next };
+      }),
+    [listKey],
+  );
 
   const complete = useCallback(
     (item: PickerItem) => {
@@ -292,17 +400,27 @@ export function Composer({
     }
     // An open menu owns the arrows (the pickers above, the model and permission menus); dictation owns the draft.
     if (!pickerOpen && !modelMenu.open && !modeMenu.open && !dictation.dictating && recall.onKeyDown(e)) return;
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.nativeEvent.isComposing) return;
+    if (matchesShortcut(e.nativeEvent, "composer.send")) {
       e.preventDefault();
       void send();
+      return;
+    }
+    // Enter that is not Send already breaks the line; any other key for New line has to do it itself.
+    if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
+      e.preventDefault();
+      insertNewLine(e.currentTarget);
     }
   };
 
   const placeholder = busy ? "Send a follow-up (it queues until the agent pauses)" : "Ask, build, or describe the next step";
   // The model picker's label, and its tooltip: the whole of it when the button has to truncate.
-  const modelName = model?.label ?? tab.model ?? "Model";
+  // An alias reads as the version it is running, once someone has said which.
+  const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
+  const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
-  const modelTitle = `Model: ${modelName}${effortName ? ` · ${effortName}` : ""}`;
+  const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
+  const permissionLabel = modeLabel(tab.permissionMode);
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
@@ -324,9 +442,10 @@ export function Composer({
             onHover={setHighlighted}
             title={token?.kind === "slash" ? "Commands" : "Files"}
             empty={token?.kind === "slash" ? "No matching command" : "No matching file"}
+            note={token?.kind === "slash" ? commandList.note : null}
           />
         )}
-        <DropHint dragging={attach.dragging} />
+        <DropHint dragging={attach.dragging} mentionFiles={mentionDropped} />
         {!busy && !draft && handoffs && handoffs.length > 0 && (
           <div className="mb-1.5 flex flex-wrap gap-1.5 px-1" aria-label="Next steps">
             {handoffs.map((h) => (
@@ -345,6 +464,11 @@ export function Composer({
           </div>
         )}
         <AttachmentThumbs attach={attach} />
+        {attach.notice && (
+          <div className="mb-1 px-1.5 text-xs text-warning" role="status" data-testid="attach-notice">
+            {attach.notice}
+          </div>
+        )}
         <textarea
           ref={ref}
           data-composer
@@ -365,7 +489,7 @@ export function Composer({
           {/* Nothing can be sent: attaching and dictating into it are off too. */}
           <AttachButton attach={attach} disabled={disabled} />
           <MicButton dictation={dictation} disabled={disabled} />
-          {cwd && (
+          {fileSource && (
             <WithTooltip label="Mention a file">
               <Button
                 variant="ghost"
@@ -395,6 +519,8 @@ export function Composer({
               <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
+                {/* An alias and the same version pinned read alike otherwise. */}
+                {model?.alias ? <span className="shrink-0 text-faint">latest</span> : null}
                 {effortName ? <span className="min-w-0 truncate text-faint">{effortName}</span> : null}
                 <ChevronDown className="size-3 text-faint" />
               </Button>
@@ -402,15 +528,21 @@ export function Composer({
             <DropdownMenuContent align="start" className="min-w-[14rem]">
               <DropdownMenuLabel>Model</DropdownMenuLabel>
               <DropdownMenuRadioGroup value={model?.id ?? ""} onValueChange={onSetModel}>
-                {models.map((m) => {
-                  const upgrade = upgradeHint(m, models);
-                  return (
-                    <DropdownMenuRadioItem key={m.id} value={m.id}>
-                      {m.label}
-                      {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
-                    </DropdownMenuRadioItem>
-                  );
-                })}
+                {modelGroups(models).map((group) => (
+                  <Fragment key={group.title ?? "models"}>
+                    {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
+                    {group.models.map((m) => {
+                      // The ticked alias says what this session reported; the rest, what the CLI listed.
+                      const note = m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
+                      return (
+                        <DropdownMenuRadioItem key={m.id} value={m.id} disabled={!modelsAreLocal && !listed.some((choice) => choice.id === m.id)}>
+                          {m.label}
+                          {note ? <span className="ml-1.5 text-faint">{note}</span> : null}
+                        </DropdownMenuRadioItem>
+                      );
+                    })}
+                  </Fragment>
+                ))}
               </DropdownMenuRadioGroup>
               {model?.efforts.length ? (
                 <>
@@ -430,14 +562,25 @@ export function Composer({
 
           <DropdownMenu {...modeMenu.root}>
             <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${modeLabel(tab.permissionMode)}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined}>
+              {/*
+                In a narrow composer the label truncates down to about its first word, never to a
+                single letter: with no room for that it wraps out of sight below the button's one
+                line, leaving the mode's dot and the chevron. The tooltip names the mode either way.
+              */}
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${permissionLabel}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined} data-testid="permission-mode">
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",
                     tab.permissionMode === "bypassPermissions" ? "bg-destructive" : tab.permissionMode === "plan" ? "bg-info" : "bg-add",
                   )}
                 />
-                <span className="min-w-0 truncate">{modeLabel(tab.permissionMode)}</span>
+                <span className="flex h-5 min-w-0 flex-wrap content-start overflow-hidden leading-5">
+                  {/* Holds the one visible line, so a label that does not fit starts below it. */}
+                  <span aria-hidden className="h-5 w-0 shrink-0" />
+                  <span className="grow basis-0 truncate" style={{ minWidth: `${Math.min(permissionLabel.length, PERMISSION_LABEL_MIN_CHARS) * 0.8}ch` }} data-testid="permission-mode-label">
+                    {permissionLabel}
+                  </span>
+                </span>
                 <ChevronDown className="size-3 text-faint" />
               </Button>
             </DropdownMenuTrigger>
@@ -475,13 +618,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={["Esc"]}>
+              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
                 <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>
             ) : null}
-            <WithTooltip label={busy ? "Queue" : "Send"} keys={keycaps("enter")}>
+            <WithTooltip label={busy ? "Queue" : "Send"} keys={keysOf("composer.send")}>
               <Button
                 size="icon-sm"
                 variant={draft.trim() || attachments.length ? "accent" : "secondary"}

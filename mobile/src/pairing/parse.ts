@@ -19,6 +19,22 @@ export function extractPairingCodeFromUrl(value: string): string | null {
   return hashStart >= 0 ? trimmed.slice(hashStart + 1) || null : null;
 }
 
+/**
+ * The computer's name, when the pairing link carries one (`&name=`, PRO-87).
+ * It rides beside the offer, not in it; a bare code has none. The caller
+ * cleans it before use: it is a label, never part of the offer's checks.
+ */
+export function extractPairingNameFromUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length > INPUT_LIMIT || !/^terminalx:\/\/pair(?:\/)?\?/i.test(trimmed)) return null;
+  const query = trimmed.slice(trimmed.indexOf("?") + 1).split("#")[0] ?? "";
+  try {
+    return new URLSearchParams(query).get("name");
+  } catch {
+    return null;
+  }
+}
+
 export function parsePairingCode(input: string, now: () => number = Date.now): PairingOffer | null {
   try { return parsePairingCodeOrThrow(input, now); }
   catch { return null; }

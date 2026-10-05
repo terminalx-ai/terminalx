@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   DEFAULT_PERMISSION_MODE: "bypassPermissions",
   PERMISSION_MODES: [
@@ -33,7 +35,7 @@ vi.mock("@/components/chat/Composer", () => ({
 // jsdom has no canvas for the chat's idle animation.
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
 
-import { CloudAgentsView, provisioningLabel } from "./CloudAgents";
+import { CloudAgentsView, connectionLabel, provisioningLabel, signInMessage, stoppedAndStaying } from "./CloudAgents";
 import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
@@ -128,6 +130,12 @@ const notificationListeners = new Set<(notification: { event: string; params: Re
 function makeClient() {
   return {
     connection: { state: "connected" } as WorkspaceConnectionState,
+    hasCapability(capability: string): boolean {
+      const state = this.connection;
+      return state.state === "connected" && (state.capabilities as readonly string[] | undefined ?? []).includes(capability);
+    },
+    onState: () => () => {},
+    listRuntimeAgents: vi.fn(async (): Promise<import("@terminalx/portable/workspace").RuntimeAgent[]> => []),
     listAgentTabs: vi.fn(async () => liveTabs),
     onNotification: vi.fn((listener: (notification: { event: string; params: Record<string, unknown> }) => void) => {
       notificationListeners.add(listener);
@@ -245,6 +253,25 @@ describe("cloud agent tabs", () => {
     expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", mode: "bypassPermissions" });
   });
 
+  it("offers pinned models from the workspace when creating a cloud tab", async () => {
+    const base = { efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
+    client.listRuntimeAgents.mockResolvedValue([{
+      id: "claude", name: "Claude Code", caps: {}, modes: [], defaultMode: "bypassPermissions",
+      models: [
+        { ...base, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true },
+        { ...base, id: "claude-opus-4-6", label: "Opus 4.6", isDefault: false },
+      ],
+    }]);
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    render(view(connected({ capabilities: ["session/1", "keys/1", "agents/1"] })));
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    expect(await within(form).findByRole("option", { name: "Opus (latest · Opus 4.6)" })).toBeTruthy();
+    fireEvent.change(within(form).getByLabelText("Model"), { target: { value: "claude-opus-4-6" } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
+  });
+
   it("keeps two agent tabs' conversations and states apart", async () => {
     liveTabs = [
       tabInfo({ status: "in_progress" }),
@@ -338,6 +365,39 @@ describe("cloud agent tabs", () => {
     // Not shown as still working: no stop button, a plain send.
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
+  });
+
+  it("says an agent needs sign-in instead of showing it working, and what to do (PRO-78)", async () => {
+    liveTabs = [tabInfo({ status: "in_progress", signIn: { provider: "claude", state: "not-connected", reason: null } })];
+    render(view(connected()));
+    const notice = await screen.findByTestId("cloud-agent-sign-in");
+    expect(notice.textContent).toContain("Needs sign-in: Claude Code isn't connected for this organization");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).toContain("Needs sign-in");
+    expect(screen.getByTestId("cloud-agent-turn").textContent).not.toContain("Working");
+    // Not a turn in progress: no spinner on the tab, no stop button.
+    expect(within(screen.getByTestId("cloud-agent-tab")).queryByLabelText("working")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("words the sign-in notice for who is reading and why the login is missing", () => {
+    const info = (signIn: AgentTabInfo["signIn"]) => ({ harness: "codex", signIn });
+    expect(signInMessage(info(null), true)).toBeNull();
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), true)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Connect it in the web console under Compute setup → Agent logins, then send again.",
+    );
+    // A member cannot connect it, and is not sent somewhere they have no access to.
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), false)).toBe(
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Ask an owner or admin to connect it, then send again.",
+    );
+    expect(signInMessage(info({ provider: "codex", state: "not-connected" }), null)).toContain("Ask an owner or admin");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "token-expired" }), true)).toContain("login has expired");
+    expect(signInMessage(info({ provider: "codex", state: "unavailable", reason: "shared-use-policy" }), false)).toContain("An owner or admin can allow it for the whole organization.");
+    expect(signInMessage(info({ provider: "codex", state: "revoked" }), true)).toContain("Codex login was revoked");
+    expect(signInMessage(info({ provider: "codex", state: "disconnected" }), true)).toContain("Codex login was disconnected");
+    // A state word this app does not know is not printed.
+    const unknown = signInMessage(info({ provider: "codex", state: "quarantined_v2" }), true)!;
+    expect(unknown).toContain("Codex login is not available");
+    expect(unknown).not.toContain("quarantined");
   });
 
   it("wakes a sleeping workspace only after an interactive command, and reports the wake", async () => {
@@ -495,11 +555,29 @@ describe("shared cloud workspace agent tabs (PRO-30)", () => {
     outbox = [
       { clientCommandId: "c-1", tabId: "t-1", kind: "send", text: "deploy", state: "rejected", category: "lease-held", receipt: { holderId: "u-alice" }, createdAt: 1, updatedAt: 1 },
       { clientCommandId: "c-2", tabId: "t-1", kind: "send", text: "hi", state: "rejected", category: "access-revoked", createdAt: 1, updatedAt: 1 },
+      // PRO-88: the runtime refused a slash command this person may not send.
+      {
+        clientCommandId: "c-3",
+        tabId: "t-1",
+        kind: "send",
+        text: "/model opus",
+        state: "rejected",
+        category: "slash-command-forbidden",
+        receipt: { command: "/model", message: "/model was not sent: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help." },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      { clientCommandId: "c-4", tabId: "t-1", kind: "send", text: "!ls", state: "rejected", category: "shell-command-forbidden", createdAt: 1, updatedAt: 1 },
+      // PRO-33: the runtime could not write its record of the command, so it left the agent alone.
+      { clientCommandId: "c-5", tabId: "t-1", kind: "send", text: "go on", state: "rejected", category: "receipt-store-failed", createdAt: 1, updatedAt: 1 },
     ];
     const state = share(me("driver"));
     render(view(state));
     expect(await screen.findByText("Alice is driving — your message was not sent")).toBeTruthy();
     expect(screen.getByText("Not sent: your access changed")).toBeTruthy();
+    expect(screen.getByText("Not sent: /model: only someone who can approve permissions may send it. Without that right you can send /clear, /compact, /help.")).toBeTruthy();
+    expect(screen.getByText("Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.")).toBeTruthy();
+    expect(screen.getByText("Not sent: the workspace could not record it (its disk may be full)")).toBeTruthy();
     expect(screen.getByTestId("cloud-agent-followup").textContent).toContain("Queued follow-up from Alice:");
   });
 
@@ -602,6 +680,47 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
     const waiting = { state: "waitingForRuntime" } as WorkspaceConnectionState;
     expect(provisioningLabel("ready", null, waiting)).toBe("Ready");
     expect(provisioningLabel("provisioning", null, waiting)).toBe("Starting");
-    expect(provisioningLabel("suspended", null, waiting)).toBe("Starting");
+    // A stopped workspace is Starting only once someone resumes it.
+    expect(provisioningLabel("suspended", null, waiting, false, true)).toBe("Starting");
+  });
+
+  // PRO-84: both chips flipped every few seconds while the workspace was simply stopped.
+  it("reads one stable state while a stopped workspace's connection keeps retrying", () => {
+    const tries = ["opening", "waitingForRuntime", "opening", "suspended"].map((state) => ({ state }) as WorkspaceConnectionState);
+    for (const state of tries) {
+      expect(stoppedAndStaying(state, "suspended", false)).toBe(true);
+      expect(connectionLabel(state, "asleep")).toBe("Offline (workspace asleep)");
+      expect(provisioningLabel("suspended", null, state)).toBe("Asleep");
+    }
+    // Being woken: one wait, not "Checking" and "Waiting for runtime" in turn.
+    expect(stoppedAndStaying(tries[0]!, "suspended", true)).toBe(false);
+    expect(new Set(tries.slice(0, 3).map((state) => connectionLabel(state)))).toEqual(new Set(["Waiting for runtime"]));
+    expect(new Set(tries.slice(0, 3).map((state) => provisioningLabel("suspended", null, state, false, true)))).toEqual(new Set(["Starting"]));
+  });
+
+  // Review of #272: a Resume refused at the running limit left "Starting" / "Waiting for runtime" on a stopped workspace.
+  it("reads stopped again when the wake stops or is refused", async () => {
+    const at = (waking: boolean) => (
+      <TooltipProvider>
+        <CloudAgentsView scope={scope} client={client as unknown as WorkspaceRpcClient} state={{ state: "waitingForRuntime" } as WorkspaceConnectionState} workspaceState="suspended" waking={waking} />
+      </TooltipProvider>
+    );
+    const { rerender } = render(at(true));
+    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Starting");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Waiting for runtime");
+    rerender(at(false));
+    expect(screen.getByTestId("cloud-agent-provisioning").textContent).toContain("Asleep");
+    expect(screen.getByTestId("cloud-agent-connection").textContent).toContain("Offline (workspace asleep)");
+    // No Resume control here: the workspace header has the one Resume button.
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+  });
+
+  it("reads an archived workspace opened to read as offline, not as waiting for its runtime", () => {
+    const tries = ["opening", "waitingForRuntime", "idle"].map((state) => ({ state }) as WorkspaceConnectionState);
+    for (const state of tries) {
+      expect(stoppedAndStaying(state, "archived", false)).toBe(true);
+      expect(provisioningLabel("archived", null, state)).toBe("Archived (unarchive it to resume)");
+    }
+    expect(connectionLabel(tries[1]!, "archived")).toBe("Offline (workspace archived)");
   });
 });

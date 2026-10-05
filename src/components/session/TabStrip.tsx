@@ -6,7 +6,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { closeEditor, useEditors } from "@/lib/editors";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
+import { useModels } from "@/lib/models";
+import { usePickerModels } from "@/lib/cloudModels";
 import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { activatePeer, closePeer, peerOrder } from "@/lib/sessionTabs";
@@ -22,7 +24,7 @@ import type { SessionEntry } from "@/types/session";
  */
 function NewTabTrigger({ trigger }: { trigger: ReturnType<typeof useRowMenu>["trigger"] }) {
   return (
-    <WithTooltip label="New tab" keys={keycaps("mod+t")}>
+    <WithTooltip label="New tab" shortcut="session.newTab">
       <DropdownMenuTrigger asChild {...trigger}>
         <Button variant="ghost" size="icon-sm" aria-label="New tab">
           <Plus />
@@ -65,10 +67,10 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
     const prefs = getPrefs();
     await addTab(session.id, harness, prefs.lastModel[harness] ?? "", prefs.lastEffort[harness] ?? null, prefs.lastMode);
   };
-  useHotkey("mod+t", () => picker.setOpen(true));
-  useHotkey("mod+w", closeActive);
-  useHotkey("mod+shift+]", () => step(1));
-  useHotkey("mod+shift+[", () => step(-1));
+  useShortcut("session.newTab", () => picker.setOpen(true));
+  useShortcut("session.closeTab", closeActive);
+  useShortcut("session.nextTab", () => step(1));
+  useShortcut("session.previousTab", () => step(-1));
 
   return (
     <DropdownMenu {...picker.root}>
@@ -80,8 +82,8 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
           {!harness.available ? <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span> : null}
         </DropdownMenuItem>)}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)}>
-          <TerminalSquare /><span>Terminal</span>
+        <DropdownMenuItem onSelect={() => void openTerminal(session.id, session.cwd)} aria-label="Terminal on this computer">
+          <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on this computer</span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void openBrowserTab(session.id, session.cwd).catch((error) => console.error("browser open failed", error))}>
           <Globe /><span>Browser</span>
@@ -97,7 +99,8 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
  * menu says why when it is not there.
  */
 function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel }) {
-  const picker = useRowMenu();
+  const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
+  const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
   const tabs = useMemo<(SelectedSessionTab & { created: string })[]>(
     () =>
@@ -116,9 +119,9 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
     },
     [selected, session.id, tabs],
   );
-  useHotkey("mod+t", () => picker.setOpen(true));
-  useHotkey("mod+shift+]", () => step(1));
-  useHotkey("mod+shift+[", () => step(-1));
+  useShortcut("session.newTab", () => picker.setOpen(true));
+  useShortcut("session.nextTab", () => step(1));
+  useShortcut("session.previousTab", () => step(-1));
   const blocked =
     cloud.backend.readOnlyReason ??
     (!cloud.connected
@@ -148,7 +151,7 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
           <DropdownMenuItem
             key={agent.id}
             disabled={!!blocked || !cloud.canAddTabs}
-            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, model: prefs.lastModel[agent.id] || undefined, effort: prefs.lastEffort[agent.id] ?? undefined, mode: prefs.lastMode }))}
+            onSelect={() => run(() => cloud.addAgentTab({ agent: agent.id, model: models.find((model) => model.harness === agent.id && model.id === prefs.lastModel[agent.id])?.id, effort: prefs.lastEffort[agent.id] ?? undefined, mode: prefs.lastMode }))}
           >
             <AgentMark id={agent.id} decorative /><span>{agent.name}</span>
             {!blocked && !cloud.canAddTabs ? <span className="ml-auto pl-3 text-[11px] text-faint">update the runtime</span> : null}

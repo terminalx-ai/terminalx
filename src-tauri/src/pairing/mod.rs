@@ -1,11 +1,12 @@
 //! Optional account binding, pairing, and end-to-end encrypted transport.
 //!
-//! Nothing in this module performs network I/O until an account session exists
-//! or the user explicitly asks for a pairing code.
+//! Network I/O starts for saved pairings, an account session, or an explicitly
+//! requested pairing code.
 
 mod cloud;
 mod crypto;
 mod diagnostics;
+mod direct;
 mod mobile;
 mod model;
 mod registry;
@@ -46,6 +47,7 @@ use self::registry::{DeviceRegistry, PairingSecrets};
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
+const PAIRING_MESSAGE_BYTES_LIMIT: usize = 10 * 1024 * 1024;
 
 #[derive(Default)]
 struct Inner {
@@ -55,6 +57,7 @@ struct Inner {
     active_pairing: Option<PairingCode>,
     pending_pairing_device: Option<String>,
     direct_listener_started: bool,
+    direct_listener_retrying: bool,
     last_error: Option<String>,
 }
 
@@ -63,6 +66,8 @@ pub struct PairingManager {
     diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
     registry: DeviceRegistry,
+    /// Fixed in the app; startup fixtures use an isolated port.
+    direct_port: u16,
     sink: OnceLock<Arc<dyn EventSink>>,
     /// Set once the session manager exists, which is after `configure`.
     sessions: OnceLock<SessionManager>,
@@ -93,6 +98,7 @@ impl PairingManager {
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
             registry: DeviceRegistry::default(),
+            direct_port: direct::PORT,
             sink: OnceLock::new(),
             sessions: OnceLock::new(),
             inner: Mutex::new(Inner::default()),
@@ -119,8 +125,13 @@ impl PairingManager {
             None => log::warn!("relay diagnostics unavailable (category=local-storage)"),
         }
         self.secrets.configure(app_identifier)?;
-        for device_id in self.registry.remove_unclaimed()? {
-            self.secrets.delete_device_token(&device_id)?;
+        let unclaimed = self.registry.remove_unclaimed()?;
+        if !unclaimed.is_empty() {
+            // This runs on the main thread at launch; the Keychain is not
+            // called from it. The devices are already gone from the registry,
+            // so a token that stays behind authenticates nothing.
+            let manager = self.clone();
+            tauri::async_runtime::spawn_blocking(move || manager.forget_device_tokens(&unclaimed));
         }
         self.sink
             .set(sink.clone())
@@ -140,6 +151,20 @@ impl PairingManager {
                 statuses.mobile.broadcast_sessions_changed();
             }),
         );
+        if !self.registry.list()?.is_empty() {
+            // Tauri setup runs outside Tokio. Restore the listener on the
+            // runtime so saved LAN pairings work without a new code or Relay.
+            let manager = self.clone();
+            tauri::async_runtime::spawn(async move {
+                if manager.is_stopped() {
+                    return;
+                }
+                if let Err(error) = manager.ensure_direct_listener() {
+                    log::debug!("saved-device LAN listener unavailable: {error}");
+                    manager.retry_direct_listener();
+                }
+            });
+        }
         let manager = self.clone();
         tauri::async_runtime::spawn(async move { relay::supervise(manager).await });
         Ok(())
@@ -174,7 +199,9 @@ impl PairingManager {
             })?),
             PairingConnectionMode::LocalOnly => None,
         };
-        self.ensure_direct_listener()?;
+        if !direct::prepare(connection_mode, || self.ensure_direct_listener()).await? {
+            self.retry_direct_listener();
+        }
         let keypair = self.host_key(true)?;
         let device_id = Uuid::new_v4().simple().to_string();
         let token = random_token();
@@ -216,6 +243,9 @@ impl PairingManager {
             .map(|relay| relay.invite_expires_at)
             .unwrap_or_else(|| Utc::now().timestamp_millis() + OFFER_TTL_MS)
             .min(Utc::now().timestamp_millis() + OFFER_TTL_MS);
+        // Version-2 phones require a direct endpoint and race it against Relay.
+        // Keep the stable addresses even while binding retries in the background,
+        // so this offer and saved pairings regain LAN access when the port frees.
         let direct_endpoints = advertised_endpoints();
         let offer = PairingOffer {
             v: 2,
@@ -228,7 +258,7 @@ impl PairingManager {
             identity_mode: "inherit".into(),
             relay: relay_offer,
         };
-        let pairing_url = match encode_pairing_offer(&offer) {
+        let pairing_url = match encode_pairing_offer(&offer, computer_name().as_deref()) {
             Ok(pairing_url) => pairing_url,
             Err(error) => {
                 if let Some(relay) = relay {
@@ -242,6 +272,7 @@ impl PairingManager {
             pairing_url,
             expires_at,
             connection_mode,
+            direct_available: self.inner.lock().unwrap().direct_listener_started,
             transport: match connection_mode {
                 PairingConnectionMode::Automatic => PairingTransport::Relay,
                 PairingConnectionMode::LocalOnly => PairingTransport::Direct,
@@ -485,8 +516,8 @@ impl PairingManager {
     pub(super) async fn relay_ready(self: &Arc<Self>, context: AccountContext, relay: RelayLive) {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
         if let Err(error) = self.ensure_direct_listener() {
-            self.set_error(format!("Direct pairing listener failed: {error:#}"));
-            return;
+            log::debug!("nearby pairing unavailable; continuing Relay setup: {error}");
+            self.retry_direct_listener();
         }
         let keypair = match self.host_key(true) {
             Ok(keypair) => keypair,
@@ -759,15 +790,43 @@ impl PairingManager {
         }
     }
 
-    fn ensure_direct_listener(self: &Arc<Self>) -> Result<()> {
+    fn retry_direct_listener(self: &Arc<Self>) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.direct_listener_started || inner.direct_listener_retrying {
+            return;
+        }
+        inner.direct_listener_retrying = true;
+        drop(inner);
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(direct::RETRY_DELAY).await;
+                if manager.is_stopped() {
+                    break;
+                }
+                match manager.ensure_direct_listener() {
+                    Ok(()) => {
+                        manager.emit();
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                    Err(error) => {
+                        log::debug!("nearby pairing listener retry failed: {error}");
+                        break;
+                    }
+                }
+            }
+            manager.inner.lock().unwrap().direct_listener_retrying = false;
+        });
+    }
+
+    fn ensure_direct_listener(self: &Arc<Self>) -> std::io::Result<()> {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
         if inner.direct_listener_started {
             return Ok(());
         }
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 6768))?;
-        listener.set_nonblocking(true)?;
-        let listener = tokio::net::TcpListener::from_std(listener)?;
+        let listener = direct::bind(self.direct_port)?;
         inner.direct_listener_started = true;
         drop(inner);
         let manager = self.clone();
@@ -982,6 +1041,16 @@ impl PairingManager {
                 self.get_pairing_endpoints(device, connection, request.get("params"))
                     .await
             }
+            // What the phone calls this computer (PRO-87). Asked on every
+            // connection, so a computer renamed in System Settings, and a
+            // phone paired before names were sent, both catch up.
+            "host.describe" if allowed_method(device.scope, method) => Ok(serde_json::json!({ "name": computer_name() })),
+            // The phone unpairs itself: only ever the device this connection
+            // authenticated as, so it is removed from this computer's paired
+            // devices too instead of lingering after the phone forgot it.
+            "pairing.forget" if allowed_method(device.scope, method) => {
+                self.revoke_device(&device.id).await.map(|_| serde_json::json!({ "forgotten": true }))
+            }
             method if allowed_method(device.scope, method) => {
                 match mobile::dispatch(self, mobile_connection, request, device).await {
                     Some(result) => result,
@@ -991,12 +1060,7 @@ impl PairingManager {
             _ => return static_rpc_response(request, device.scope),
         };
         match result {
-            Ok(result) => serde_json::json!({
-                "id": id,
-                "ok": true,
-                "result": result,
-                "_meta": { "runtimeId": "desktop" }
-            }),
+            Ok(result) => mobile::success_response(&id, result),
             Err(error) => serde_json::json!({
                 "id": id,
                 "ok": false,
@@ -1116,6 +1180,14 @@ impl PairingManager {
         Ok(result)
     }
 
+    fn forget_device_tokens(&self, device_ids: &[String]) {
+        for device_id in device_ids {
+            if let Err(error) = self.secrets.delete_device_token(device_id) {
+                log::warn!("could not remove an unclaimed device token from Keychain: {error:#}");
+            }
+        }
+    }
+
     fn revoke_local(&self, device_id: &str) -> Result<()> {
         let _ = self.registry.revoke(device_id)?;
         self.secrets.delete_device_token(device_id)?;
@@ -1163,7 +1235,10 @@ impl PairingManager {
                 .into_iter()
                 .filter(|device| device.last_seen_at.is_some())
                 .collect(),
-            active_pairing: inner.active_pairing.clone(),
+            active_pairing: inner.active_pairing.clone().map(|mut pairing| {
+                pairing.direct_available = inner.direct_listener_started;
+                pairing
+            }),
             last_error: inner.last_error.clone(),
         }
     }
@@ -1277,6 +1352,43 @@ fn valid_grant(
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
 
+/// The longest computer name sent to a phone.
+const COMPUTER_NAME_MAX_CHARS: usize = 64;
+
+/// A name as it may be shown on another device: no control or formatting
+/// characters, single spaces, at most [`COMPUTER_NAME_MAX_CHARS`]. `None`
+/// when nothing is left.
+fn presentable_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'))
+        .collect();
+    let name: String = cleaned.split(' ').filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ").chars().take(COMPUTER_NAME_MAX_CHARS).collect();
+    let name = name.trim_end().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// This computer's own name: the macOS computer name (System Settings →
+/// General → About → Name), the host name elsewhere. Read each time it is
+/// asked for, so a rename shows on the next connection.
+fn computer_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output() {
+        if output.status.success() {
+            if let Some(name) = String::from_utf8(output.stdout).ok().and_then(|name| presentable_name(&name)) {
+                return Some(name);
+            }
+        }
+    }
+    ["COMPUTERNAME", "HOSTNAME"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .chain(std::fs::read_to_string("/etc/hostname").ok())
+        .filter_map(|name| presentable_name(name.split('.').next().unwrap_or("")))
+        .next()
+}
+
 fn host_display_name() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -1370,9 +1482,9 @@ pub(super) fn pairing_websocket_config() -> WebSocketConfig {
         // A 5 MB image is base64 encoded in JSON, then the encrypted frame is
         // base64 encoded for the text websocket. Keep the authenticated
         // pairing channel bounded while leaving room for that expansion.
-        .max_write_buffer_size(10 * 1024 * 1024)
-        .max_message_size(Some(10 * 1024 * 1024))
-        .max_frame_size(Some(10 * 1024 * 1024))
+        .max_write_buffer_size(PAIRING_MESSAGE_BYTES_LIMIT)
+        .max_message_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
+        .max_frame_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
 }
 
 fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {
@@ -1472,6 +1584,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "chat.list",
         "sessions.summaries",
         "session.tail",
+        "session.sync",
+        "sync.capabilities",
         "session.subscribe",
         "session.unsubscribe",
         "session.status",
@@ -1483,6 +1597,8 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "notifications.missedSince",
         "notifications.subscribe",
         "notifications.unsubscribe",
+        "host.describe",
+        "pairing.forget",
     ];
     const DRIVER: &[&str] = &[
         "pairing.getEndpoints",
@@ -1503,6 +1619,9 @@ fn allowed_method(scope: DeviceScope, method: &str) -> bool {
 }
 
 #[cfg(test)]
+mod startup_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1510,6 +1629,11 @@ mod tests {
     fn paired_device_scopes_are_deny_by_default() {
         assert!(allowed_method(DeviceScope::Viewer, "terminal.read"));
         assert!(allowed_method(DeviceScope::Viewer, "sessions.summaries"));
+        // PRO-87: any paired device may ask this computer's name and unpair itself.
+        for scope in [DeviceScope::Viewer, DeviceScope::Driver] {
+            assert!(allowed_method(scope, "host.describe"));
+            assert!(allowed_method(scope, "pairing.forget"));
+        }
         assert!(allowed_method(DeviceScope::Viewer, "session.tail"));
         assert!(!allowed_method(DeviceScope::Viewer, "terminal.send"));
         assert!(!allowed_method(DeviceScope::Viewer, "session.send"));
@@ -1558,9 +1682,29 @@ mod tests {
             relay: None,
         };
         assert_eq!(offer.public_key_b64, key.public_key_b64());
-        assert!(encode_pairing_offer(&offer)
+        assert!(encode_pairing_offer(&offer, None)
             .unwrap()
             .starts_with("terminalx://pair?code="));
+        // PRO-87: the computer's name rides beside the offer, where a phone that predates it does not look.
+        let named = encode_pairing_offer(&offer, Some("Paresh\u{2019}s Mac mini & co")).unwrap();
+        let (code, name) = named.split_once("&name=").unwrap();
+        assert_eq!(code, encode_pairing_offer(&offer, None).unwrap());
+        assert_eq!(url::form_urlencoded::parse(format!("name={name}").as_bytes()).next().unwrap().1, "Paresh\u{2019}s Mac mini & co");
+        assert!(!name.contains(' ') && !name.contains('&'));
+        assert_eq!(encode_pairing_offer(&offer, Some("")).unwrap(), code);
+    }
+
+    // PRO-87: a name shown on another device is cleaned and bounded.
+    #[test]
+    fn a_computer_name_is_made_presentable_before_it_is_sent() {
+        assert_eq!(presentable_name("  Paresh\u{2019}s  Mac\tmini \n").as_deref(), Some("Paresh\u{2019}s Mac mini"));
+        assert_eq!(presentable_name("Mac\u{0007}\u{202E}evil\u{200B}").as_deref(), Some("Macevil"));
+        assert_eq!(presentable_name(&"n".repeat(200)).map(|name| name.chars().count()), Some(COMPUTER_NAME_MAX_CHARS));
+        assert_eq!(presentable_name(" \u{0000}\n "), None);
+        // Whatever this machine is called, what is sent obeys the same rules.
+        if let Some(name) = computer_name() {
+            assert!(!name.is_empty() && name.chars().count() <= COMPUTER_NAME_MAX_CHARS && !name.chars().any(char::is_control));
+        }
     }
 
     #[test]

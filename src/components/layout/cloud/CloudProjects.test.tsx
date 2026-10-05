@@ -96,7 +96,7 @@ function signIn() {
 
 /** The catalog as a relaunch reads it: rows and each workspace's cached sessions. */
 async function load(workspaces: CloudWorkspaceListItem[], cached: Record<string, { sessions: unknown[]; capabilities: string[] | null }> = {}) {
-  await catalog.ingestCloudList({ workspaces, quota: { used: workspaces.length, limit: 3 } }, ORG);
+  await catalog.ingestCloudList({ workspaces, quota: { used: workspaces.length, limit: 3, running: { used: workspaces.length, limit: 3 }, total: { used: workspaces.length, limit: 20 } } } as never, ORG);
   for (const [workspaceId, entry] of Object.entries(cached)) catalog.cacheCloudSessions(ORG, workspaceId, entry.sessions as never, entry.capabilities);
 }
 
@@ -201,6 +201,222 @@ describe("sessions under the project", () => {
     const tab = within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByRole("treeitem", { name: "Claude Code", hidden: true });
     expect(tab.getAttribute("title")).toBe("Claude Code · Idle");
     expect(within(sessionNode(`cloud:${ORG}:sleepy:s1`)).getByTestId("cloud-location-chip").getAttribute("title")).toContain("State: Stopped");
+  });
+
+  describe("S1 chips (PRO-59)", () => {
+    const webExtra = { ...acmeWeb, primary: false };
+    const docsExtra = { identity: "github.com/acme/docs", fullName: null, cloneUrl: "https://github.com/acme/docs.git", primary: false };
+
+    it("marks a workspace with extra repositories +N repo, on the project row when it is the only workspace", async () => {
+      await load([item("multi", { repositories: [acmeApi, webExtra, docsExtra] }), item("single", { repositories: [acmeWeb] })], {
+        multi: { sessions: [session("a", "A")], capabilities: null },
+        single: { sessions: [session("b", "B")], capabilities: null },
+      });
+      mount();
+      const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
+      const chip = within(api).getByTestId("cloud-extra-repositories");
+      expect(chip.textContent).toBe("+2 repos");
+      // The row is one button: its tooltip names them; an unselected repository shows by its identity.
+      expect(within(api).getByTestId("cloud-project-row").contains(chip)).toBe(true);
+      expect(within(api).getByTestId("cloud-project-row").getAttribute("title")).toBe("github.com/acme/api\nmulti also checks out acme/web, github.com/acme/docs");
+      // The extra repository is not a second place for the workspace.
+      expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(within(projectTree(`cloud:${ORG}:github.com/acme/web`)).getAllByTestId("cloud-session-node")).toHaveLength(1);
+    });
+
+    it("puts the chip on the workspace's own row when the project has several", async () => {
+      await load([item("multi", { repositories: [acmeApi, webExtra], lastActivityAt: 50 }), item("plain", { repositories: [acmeApi], lastActivityAt: 40 })], {
+        multi: { sessions: [session("a", "A")], capabilities: null },
+        plain: { sessions: [session("b", "B")], capabilities: null },
+      });
+      mount();
+      const api = projectTree(`cloud:${ORG}:github.com/acme/api`);
+      const [multi, plain] = within(api).getAllByTestId("cloud-workspace-node");
+      const chip = within(multi).getByTestId("cloud-extra-repositories");
+      expect(chip.textContent).toBe("+1 repo");
+      // Reachable: it takes the focus, says what it means, and does not hide when the row's actions show.
+      expect(chip.getAttribute("tabindex")).toBe("0");
+      expect(chip.getAttribute("aria-label")).toBe("+1 repo. multi also checks out acme/web");
+      expect(chip.className).not.toMatch(/group-hover\/row:hidden|group-focus-within\/row:hidden/);
+      expect(within(plain).queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(within(api).getByTestId("cloud-project-row").querySelector('[data-testid="cloud-extra-repositories"]')).toBeNull();
+    });
+
+    it("shows the organization's running slots in its header, and says when it is full", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 1, limit: 2, running: { used: 1, limit: 2 }, total: { used: 5, limit: 20 } } } as never, ORG);
+      const view = mount();
+      const chip = screen.getByTestId("cloud-org-quota");
+      expect(chip.textContent).toBe("1 of 2 running");
+      expect(chip.getAttribute("aria-label")).toBe("1 of 2 running. 1 of 2 cloud workspaces running\n5 of 20 workspaces in all, stopped ones included");
+      expect(chip.getAttribute("data-at-limit")).toBeNull();
+      // The tooltip can be reached: the chip takes the focus and stays when the header's actions show.
+      expect(chip.getAttribute("tabindex")).toBe("0");
+      expect(chip.className).not.toMatch(/group-hover\/row:hidden|group-focus-within\/row:hidden/);
+      view.unmount();
+
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 2, limit: 2, running: { used: 2, limit: 2 }, total: { used: 2, limit: 20 } } } as never, ORG);
+      mount();
+      const full = screen.getByTestId("cloud-org-quota");
+      expect(full.textContent).toBe("2 of 2 running");
+      expect(full.getAttribute("data-at-limit")).toBe("true");
+      expect(full.getAttribute("aria-label")).toContain("Stop one to start another.");
+    });
+
+    it("shows no running chip on a server from before PRO-76, whose quota counts stopped workspaces too", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("one", { repositories: [acmeApi] })], quota: { used: 5, limit: 20 } }, ORG);
+      mount();
+      expect(screen.queryByTestId("cloud-org-quota")).toBeNull();
+    });
+
+    it("tells someone a workspace is not shared with nothing of its other repositories", async () => {
+      const none = { role: "none", canApprove: false, canManageShares: false };
+      await load([item("multi", { repositories: [acmeApi, webExtra], you: none, lastActivityAt: 50 }), item("plain", { repositories: [acmeApi], you: none, lastActivityAt: 40 }), item("alone", { repositories: [acmeWeb, { ...acmeApi, primary: false }], you: none })]);
+      const view = mount();
+      expect(screen.queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(view.container.innerHTML).not.toContain("also checks out");
+    });
+
+    it("draws neither chip for a server that sends neither field (CS-5 behaviour)", async () => {
+      await catalog.ingestCloudList({ workspaces: [item("old", {})] }, ORG);
+      catalog.cacheCloudSessions(ORG, "old", [session("a", "A")] as never, null);
+      mount();
+      expect(screen.queryByTestId("cloud-org-quota")).toBeNull();
+      expect(screen.queryByTestId("cloud-extra-repositories")).toBeNull();
+      expect(screen.getAllByTestId("cloud-session-node")).toHaveLength(1);
+    });
+
+    it("renders both chips without attaching or resuming anything", async () => {
+      await load([item("multi", { state: "suspended", repositories: [acmeApi, webExtra] })], { multi: { sessions: [session("a", "A")], capabilities: null } });
+      mount();
+      expect(screen.getByTestId("cloud-extra-repositories")).toBeTruthy();
+      expect(screen.getByTestId("cloud-org-quota")).toBeTruthy();
+      expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the sidebar's Unread / Needs you filter (PRO-23)", () => {
+    const sessionsStore = () => import("@/lib/sessions");
+    const { resetCloudDashboard } = { resetCloudDashboard: () => import("@/lib/cloudDashboard").then((module) => module.resetCloudDashboard()) };
+    const tab = (id: string, status: string) => ({ id: `${id}-tab`, harness: "claude", title: null, model: "opus", permissionMode: "bypassPermissions", status, created: "2026-09-30T10:00:00.000Z", modified: "2026-09-30T10:00:00.000Z" });
+    const pending = { online: true, reportedAt: Date.now(), activeTurns: 0, pendingApprovals: 1 };
+    const seed = async () => {
+      await load(
+        [
+          // The list says an approval waits in this running workspace.
+          item("asks", { repositories: [acmeApi], lastActivityAt: 50, runtimeActivity: pending }),
+          item("quiet", { repositories: [acmeApi], lastActivityAt: 40 }),
+          // Stopped: its finished answer was never read.
+          item("answered", { state: "suspended", repositories: [acmeWeb] }),
+        ],
+        {
+          asks: { sessions: [session("a1", "Approve the deploy", { tabs: [tab("a1", "waiting")] })], capabilities: ["session/2"] },
+          quiet: { sessions: [session("q1", "Nothing new")], capabilities: ["session/2"] },
+          answered: { sessions: [session("w1", "Draft the changelog", { tabs: [tab("w1", "completed")] }), session("w2", "Read already")], capabilities: ["session/2"] },
+        },
+      );
+    };
+    const titles = () => screen.queryAllByTestId("cloud-session-node").map((node) => node.getAttribute("data-session"));
+    const filterTo = async (filter: "all" | "unread" | "needs") => {
+      const { setSidebarFilter } = await import("@/lib/sidebarFilter");
+      await act(async () => {
+        setSidebarFilter(filter);
+        // The dashboard's projection, which the filter reads, settles a microtask later.
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+
+    afterEach(async () => {
+      await filterTo("all");
+      await resetCloudDashboard();
+    });
+
+    it("Needs you shows only the cloud session waiting for a person, and no attach or resume happens", async () => {
+      await seed();
+      mount();
+      expect(titles()).toHaveLength(4);
+      await filterTo("needs");
+      await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:asks:a1`]));
+      // The other project has nothing waiting: it is not listed at all.
+      expect(projectRow(`cloud:${ORG}:github.com/acme/web`)).toBeUndefined();
+      // Nor the sibling workspace of the same project, nor a placeholder line for it.
+      expect(screen.queryAllByTestId("cloud-workspace-node").map((node) => node.getAttribute("data-workspace"))).toEqual(["asks"]);
+      expect(screen.queryByTestId("cloud-workspace-empty")).toBeNull();
+      expectNoAttachOrResume();
+    });
+
+    it("Unread shows only the finished answer nobody has read, in a stopped workspace too, without waking it", async () => {
+      await seed();
+      mount();
+      await filterTo("unread");
+      await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:answered:w1`]));
+      expect(projectRow(`cloud:${ORG}:github.com/acme/api`)).toBeUndefined();
+      expectNoAttachOrResume();
+    });
+
+    it("opens a collapsed project that holds a match, and says so when an organization has none", async () => {
+      await seed();
+      const prefs = await import("@/lib/prefs");
+      act(() => prefs.setPrefs({ cloudCollapsed: { [`cloud:${ORG}:github.com/acme/api`]: true } }));
+      try {
+        mount();
+        expect(projectTree(`cloud:${ORG}:github.com/acme/api`).getAttribute("aria-expanded")).toBe("false");
+        await filterTo("needs");
+        await waitFor(() => expect(titles()).toEqual([`cloud:${ORG}:asks:a1`]));
+        expect(projectTree(`cloud:${ORG}:github.com/acme/api`).getAttribute("aria-expanded")).toBe("true");
+        // The approval is answered elsewhere: the list no longer reports it.
+        await load([item("asks", { repositories: [acmeApi], lastActivityAt: 50 }), item("quiet", { repositories: [acmeApi], lastActivityAt: 40 })], {
+          asks: { sessions: [session("a1", "Approve the deploy")], capabilities: ["session/2"] },
+        });
+        await waitFor(() => expect(screen.getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you."));
+        expect(titles()).toEqual([]);
+        expect(screen.queryByTestId("cloud-node-archived")).toBeNull();
+      } finally {
+        act(() => prefs.setPrefs({ cloudCollapsed: {} }));
+      }
+    });
+
+    it("Needs you shows a workspace the list says is waiting although this desktop has never opened it", async () => {
+      // No session of it is known here: only the server's count of pending approvals.
+      await load([item("never-opened", { repositories: [acmeApi], runtimeActivity: pending }), item("quiet", { repositories: [acmeWeb] })], {
+        quiet: { sessions: [session("q1", "Nothing new")], capabilities: ["session/2"] },
+      });
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(projectRow(`cloud:${ORG}:github.com/acme/api`)).toBeTruthy());
+      expect(screen.queryByTestId("cloud-org-filtered-empty")).toBeNull();
+      // Its line offers to open it (which connects, never wakes); the other project is not listed.
+      const line = screen.getByTestId("cloud-workspace-empty");
+      expect(line.getAttribute("data-workspace")).toBe("never-opened");
+      expect(line.textContent).toContain("Open to load sessions");
+      expect(projectRow(`cloud:${ORG}:github.com/acme/web`)).toBeUndefined();
+      expectNoAttachOrResume();
+    });
+
+    it("does not count a stopped workspace, one that is offline, or one not shared with this person as needing them", async () => {
+      await load([
+        item("stopped", { state: "suspended", repositories: [acmeApi], runtimeActivity: pending }),
+        item("offline", { repositories: [acmeApi], runtimeActivity: { ...pending, online: false } }),
+        item("unshared", { repositories: [acmeWeb], runtimeActivity: pending, you: { role: "none", canApprove: false, canManageShares: false } }),
+      ]);
+      mount();
+      await filterTo("needs");
+      await waitFor(() => expect(screen.getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you."));
+    });
+
+    it("keeps the selected cloud session in view under a filter it does not match", async () => {
+      await seed();
+      const { selectCloudSession, selectSession } = await sessionsStore();
+      act(() => selectCloudSession(`cloud:${ORG}:quiet:q1`));
+      try {
+        mount();
+        await filterTo("needs");
+        await waitFor(() => expect(titles().sort()).toEqual([`cloud:${ORG}:asks:a1`, `cloud:${ORG}:quiet:q1`].sort()));
+      } finally {
+        act(() => selectSession(null));
+      }
+    });
   });
 
   it("groups by VM only when a project has more than one workspace", async () => {

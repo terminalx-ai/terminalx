@@ -141,14 +141,36 @@ fn an_unreadable_key_store_is_reported_as_unavailable_not_as_a_missing_key() {
         .store_keys(USER, ORG, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
         .unwrap();
     // The workspace has a key; it just cannot be read. Connecting again would not fix that.
-    assert_eq!(client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err(), "cloud_agent_key_store_unavailable");
+    assert_eq!(client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap_err(), "cloud_agent_key_store_unavailable");
     assert_eq!(client.has_key(ORG, WS).unwrap_err(), "cloud_agent_key_store_unavailable");
+}
+
+/// PRO-22: the outbox keeps how many images a message names, for its row and
+/// for "Send again"; never the images or their ids.
+#[test]
+fn an_outbox_entry_says_how_many_images_its_message_names() {
+    // Every answer is lost: entries stay unsent, which is all this needs.
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    give_key(&fixture);
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests" }), true).unwrap();
+    assert_eq!(entry.images, 0);
+    assert!(serde_json::to_value(&entry).unwrap().get("images").is_none(), "a message without images says nothing about them");
+    // A message that names images says how many, for the list and for "Send again"; never which.
+    let with_images = json!({ "text": "", "images": [{ "id": "att-0001", "mediaType": "image/png" }, { "id": "att-0002", "mediaType": "image/png" }] });
+    let pictured = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_images, true).unwrap();
+    assert_eq!(serde_json::to_value(&pictured).unwrap()["images"], 2);
+    assert!(!serde_json::to_string(&pictured).unwrap().contains("att-0001"));
+    assert_eq!(fixture.client.outbox(ORG, WS, None).unwrap().iter().map(|entry| entry.images).collect::<Vec<_>>(), vec![0, 2], "the count survives a reload");
+    // Images alone are a message (the line above sent one); nothing at all is not, and a steer is always text.
+    for (kind, payload) in [("send", json!({ "text": "" })), ("send", json!({ "text": " ", "images": [] })), ("steer", json!({ "text": "", "images": [{ "id": "att-0003" }] }))] {
+        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload, true).unwrap_err(), "cloud_agent_request_invalid");
+    }
 }
 
 #[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
-    let error = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap_err();
+    let error = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap_err();
     assert_eq!(error, "cloud_agent_key_missing");
     assert!(!fixture.client.has_key(ORG, WS).unwrap());
     give_key(&fixture);
@@ -182,7 +204,7 @@ fn a_lost_response_is_resent_with_the_same_bytes_and_never_re_encrypted() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests", "model": "opus" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "run the tests", "model": "opus" }), true).unwrap();
     assert_eq!(entry.state, "unsent");
     assert_eq!(entry.error.as_deref(), Some("cloud_agent_command_pending_retry"));
     assert_eq!(entry.text.as_deref(), Some("run the tests"));
@@ -211,7 +233,7 @@ fn an_unsent_command_survives_a_restart_of_the_client() {
     let base = serve(Arc::new(|_, _, _| None));
     let fixture = fixture(&base);
     give_key(&fixture);
-    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({}), true).unwrap();
     let reopened = CloudAgentClient::with(fixture.account.clone(), fixture.keys.clone(), Url::parse(&base).unwrap(), fixture._dir.path().join("cloud-agent"));
     let outbox = reopened.outbox(ORG, WS, Some("tab-1")).unwrap();
     assert_eq!(outbox.len(), 1);
@@ -223,7 +245,7 @@ fn a_conflict_or_refusal_settles_the_command_as_rejected() {
     let base = serve(Arc::new(|_, _, _| Some((409, json!({ "error": "cloud_workspace_agent_command_conflict" })))));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "focus on the parser" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "focus on the parser" }), true).unwrap();
     assert_eq!(entry.state, "rejected");
     assert_eq!(entry.category.as_deref(), Some("cloud_workspace_agent_command_conflict"));
     // A settled command is not resent.
@@ -241,7 +263,7 @@ fn a_rate_limit_keeps_the_command_for_a_resend_but_a_full_mailbox_is_final() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let limited = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" })).unwrap();
+    let limited = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" }), true).unwrap();
     assert_eq!(limited.state, "unsent", "a rate limit is not a refusal");
     for status in [408u16, 425, 401, 503] {
         assert!(retryable(status, "x"), "{status}");
@@ -249,8 +271,70 @@ fn a_rate_limit_keeps_the_command_for_a_resend_but_a_full_mailbox_is_final() {
     assert!(!retryable(422, "cloud_workspace_request_invalid"));
     assert!(!retryable(409, "cloud_workspace_agent_command_conflict"));
     *full.lock().unwrap() = true;
-    let refused = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" })).unwrap();
+    let refused = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" }), true).unwrap();
     assert_eq!((refused.state.as_str(), refused.category.as_deref()), ("rejected", Some("cloud_workspace_agent_mailbox_full")));
+}
+
+#[test]
+fn a_do_not_wake_command_is_posted_with_wake_false_and_dropped_when_the_workspace_is_stopped() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let running = Arc::new(Mutex::new(false));
+    let (log, up) = (received.clone(), running.clone());
+    let base = serve(Arc::new(move |method, path, body| {
+        if path.ends_with("/agent-commands/status") {
+            return Some((200, json!({ "commands": [] })));
+        }
+        assert_eq!((method, path), ("POST", commands_path().as_str()));
+        log.lock().unwrap().push(body.clone());
+        if body["wake"] == json!(false) && !*up.lock().unwrap() {
+            return Some((409, json!({ "error": "cloud_workspace_stopped" })));
+        }
+        let wake = if *up.lock().unwrap() { "not-needed" } else { "queued" };
+        Some((202, json!({ "command": command_json(&body, "queued"), "existing": false, "wake": wake })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+
+    // Stopped: refused, and nothing is kept, so asking the person and sending again is a new command.
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "are you up?" }), false).unwrap_err(), WORKSPACE_STOPPED);
+    assert_eq!(received.lock().unwrap()[0]["wake"], json!(false));
+    assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
+    assert!(fixture.client.outbox_sync(ORG, WS).unwrap().is_empty());
+    assert_eq!(received.lock().unwrap().len(), 1, "nothing is resent");
+
+    // The person agreed: the ordinary post, without the key an older API would reject.
+    let woke = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "are you up?" }), true).unwrap();
+    assert_eq!((woke.state.as_str(), woke.wake.as_deref()), ("queued", Some("queued")));
+    assert!(received.lock().unwrap()[1].get("wake").is_none());
+
+    // Running: stored like any other.
+    *running.lock().unwrap() = true;
+    let stored = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hello" }), false).unwrap();
+    assert_eq!((stored.state.as_str(), stored.wake.as_deref()), ("queued", Some("not-needed")));
+    assert_eq!(received.lock().unwrap()[2]["wake"], json!(false));
+}
+
+#[test]
+fn a_do_not_wake_command_whose_answer_was_lost_is_resent_with_wake_false() {
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let log = received.clone();
+    let base = serve(Arc::new(move |_, path, body| {
+        if path.ends_with("/agent-commands/status") {
+            return Some((200, json!({ "commands": [] })));
+        }
+        log.lock().unwrap().push(body.clone());
+        // The first post gets no answer; by the resend the workspace has stopped.
+        (log.lock().unwrap().len() > 1).then(|| (409, json!({ "error": "cloud_workspace_stopped" })))
+    }));
+    let fixture = fixture(&base);
+    give_key(&fixture);
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), false).unwrap();
+    assert_eq!(entry.state, "unsent");
+    let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
+    let received = received.lock().unwrap();
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[1]["wake"], json!(false), "the resend cannot start the workspace either");
+    assert_eq!((synced[0].state.as_str(), synced[0].category.as_deref()), ("rejected", Some("cloud_workspace_stopped")));
 }
 
 #[test]
@@ -270,7 +354,7 @@ fn a_command_cancelled_before_the_api_has_it_is_never_posted_afterwards() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
     assert_eq!(entry.state, "unsent");
     assert_eq!(fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap().state, "cancelled");
     // A resend that took its snapshot before the cancel re-checks under the send lock.
@@ -291,11 +375,11 @@ fn invalid_commands_are_refused_before_anything_is_stored() {
         ("delete-everything", json!({})),
         ("send", json!("hi")),
     ] {
-        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload).unwrap_err(), "cloud_agent_request_invalid");
+        assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", kind, payload, true).unwrap_err(), "cloud_agent_request_invalid");
     }
-    assert_eq!(fixture.client.enqueue(ORG, WS, "../tab", "stop", json!({})).unwrap_err(), "cloud_agent_request_invalid");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "../tab", "stop", json!({}), true).unwrap_err(), "cloud_agent_request_invalid");
     let big = "x".repeat(70 * 1024);
-    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": big })).unwrap_err(), "cloud_agent_command_too_large");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": big }), true).unwrap_err(), "cloud_agent_command_too_large");
     assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
 }
 
@@ -329,7 +413,7 @@ fn status_polling_settles_commands_and_decrypts_their_receipts() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "permission-decision", json!({ "requestId": "perm-7", "optionId": "allow" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "permission-decision", json!({ "requestId": "perm-7", "optionId": "allow" }), true).unwrap();
     assert_eq!(entry.state, "queued");
     assert_eq!(entry.request_id.as_deref(), Some("perm-7"));
     let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
@@ -395,7 +479,7 @@ fn cancel_before_the_api_has_it_settles_locally() {
     }));
     let fixture = fixture(&base);
     give_key(&fixture);
-    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" })).unwrap();
+    let entry = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
     let cancelled = fixture.client.cancel(ORG, WS, &entry.client_command_id).unwrap();
     assert_eq!(cancelled.state, "cancelled");
     // A settled command is never resent.
@@ -434,7 +518,7 @@ fn an_identity_change_drops_the_previous_identitys_keys_outbox_and_cache() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     fixture.client.observe_identity(kept(&[ORG]));
     give_key(&fixture);
-    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({}), true).unwrap();
     fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({}))).unwrap();
     // Unchanged or not yet loaded: nothing is dropped.
     fixture.client.observe_identity(kept(&[ORG]));
@@ -454,7 +538,7 @@ fn fill(fixture: &Fixture, org: &str) {
         .client
         .store_keys(USER, org, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
         .unwrap();
-    fixture.client.enqueue(org, WS, "tab-1", "stop", json!({})).unwrap();
+    fixture.client.enqueue(org, WS, "tab-1", "stop", json!({}), true).unwrap();
     fixture.client.cache_save(org, WS, "tab-1", Some(json!({ "seen": org }))).unwrap();
 }
 
@@ -568,6 +652,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         iv: String::new(),
         ciphertext: String::new(),
         text: None,
+        images: 0,
         request_id: None,
         state: state.into(),
         wake: None,
@@ -578,6 +663,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         created_at: id as u64,
         updated_at: id as u64,
         error: None,
+        no_wake: false,
     };
     let mut entries: Vec<Stored> = (0..30).map(|id| entry(id, "applied")).collect();
     entries.push(entry(100, "queued"));
@@ -592,7 +678,7 @@ fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
     give_key(&fixture);
     // Unsent: the API never answers.
-    fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" })).unwrap();
+    fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" }), true).unwrap();
     fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
     fixture.client.cache_save(ORG, "ws_2", "tab-1", Some(json!({ "events": [] }))).unwrap();
 
@@ -607,4 +693,154 @@ fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
     assert_eq!(fixture.client.purge_workspace(ORG, WS).unwrap(), Purged::default());
     // Only the signed-in organization's workspaces can be purged.
     assert_eq!(fixture.client.purge_workspace("org_2", WS).unwrap_err(), "cloud_remote_organization_mismatch");
+}
+
+// ---- the in-memory key cache (a wake no longer makes several Keychain calls at once) ----
+
+type DuringGet = Box<dyn FnOnce() + Send>;
+
+/// A key store that counts what reaches it, and can run something in the
+/// middle of a read.
+#[derive(Default)]
+struct Counted {
+    keys: MemoryKeys,
+    puts: AtomicUsize,
+    gets: AtomicUsize,
+    deletes: AtomicUsize,
+    during_get: Mutex<Option<DuringGet>>,
+    /// Run when a delete has reached the store and the key is still there.
+    before_delete: Mutex<Option<DuringGet>>,
+}
+
+impl KeyStore for Counted {
+    fn put(&self, organization_id: &str, workspace_id: &str, key_id: &str, key: &[u8; crypto::KEY_LEN]) -> Result<()> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        self.keys.put(organization_id, workspace_id, key_id, key)
+    }
+    fn get(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<Option<[u8; crypto::KEY_LEN]>> {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        let found = self.keys.get(organization_id, workspace_id, key_id);
+        let during = self.during_get.lock().unwrap().take();
+        if let Some(during) = during {
+            during();
+        }
+        found
+    }
+    fn delete(&self, organization_id: &str, workspace_id: &str, key_id: &str) -> Result<()> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        let before = self.before_delete.lock().unwrap().take();
+        if let Some(before) = before {
+            before();
+        }
+        self.keys.delete(organization_id, workspace_id, key_id)
+    }
+}
+
+fn counts(store: &Counted) -> (usize, usize, usize) {
+    (store.puts.load(Ordering::SeqCst), store.gets.load(Ordering::SeqCst), store.deletes.load(Ordering::SeqCst))
+}
+
+#[test]
+fn a_key_is_read_from_the_store_once_and_written_only_when_it_changes() {
+    let store = Arc::new(Counted::default());
+    store.keys.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let cached = CachedKeys::new(store.clone());
+
+    // A send, a checkpoint, a receipt: one read between them.
+    for _ in 0..5 {
+        assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
+    }
+    assert_eq!(counts(&store), (0, 1, 0));
+    // Every connect is answered with the key this Mac already has: no write.
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    assert_eq!(counts(&store), (0, 1, 0));
+    // A rotated key is written, and is the one held from then on.
+    cached.put(ORG, WS, KEY_ID, &[9u8; 32]).unwrap();
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some([9u8; 32]));
+    assert_eq!(store.keys.get(ORG, WS, KEY_ID).unwrap(), Some([9u8; 32]));
+    assert_eq!(counts(&store), (1, 1, 0));
+    // A missing key is asked for each time: it may arrive.
+    assert_eq!(cached.get(ORG, WS, "key-other").unwrap(), None);
+    assert_eq!(cached.get(ORG, WS, "key-other").unwrap(), None);
+    assert_eq!(counts(&store), (1, 3, 0));
+}
+
+#[test]
+fn a_deleted_or_forgotten_key_does_not_stay_in_memory() {
+    let store = Arc::new(Counted::default());
+    let cached = Arc::new(CachedKeys::new(store.clone()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    cached.delete(ORG, WS, KEY_ID).unwrap();
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None, "gone from memory and from the store");
+
+    // The identity changed: nothing is held, and what is still stored is read again.
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let reads = counts(&store).1;
+    cached.forget();
+    assert!(cached.held.lock().unwrap().keys.is_empty());
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
+    assert_eq!(counts(&store).1, reads + 1);
+
+    // A key deleted while a read of it was under way is not kept by that read.
+    cached.forget();
+    let deleting = cached.clone();
+    *store.during_get.lock().unwrap() = Some(Box::new(move || deleting.delete(ORG, WS, KEY_ID).unwrap()));
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()), "the read itself was before the delete");
+    assert!(cached.held.lock().unwrap().keys.is_empty());
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None);
+}
+
+#[test]
+fn reconnecting_writes_no_key_again_and_checking_for_one_reads_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Counted::default());
+    let account = Arc::new(Fixed(Mutex::new(Some((USER.into(), ORG.into()))), Mutex::new(Vec::new())));
+    let client = CloudAgentClient::with(account, Arc::new(CachedKeys::new(store.clone())), Url::parse("http://127.0.0.1:9/").unwrap(), dir.path().join("cloud-agent"));
+    let answer = json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] });
+    // The first connect stores the key; each wake after it answers the same.
+    for _ in 0..4 {
+        client.store_keys(USER, ORG, WS, &answer).unwrap();
+        assert!(client.has_key(ORG, WS).unwrap());
+    }
+    assert_eq!(counts(&store), (1, 0, 0), "one Keychain write, and no read");
+
+    // Signing out drops the key from memory and from the store.
+    client.observe_identity(kept(&[ORG]));
+    client.observe_identity(None);
+    assert_eq!(counts(&store).2, 1);
+    assert_eq!(store.keys.get(ORG, WS, KEY_ID).unwrap(), None);
+}
+
+/// A checkpoint in flight at sign-out: its read lands after the delete has
+/// dropped the held copy and before the Keychain item is gone.
+#[test]
+fn a_read_that_lands_in_the_middle_of_a_delete_does_not_leave_the_key_in_memory() {
+    let store = Arc::new(Counted::default());
+    let cached = Arc::new(CachedKeys::new(store.clone()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let reading = cached.clone();
+    *store.before_delete.lock().unwrap() = Some(Box::new(move || {
+        assert_eq!(reading.get(ORG, WS, KEY_ID).unwrap(), Some(key()), "the item is still stored, so the read finds it");
+        assert_eq!(reading.held.lock().unwrap().keys.len(), 1, "and holds it, for now");
+    }));
+    cached.delete(ORG, WS, KEY_ID).unwrap();
+    assert!(cached.held.lock().unwrap().keys.is_empty(), "nothing of a deleted key stays in memory");
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), None);
+    assert_eq!(counts(&store), (1, 2, 1));
+}
+
+#[test]
+fn a_held_key_is_not_copied_when_the_cache_grows() {
+    assert_eq!(std::mem::size_of::<HeldKey>(), std::mem::size_of::<usize>(), "the map holds a pointer, not the key");
+    let cached = CachedKeys::new(Arc::new(MemoryKeys::default()));
+    cached.put(ORG, WS, KEY_ID, &key()).unwrap();
+    let account = key_account(ORG, WS, KEY_ID);
+    let place = |cached: &CachedKeys| cached.held.lock().unwrap().keys[&account].as_ptr();
+    let before = place(&cached);
+    // Enough keys to make the map reallocate several times.
+    for n in 0..2_000 {
+        cached.put(ORG, WS, &format!("key-{n}"), &[3u8; 32]).unwrap();
+    }
+    assert_eq!(place(&cached), before, "the key stayed where it was: no copy was left behind");
+    assert_eq!(cached.get(ORG, WS, KEY_ID).unwrap(), Some(key()));
 }

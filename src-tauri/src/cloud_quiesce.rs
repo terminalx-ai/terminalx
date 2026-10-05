@@ -1,6 +1,7 @@
-//! The runtime half of an archive's final checkpoint (terminalx-saas
-//! contract §10.3). This runtime advertises `quiesce-v1`, so while an
-//! archive waits for it the `/refresh` answer carries a `quiesce` request.
+//! The runtime half of the final checkpoint before an archive or a stop
+//! (terminalx-saas contract §10.3). This runtime advertises `quiesce-v1`, so
+//! while either waits for it the `/refresh` answer carries a `quiesce`
+//! request; its `reason` (`archive` or `suspend`) changes nothing here.
 //! The runtime then stops taking new work, uploads every agent tab's newest
 //! transcript checkpoint (§12), and reports `committed` or `failed` once. The
 //! server waits at most 60 s and never lets a missing answer block the
@@ -136,6 +137,19 @@ mod tests {
         assert_eq!(budget(&request("op", 30_000), 0), Duration::from_secs(25));
         assert_eq!(budget(&request("op", 3_000), 0), Duration::from_secs(1), "late, but still tried once");
         assert_eq!(budget(&request("op", 10), 50_000), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_stop_is_answered_like_an_archive() {
+        let mut quiescer = Quiescer::default();
+        let reports = std::cell::RefCell::new(Vec::new());
+        let mut report = |id: &str, committed: bool| {
+            reports.borrow_mut().push((id.to_string(), committed));
+            Ok(())
+        };
+        let stop = QuiesceRequest { reason: "suspend".into(), ..request("op_stop", 60_000) };
+        quiescer.tick(Some(&stop), None, &mut report, Instant::now(), 0);
+        assert_eq!(*reports.borrow(), [("op_stop".to_string(), true)]);
     }
 
     #[test]

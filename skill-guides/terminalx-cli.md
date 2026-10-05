@@ -65,6 +65,7 @@ terminalx sessions create \
   --project <project> \
   --agent <claude|codex> \
   --prompt <text> \
+  [--title <text>] [--name <name>] \
   [--worktree | --on-main] \
   [--model <id>] [--effort <level>] [--mode <mode>] \
   --json
@@ -75,6 +76,28 @@ project's own checkout; `--worktree` makes the default explicit. The command cre
 session, starts its PTY-first tab, types the prompt through the same path as the composer, and
 returns both ids. Valid modes are `plan`, `manual`, `auto`, `acceptEdits`, and
 `bypassPermissions`.
+
+`--title` sets the sidebar title. `--name` chooses the worktree directory name and branch
+suffix (by default, `raccoon/<name>`). Names use the workspace UI's slug rules: lowercase
+ASCII letters and digits, other characters become hyphens, and the slug is limited to 40
+characters. An empty slug or an explicitly named workspace already claimed by a directory,
+branch, or session fails with `invalid_arguments` before anything is created. `--name`
+requires a Git project and cannot be combined with `--on-main`.
+
+With only `--title`, its slug becomes the worktree name. Generated names gain a numeric
+suffix when taken; random names remain the fallback without a usable title. Sessions started
+from an issue use its identifier and title by default, preserving the issue number in both
+the session title and worktree name.
+
+```text
+terminalx sessions create --project <project> --agent codex --prompt "Fix the timeout" \
+  --title "#203 fix" --name fix-203 --json
+terminalx sessions rename <session> --title "#203 ready for review" --json
+```
+
+Creation returns `sessionId`, `tabId`, the final `title`, `worktreeName`, `branch`, and `path`,
+alongside the full `session` and prompt delivery `outcome`. Renaming a session changes its
+title without changing its worktree name.
 
 ### Send, read, and wait
 
@@ -109,8 +132,14 @@ already raised.
 
 ```text
 terminalx worktrees list [--project <project>] --json
-terminalx worktrees delete <path-or-name> [--project <project>] --yes --json
+terminalx worktrees rename <path-or-name> --name <name> [--project <project>] --json
+terminalx worktrees delete <path-or-name> [--project <project>] --yes [--force] --json
 ```
+
+Renaming moves a TerminalX-managed worktree and renames its matching branch, using the same
+slug rules as creation. It rejects taken or unusable names and updates every session attached
+to that workspace. The response includes `name`, `path`, `branch`, and the updated `sessions`.
+The project's main checkout and externally managed worktrees cannot be renamed here.
 
 Deletion always requires `--yes` and refuses a project's main checkout. It stops every tab
 running in the worktree and removes the sessions that ran there, transcripts included; the
@@ -126,6 +155,87 @@ terminalx issues list --project <project> [--provider github|linear] \
 
 GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX →
 Settings → Integrations. The default provider is GitHub.
+
+### Cloud workspaces
+
+The same verbs work on an organization's cloud workspaces. A cloud project, workspace or
+session is named by the opaque key the lists print (`cloud:…`); never build one by hand. The
+app must be signed in. Every command does exactly what the signed-in person may do in the
+window, with the same refusals: a viewer can read and cannot send, and only an organization
+owner or admin can start a session, stop or resume a workspace.
+
+```text
+terminalx cloud status --json
+terminalx projects list --cloud [--org <org>] --json
+terminalx sessions list --cloud [--project <cloud-project>] [--org <org>] --json
+terminalx read <cloud-session> [--tab <tab>] [--since <seq>] [--tail <count>] --json
+terminalx wait <cloud-session> [--tab <tab>] [--timeout <seconds>] --json
+terminalx send <cloud-session> <text> [--tab <tab>] [--idempotency-key <key>] --json
+terminalx sessions create --project <cloud-project> --prompt <text> [--agent <agent>] \
+  [--model <model>] [--effort <effort>] [--mode <mode>] [--on-main] \
+  [--wake] [--confirm-spend] [--idempotency-key <key>] --json
+terminalx cloud stop <cloud-workspace> --yes --json
+terminalx cloud resume <cloud-workspace> --json
+```
+
+`cloud status` reports `version`, whether cloud commands are `enabled`, the `capabilities` this
+app supports, and the organizations reachable from it. Check a capability before relying on a
+command; an app that does not know one answers `unsupported`.
+
+**The person decides whether the command line may touch the cloud.** These commands run with the
+signed-in person's account, and any agent in a local session can run them. They are all refused
+with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
+command that starts billed compute or stops a workspace is still confirmed by the person in a
+native dialog first. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
+seconds all answer `declined`, and answering an expired dialog later does nothing. One question
+is shown at a time. After a refusal or an unanswered question the app does not ask again for a
+while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
+open, `terminalx computer` actions answer `confirmation_pending`: only the person can answer it.
+Do not try to work around any of this, and do not answer it for them: ask the person.
+
+What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
+TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
+macOS its helper serves only the app itself: an agent that talks to the helper directly, or
+starts its own copy, is refused. It does not stop a hostile program that drives the screen
+without the helper: the system's own scripting, or any program when TerminalX itself has been
+granted Accessibility. The app cannot prevent that from inside. The person's switch and their
+answer are the control, not a security boundary against software already running as them.
+
+`send` to a workspace the app is not connected to reads the workspace list again first. If the
+workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the
+message would start it.
+
+The switch is kept in a file in the app's home (`cloud-control.json`), not in the window. That
+protects it from an agent that uses the app; it does not protect it from a process that already
+has the person's files, which could edit it directly.
+
+**Looking never starts compute.** `projects list`, `sessions list`, `read` and `wait` never
+resume a stopped workspace. Lists come from what the app already holds. `read` returns the
+transcript kept on this computer, caught up from the workspace's saved checkpoint. `wait`
+follows a running workspace and only polls a stopped one. Session titles and transcripts are
+end-to-end encrypted: a workspace this computer has never opened appears under
+`workspacesNotLoaded` until someone opens it once in the app.
+
+**Only these start or stop compute, and each says so:**
+
+- `send` to a session of a stopped workspace resumes it for that message (the result's `wake`
+  says what happened). The message is queued and delivered once; `state` is `queued` until the
+  runtime takes it. Pass `--idempotency-key` so that repeating the command after a timeout
+  returns the first answer instead of sending again (the key is remembered while the app runs);
+  without one, `read` the session before resending.
+- `cloud resume` and `cloud stop --yes` are the workspace menu's Resume and Stop.
+- `sessions create` runs in the project's running workspace. If its workspace is stopped, or
+  turns out to have stopped by itself, it answers `cloud_workspace_stopped` and wakes nothing
+  unless `--wake` is passed. If the project has no workspace
+  it answers `spend_confirmation_required` unless `--confirm-spend` is passed, which creates a
+  new machine and returns its `workspace` key and `operationId`; the first session appears in
+  `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
+  retrying a create.
+
+`wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
+`stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and
+deleting a workspace are done in the app.
 
 ### This guide
 
@@ -266,8 +376,24 @@ JSON failures have this shape:
 - `request_lapsed`: refresh `permissions list`; never reuse the old request id.
 - `timeout`: the socket did not answer in time. Check `status` before retrying a mutating
   command, because it may already have completed.
+- `forbidden`: the signed-in person may not do this in that cloud workspace or organization (a
+  viewer sending, a member starting a session, stopping or resuming). The message says who can.
+  Do not retry.
+- `cloud_workspace_stopped`, `spend_confirmation_required`: the command would start billed
+  compute. Repeat it with `--wake` or `--confirm-spend` only when that is intended.
+- `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
+  them the setting named in `recovery`; do not retry.
+- `declined`: the person refused the request in the app window. Do not retry.
+- `account_signed_out`: sign in to TerminalX in the app.
+- `cloud_unavailable`: the app's window did not answer. Check the session with `read` before
+  repeating a `send`.
+- `unsupported`: this app does not know the command; see `cloud status`.
+- Other `cloud_…` codes are the service's own answers (for example
+  `cloud_workspace_concurrency_exceeded`: the organization is at its running limit).
 - `internal`: report the message and stop rather than guessing at app state.
 
 All mutating commands act only through the running app. Version 1 exposes no arbitrary
 filesystem or git-write command; worktree deletion and browser profile deletion are the only
-destructive operations outside the browser page itself.
+destructive operations outside the browser page itself. Cloud commands use the app's signed-in
+account over this same local socket: there is no hosted endpoint, and the organization's
+cloud-provider key is never involved.

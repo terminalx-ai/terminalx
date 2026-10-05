@@ -5,6 +5,7 @@ import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
 import type { PendingAsk } from "@/lib/transcript";
+import { LinkedText } from "./LinkedText";
 
 /**
  * A held tool call. The buttons are the harness's own options; the app only
@@ -85,7 +86,7 @@ export function PermissionCard({
           </div>
           {detail && (
             <div className="mt-1.5 break-words rounded-md bg-well px-2 py-1 font-mono text-[11.5px] text-muted-foreground" data-testid="permission-detail" title={detail}>
-              {detail}
+              <LinkedText text={detail} />
             </div>
           )}
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -202,30 +203,33 @@ export function QuestionCard({
             const pickedSet = new Set(picked.split(", ").filter(Boolean));
             return (
               <div key={q.question}>
-                <div className="text-[13px] font-medium">{q.question}</div>
+                <div className="text-[13px] font-medium"><LinkedText text={q.question} /></div>
                 <div className="mt-2 flex flex-col gap-1">
                   {q.options.map((o) => (
-                    <button
+                    <div
                       key={o.label}
-                      type="button"
-                      data-choice
                       onClick={() => toggle(q.question, o.label, q.multiSelect)}
                       className={cn(
                         "flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                         pickedSet.has(o.label) ? "border-ring bg-veil-raised" : "border-hairline hover:bg-veil-raised",
                       )}
                     >
-                      <span
+                      <button
+                        type="button"
+                        data-choice
+                        aria-label={o.label}
+                        aria-pressed={pickedSet.has(o.label)}
+                        onClick={(event) => { event.stopPropagation(); toggle(q.question, o.label, q.multiSelect); }}
                         className={cn(
-                          "mt-1 size-2.5 shrink-0 rounded-full border",
+                          "mt-1 size-2.5 shrink-0 rounded-full border outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                           pickedSet.has(o.label) ? "border-accent bg-accent" : "border-faint",
                         )}
                       />
                       <span>
-                        <span>{o.label}</span>
-                        {o.description && <span className="block text-xs text-muted-foreground">{o.description}</span>}
+                        <span><LinkedText text={o.label} /></span>
+                        {o.description && <span className="block text-xs text-muted-foreground"><LinkedText text={o.description} /></span>}
                       </span>
-                    </button>
+                    </div>
                   ))}
                   {q.freeText && (
                     <input

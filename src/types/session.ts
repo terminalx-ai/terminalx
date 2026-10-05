@@ -42,6 +42,7 @@ export interface SessionEntry {
   worktreeName?: string | null;
   branch?: string | null;
   baseRef?: string | null;
+  worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
   issue?: IssueRef | null;
@@ -93,7 +94,12 @@ export interface Workspace {
   ahead: number;
   /** Commits behind this checkout's configured upstream. */
   behind: number;
+  /** As known locally, without a fetch. */
+  state?: WorkspaceState;
 }
+
+/** A workspace's state in one word. */
+export type WorkspaceState = "clean" | "uncommitted" | "unmerged" | "merged" | "unknown";
 
 export interface WorkspacePr {
   number: number;
@@ -103,8 +109,38 @@ export interface WorkspacePr {
   isDraft: boolean;
 }
 
+/** The clean-and-merged check made before a workspace is deleted. */
+export interface Landed {
+  /** The directory is a working tree of this project, so it could be read. */
+  checked: boolean;
+  branch: string | null;
+  /** The commit HEAD is at. */
+  head: string | null;
+  /** What the branch was compared with, e.g. `origin/main`. */
+  base: string | null;
+  uncommitted: number;
+  /** Stash entries made on this branch. */
+  stashes: number;
+  clean: boolean;
+  merged: "ancestor" | "rebase" | "squash" | "noChanges" | null;
+  unmergedCommits: number;
+  pushed: boolean;
+  /** The default branch was fetched for this check. */
+  fresh: boolean;
+  /** Why "merged" could not be established for certain; null when it was. */
+  notVerified: string | null;
+  /** Clean, merged and verified: one confirmation is enough. */
+  safe: boolean;
+  /** What deleting would lose, in plain words; empty when it is safe. */
+  losses: string[];
+  /** Stands for exactly what this check found; a second confirmation is given for one digest. */
+  digest: string;
+}
+
 export interface WorkspaceDisposition {
   exists: boolean;
+  /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
+  checked: boolean;
   isMain: boolean;
   branch: string | null;
   uncommitted: number;
@@ -114,6 +150,12 @@ export interface WorkspaceDisposition {
   prChecked: boolean;
   /** Sessions that ran here; deleting the workspace removes them and their transcripts. */
   sessions: number;
+  /** Their titles, so the confirmation can name what goes. */
+  sessionTitles: string[];
+  /** Their ids, in the same order: what the removal is told to expect. */
+  sessionIds: string[];
+  /** Whether the work is clean and merged into the default branch. Only present when the check was asked for with a fetch. */
+  landed?: Landed | null;
 }
 
 export interface Capabilities {
@@ -180,9 +222,40 @@ export interface CommitInfo {
 
 export interface WorktreeDisposition {
   exists: boolean;
+  /** False when the directory could not be checked: the counts are then 0 and mean "unknown". */
+  checked: boolean;
   uncommitted: number;
   unpushed: number;
   branch: string | null;
+}
+
+/** What a workspace removal did: the sessions it deleted or moved, and what became of the branch. */
+export interface WorkspaceRemoveReport {
+  sessions: SessionEntry[];
+  /** The workspace's branch, when it was kept because it holds commits nothing else has. */
+  keptBranch: string | null;
+  /** A branch made to keep a detached HEAD's commits reachable. */
+  rescuedBranch: string | null;
+}
+
+/** Something an earlier delete left on disk; see Storage in Settings. */
+export interface Leftover {
+  id: string;
+  kind: "worktree" | "agentData" | "branch";
+  projectPath: string;
+  projectName: string;
+  name: string;
+  agent: string | null;
+  paths: string[];
+  sizeBytes: number;
+  /** Why the clean-up will not remove it; null when it can. */
+  keptBecause: string | null;
+}
+
+export interface LeftoverRemoval {
+  removed: string[];
+  failed: { id: string; error: string }[];
+  freedBytes: number;
 }
 
 export function sessionStatus(s: SessionEntry): TabStatus {

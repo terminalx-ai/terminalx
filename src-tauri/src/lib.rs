@@ -7,14 +7,22 @@
 
 #[cfg(feature = "desktop")]
 mod account;
+mod agent_data;
+#[cfg(feature = "desktop")]
+mod desktop_links;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
+#[cfg(feature = "desktop")]
+mod cloud_mirror;
+mod mirror_rules;
 mod cloud_bootstrap;
 mod cloud_quiesce;
+mod cloud_resources;
 mod cloud_environment;
 pub mod cloud_agents;
 mod cloud_github;
@@ -31,7 +39,11 @@ mod cloud_agent_client;
 #[cfg(feature = "desktop")]
 mod cloud_diagnostics;
 #[cfg(feature = "desktop")]
+mod cloud_ports;
+#[cfg(feature = "desktop")]
 mod cloud_remote;
+#[cfg(feature = "desktop")]
+mod agent_local_login;
 #[cfg(feature = "desktop")]
 mod cloud_workspaces;
 #[cfg(feature = "desktop")]
@@ -45,10 +57,13 @@ mod organization_workspace_config;
 #[cfg(feature = "desktop")]
 pub mod computer;
 mod control;
+mod cloud_control;
 #[cfg(windows)]
 mod pipe_transport;
 #[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
+mod drag_text;
 #[cfg(feature = "desktop")]
 mod transcription;
 mod events;
@@ -63,6 +78,9 @@ pub mod hooks;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
+#[cfg(feature = "desktop")]
+mod keychain;
+mod landed;
 mod memory_baseline;
 mod models;
 mod names;
@@ -84,20 +102,13 @@ mod stats;
 #[cfg(feature = "desktop")]
 mod star_nag;
 mod summaries;
+mod terminal_perf;
 mod workspaces;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::Manager;
-
-#[cfg(feature = "desktop")]
-const DEEP_LINK_SCHEMES: [&str; 2] = ["terminalx", "terminalx-next"];
-
-#[cfg(feature = "desktop")]
-fn supports_deep_link_scheme(scheme: &str) -> bool {
-    DEEP_LINK_SCHEMES.contains(&scheme)
-}
 
 #[cfg(feature = "desktop")]
 pub struct AppState {
@@ -145,7 +156,7 @@ pub fn run() {
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
     let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
     let cloud_agents = Arc::new(
-        cloud_agent_client::CloudAgentClient::new(account.clone(), agent_keys.clone()).expect("open the cloud agent store under TERMINALX_HOME"),
+        cloud_agent_client::CloudAgentClient::new(account.clone(), Arc::new(cloud_agent_client::CachedKeys::new(agent_keys.clone()))).expect("open the cloud agent store under TERMINALX_HOME"),
     );
     let organization_compute = Arc::new(organization_compute::OrganizationComputeService::new(account.clone()));
     let organization_github_app = Arc::new(organization_github_app::OrganizationGithubAppService::new(account.clone()));
@@ -199,12 +210,13 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let app_handle = app.handle().clone();
+                let links = desktop_links::DesktopLinks::for_identifier(&app.config().identifier);
                 let account = account.clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        if supports_deep_link_scheme(url.scheme()) {
+                        if links.accepts_scheme(url.scheme()) {
                             account::focus_main_window(&app_handle);
-                            if account::is_launch_link(&url) {
+                            if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
                                 log::info!("received TerminalX account callback");
@@ -318,12 +330,25 @@ pub fn run() {
             commands::cloud_provider,
             commands::cloud_provider_connect,
             commands::cloud_provider_disconnect,
+            commands::cloud_teardown_status,
+            commands::cloud_teardown_preview,
+            commands::cloud_teardown_request,
+            commands::cloud_provider_set_creation_enabled,
+            commands::cloud_provider_revalidate,
+            commands::cloud_agent_logins,
+            commands::cloud_agent_login_connect,
+            commands::cloud_agent_login_remove,
+            commands::cloud_agent_claude_login_start,
+            commands::cloud_agent_claude_login_open,
+            commands::cloud_agent_claude_login_complete,
+            commands::cloud_agent_claude_login_cancel,
             commands::cloud_workspace_setup,
             commands::cloud_workspace_quote,
             commands::cloud_workspace_create,
             commands::cloud_workspace_preflight,
             commands::cloud_workspace_repositories,
             commands::cloud_workspaces,
+            commands::cloud_catalog_feed,
             commands::cloud_workspace_suspend,
             commands::cloud_workspace_resume,
             commands::cloud_workspace_release,
@@ -342,6 +367,9 @@ pub fn run() {
             cloud_remote::cloud_remote_send,
             cloud_remote::cloud_remote_activate,
             cloud_remote::cloud_remote_detach,
+            cloud_remote::cloud_port_forward,
+            cloud_remote::cloud_port_unforward,
+            cloud_remote::cloud_port_forwards,
             cloud_diagnostics::commands::cloud_diagnostics,
             cloud_diagnostics::commands::cloud_connection_diagnostics,
             cloud_diagnostics::commands::cloud_diagnostics_export,
@@ -391,7 +419,9 @@ pub fn run() {
             commands::work_status,
             commands::list_branches,
             commands::worktree_disposition,
-            commands::remove_session_worktree,
+            commands::sessions_sharing_worktree,
+            commands::relocate_session,
+            commands::sole_workspace_of,
             commands::snapshot_tree,
             commands::head_tree,
             commands::changes_between,
@@ -419,9 +449,22 @@ pub fn run() {
             commands::search_files,
             commands::list_slash_commands,
             commands::read_image_file,
+            drag_text::dropped_text,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_identity,
+            commands::cloud_mirror_status,
+            commands::cloud_mirror_enable,
+            commands::cloud_mirror_disable,
+            commands::cloud_mirror_check,
+            commands::cloud_mirror_plan,
+            commands::cloud_mirror_stage,
+            commands::cloud_mirror_publish,
+            commands::cloud_mirror_resolve,
+            commands::cloud_mirror_list,
+            commands::cloud_mirror_purge,
+            commands::cloud_mirror_claim_owner,
+            commands::cloud_mirror_note_unreadable,
             commands::git_push,
             commands::git_pull,
             commands::git_discard,
@@ -439,9 +482,18 @@ pub fn run() {
             star_nag::star_nag_act,
             commands::pty_spawn,
             commands::pty_write,
+            commands::pty_attach,
+            commands::pty_detach,
+            commands::pty_detach_all,
+            commands::pty_ack,
             commands::pty_resize,
             commands::mobile_terminal_drivers,
             commands::pty_kill,
+            commands::terminal_perf_reply,
+            commands::cloud_control_reply,
+            commands::cloud_control_setting,
+            commands::cloud_control_set_setting,
+            commands::cloud_control_confirm,
             commands::list_dir,
             media::open_media_file,
             media::close_media_file,
@@ -452,7 +504,6 @@ pub fn run() {
             commands::open_local_path,
             commands::search_text,
             commands::replace_text,
-            commands::settle_session,
             commands::fork_session,
             commands::dictation_available,
             commands::dictation_start,
@@ -463,7 +514,10 @@ pub fn run() {
             commands::preview_workspace_name,
             commands::rename_workspace,
             commands::workspace_disposition,
-            commands::delete_workspace,
+            commands::remove_workspace,
+            commands::workspace_size,
+            commands::scan_leftovers,
+            commands::remove_leftovers,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,
@@ -510,6 +564,9 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                drag_text::on_drag_drop(drag);
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
@@ -540,16 +597,4 @@ pub fn run() {
                 }
             }
         });
-}
-
-#[cfg(all(test, feature = "desktop"))]
-mod tests {
-    use super::supports_deep_link_scheme;
-
-    #[test]
-    fn accepts_current_and_legacy_deep_link_schemes() {
-        assert!(supports_deep_link_scheme("terminalx"));
-        assert!(supports_deep_link_scheme("terminalx-next"));
-        assert!(!supports_deep_link_scheme("https"));
-    }
 }

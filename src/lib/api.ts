@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { Channel, invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
@@ -19,7 +19,9 @@ import type {
   WorkspaceDisposition,
   TabEntry,
   WorkStatus,
-  WorktreeDisposition,
+  WorkspaceRemoveReport,
+  Leftover,
+  LeftoverRemoval,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
@@ -122,6 +124,7 @@ export interface StatsUsageState {
   generation: number;
   snapshot: StatsUsageSnapshot | null;
   activity?: AppStats | null;
+  activityError?: string | null;
   refreshing: boolean;
   error: string | null;
 }
@@ -150,6 +153,21 @@ export interface WorkspaceRename {
   sessions: SessionEntry[];
 }
 
+/** How a workspace is removed. */
+export interface WorkspaceRemoveOptions {
+  /** Settling: the conversations stay and move to the project. */
+  keepSessions: boolean;
+  deleteBranch: boolean;
+  /**
+   * The second confirmation, as the digest of the check the person saw when
+   * they gave it. Null for a single confirmation, which is enough only for a
+   * workspace found clean and merged.
+   */
+  confirmedDigest: string | null;
+  /** The sessions the person was told are in the workspace; the removal is refused if that changed. */
+  expectedSessions: string[];
+}
+
 export const api = {
   // optional TerminalX account
   accountStatus: () => invoke<AccountStatus>("account_status"),
@@ -161,8 +179,9 @@ export const api = {
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
+  /** `selected: false`: created, but selecting it failed. Select it by id; never create again. */
   organizationCreate: (name: string, idempotencyKey: string) =>
-    invoke<OrganizationSummary>("organization_create", { name, idempotencyKey }),
+    invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
     invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
 
@@ -170,8 +189,40 @@ export const api = {
   // are resolved natively, so account tokens never cross this boundary.
   cloudProviders: () => invoke<CloudProviderSummaryResponse>("cloud_providers"),
   cloudProvider: (provider: CloudWorkspaceProviderId) => invoke<CloudProviderConnection>("cloud_provider", { provider }),
-  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "destroy") =>
+  cloudProviderDisconnect: (provider: CloudWorkspaceProviderId, contextRevision: string, disposition: "retain" | "archive" | "destroy") =>
     invoke<CloudProviderConnection>("cloud_provider_disconnect", { provider, contextRevision, disposition }),
+  /** The organization's cloud teardown, or null when none was ever asked for. Owners and admins only; the server decides. */
+  cloudTeardownStatus: (orgId?: string | null) => invoke<CloudTeardown | null>("cloud_teardown_status", { orgId: orgId ?? null }),
+  /** How many workspaces a teardown of `organizationId` would take, private ones the caller cannot list included. Refused if that is not the active organization. */
+  cloudTeardownPreview: (organizationId: string) => invoke<CloudTeardownPreview>("cloud_teardown_preview", { organizationId }),
+  /**
+   * Archive or delete every cloud workspace of `organizationId`. It cannot be
+   * cancelled; call it only after an explicit confirmation, with the
+   * organization and the context revision that confirmation was given for,
+   * and the preview it showed. Nothing is sent if the organization or context
+   * is no longer current, or the workspaces are no longer the ones counted.
+   */
+  cloudTeardownRequest: (organizationId: string, contextRevision: string, disposition: "archive" | "destroy", confirmed: { expectedWorkspaces: number; previewToken: string }) =>
+    invoke<CloudTeardown>("cloud_teardown_request", { organizationId, contextRevision, disposition, confirmed }),
+  /** Allow or stop new machines on a provider (owners and admins); saved keys and running workspaces are untouched. */
+  cloudProviderSetCreationEnabled: (provider: CloudWorkspaceProviderId, contextRevision: string, enabled: boolean) =>
+    invoke<CloudProviderSummary>("cloud_provider_set_creation_enabled", { provider, contextRevision, enabled }),
+  /** Check the saved key against the provider again, without entering it. */
+  cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
+    invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
+  // Agent logins for the organization's cloud workspaces (PRO-79). The login itself is collected in Rust
+  // (a native secure dialog, or this computer's own login) and never passes through the webview.
+  cloudAgentLogins: () => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins"),
+  cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
+    invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
+  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
+  // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
+  // The page opens in the browser; the code it shows is entered in a native dialog, never here.
+  cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
+  cloudAgentClaudeLoginOpen: (url: string) => invoke<void>("cloud_agent_claude_login_open", { url }),
+  cloudAgentClaudeLoginComplete: (attemptId: string, consent: AgentLoginConsent) =>
+    invoke<ClaudeLoginOutcome>("cloud_agent_claude_login_complete", { attemptId, consent }),
+  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string) => invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision }),
   cloudProviderConnect: (provider: CloudWorkspaceProviderId, input: CloudProviderConnectInput) =>
     invoke<CloudProviderConnection>("cloud_provider_connect", { provider, input }),
   // Cloud workspace routes take the Organization they act in (CS-18). None
@@ -184,19 +235,26 @@ export const api = {
     invoke<CloudWorkspaceQuote>("cloud_workspace_quote", { input, orgId: orgId ?? null }),
   cloudWorkspaceCreate: (input: CloudWorkspaceCreateInput, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_create", { input, orgId: orgId ?? null }),
-  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null) =>
-    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null }),
+  /** `agent`: the one a first prompt would go to; the answer then says whether the organization has a login for it. */
+  cloudWorkspacePreflight: (repositories: CloudWorkspaceRepositoryInput[], orgId?: string | null, agent?: string | null) =>
+    invoke<CloudWorkspacePreflight>("cloud_workspace_preflight", { repositories, orgId: orgId ?? null, agent: agent ?? null }),
   cloudWorkspaceRepositories: (orgId?: string | null) => invoke<CloudSelectedRepositories>("cloud_workspace_repositories", { orgId: orgId ?? null }),
   cloudWorkspaces: (orgId?: string | null) => invoke<CloudWorkspaceList>("cloud_workspaces", { orgId: orgId ?? null }),
+  /** Every member organization's list in one request, for a server that offers it; `cursor` is the last answer's. */
+  cloudCatalogFeed: (cursor?: string | null) => invoke<CloudCatalogFeed>("cloud_catalog_feed", { cursor: cursor ?? null }),
   cloudWorkspaceSuspend: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_suspend", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceResume: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_resume", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceRelease: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_release", { workspaceId, orgId: orgId ?? null }),
-  /** Archive (30-day trash). `force` only after the person confirmed stopping running agent work. */
-  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null) =>
-    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null }),
+  /**
+   * Archive (30-day trash by default). `force` only after the person confirmed
+   * stopping running agent work. `retentionDays` only when the person chose a
+   * period the disposition facts offer; a server without the choice refuses it.
+   */
+  cloudWorkspaceArchive: (workspaceId: string, force: boolean, orgId?: string | null, retentionDays?: number | null) =>
+    invoke<CloudWorkspaceSnapshot>("cloud_workspace_archive", { workspaceId, force, orgId: orgId ?? null, retentionDays: retentionDays ?? null }),
   /** Permanent delete, a resumable cleanup job; retrying resumes the same operation. */
   cloudWorkspaceDelete: (workspaceId: string, force: boolean, orgId?: string | null) =>
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_delete", { workspaceId, force, orgId: orgId ?? null }),
@@ -235,6 +293,18 @@ export const api = {
   cloudRemoteAttach: (target: CloudWorkspaceTarget, activation: Activation) =>
     invoke<string>("cloud_remote_attach", { target, activation }),
   cloudRemoteAttachDev: (pairingCode: string) => invoke<string>("cloud_remote_attach_dev", { pairingCode, ticket: null }),
+  /**
+   * Forward a port of the connection's workspace to this Mac's loopback (PRO-28,
+   * docs/CLOUD-PREVIEWS.md), on a random free port unless `localPort` names one.
+   * Never wakes the workspace: rejects with `cloud_port_not_connected` unless the
+   * connection is live. `reassigned` says the named local port was taken; `exact`
+   * refuses instead (`cloud_port_in_use`). The forward closes when the workspace
+   * stops, access goes or the active organization changes.
+   */
+  cloudPortForward: (connectionId: string, port: number, options: { localPort?: number; exact?: boolean } = {}) =>
+    invoke<CloudPortForward>("cloud_port_forward", { connectionId, port, localPort: options.localPort ?? null, exact: options.exact ?? false }),
+  cloudPortUnforward: (connectionId: string, port: number) => invoke<boolean>("cloud_port_unforward", { connectionId, port }),
+  cloudPortForwards: (connectionId: string) => invoke<CloudPortForward[]>("cloud_port_forwards", { connectionId }),
   cloudRemoteSend: (connectionId: string, frame: { id: string; method: string; params?: unknown }) =>
     invoke<boolean>("cloud_remote_send", { connectionId, frame }),
   cloudRemoteActivate: (connectionId: string, activation: Activation) =>
@@ -266,9 +336,21 @@ export const api = {
     invoke<string>("preview_workspace_name", { projectPath, requested: requested ?? null }),
   renameWorkspace: (projectPath: string, path: string, name: string) =>
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
-  workspaceDisposition: (projectPath: string, path: string) => invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path }),
-  deleteWorkspace: (projectPath: string, path: string, deleteBranch: boolean) =>
-    invoke<SessionEntry[]>("delete_workspace", { projectPath, path, deleteBranch }),
+  /** What earlier deletes left on disk. Reads only, apart from fetching each project's default branch. */
+  scanLeftovers: () => invoke<Leftover[]>("scan_leftovers"),
+  /** Delete the confirmed leftovers; each is checked again first. */
+  removeLeftovers: (ids: string[]) => invoke<LeftoverRemoval>("remove_leftovers", { ids }),
+  workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
+  /**
+   * What a workspace holds. With `fetch`, the default branch is fetched and
+   * the clean-and-merged check is made too (`landed`); that is for the
+   * dialog about to delete it. Without it, nothing touches the network.
+   */
+  workspaceDisposition: (projectPath: string, path: string, options: { fetch?: boolean } = {}) =>
+    invoke<WorkspaceDisposition>("workspace_disposition", { projectPath, path, fetch: options.fetch ?? false }),
+  /** Remove a workspace through the one checked path. */
+  removeWorkspace: (projectPath: string, path: string, options: WorkspaceRemoveOptions) =>
+    invoke<WorkspaceRemoveReport>("remove_workspace", { projectPath, path, ...options }),
 
   // sessions
   listSessions: () => invoke<SessionEntry[]>("list_sessions"),
@@ -285,11 +367,12 @@ export const api = {
     invoke<void>("set_session_archived", { sessionId, archived }),
   setSessionPinned: (sessionId: string, pinned: boolean) => invoke<void>("set_session_pinned", { sessionId, pinned }),
   setActiveTab: (sessionId: string, tabId: string) => invoke<void>("set_active_tab", { sessionId, tabId }),
-  deleteSession: (sessionId: string, removeWorktree: boolean) =>
-    invoke<void>("delete_session", { sessionId, removeWorktree }),
-  worktreeDisposition: (sessionId: string) => invoke<WorktreeDisposition>("worktree_disposition", { sessionId }),
-  removeSessionWorktree: (sessionId: string) => invoke<SessionEntry>("remove_session_worktree", { sessionId }),
-  settleSession: (sessionId: string, action: "delete" | "relocate") => invoke<SessionEntry>("settle_session", { sessionId, action }),
+  /** Delete one session; its workspace and every other session stay. */
+  deleteSession: (sessionId: string) => invoke<void>("delete_session", { sessionId }),
+  /** The workspace this session could take along: its worktree, when no other session runs there. */
+  soleWorkspaceOf: (sessionId: string) => invoke<string | null>("sole_workspace_of", { sessionId }),
+  /** Keep the worktree on disk but run the session in the project itself from now on. */
+  relocateSession: (sessionId: string) => invoke<SessionEntry>("relocate_session", { sessionId }),
   forkSession: (sessionId: string, tabId: string) => invoke<SessionEntry>("fork_session", { sessionId, tabId }),
 
   // harnesses
@@ -313,6 +396,32 @@ export const api = {
 
   // git
   workStatus: (cwd: string) => invoke<WorkStatus>("work_status", { cwd }),
+  // The local mirror of a cloud workspace (PRO-25, docs/CLOUD-MIRROR.md).
+  // None of these takes a local path: the native side derives the mirror's
+  // directory from the two ids and only reports it back (`root`).
+  cloudMirrorStatus: (organizationId: string, workspaceId: string) => invoke<CloudMirrorStatus>("cloud_mirror_status", { organizationId, workspaceId }),
+  /** `account` is who is signed in: the mirrors on this computer are recorded as theirs. */
+  cloudMirrorEnable: (organizationId: string, workspaceId: string, account: string) =>
+    invoke<CloudMirrorStatus>("cloud_mirror_enable", { organizationId, workspaceId, account }),
+  cloudMirrorDisable: (organizationId: string, workspaceId: string, removeFiles: boolean) =>
+    invoke<CloudMirrorStatus>("cloud_mirror_disable", { organizationId, workspaceId, removeFiles }),
+  cloudMirrorCheck: (organizationId: string, workspaceId: string) =>
+    invoke<{ diverged: CloudMirrorDivergence[]; divergedTotal: number }>("cloud_mirror_check", { organizationId, workspaceId }),
+  cloudMirrorPlan: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput) =>
+    invoke<CloudMirrorPlan>("cloud_mirror_plan", { organizationId, workspaceId, manifest }),
+  cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, size: number, etag: string) =>
+    invoke<void>("cloud_mirror_stage", { organizationId, workspaceId, relative, dataB64, size, etag }),
+  cloudMirrorList: () => invoke<{ organizationId: string; workspaceId: string }[]>("cloud_mirror_list"),
+  /** Says who is using the app; mirrors made under another account are removed. Returns how many. */
+  cloudMirrorClaimOwner: (account: string, legacyEmail: string | null) => invoke<number>("cloud_mirror_claim_owner", { account, legacyEmail }),
+  /** The saved session could not be read at this launch: mirrors are kept for a bounded time, then removed. Returns how many were. */
+  cloudMirrorNoteUnreadable: () => invoke<number>("cloud_mirror_note_unreadable"),
+  /** Removes what the mirror wrote; files the person added and their exports stay. */
+  cloudMirrorPurge: (organizationId: string, workspaceId: string) => invoke<number>("cloud_mirror_purge", { organizationId, workspaceId }),
+  cloudMirrorPublish: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, etags: Record<string, string>) =>
+    invoke<CloudMirrorPublished>("cloud_mirror_publish", { organizationId, workspaceId, manifest, etags }),
+  cloudMirrorResolve: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput, resolution: "discard" | "export") =>
+    invoke<{ paths: number; exportedTo: string | null }>("cloud_mirror_resolve", { organizationId, workspaceId, manifest, resolution }),
   /** The person's global Git identity; it authors their commits in cloud workspaces. */
   gitIdentity: () => invoke<{ name: string; email: string } | null>("git_identity"),
   listBranches: (cwd: string) => invoke<BranchInfo[]>("list_branches", { cwd }),
@@ -349,6 +458,8 @@ export interface AccountStatus {
   identity: AccountIdentity | null;
   expiresAt: number | null;
   lastError: string | null;
+  /** The saved session could not be read: signed-out because nothing loaded, not because anyone signed out. */
+  sessionUnreadable?: boolean;
   /**
    * `scope` and `revision` include the active Organization; `account` is the
    * user and profile alone (CS-18), what cloud state belongs to when every
@@ -358,10 +469,96 @@ export interface AccountStatus {
   organizations?: OrganizationSummary[];
   /** The server authorizes desktop cloud routes by membership (`cloud.desktop.multi-org.v1`, CS-18). */
   multiOrg?: boolean;
+  /** The server lists every member organization's cloud workspaces in one request (`cloud.desktop.catalog-feed.v1`, PRO-74). */
+  catalogFeed?: boolean;
+  /** The server lets any member create a cloud workspace and manage the ones they created (`cloud.workspaces.member-managed.v1`, PRO-73). */
+  memberWorkspaces?: boolean;
+  /** The server takes `wake: false` on an agent command and refuses a stopped workspace instead of starting it (`cloud.workspaces.agent-command-wake.v1`, PRO-89). */
+  agentCommandWake?: boolean;
+}
+
+/** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
+export interface CloudCatalogOrganization {
+  orgId: string;
+  workspaces: CloudWorkspaceListItem[];
+  tombstones: CloudWorkspaceTombstone[];
+  quota?: CloudWorkspaceQuota | null;
+  error?: string | null;
+}
+
+/**
+ * `cloud_catalog_feed` (saas contract §23). `changed: false` is the server's
+ * 304: the catalog `cursor` names is still current. `reset` means the answer
+ * is the whole catalog; without it, only the workspaces that changed are
+ * listed and `deletedWorkspaceIds` names the ones to drop.
+ */
+export interface CloudCatalogFeed {
+  changed: boolean;
+  cursor: string | null;
+  reset: boolean;
+  organizations: CloudCatalogOrganization[];
+  deletedWorkspaceIds: string[];
 }
 
 /** `local-docker` is offered by debug builds only (terminalx-saas `cloud:e2e:local --serve`). */
-export type CloudWorkspaceProviderId = "machine0" | "box" | "local-docker";
+export interface CloudMirrorRepository {
+  repo: string;
+  branch: string | null;
+  head: string | null;
+}
+
+/** The last sync that was published in full. */
+export interface CloudMirrorRevision {
+  manifestId: string;
+  atMs: number;
+  files: number;
+  bytes: number;
+  repositories: CloudMirrorRepository[];
+}
+
+export interface CloudMirrorStatus {
+  enabled: boolean;
+  /** Where the mirrored files are on this computer. For display and "show in folder" only. */
+  root: string;
+  revision: CloudMirrorRevision | null;
+  files: number;
+}
+
+export interface CloudMirrorDivergence {
+  path: string;
+  reason: "modified" | "deleted" | "replaced" | "in-the-way";
+}
+
+export interface CloudMirrorManifestInput {
+  manifestId: string;
+  repositories: CloudMirrorRepository[];
+  entries: { path: string; size: number; version: string; executable: boolean }[];
+  truncated: boolean;
+}
+
+export interface CloudMirrorPlan {
+  fetch: string[];
+  fetchBytes: number;
+  remove: number;
+  unchanged: number;
+  diverged: CloudMirrorDivergence[];
+  divergedTotal: number;
+  /** Listed by the workspace and left out on this computer, by reason. */
+  refused: { secret: number; toolConfig: number; gitDirectory: number; collision: number; tooLong: number; invalid: number; onDisk: number };
+  upToDate: boolean;
+}
+
+export interface CloudMirrorPublished {
+  status: CloudMirrorStatus;
+  diverged: CloudMirrorDivergence[];
+  divergedTotal: number;
+  written: number;
+  removed: number;
+  /** Written, then removed again: on the disk they turned out to be something a mirror never holds. */
+  takenBack: number;
+}
+
+export type CloudWorkspaceProviderId = "machine0" | "box" | "hetzner" | "local-docker";
 export type CloudWorkspaceReleaseDisposition = "destroyed" | "archived" | "terminalx-only";
 export type CloudWorkspaceNetworkPolicy = "relay-only" | "provider-public-network";
 
@@ -388,6 +585,44 @@ export interface CloudProviderSummary {
   capabilities: CloudProviderCapabilities;
 }
 
+export type AgentLoginProvider = "codex" | "claude" | "cursor";
+/** `api-key`: typed into a native secure dialog. `local-login`: the agent's own login on this computer. */
+export type AgentLoginSource = "api-key" | "local-login";
+
+/** What the service says about a stored agent login; never the login. */
+export interface AgentLogin {
+  provider: AgentLoginProvider;
+  authKind: "api-key" | "oauth-credentials-json" | (string & {});
+  fingerprint: string;
+  displayIdentity?: string;
+  version: number;
+  updatedAt: number;
+  state?: "connected" | "revoked" | "disconnected" | (string & {});
+  sharedUse?: "organization" | "managers" | (string & {});
+}
+
+export interface ClaudeLoginStarted {
+  attemptId: string;
+  authorizeUrl: string;
+  expiresInSeconds: number;
+  /** The browser was asked to open the page. */
+  opened: boolean;
+}
+
+export interface ClaudeLoginOutcome {
+  status: "complete" | "code-invalid" | "unavailable" | "pending" | "expired" | "canceled" | "failed" | (string & {});
+  credential?: AgentLogin;
+  attemptsLeft?: number;
+}
+
+export interface AgentLoginConsent {
+  contextRevision: string;
+  organizationSharing: boolean;
+  machineInstallation: boolean;
+  /** The login now stored for the agent may be replaced; required when there is one. */
+  replaceExisting: boolean;
+}
+
 export interface CloudProviderSummaryResponse {
   providers: CloudProviderSummary[];
 }
@@ -403,7 +638,43 @@ export interface CloudProviderConnection {
   providerAccount?: string | null;
   operationsBlocked?: boolean | null;
   disconnectDisposition?: "retain" | "destroy" | null;
+  /** `archive` while a disconnect that archives is under way; its workspaces are deleted at `retentionDeadline`. */
+  disconnectRetention?: "archive" | (string & {}) | null;
+  retentionDeadline?: number | null;
   resources?: CloudProviderResource[] | null;
+}
+
+/** One thing an organization still has at a provider, in a teardown's inventory (saas contract §10.7). */
+export interface CloudTeardownResource {
+  provider: string;
+  id: string;
+  kind: string;
+  state: string;
+  releaseDisposition: string | null;
+  cleanupRequired: boolean;
+  deleteAfter: number | null;
+}
+
+/** What a teardown would take, as counts (no names or ids). */
+export interface CloudTeardownPreview {
+  organizationId: string;
+  workspaces: number;
+  /** Private workspaces created by someone other than the caller. */
+  othersPrivateWorkspaces: number;
+  archivedWorkspaces: number;
+  /** Names exactly the set counted; it goes back with the request. */
+  token: string;
+}
+
+/** An organization-wide cloud teardown: what was asked, the deadline, and what still blocks completion. */
+export interface CloudTeardown {
+  organizationId: string;
+  disposition: "archive" | "destroy" | (string & {});
+  requestedAt: number;
+  retentionDeadline: number;
+  completedAt: number | null;
+  resources: CloudTeardownResource[];
+  remaining: CloudTeardownResource[];
 }
 
 export interface CloudProviderConnectInput {
@@ -527,6 +798,8 @@ export interface CloudWorkspaceCleanup {
     state: "removed" | "pending" | "retained-by-provider" | "unconfirmed" | (string & {});
     providerStage: string | null;
     expectedBy: number | null;
+    /** The provider's id for the deletion it accepted (admins only; absent from an older server). */
+    providerOperationId?: string;
   }[];
 }
 
@@ -548,8 +821,11 @@ export interface CloudWorkspaceDisposition {
   activeOperation: { id: string; action: string; state: string } | null;
   runtime: { reporting: boolean; reportedAt: number | null; stale: boolean; activeTurns: number; pendingApprovals: number };
   attachedClients: number;
-  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string };
+  /** `preservesProcessesOnResume` is absent from an older server: then it is not known. */
+  providerCapabilities: { permanentDelete: boolean; releaseDisposition: string; preservesProcessesOnResume?: boolean | null };
   archiveRetentionDays: number;
+  /** The periods an archive may ask for instead; absent or empty from a server that takes no choice. */
+  archiveRetentionChoices?: number[];
   blockers: ("active-turns" | "pending-approvals" | "operation-in-progress" | (string & {}))[];
   removedOnDelete: string[];
   runtimeFacts: { available: boolean };
@@ -627,13 +903,17 @@ export interface CloudWorkspaceOperation {
   errorCode: CloudWorkspaceOperationErrorCode | null;
   /** The provider's own normalized error code for a failed operation, when the server reports one; never a message or body. */
   providerErrorCode?: string | null;
+  /** The server's own detail for a failed operation, beside its error code (`box_deleted_sandbox_present`); absent from an older server. */
+  detailCode?: string | null;
   progress: { phase: "allocating" | "starting" | "installing-runtime" | "connecting-relay" | "suspending" | "releasing"; retryAt: number | null } | null;
   events: {
     code: "operation-queued" | "provider-preflight-started" | "machine-allocation-started" | "runtime-installation-started" | "credentials-installing" | "credentials-ready" | "repository-cloning" | "repository-ready" | "repository-clone-failed" | "relay-connection-started" | "provider-cleanup-started" | "workspace-ready" | "operation-failed" | "operation-canceled";
     occurredAt: number;
   }[] | null;
-  /** An archive's final checkpoint (§10.3). */
+  /** A stop's or an archive's final checkpoint (§10.3). */
   checkpoint?: "committed" | "failed" | "timed-out" | "skipped" | (string & {}) | null;
+  /** When the runtime reported it; absent when it never answered. */
+  checkpointAt?: number | null;
   cleanup?: CloudWorkspaceCleanup | null;
 }
 
@@ -688,11 +968,20 @@ export interface CloudWorkspaceLaunchInput {
   prompt?: string | null;
 }
 
+/** A workspace port reachable at `http://127.0.0.1:<localPort>` on this Mac. */
+export interface CloudPortForward {
+  port: number;
+  localPort: number;
+  reassigned: boolean;
+}
+
 export interface CloudWorkspacePreflight {
   ready: boolean;
   checks: {
     kind: string;
     cloneUrl: string | null;
+    /** On an `agent-credential` check from an API that answers per agent: the agent it is about. */
+    agent?: string | null;
     status: "verified" | "failed";
     errorCode: string | null;
     retryable: boolean;
@@ -1014,6 +1303,10 @@ export interface ModelInfo {
   /** The model that replaces this one when the provider is retiring it. */
   upgrade: string | null;
   description: string | null;
+  /** A family alias (`opus`): it follows the latest release rather than staying on one version. */
+  alias?: boolean;
+  /** The full model id an alias runs now, per the CLI on the machine that listed it. */
+  resolved?: string | null;
 }
 
 export interface HandoffInfo {
@@ -1077,6 +1370,8 @@ export const files = {
   search: (cwd: string, query: string, limit = 40) => invoke<FileHit[]>("search_files", { cwd, query, limit }),
   invalidate: (cwd: string) => invoke<void>("invalidate_file_index", { cwd }),
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
+  /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
+  droppedText: () => invoke<string | null>("dropped_text"),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
 
@@ -1178,6 +1473,22 @@ export const browser = {
 export const pty = {
   spawn: (id: string, cwd: string, cols: number, rows: number, command?: string) => invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
+  /**
+   * Receive pane `id`'s output as raw bytes, starting with what it has
+   * printed so far. One attachment per pane: a later one replaces it.
+   * `token` names this attachment; its acknowledgements and its detach carry
+   * it, so they cannot act on an attachment that has replaced it.
+   */
+  attach: (id: string, token: string, onData: (bytes: Uint8Array) => void) => {
+    const channel = new Channel<ArrayBuffer>();
+    channel.onmessage = (message) => onData(new Uint8Array(message));
+    return invoke<void>("pty_attach", { id, token, channel });
+  },
+  /** This window has drawn `drawn` bytes of the pane's output since it attached; the backend holds a pane that gets too far ahead. */
+  ack: (id: string, token: string, drawn: number) => invoke<void>("pty_ack", { id, token, drawn }),
+  detach: (id: string, token: string) => invoke<void>("pty_detach", { id, token }),
+  /** This page has attached nothing yet: drop what a page loaded before it in this window had attached. */
+  detachAll: () => invoke<void>("pty_detach_all"),
   resize: (id: string, cols: number, rows: number) => invoke<void>("pty_resize", { id, cols, rows }),
   kill: (id: string) => invoke<void>("pty_kill", { id }),
 };
@@ -1409,6 +1720,10 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
     else this.unlisten = unlisten;
   }
 
+  get id(): string | null {
+    return this.connectionId;
+  }
+
   bind(connectionId: string): void {
     this.connectionId = connectionId;
     const early = this.early;
@@ -1468,6 +1783,8 @@ class NativeWorkspaceTransport implements WorkspaceTransport {
 export interface CloudWorkspaceConnection {
   target: WorkspaceTarget;
   client: WorkspaceRpcClient;
+  /** The native connection's id, for calls that act on it (port forwards); null until attached. */
+  connectionId?: () => string | null;
   /** Raise the activation; only `wake` (an interactive action) resumes suspended compute. */
   activate(activation: Activation): Promise<void>;
   close(): void;
@@ -1527,6 +1844,7 @@ async function adopt(
   const connection: CloudWorkspaceConnection = {
     target,
     client,
+    connectionId: () => transport.id,
     activate: (next) => transport.activate(next),
     close: () => {
       if (connections.get(key) === self) connections.delete(key);

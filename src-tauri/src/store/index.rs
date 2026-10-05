@@ -77,7 +77,10 @@ pub struct TabEntry {
     pub context_used: Option<u64>,
     #[serde(default)]
     pub context_max: Option<u64>,
-    /// Provider conversation this tab was forked from; consumed on first start.
+    /// Provider conversation this tab was forked from. It drives the first
+    /// start only (a tab with an id of its own resumes that), and stays set
+    /// afterwards so the parent's transcript is not deleted before the fork
+    /// has one of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
     #[serde(flatten, default)]
@@ -134,6 +137,8 @@ pub struct SessionEntry {
     /// Base the worktree forked from, for the first turn's changes baseline.
     #[serde(default)]
     pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<crate::git::WorktreeBase>,
     #[serde(default)]
     pub worktree_removed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,6 +280,7 @@ mod tests {
             worktree_name: None,
             branch: None,
             base_ref: None,
+            worktree_base: None,
             worktree_removed: false,
             removed_workspace: None,
             issue: None,

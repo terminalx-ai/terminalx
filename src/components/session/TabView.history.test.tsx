@@ -21,7 +21,7 @@ vi.mock("@/lib/tabViews", () => ({
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 // The transcript is not under test; the real composer in its footer is.
 vi.mock("@/components/chat/Chat", () => ({ Chat: ({ footer }: { footer: React.ReactNode }) => <div>{footer}</div> }));
-vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }) }));
+vi.mock("@/components/chat/Dictation", () => ({ DictationStatus: () => null, MicButton: () => null, useDictationInto: () => ({ dictating: false, toggle: vi.fn() }), useDictationShortcuts: vi.fn() }));
 vi.mock("./ContinuationDialog", () => ({ ContinuationDialog: () => null }));
 
 import { TabView } from "./TabView";

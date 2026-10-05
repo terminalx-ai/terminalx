@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,10 +10,10 @@ import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 import { THEMES, hasLightMode, setMode, setTheme, useTheme, type Mode, type ThemeId } from "@/lib/theme";
+import { CLOUD_CONTROL_HAS_SETTING, CLOUD_CONTROL_POLICY, CLOUD_CONTROL_SETTING, cloudControlEnabled, loadCloudControlSetting, requestCloudControlSetting, subscribeCloudControlSetting } from "@/lib/cloudControl";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
-import { hasEscapeOverlay, keycaps, useHotkey } from "@/lib/hotkeys";
-import { SHORTCUTS } from "@/lib/shortcuts";
+import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { api, errorMessage, gh, issues, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { ComputerUseRows } from "./ComputerUseSettings";
@@ -22,9 +22,13 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
+import { StorageTab } from "./StorageTab";
+import { ShortcutsTab } from "./ShortcutsTab";
 
-const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
+/** The section Settings opens on when nothing asks for a particular one (PRO-81). */
+export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
 type Tab = SettingsTab;
 const TAB_LABEL: Record<Tab, string> = {
   account: "Account",
@@ -34,21 +38,31 @@ const TAB_LABEL: Record<Tab, string> = {
   agents: "Agents",
   transcription: "Transcription",
   integrations: "Integrations",
+  storage: "Storage",
   shortcuts: "Shortcuts",
   about: "About",
 };
 
 export function SettingsPage({
   onBack,
-  initialTab = "general",
+  initialTab = DEFAULT_SETTINGS_TAB,
+  openRequest = 0,
 }: {
   onBack: () => void;
   initialTab?: SettingsTab;
+  /**
+   * Counts each time Settings is asked for. Asking again while it is open
+   * goes to `initialTab` even when that is the section it opened on and the
+   * reader has since picked another by hand.
+   */
+  openRequest?: number;
 }) {
-  const [tab, setTab] = useState<Tab>(initialTab);
+  // Settings always opens on a section: a value that names none is the default one.
+  const initial: Tab = TABS.includes(initialTab) ? initialTab : DEFAULT_SETTINGS_TAB;
+  const [tab, setTab] = useState<Tab>(initial);
   useEffect(() => {
-    setTab(initialTab);
-  }, [initialTab]);
+    setTab(initial);
+  }, [initial, openRequest]);
 
   useHotkey("escape", () => {
     if (hasEscapeOverlay()) return false;
@@ -102,6 +116,7 @@ export function SettingsPage({
             {tab === "agents" && <AgentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
+            {tab === "storage" && <StorageTab />}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
@@ -113,6 +128,12 @@ export function SettingsPage({
 
 function GeneralTab() {
   const prefs = usePrefs();
+  // PRO-40: the switch lives in native code (the control socket reads it itself); this shows what it says.
+  const cloudControlOn = useSyncExternalStore(subscribeCloudControlSetting, cloudControlEnabled, cloudControlEnabled);
+  const [cloudControlReason, setCloudControlReason] = useState<string | null>(null);
+  useEffect(() => {
+    void loadCloudControlSetting();
+  }, []);
   const [cli, setCli] = useState<CliToolStatus | null>(null);
   const [cliBusy, setCliBusy] = useState(false);
   const [cliError, setCliError] = useState<string | null>(null);
@@ -132,13 +153,31 @@ function GeneralTab() {
   };
   return (
     <div className="flex flex-col">
-      <SettingRow label="Website links" description="Choose where HTTP(S) links open by default." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v })} options={[{ value: "terminalx", label: "TerminalX Browser" }, { value: "system", label: "System Browser" }]} />} />
+      <SettingRow label="Website links" description="Choose a browser for website links, or ask each time." control={<Segmented aria-label="Website links" value={prefs.linkBrowser} onChange={(v) => setPrefs({ linkBrowser: v, linkBrowserChosen: true })} options={[{ value: "ask", label: "Ask every time" }, { value: "system", label: "System Browser" }, { value: "terminalx", label: "TerminalX Browser" }]} />} />
       <SettingRow label="Link actions" description="Show both browser destinations in the link action menu." control={<Switch checked={prefs.linkActions} onCheckedChange={(v) => setPrefs({ linkActions: v })} />} />
-      <SettingRow
-        label="Cloud workspaces in the sidebar"
-        description="Show a section for each organization with cloud workspaces enabled. When off, cloud workspaces open from the command palette only."
-        control={<Switch aria-label="Cloud workspaces in the sidebar" checked={prefs.cloudSidebar} onCheckedChange={(v) => setPrefs({ cloudSidebar: v })} />}
-      />
+      {/* PRO-40: unless the app ships the in-window confirmation alone. */}
+      {CLOUD_CONTROL_HAS_SETTING && (
+        <SettingRow
+          label={CLOUD_CONTROL_SETTING}
+          description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
+          control={
+            <Switch
+              aria-label={CLOUD_CONTROL_SETTING}
+              checked={cloudControlOn}
+              onCheckedChange={(v) => {
+                setCloudControlReason(null);
+                void requestCloudControlSetting(v).then((result) => setCloudControlReason(result.reason));
+              }}
+            />
+          }
+        />
+      )}
+      {/* Why the switch did not turn on (refused, not answered, or asked again too soon): never a silent no. */}
+      {CLOUD_CONTROL_HAS_SETTING && cloudControlReason && (
+        <p role="status" data-testid="cloud-control-reason" className="pb-2 text-[11px] text-amber-600 dark:text-amber-400">
+          {cloudControlReason}
+        </p>
+      )}
       <SettingRow
         label="Command line tool"
         description={
@@ -556,33 +595,6 @@ function IntegrationsTab() {
         </div>
         {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
       </div>
-    </div>
-  );
-}
-
-function ShortcutsTab() {
-  const groups = [...new Set(SHORTCUTS.map((s) => s.group))];
-  return (
-    <div className="flex flex-col gap-4">
-      {groups.map((g) => (
-        <div key={g}>
-          <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">{g}</div>
-          <ul className="flex flex-col">
-            {SHORTCUTS.filter((s) => s.group === g).map((s) => (
-              <li key={s.chord} className="flex items-center justify-between py-1 text-[13px]">
-                <span>{s.label}</span>
-                <span className="flex gap-0.5">
-                  {keycaps(s.chord).map((k, i) => (
-                    <kbd key={i} className="rounded-md bg-veil-raised px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground hairline">
-                      {k}
-                    </kbd>
-                  ))}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
     </div>
   );
 }

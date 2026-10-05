@@ -1,10 +1,10 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api } from "@/lib/api";
+import { api, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
-import { setSelectedAgent } from "@/lib/terminal";
+import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
 import type {
   ProjectPatch,
@@ -97,6 +97,7 @@ function set(patch: Partial<State>) {
     next.paletteIndex = buildPaletteIndex(next.sessions, next.projects, next.workspaces, next.harnesses);
   }
   state = next;
+  if (patch.sessions) setArchivedTerminalSessions(patch.sessions.filter((session) => session.archived).map((session) => session.id));
   for (const l of listeners) l();
 }
 
@@ -137,13 +138,32 @@ export async function bootSessions() {
 
 export async function refreshSessions() {
   const sessions = await api.listSessions();
+  const before = state.sessions;
   set({ sessions });
+  // The list was replaced wholesale: what is no longer in it has no row to be closed from.
+  const kept = new Map(sessions.map((session) => [session.id, session]));
+  const gone = before.filter((session) => !kept.has(session.id)).map((session) => session.id);
+  const closed = before.flatMap((session) => {
+    const now = kept.get(session.id);
+    return now ? session.tabs.filter((tab) => !now.tabs.some((other) => other.id === tab.id)).map((tab) => tab.id) : [];
+  });
+  if (gone.length || closed.length) {
+    queueMicrotask(() => {
+      dropSessionTerminals(gone);
+      dropTabTerminals(closed);
+    });
+  }
 }
 
 export function upsertSession(s: SessionEntry) {
   const i = state.sessions.findIndex((x) => x.id === s.id);
+  // Its checkout was just removed: a shell left running there has no directory.
+  if (s.worktreeRemoved && i >= 0 && !state.sessions[i].worktreeRemoved) void closeSessionShells(s.id);
   const sessions = i >= 0 ? state.sessions.map((x) => (x.id === s.id ? s : x)) : [...state.sessions, s];
+  const closed = i >= 0 ? state.sessions[i].tabs.filter((tab) => !s.tabs.some((kept) => kept.id === tab.id)).map((tab) => tab.id) : [];
   set({ sessions });
+  // After the list changed, so no view of a closed tab is left to ask for its terminal again.
+  if (closed.length) queueMicrotask(() => dropTabTerminals(closed));
   // A session that just cut its own worktree is ahead of the cached workspace
   // list, and the sidebar files an unknown cwd under "missing". Every creation
   // path lands here, so the catch-up belongs here rather than in each caller.
@@ -154,6 +174,7 @@ export function upsertSession(s: SessionEntry) {
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
 export function removeSessions(ids: string[]) {
+  dropSessionTerminals(ids);
   const gone = new Set(ids);
   const selectedGone = !!state.selectedSessionId && gone.has(state.selectedSessionId);
   if (!selectedGone && !state.sessions.some((s) => gone.has(s.id))) return;
@@ -361,14 +382,19 @@ export async function setProjectLogo(path: string, source: string | null) {
   return p;
 }
 
-/** Delete a workspace; the sessions that ran in it are removed with it. */
-export async function deleteWorkspace(projectPath: string, path: string, deleteBranch: boolean) {
-  const removed = await api.deleteWorkspace(projectPath, path, deleteBranch);
+/**
+ * Remove a workspace. Deleting it removes the sessions that ran in it;
+ * settling (`keepSessions`) keeps them and moves them to the project.
+ */
+export async function removeWorkspace(projectPath: string, path: string, options: WorkspaceRemoveOptions) {
+  const report = await api.removeWorkspace(projectPath, path, options);
   if (state.newSessionPreset?.projectPath === projectPath && state.newSessionPreset.cwd === path) {
     set({ newSessionPreset: { projectPath, cwd: projectPath } });
   }
-  removeSessions(removed.map((s) => s.id));
+  if (options.keepSessions) for (const session of report.sessions) upsertSession(session);
+  else removeSessions(report.sessions.map((s) => s.id));
   await refreshWorkspaces(projectPath);
+  return report;
 }
 
 export async function refreshHarnesses() {
@@ -428,16 +454,17 @@ export async function renameSession(id: string, title: string) {
   patchSession(id, { title });
 }
 
-export async function deleteSession(id: string, removeWorktree: boolean) {
-  await api.deleteSession(id, removeWorktree);
-  // Siblings taken along with a removed worktree arrive as session_deleted events.
+/** Delete one session. Its workspace stays, and so does every other session. */
+export async function deleteSession(id: string) {
+  await api.deleteSession(id);
   removeSessions([id]);
 }
 
-export async function settleSession(id: string, action: "delete" | "relocate") {
-  const s = await api.settleSession(id, action);
-  upsertSession(s);
-  return s;
+/** Keep the worktree on disk but run the session in the project itself from now on. */
+export async function relocateSession(id: string) {
+  const session = await api.relocateSession(id);
+  upsertSession(session);
+  return session;
 }
 
 export async function forkSession(id: string, tabId: string) {
@@ -463,6 +490,8 @@ export async function removeTab(sessionId: string, tabId: string) {
   const idx = s.tabs.findIndex((t) => t.id === tabId);
   const next = s.activeTab === tabId ? (tabs[Math.min(idx, tabs.length - 1)]?.id ?? null) : s.activeTab;
   patchSession(sessionId, { tabs, activeTab: next });
+  // The backend stopped the tab's CLI; its pane and xterm are this window's to drop.
+  queueMicrotask(() => dropTabTerminals([tabId]));
 }
 
 export async function setActiveTab(sessionId: string, tabId: string) {

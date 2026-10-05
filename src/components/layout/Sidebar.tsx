@@ -1,7 +1,6 @@
 import { PanelLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { keycaps } from "@/lib/hotkeys";
 import { ProjectRail } from "./ProjectRail";
 
 /**
@@ -18,7 +17,6 @@ export function Sidebar({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
-  onOpenCloudPage,
 }: {
   onToggle: () => void;
   onOpenSettings: () => void;
@@ -29,8 +27,6 @@ export function Sidebar({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
-  /** The full-window cloud page, for creating a workspace until the sidebar can (CS-13). */
-  onOpenCloudPage?: () => void;
 }) {
   return (
     <aside className="relative flex h-full min-h-0 w-(--sidebar-w) shrink-0 overflow-clip">
@@ -43,10 +39,9 @@ export function Sidebar({
         onOpenAutomations={onOpenAutomations}
         onOpenSkills={onOpenSkills}
         onSearch={onSearch}
-        onOpenCloudPage={onOpenCloudPage}
       />
       <div className="absolute right-2 top-1.5 z-10">
-        <WithTooltip label="Hide sidebar" keys={keycaps("mod+b")}>
+        <WithTooltip label="Hide sidebar" shortcut="app.toggleSidebar">
           <Button variant="ghost" size="icon-sm" aria-label="Hide sidebar" onClick={onToggle} className="text-faint hover:text-foreground">
             <PanelLeft />
           </Button>

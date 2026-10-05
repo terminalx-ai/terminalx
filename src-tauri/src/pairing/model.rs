@@ -96,6 +96,8 @@ pub struct PairingCode {
     pub pairing_url: String,
     pub expires_at: i64,
     pub connection_mode: PairingConnectionMode,
+    /// Desktop UI status only; the version-2 mobile offer stays compatible.
+    pub direct_available: bool,
     pub transport: PairingTransport,
 }
 

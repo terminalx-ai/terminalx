@@ -170,6 +170,32 @@ afterEach(() => {
   sessions.selectSession(null);
 });
 
+describe("a member's new session only uses a workspace they manage (PRO-73)", () => {
+  const mine = { you: { role: "manager", canApprove: true, canManageShares: true }, authority: "manage" };
+  const shared = { you: { role: "driver", canApprove: false, canManageShares: false }, authority: "participate" };
+  const visible = { you: { role: "none", canApprove: false, canManageShares: false }, authority: "participate" };
+
+  it("creates a workspace of their own rather than adding a session to, or waking, someone else's", async () => {
+    // Running and shared with them as a driver; another only visible; another stopped.
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 50, ...shared }), item("other", { repositories: [api], accessMode: "organization", lastActivityAt: 40, ...visible }), item("asleep", { repositories: [api], accessMode: "organization", state: "suspended", lastActivityAt: 30, ...shared })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+  });
+
+  it("reuses their own running workspace, and wakes their own stopped one, whatever else is in the project", async () => {
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 90, ...shared }), item("own", { repositories: [api], lastActivityAt: 10, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:own` } });
+    await place([item("teammate", { repositories: [api], accessMode: "organization", lastActivityAt: 90, ...shared }), item("own", { repositories: [api], state: "suspended", lastActivityAt: 10, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "wake", node: { key: `cloud:${ORG}:own` } });
+  });
+
+  it("follows the attachment the server would grant where it reports no role", async () => {
+    await place([item("theirs", { repositories: [api], accessMode: "organization", authority: "participate" })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    await place([item("managed", { repositories: [api], authority: "manage" })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse" });
+  });
+});
+
 describe("new session in a cloud project", () => {
   it("reuses the most recently active running workspace, with a worktree, and selects the new session", async () => {
     await place([item("old", { repositories: [api], lastActivityAt: 5 }), item("recent", { repositories: [api], lastActivityAt: 50 })]);
@@ -200,6 +226,44 @@ describe("new session in a cloud project", () => {
     expect(wakes).toBe(1);
     // The native attach resumes it; nothing here calls resume on its own.
     expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
+
+  describe("the list says running, the runtime has stopped by itself", () => {
+    // What the native side does on attach: parked as suspended on `connect`, resumed on `wake`.
+    const idleStopped = () =>
+      mocks.workspaceConnection.mockImplementation(async (target: { workspaceId: string }, activation: string) => {
+        let runtime = runtimes.get(target.workspaceId);
+        if (!runtime) runtimes.set(target.workspaceId, (runtime = fakeRuntime(target.workspaceId, { state: "suspended" })));
+        if (activation === "wake") queueMicrotask(() => runtime!.set(connected));
+        return runtime.connection;
+      });
+    const wakes = (id: string) => mocks.workspaceConnection.mock.calls.filter((call) => call[1] === "wake").length + (runtimes.get(id)?.connection.activate.mock.calls.length ?? 0);
+
+    it("the app's form wakes it: starting a session there is the person's own action", async () => {
+      await place([item("dozed", { repositories: [api] })]);
+      idleStopped();
+      const plan = flow.planCloudStart(project("github.com/acme/api"));
+      expect(plan.kind).toBe("reuse");
+      expect(await flow.startInWorkspace(plan as never, request)).toBe(`cloud:${ORG}:dozed:dozed-s1`);
+      expect(wakes("dozed")).toBe(1);
+    });
+
+    it("a caller that was not told to wake gets cloud_workspace_stopped, and nothing is woken or created (PRO-40)", async () => {
+      await place([item("dozed", { repositories: [api] })]);
+      idleStopped();
+      const plan = flow.planCloudStart(project("github.com/acme/api"));
+      await expect(flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: false })).rejects.toThrow("cloud_workspace_stopped");
+      const asked = vi.fn(async () => false);
+      await expect(flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: asked })).rejects.toThrow("cloud_workspace_stopped");
+      expect(asked).toHaveBeenCalledTimes(1);
+      expect(wakes("dozed")).toBe(0);
+      expect(runtimes.get("dozed")!.created).toEqual([]);
+      expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+      // Told to: one wake, and the session is not selected in the window.
+      expect(await flow.startInWorkspace(plan as never, request, { select: false, wakeIfStopped: async () => true })).toBe(`cloud:${ORG}:dozed:dozed-s1`);
+      expect(wakes("dozed")).toBe(1);
+      expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+    });
   });
 
   it("puts two sessions in one project on the same workspace and connection", async () => {
@@ -263,8 +327,10 @@ describe("blank projects", () => {
     expect(pending).toMatchObject({ blank: true, fullName: "scratch", workspaces: [] });
     expect(flow.planCloudStart(pending)).toEqual({ kind: "create" });
     const prepared = await flow.prepareCloudCreate(pending, request);
-    // No repository to check.
-    expect(mocks.api.cloudWorkspacePreflight).not.toHaveBeenCalled();
+    // No repository to check: only that the prompt's agent has a login (PRO-78).
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledTimes(1);
+    const [checked, , agent] = mocks.api.cloudWorkspacePreflight.mock.calls[0]!;
+    expect([checked, agent]).toEqual([[], "claude"]);
     const created = item("scratch-ws", { name: "scratch", repositories: [], state: "ready" });
     mocks.api.cloudWorkspaceCreate.mockResolvedValue({ workspace: created.workspace, operation: { id: "op", state: "succeeded", type: "create", stage: "ready" } });
     await flow.confirmCloudCreate(prepared);
@@ -318,7 +384,7 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudProviders).not.toHaveBeenCalled();
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledTimes(1);
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG_B);
-    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B);
+    expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), ORG_B, "claude");
     expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box" }), ORG_B);
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 
@@ -349,6 +415,20 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
     expect(prepared.form.provider).toBe("box");
     expect(prepared.providerLabel).toBe("Box");
+  });
+
+  it("creates on Hetzner in an organization that offers only Hetzner (PRO-10)", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.machine0.v1": false, "cloud.workspaces.provider.box.v1": false, "cloud.workspaces.provider.hetzner.v1": true } } } : org,
+      ),
+    };
+    const prepared = await flow.prepareCloudCreate(target, request);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["hetzner"]);
+    expect(mocks.api.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "hetzner" }), ORG_B);
+    expect(prepared.form.provider).toBe("hetzner");
+    expect(prepared.providerLabel).toBe("Hetzner");
   });
 
   it.each(["organization_admin_required", "cloud_workspace_network_unavailable", "cloud_workspace_rate_limited"])("shows the real setup error (%s) instead of trying the next provider", async (code) => {

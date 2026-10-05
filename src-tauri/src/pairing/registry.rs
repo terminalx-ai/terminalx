@@ -8,7 +8,6 @@ use super::crypto::{token_hash, HostKeypair};
 use super::model::{AccountMirror, DeviceEntry, DeviceFile, DeviceProvenance};
 
 const HOST_KEY_ACCOUNT: &str = "host-e2ee-key";
-const KEYCHAIN_NOT_FOUND: i32 = -25_300;
 
 #[derive(Default)]
 pub struct PairingSecrets {
@@ -58,46 +57,18 @@ impl PairingSecrets {
             .ok_or_else(|| anyhow!("pairing secret service is not configured"))
     }
 
-    #[cfg(target_os = "macos")]
+    // Through `crate::keychain`, which makes Keychain calls one at a time.
+    // Elsewhere than macOS nothing is stored: reads find nothing, writes fail.
     fn read(&self, account: &str) -> Result<Option<Vec<u8>>> {
-        use security_framework::passwords::get_generic_password;
-        match get_generic_password(self.service()?, account) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.code() == KEYCHAIN_NOT_FOUND => Ok(None),
-            Err(error) => Err(error).context("read pairing secret from Keychain"),
-        }
+        crate::keychain::get(self.service()?, account).context("read pairing secret from Keychain")
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn read(&self, _account: &str) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    #[cfg(target_os = "macos")]
     fn write(&self, account: &str, bytes: &[u8]) -> Result<()> {
-        use security_framework::passwords::set_generic_password;
-        set_generic_password(self.service()?, account, bytes)
-            .context("save pairing secret to Keychain")
+        crate::keychain::set(self.service()?, account, bytes).context("save pairing secret to Keychain")
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn write(&self, _account: &str, _bytes: &[u8]) -> Result<()> {
-        Err(anyhow!("macOS Keychain is unavailable"))
-    }
-
-    #[cfg(target_os = "macos")]
     fn delete(&self, account: &str) -> Result<()> {
-        use security_framework::passwords::delete_generic_password;
-        match delete_generic_password(self.service()?, account) {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == KEYCHAIN_NOT_FOUND => Ok(()),
-            Err(error) => Err(error).context("delete pairing secret from Keychain"),
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn delete(&self, _account: &str) -> Result<()> {
-        Ok(())
+        crate::keychain::delete(self.service()?, account).context("delete pairing secret from Keychain")
     }
 }
 

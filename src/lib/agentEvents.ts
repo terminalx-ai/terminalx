@@ -1,10 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { agent } from "@/lib/api";
+import { agent, api } from "@/lib/api";
 import { getSessions, patchTab } from "@/lib/sessions";
 import { noteStatusChange } from "@/lib/notify";
+import { onAppResume } from "@/lib/appResume";
 import type { AgentEvent, BlockRef } from "@/types/events";
-import type { TabStatus } from "@/types/session";
+import type { SessionEntry, TabStatus } from "@/types/session";
 
 /**
  * Per-tab event logs and streaming previews, kept in a module store.
@@ -150,7 +151,9 @@ export async function loadTab(sessionId: string, tabId: string) {
   const log = getLog(k);
   if (log.loaded) return;
   const events = await agent.loadEvents(sessionId, tabId);
-  const fresh = getLog(k);
+  const fresh = logs.get(k);
+  // The tab may have closed while its persisted history was being read.
+  if (!fresh) return;
   // Events that streamed in while loading are newer than the file; keep them.
   const seen = new Set(events.map((e) => e.id));
   fresh.events = [...events, ...fresh.events.filter((e) => !seen.has(e.id))];
@@ -228,6 +231,7 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
       set.add(cb);
       return () => {
         set!.delete(cb);
+        if (!set!.size) listeners.delete(k);
       };
     },
     () => logs.get(k) ?? EMPTY,
@@ -236,14 +240,72 @@ export function useTabLog(sessionId: string, tabId: string): TabLog {
 }
 
 let subscribed = false;
+let reconciling = false;
+
+/** Read saved history again after suspension; never send input or restart work. */
+export async function reconcileAgentEvents() {
+  if (reconciling) return;
+  reconciling = true;
+  // A frame requested before suspension need not be delivered on resume.
+  if (frame !== null) cancelAnimationFrame(frame);
+  flush();
+  try {
+    const before = getSessions().sessions;
+    try {
+      const sessions = await api.listSessions();
+      for (const session of sessions) {
+        for (const tab of session.tabs) {
+          const old = before.find((s) => s.id === session.id)?.tabs.find((t) => t.id === tab.id);
+          const current = getSessions().sessions.find((s) => s.id === session.id)?.tabs.find((t) => t.id === tab.id);
+          // A live update during the read wins over its snapshot. Only status
+          // is reconciled here; recovery must not close panes or change drafts.
+          if (old && old === current && old.status !== tab.status) setTabStatus(session.id, tab.id, tab.status);
+        }
+      }
+    } catch { /* Keep the last verified state when the backend is unavailable. */ }
+    for (const session of getSessions().sessions) {
+      for (const tab of session.tabs) {
+        const k = key(session.id, tab.id);
+        if (!logs.get(k)?.loaded || !listeners.get(k)?.size) continue;
+        try {
+          const events = await agent.loadEvents(session.id, tab.id);
+          // Navigation/closure while the read was pending must not resurrect a log.
+          if (logs.has(k)) mergeTabEvents(session.id, tab.id, events);
+        } catch {
+          // Keep the existing conversation; a later resume retries the read.
+        }
+      }
+    }
+  } finally {
+    reconciling = false;
+  }
+}
+
 export async function subscribeAgentEvents() {
   if (subscribed) return;
   subscribed = true;
+  onAppResume(() => void reconcileAgentEvents());
   try {
-    await listen<AgentEvent>("agent_event", (e) => applyEvent(e.payload));
-    await listen<{ sessionId: string; tabId: string; status: TabStatus }>("tab_status", (e) =>
-      setTabStatus(e.payload.sessionId, e.payload.tabId, e.payload.status),
-    );
+    const liveTab = (sessionId: string, tabId: string) => getSessions().sessions.some((session) => session.id === sessionId && session.tabs.some((tab) => tab.id === tabId));
+    await listen<AgentEvent>("agent_event", ({ payload }) => {
+      if (liveTab(payload.sessionId, payload.tabId)) applyEvent(payload);
+    });
+    await listen<{ sessionId: string; tabId: string; status: TabStatus }>("tab_status", ({ payload }) => {
+      if (liveTab(payload.sessionId, payload.tabId)) setTabStatus(payload.sessionId, payload.tabId, payload.status);
+    });
+    await listen<string>("session_deleted", ({ payload: id }) => {
+      for (const k of logs.keys()) if (k.startsWith(`${id}/`)) {
+        logs.delete(k);
+        touch(k, true);
+      }
+    });
+    await listen<SessionEntry>("session_updated", ({ payload: session }) => {
+      const kept = new Set(session.tabs.map((tab) => key(session.id, tab.id)));
+      for (const k of logs.keys()) if (k.startsWith(`${session.id}/`) && !kept.has(k)) {
+        logs.delete(k);
+        touch(k, true);
+      }
+    });
   } catch {
     /* not in a webview */
   }

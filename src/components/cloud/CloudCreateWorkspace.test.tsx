@@ -25,7 +25,7 @@ vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   useModels: (harness: string) =>
     harness === "claude"
-      ? [{ id: "sonnet", label: "Sonnet", harness: "claude", efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]
+      ? [{ id: "sonnet", label: "Sonnet", harness: "claude", alias: true, efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]
       : [],
 }));
 
@@ -95,7 +95,7 @@ describe("CloudCreateWorkspace", () => {
     expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith([
       { cloneUrl: "https://github.com/acme/app.git", ref: "feature/login" },
       { cloneUrl: "https://github.com/acme/lib.git", ref: null },
-    ], null);
+    ], null, "claude");
     expect(mocked.cloudWorkspaceQuote).toHaveBeenCalledWith(expect.objectContaining({ provider: "box", sourceId: "s" }), null);
     const input = mocked.cloudWorkspaceCreate.mock.calls[0][0];
     expect(input).toMatchObject({
@@ -163,7 +163,7 @@ describe("CloudCreateWorkspace", () => {
     expect(screen.getByText("Syncing repository").closest("li")?.dataset.state).toBe("current");
     await act(async () => void (await vi.advanceTimersByTimeAsync(2100)));
     await waitFor(() => expect(progress.dataset.phase).toBe("running"));
-    expect(screen.getByText(/Ready in 6.4 s/)).toBeTruthy();
+    expect(screen.getByText(/Ready in 6s\./)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open session" }));
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ workspace: expect.objectContaining({ id: "ws-1" }) }));
     // Settled: polling stops.

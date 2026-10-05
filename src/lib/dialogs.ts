@@ -3,13 +3,25 @@ import { BYPASS_MODE } from "./models";
 import { getPrefs } from "./prefs";
 
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
+/**
+ * A workspace about to be removed. `settle` keeps its sessions (the work has
+ * landed, the conversations stay); `delete` removes them with it.
+ */
+export interface WorkspaceRemoveRequest {
+  projectPath: string;
+  path: string;
+  name: string;
+  mode: "delete" | "settle";
+  /** Settling was started from this session; "Move session to project" applies to it. */
+  sessionId?: string;
+}
+
 interface State {
-  settleFor: string | null;
-  workspaceDelete: { projectPath: string; path: string; name: string } | null;
+  workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
 }
 
-let state: State = { settleFor: null, workspaceDelete: null, bypass: null };
+let state: State = { workspaceRemove: null, bypass: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -27,20 +39,22 @@ export function useDialogs(): State {
   );
 }
 
-export function openSettle(sessionId: string) {
-  set({ settleFor: sessionId });
+/** Every way of removing a workspace opens this one dialog. */
+export function openWorkspaceRemove(request: WorkspaceRemoveRequest) {
+  set({ workspaceRemove: request });
 }
 
-export function closeSettle() {
-  set({ settleFor: null });
+/** Settle a session's worktree: remove it, keep the conversations. */
+export function openSettle(session: { id: string; projectPath: string; cwd: string; worktreeName?: string | null }) {
+  openWorkspaceRemove({ projectPath: session.projectPath, path: session.cwd, name: session.worktreeName ?? session.cwd, mode: "settle", sessionId: session.id });
 }
 
 export function openWorkspaceDelete(projectPath: string, path: string, name: string) {
-  set({ workspaceDelete: { projectPath, path, name } });
+  openWorkspaceRemove({ projectPath, path, name, mode: "delete" });
 }
 
-export function closeWorkspaceDelete() {
-  set({ workspaceDelete: null });
+export function closeWorkspaceRemove() {
+  set({ workspaceRemove: null });
 }
 
 /**

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem } from "@/lib/api";
 import type { RuntimeCheck } from "@/lib/cloudLifecycle";
-import { CloudWorkspaceLifecycleDialog, DeletionProgress } from "./CloudWorkspaceLifecycle";
+import { actionsFor, CloudWorkspaceLifecycleDialog, deletionLine, DeletionProgress } from "./CloudWorkspaceLifecycle";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -76,8 +76,9 @@ function renderDialog(workspace: CloudWorkspaceListItem, initial: "stop" | "arch
   const onDone = vi.fn();
   const onExport = vi.fn();
   const check = vi.fn().mockResolvedValue(runtime);
-  render(<CloudWorkspaceLifecycleDialog item={workspace} initial={initial} onClose={() => undefined} onDone={onDone} onExport={onExport} check={check} />);
-  return { onDone, onExport, check };
+  const push = vi.fn().mockResolvedValue(undefined);
+  render(<CloudWorkspaceLifecycleDialog item={workspace} initial={initial} onClose={() => undefined} onDone={onDone} onExport={onExport} check={check} push={push} />);
+  return { onDone, onExport, check, push };
 }
 
 const button = (name: RegExp) => screen.getByRole("button", { name }) as HTMLButtonElement;
@@ -105,7 +106,102 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     fireEvent.click(screen.getByLabelText("Stop the running agent work"));
     fireEvent.click(button(/Archive workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
-    expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", true, null);
+    expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", true, null, null);
+  });
+
+  it("offers the server's retention periods on an archive and sends the one chosen (PRO-34)", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ archiveRetentionChoices: [90, 7, 30] }));
+    mocked.cloudWorkspaceArchive.mockResolvedValue(snapshot("archive") as never);
+    renderDialog(item("ready"), "archive", clean);
+    await screen.findByText(/Everything is committed and pushed/);
+    const picker = screen.getByTestId("cloud-lifecycle-retention");
+    expect(Array.from(picker.querySelectorAll("[role=radio]")).map((node) => node.textContent)).toEqual(["7 days", "30 days", "90 days"]);
+    expect(screen.getByRole("radio", { name: "30 days" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("radio", { name: "90 days" }));
+    expect(screen.getByTestId("cloud-lifecycle-summary").textContent).toMatch(/Kept for 90 days, until/);
+    fireEvent.click(button(/Archive workspace/));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null, 90));
+    cleanup();
+
+    // The workspace's own period is not sent: the server applies it.
+    renderDialog(item("ready"), "archive", clean);
+    await screen.findByText(/Everything is committed and pushed/);
+    fireEvent.click(screen.getByRole("radio", { name: "7 days" }));
+    fireEvent.click(screen.getByRole("radio", { name: "30 days" }));
+    fireEvent.click(button(/Archive workspace/));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenLastCalledWith("ws-1", false, null, null));
+  });
+
+  it("offers no retention choice from a server that takes none, and none on Stop or Delete", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    renderDialog(item("ready"), "archive", clean);
+    await screen.findByText(/Everything is committed and pushed/);
+    expect(screen.queryByTestId("cloud-lifecycle-retention")).toBeNull();
+    cleanup();
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ archiveRetentionChoices: [7, 30, 90] }));
+    renderDialog(item("ready"), "delete", clean);
+    await screen.findByText(/Everything is committed and pushed/);
+    expect(screen.queryByTestId("cloud-lifecycle-retention")).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Stop" }));
+    expect(screen.queryByTestId("cloud-lifecycle-retention")).toBeNull();
+  });
+
+  it("pushes a repository's commits from the dialog, then reads what is still at risk (PRO-34)", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const workspace = item("ready");
+    // Unpublished work, and nothing running that would need its own confirmation.
+    const idle: RuntimeCheck = { kind: "checked", facts: { ...(dirty as Extract<RuntimeCheck, { kind: "checked" }>).facts, activeTasks: [], runningProcesses: 0 } };
+    const { check, push } = renderDialog(workspace, "archive", idle);
+    await screen.findByText(/2 unpushed commits/);
+    expect(button(/Archive workspace/).disabled).toBe(false);
+    // Only a repository with commits to publish offers a push.
+    expect(screen.getAllByRole("button", { name: /^Push / })).toHaveLength(1);
+    expect(screen.getByTestId("cloud-lifecycle-export").textContent).toMatch(/Uncommitted files need a commit, or a copy/);
+    expect(check).toHaveBeenCalledTimes(1);
+    // A push that fails says why, changes nothing and does not read again.
+    push.mockRejectedValueOnce(new Error("GitHub refused the push."));
+    fireEvent.click(screen.getByRole("button", { name: "Push site" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("GitHub refused the push.");
+    expect(check).toHaveBeenCalledTimes(1);
+
+    // While a push is out the action waits for it.
+    let finish = () => {};
+    push.mockImplementationOnce(() => new Promise<void>((resolve) => (finish = resolve)));
+    fireEvent.click(screen.getByRole("button", { name: "Push site" }));
+    await waitFor(() => expect(button(/Archive workspace/).disabled).toBe(true));
+    finish();
+    await waitFor(() => expect(check).toHaveBeenCalledTimes(2));
+    expect(push).toHaveBeenLastCalledWith(workspace.workspace, "site");
+    // Pushed here: not offered again, even if the facts still count commits (a differently named upstream).
+    expect(screen.queryByRole("button", { name: "Push site" })).toBeNull();
+    expect(screen.getByText("Pushed")).toBeTruthy();
+    await waitFor(() => expect(button(/Archive workspace/).disabled).toBe(false));
+  });
+
+  it("does not offer a push for a detached HEAD, which has no branch to push", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    const detached: RuntimeCheck = {
+      kind: "checked",
+      facts: { v: 1, repositories: [{ path: "site", branch: null, dirtyFiles: 0, untrackedFiles: 0, unpushedCommits: null, hasUpstream: false, localOnlyCommits: 2, openPullRequests: [] }], activeTasks: [], runningProcesses: 0, observedAt: 1 },
+    };
+    renderDialog(item("ready"), "archive", detached);
+    await screen.findByText(/2 commits on no remote branch/);
+    expect(screen.queryByRole("button", { name: /^Push / })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open workspace" })).toBeTruthy();
+  });
+
+  it("offers to archive instead of deleting unpublished work", async () => {
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ archiveRetentionChoices: [7, 30, 90] }));
+    renderDialog(item("ready"), "delete", dirty);
+    await screen.findByText(/2 unpushed commits/);
+    fireEvent.click(screen.getByRole("button", { name: "Archive instead (kept 30 days)" }));
+    expect(screen.getByTestId("cloud-lifecycle-summary").getAttribute("data-action")).toBe("archive");
+    expect(screen.queryByRole("button", { name: /Archive instead/ })).toBeNull();
+    // A clean workspace is not nudged.
+    cleanup();
+    renderDialog(item("ready"), "delete", clean);
+    await screen.findByText(/Everything is committed and pushed/);
+    expect(screen.queryByRole("button", { name: /Archive instead/ })).toBeNull();
   });
 
   it("names a blank project's workspace folder, never \".\"", async () => {
@@ -133,18 +229,51 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     await screen.findByText(/Everything is committed and pushed/);
     expect(screen.queryByLabelText("Stop the running agent work")).toBeNull();
     fireEvent.click(button(/Archive workspace/));
-    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null, null));
   });
 
   it("stops a workspace without asking the runtime anything destructive", async () => {
     mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
     mocked.cloudWorkspaceSuspend.mockResolvedValue(snapshot("suspend") as never);
     const { onDone } = renderDialog(item("ready"), "stop", clean);
-    expect(screen.getByTestId("cloud-lifecycle-summary").textContent).toMatch(/Everything is kept/);
+    expect(screen.getByTestId("cloud-lifecycle-summary").textContent).toMatch(/Kept: the files in the workspace/);
     expect(screen.queryByTestId("cloud-lifecycle-facts")).toBeNull();
     fireEvent.click(button(/Stop workspace/));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(mocked.cloudWorkspaceSuspend).toHaveBeenCalledWith("ws-1", null);
+  });
+
+  it("the Stop dialog names what the provider's resume brings back (PRO-33)", async () => {
+    const undo = () => screen.getByTestId("cloud-lifecycle-undo").textContent;
+    // Boat: a cold boot; what runs now is lost.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition({ providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: false } }));
+    renderDialog(item("ready"), "stop", clean);
+    // Nothing is claimed before the server has answered.
+    expect(undo()).toBe("Resume at any time.");
+    await waitFor(() => expect(undo()).toMatch(/Boat starts the machine again \(a cold boot\): the files in the workspace come back.*programs and terminals that are running now do not, and what was installed or written outside the workspace may not/));
+    // Nothing is promised about the whole disk: Boat keeps only part of it.
+    expect(undo()).not.toMatch(/repositories and conversations come back|from its disk/);
+    cleanup();
+
+    // A provider that freezes the machine: a warm reconnect.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(
+      disposition({ provider: "local-docker", providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed", preservesProcessesOnResume: true } }),
+    );
+    renderDialog(item("ready", { provider: "local-docker" }), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/Local Docker freezes the machine as it is.*continue where they were/));
+    cleanup();
+
+    // An older server does not say: neither is promised.
+    mocked.cloudWorkspaceDisposition.mockResolvedValue(disposition());
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    cleanup();
+
+    // The facts could not be read: the same caution, and Stop still works.
+    mocked.cloudWorkspaceDisposition.mockRejectedValue({ code: "cloud_workspace_unavailable" });
+    renderDialog(item("ready"), "stop", clean);
+    await waitFor(() => expect(undo()).toMatch(/may not/));
+    expect(button(/Stop workspace/).hasAttribute("disabled")).toBe(false);
   });
 
   it("switching to delete says it cannot be undone and needs an explicit acknowledgement", async () => {
@@ -237,7 +366,7 @@ describe("CloudWorkspaceLifecycleDialog", () => {
     await screen.findByText(/cannot be checked/);
     expect(screen.getByTestId("cloud-lifecycle-summary").dataset.action).toBe("archive");
     fireEvent.click(button(/Archive workspace/));
-    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null));
+    await waitFor(() => expect(mocked.cloudWorkspaceArchive).toHaveBeenCalledWith("ws-1", false, null, null));
   });
 
   it("waits for the runtime's answer before an archive can be confirmed", async () => {
@@ -336,9 +465,103 @@ describe("DeletionProgress", () => {
 
   it("explains an action the provider refused while its credential stays valid", async () => {
     const failed = operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "permission_denied" });
-    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: item("ready").workspace, operation: failed } as never);
-    render(<DeletionProgress item={item("ready", {}, failed)} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+    // Another provider's refusal; Boat's own names the key scopes it needs (below).
+    const other = item("ready", { provider: "machine0" }, failed);
+    mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: other.workspace, operation: failed } as never);
+    render(<DeletionProgress item={other} onChanged={() => undefined} onForceNeeded={() => undefined} />);
     expect(screen.getByTestId("cloud-deletion-progress").textContent).toMatch(/refused this action, though its credential is still valid.*\(Provider code: permission_denied\)/);
+  });
+
+  // PRO-52: the two Boat delete failures, worded for the one button the row shows.
+  describe("a Boat delete that stopped", () => {
+    const show = (failed: ReturnType<typeof operation>) => {
+      const row = item("attention-required", { provider: "box" }, failed);
+      mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: row.workspace, operation: failed } as never);
+      render(<DeletionProgress item={row} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      return screen.getByTestId("cloud-deletion-progress");
+    };
+
+    it("says which key scopes are missing when Boat refuses, and names the Retry delete button it shows", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "forbidden" }));
+      expect(view.textContent).toContain("Boat refused to delete this workspace (forbidden)");
+      expect(view.textContent).toContain("a key with sandbox.read and sandbox.delete that covers all sandboxes");
+      expect(view.textContent).toContain("then press Retry delete.");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+    });
+
+    it("sends the admin to Boat support with the deletion's operation id, without a retry or a broader key", () => {
+      const failed = operation({
+        state: "failed",
+        errorCode: "cloud_provider_state_conflict",
+        detailCode: "box_deleted_sandbox_present",
+        cleanup: { complete: false, items: [{ kind: "provider-compute", state: "unconfirmed", providerStage: null, expectedBy: null, providerOperationId: "op_01HZX-9f2c" }] },
+      });
+      const view = show(failed);
+      expect(view.textContent).toContain("Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id: op_01HZX-9f2c.");
+      expect(view.textContent).not.toMatch(/sandbox\.delete|key|Retry/);
+      expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
+    });
+
+    it("says who can see the operation id only once the operation was read without one", async () => {
+      const failed = operation({ state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" });
+      let answer: (value: unknown) => void = () => undefined;
+      const row = item("attention-required", { provider: "box" }, failed);
+      mocked.cloudWorkspaceOperation.mockReturnValue(new Promise((resolve) => (answer = resolve)) as never);
+      render(<DeletionProgress item={row} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      const view = screen.getByTestId("cloud-deletion-progress");
+      // Before the read (what an admin sees for a moment): nothing about who can see it, so the line does not change under them.
+      expect(view.textContent).toContain("Contact Boat support with the deletion operation id.");
+      expect(view.textContent).not.toContain("can see it here");
+      await act(async () => answer({ workspace: row.workspace, operation: failed }));
+      expect(view.textContent).toContain("with the deletion operation id; an organization owner or admin can see it here.");
+      expect(screen.queryByRole("button", { name: /Retry delete/ })).toBeNull();
+    });
+
+    it("does not offer Delete again, from the menu or the dialog, while only Boat can finish the deletion", () => {
+      const stuck = item("attention-required", { provider: "box" }, operation({ action: "delete", state: "failed", errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" }));
+      expect(actionsFor(stuck)).not.toContain("delete");
+      // Any other stopped delete can be deleted again.
+      const refused = item("attention-required", { provider: "box" }, operation({ action: "delete", state: "failed", errorCode: "cloud_provider_permission_denied" }));
+      expect(actionsFor(refused)).toContain("delete");
+    });
+
+    it("names no code when Boat sent none", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_permission_denied" }));
+      expect(view.textContent).toContain("Boat refused to delete this workspace: the connected key is not allowed to read or delete it.");
+      expect(view.textContent).not.toContain("permission_denied");
+    });
+
+    it("words the list row's line the same way", () => {
+      const line = (fields: Record<string, unknown>, provider: "box" | "machine0" = "box") => deletionLine(item("attention-required", { provider }, operation({ action: "delete", state: "failed", ...fields })));
+      expect(line({ errorCode: "cloud_provider_state_conflict", detailCode: "box_deleted_sandbox_present" })).toBe(
+        "The delete stopped: Boat accepted the deletion but still reports the sandbox. Contact Boat support with the deletion operation id.",
+      );
+      expect(line({ errorCode: "cloud_provider_permission_denied" })).toMatch(/sandbox\.read and sandbox\.delete.*then press Retry delete\.$/);
+      expect(line({ errorCode: "cloud_provider_state_conflict" })).not.toMatch(/cloud_provider_state_conflict|The action failed/);
+    });
+
+    it("never shows the raw state-conflict code, with or without a detail code", () => {
+      const view = show(operation({ state: "failed", errorCode: "cloud_provider_state_conflict" }));
+      expect(view.textContent).toContain("The delete stopped: The provider reports this resource in a state that does not allow the action yet.");
+      expect(view.textContent).not.toMatch(/cloud_provider_state_conflict|The action failed/);
+    });
+
+    it("keeps the general wording for another provider's refusal and for an older server's state conflict", () => {
+      // Not Boat: no Boat scopes are advised.
+      const failed = operation({ state: "failed", errorCode: "cloud_provider_permission_denied", providerErrorCode: "permission_denied" });
+      const other = item("ready", { provider: "machine0" }, failed);
+      mocked.cloudWorkspaceOperation.mockResolvedValue({ workspace: other.workspace, operation: failed } as never);
+      const first = render(<DeletionProgress item={other} onChanged={() => undefined} onForceNeeded={() => undefined} />);
+      expect(screen.getByTestId("cloud-deletion-progress").textContent).not.toContain("sandbox.delete");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+      first.unmount();
+
+      // Boat's state conflict from a server that sends no detail code: the plain failure, still retryable.
+      const conflict = operation({ state: "failed", errorCode: "cloud_provider_state_conflict" });
+      const view = show(conflict);
+      expect(view.textContent).not.toContain("Contact Boat support");
+      expect(screen.getByRole("button", { name: /Retry delete/ })).toBeTruthy();
+    });
   });
 
   it("a retry refused for running agent work goes to the confirmation dialog", async () => {

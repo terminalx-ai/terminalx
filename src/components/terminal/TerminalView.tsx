@@ -1,11 +1,22 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { pty } from "@/lib/api";
-import { getInstance, type TerminalInstance } from "@/lib/terminal";
+import { disposeInstance, getInstance, isAgentPane, peekInstance, subscribeTerminals, trimTerminalInstances, type TerminalInstance } from "@/lib/terminal";
+import { feedLocalPane } from "@/lib/terminalFeed";
+import { terminalInput } from "@/lib/terminalInput";
+import { fitTerminal } from "@/lib/terminalFit";
+import { hideWebgl, recoverWebgl, showWebgl } from "@/lib/terminalWebgl";
+import { onAppResume } from "@/lib/appResume";
 import { useTheme } from "@/lib/theme";
+import { REMOTE_DROP_REFUSAL, TerminalDropHint, useTerminalDrop, type TerminalDropRefusal } from "./TerminalDrop";
+
+const subscribeVisibility = (changed: () => void) => {
+  document.addEventListener("visibilitychange", changed);
+  return () => document.removeEventListener("visibilitychange", changed);
+};
+const pageVisible = () => !document.hidden;
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -85,7 +96,10 @@ export function themeFor(mode: "dark" | "light") {
       };
 }
 
-/** An xterm in its own element, styled like every TerminalX terminal, not yet wired to a process. */
+/**
+ * An xterm in its own element, styled like every TerminalX terminal, not yet
+ * wired to a process. It draws with WebGL once a view shows it (`terminalWebgl.ts`).
+ */
 export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   const el = document.createElement("div");
   el.className = "h-full w-full";
@@ -102,93 +116,186 @@ export function createTerminal(mode: "dark" | "light"): TerminalInstance {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
-    term.loadAddon(webgl);
-  } catch {
-    /* canvas renderer stays */
-  }
   return { el, term, fit };
 }
 
-function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
+/** A terminal wired to the local pane `id`. */
+export function createInstance(id: string, mode: "dark" | "light"): TerminalInstance {
   const { el, term, fit } = createTerminal(mode);
-  term.onData((d) => void pty.write(id, d).catch(() => {}));
-  term.onBinary((d) => void pty.write(id, d).catch(() => {}));
+  // The pane's output so far, then everything it prints, as raw bytes. Only
+  // once this page has dropped what a page before it had attached
+  // (`subscribeTerminals`): attached before that, the view would be dropped
+  // with them, and its terminal would stay blank.
+  // This attachment's own name: another terminal made for the same pane
+  // (this one disposed, the next one created) has another, and neither can
+  // detach or answer for the other, in whatever order their calls land.
+  const token = crypto.randomUUID();
+  const feed = feedLocalPane(id, token, term, {
+    paced: !isAgentPane(id),
+    retire: () => disposeInstance(id),
+  });
+  let released = false;
+  void subscribeTerminals()
+    .then(() => (released ? undefined : pty.attach(id, token, feed.data)))
+    // Disposed while the attach was on its way: it must not be left attached to nothing.
+    .then(() => (released ? pty.detach(id, token) : undefined))
+    .catch(() => {});
+  const input = terminalInput(id);
+  term.onData(input.write);
+  term.onBinary(input.write);
   term.onResize(({ cols, rows }) => void pty.resize(id, cols, rows).catch(() => {}));
-  return { el, term, fit };
+  return {
+    el,
+    term,
+    fit,
+    restorable: true,
+    release: () => {
+      released = true;
+      input.stop();
+      feed.stop();
+      void pty.detach(id, token).catch(() => {});
+    },
+  };
 }
 
 /**
- * A view onto one long-lived terminal instance. Mounting re-parents the
- * instance's element here; unmounting detaches it, leaving the buffer and
- * the shell untouched. Size follows the box through a ResizeObserver.
+ * A view onto a cached terminal instance. The instance's element is
+ * here only while the view is `visible`; hiding or unmounting the view takes
+ * it out of the document again. The idle cache may then release the local
+ * buffer; the shell continues, and the next view restores its output tail.
+ * Out of the document xterm draws nothing, whatever the program prints, and a
+ * view that is merely covered (an agent's terminal under its chat, a shell
+ * tab behind another) would otherwise redraw on every frame of output.
+ *
+ * Size follows the view's box through a ResizeObserver, shown or not, so the
+ * program already has the right size when the terminal is first looked at.
  *
  * `create` makes the instance when there is none yet (a cloud terminal
  * wires its own input); `fit: false` keeps the size someone else set, for
  * a view that watches a terminal another device controls.
+ *
+ * A file dropped on a local terminal types its path (`TerminalDrop.tsx`).
+ * A terminal with its own `create` is not on this computer and takes no
+ * drop at all unless `dropRefusal` says what it does take.
  */
 export function TerminalView({
   id,
   visible,
   create,
   fit = true,
+  dropRefusal,
 }: {
   id: string;
   visible: boolean;
   create?: (mode: "dark" | "light") => TerminalInstance;
   fit?: boolean;
+  dropRefusal?: TerminalDropRefusal;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
+  const drop = useTerminalDrop({ id, frame, enabled: visible, refusal: dropRefusal ?? (create ? REMOTE_DROP_REFUSAL : undefined) });
   const { resolvedMode } = useTheme();
+  // Hidden-window overflow may retire a local parser. Showing the page must
+  // reacquire its instance even when the selected tab has not changed.
+  const pageShown = useSyncExternalStore(subscribeVisibility, pageVisible, () => true);
+  const shown = visible && pageShown;
   const make = () => (create ? create(resolvedMode) : createInstance(id, resolvedMode));
   const fitting = useRef(fit);
   fitting.current = fit;
 
+  const recover = () => {
+    const el = host.current;
+    const inst = peekInstance(id);
+    if (!visible || !el || !inst || inst.el.parentNode !== el) return;
+    try {
+      if (fitting.current) fitTerminal(inst.term, el);
+    } catch {
+      // A stale renderer may not be measurable until it has been replaced.
+    }
+    recoverWebgl(inst.term);
+  };
+
+  useEffect(() => {
+    if (visible) return onAppResume(recover);
+  }, [id, visible]);
+
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    const inst = getInstance(id, make);
-    el.appendChild(inst.el);
+    getInstance(id, make);
     const refit = () => {
-      if (fitting.current && el.clientWidth > 0 && el.clientHeight > 0) {
-        try {
-          inst.fit.fit();
-        } catch {
-          /* not laid out yet */
-        }
+      if (!fitting.current) return;
+      // A hidden instance may have left the idle cache since this view mounted.
+      const inst = peekInstance(id);
+      if (!inst) return;
+      try {
+        fitTerminal(inst.term, el);
+      } catch {
+        /* not laid out yet */
       }
     };
     const ro = new ResizeObserver(refit);
     ro.observe(el);
-    requestAnimationFrame(() => {
-      refit();
-      if (visible) inst.term.focus();
-    });
+    const frame = requestAnimationFrame(refit);
+    trimTerminalInstances();
     return () => {
+      cancelAnimationFrame(frame);
       ro.disconnect();
-      if (inst.el.parentNode === el) el.removeChild(inst.el);
+      trimTerminalInstances();
     };
   }, [id]);
 
   useEffect(() => {
-    const inst = getInstance(id, make);
-    inst.term.options.theme = themeFor(resolvedMode);
+    const inst = peekInstance(id);
+    if (inst) inst.term.options.theme = themeFor(resolvedMode);
   }, [id, resolvedMode]);
 
+  // Before paint, so a terminal that is shown is never a blank frame first.
+  useLayoutEffect(() => {
+    const el = host.current;
+    if (!shown || !el) return;
+    const inst = getInstance(id, make, el);
+    showWebgl(inst.term);
+    return () => {
+      hideWebgl(inst.term);
+      if (inst.el.parentNode === el) el.removeChild(inst.el);
+      trimTerminalInstances();
+    };
+  }, [id, shown]);
+
   useEffect(() => {
-    if (!visible) return;
-    requestAnimationFrame(() => {
-      const inst = getInstance(id, make);
+    const el = host.current;
+    if (!shown || !el) return;
+    const frame = requestAnimationFrame(() => {
+      // Closed in the meantime (its tab was): nothing to focus, and nothing to make anew.
+      const inst = peekInstance(id);
+      if (!inst) return;
       try {
-        if (fitting.current) inst.fit.fit();
+        if (fitting.current) fitTerminal(inst.term, el);
+        inst.term.refresh(0, inst.term.rows - 1);
         inst.term.focus();
       } catch {
         /* ignore */
       }
     });
-  }, [id, visible, fit]);
+    return () => cancelAnimationFrame(frame);
+  }, [id, shown, fit]);
 
-  return <div ref={host} className="terminal-host h-full w-full px-2 pt-1" />;
+  return (
+    <div ref={frame} className="relative flex h-full w-full flex-col" data-testid="terminal-drop-target" {...drop.zoneProps}>
+      <div className="flex h-6 shrink-0 justify-end px-3">
+        <button
+          type="button"
+          className="rounded px-2 text-xs text-muted-foreground hover:text-foreground"
+          onClick={recover}
+          title="Redraw the terminal without restarting its process"
+          tabIndex={visible ? 0 : -1}
+        >
+          Redraw terminal
+        </button>
+      </div>
+      <div ref={host} className="terminal-host min-h-0 w-full flex-1 px-2 pt-1" />
+      <TerminalDropHint drop={drop} />
+    </div>
+  );
 }

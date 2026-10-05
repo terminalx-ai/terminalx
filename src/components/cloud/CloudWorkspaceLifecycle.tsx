@@ -7,21 +7,29 @@ import { api, type CloudWorkspaceDisposition, type CloudWorkspaceListItem, type 
 import {
   checkRuntime,
   cleanupKindText,
+  daysText,
   cleanupStateText,
   dateText,
   DAY_MS,
   deadlineText,
+  deletion,
   isOpen,
   lifecycleErrorMessage,
-  operationFailureText,
+  pushable,
+  pushRepository,
+  deleteAwaitsProvider,
+  deleteFailure,
+  RETRY_DELETE,
   remaining,
   repositoryLabel,
   repositoryRiskLines,
+  resumeBehaviourText,
   risksOf,
   type RuntimeCheck,
 } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
 import { cloudOrgArg } from "@/lib/cloudCatalog";
+import { cloudProviderName } from "@/lib/cloudSession";
 
 export type LifecycleAction = "stop" | "archive" | "delete";
 
@@ -34,7 +42,8 @@ export function actionsFor(item: CloudWorkspaceListItem): LifecycleAction[] {
   if (state === "ready") actions.push("stop");
   // A failed archive stays in the archive list and is retried by archiving again.
   if (["ready", "suspended", "attention-required"].includes(state)) actions.push("archive");
-  if (state !== "destroyed") actions.push("delete");
+  // A delete only the provider can finish is not offered again (PRO-52).
+  if (state !== "destroyed" && !(item.latestOperation?.action === "delete" && item.latestOperation.state === "failed" && deleteAwaitsProvider(item.latestOperation))) actions.push("delete");
   return actions;
 }
 
@@ -56,6 +65,7 @@ export function CloudWorkspaceLifecycleDialog({
   onDone,
   onExport,
   check = checkRuntime,
+  push = pushRepository,
 }: {
   item: CloudWorkspaceListItem;
   initial: LifecycleAction;
@@ -69,6 +79,8 @@ export function CloudWorkspaceLifecycleDialog({
   /** Open the workspace (its Git view) to push or copy files out first. */
   onExport: () => void;
   check?: typeof checkRuntime;
+  /** Push a repository's commits from the dialog, before the action. */
+  push?: typeof pushRepository;
 }) {
   const { workspace } = item;
   const actions = actionsFor(item);
@@ -82,6 +94,12 @@ export function CloudWorkspaceLifecycleDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [again, setAgain] = useState(0);
+  // The retention period chosen for an archive; null keeps the workspace's own.
+  const [chosenDays, setChosenDays] = useState<number | null>(null);
+  const [pushing, setPushing] = useState<string | null>(null);
+  const [pushError, setPushError] = useState<string | null>(null);
+  // Repositories pushed from this dialog: not offered again, whatever the facts still count (a branch that tracks a differently named upstream).
+  const [pushed, setPushed] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     let live = true;
@@ -111,10 +129,15 @@ export function CloudWorkspaceLifecycleDialog({
   const destructive = action !== "stop";
   const needsForce = destructive && (risks.needsForce || forceAsked);
   const permanentDelete = server?.providerCapabilities.permanentDelete ?? true;
-  const retentionDays = server?.archiveRetentionDays ?? 30;
+  const defaultDays = server?.archiveRetentionDays ?? 30;
+  // Only a server that lists the periods takes one; an older one refuses the field.
+  const choices = [...new Set(server?.archiveRetentionChoices ?? [])].filter((days) => Number.isInteger(days) && days > 0).sort((a, b) => a - b);
+  const retentionDays = chosenDays !== null && choices.includes(chosenDays) ? chosenDays : defaultDays;
   const unverified = destructive && runtime !== null && runtime.kind !== "checked";
   const ready =
     !busy &&
+    // Not mid-push: the action would race the push it was meant to wait for.
+    pushing === null &&
     // Wait for both answers (the runtime's is bounded) so nothing at risk is missed.
     (!destructive || (server !== undefined && runtime !== null)) &&
     (!needsForce || force) &&
@@ -129,7 +152,7 @@ export function CloudWorkspaceLifecycleDialog({
         action === "stop"
           ? await api.cloudWorkspaceSuspend(workspace.id, cloudOrgArg(workspace.orgId))
           : action === "archive"
-            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId))
+            ? await api.cloudWorkspaceArchive(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId), retentionDays === defaultDays ? null : retentionDays)
             : await api.cloudWorkspaceDelete(workspace.id, needsForce && force, cloudOrgArg(workspace.orgId));
       onDone(snapshot, { action, requestedAt });
     } catch (e) {
@@ -143,6 +166,21 @@ export function CloudWorkspaceLifecycleDialog({
       setError(lifecycleErrorMessage(code));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const pushNow = async (repo: string) => {
+    setPushing(repo);
+    setPushError(null);
+    try {
+      await push(workspace, repo);
+      setPushed((done) => new Set(done).add(repo));
+      // Read the facts again: what was pushed is no longer at risk.
+      setAgain((value) => value + 1);
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPushing(null);
     }
   };
 
@@ -165,7 +203,20 @@ export function CloudWorkspaceLifecycleDialog({
             options={actions.map((value) => ({ value, label: LABELS[value] }))}
           />
         )}
-        <ActionSummary action={action} retentionDays={retentionDays} removedOnDelete={server?.removedOnDelete ?? []} />
+        <ActionSummary
+          action={action}
+          retentionDays={retentionDays}
+          removedOnDelete={server?.removedOnDelete ?? []}
+          // Until the server has answered, nothing is said about the resume that might be wrong.
+          resume={server === undefined ? null : resumeBehaviourText(cloudProviderName(server?.provider ?? workspace.provider), server?.providerCapabilities.preservesProcessesOnResume)}
+        />
+
+        {action === "archive" && choices.length > 1 && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs" data-testid="cloud-lifecycle-retention">
+            <span className="text-muted-foreground">Keep it for</span>
+            <Segmented aria-label="Keep it for" value={String(retentionDays)} onChange={(next) => setChosenDays(Number(next))} options={choices.map((days) => ({ value: String(days), label: daysText(days) }))} />
+          </div>
+        )}
 
         {destructive && (
           <section className="mt-3 flex flex-col gap-1.5 rounded-lg bg-well px-3 py-2 text-xs" aria-label="Before this action" data-testid="cloud-lifecycle-facts">
@@ -180,15 +231,22 @@ export function CloudWorkspaceLifecycleDialog({
             {risks.runningProcesses > 0 && <Warn text={`${risks.runningProcesses} terminal${risks.runningProcesses === 1 ? " is" : "s are"} running a program.`} />}
             {risks.operationInProgress && <Warn text="Another action on this workspace is still running." />}
             {risks.repositories.map((repo) => (
-              <div key={repo.path} className="flex items-start gap-2" data-testid="cloud-lifecycle-repo">
+              <div key={repo.path} className="flex items-start gap-2">
                 <GitBranch className="mt-0.5 size-3.5 shrink-0 text-warning" />
-                <span className="min-w-0">
+                <span className="min-w-0 flex-1" data-testid="cloud-lifecycle-repo">
                   <span className="font-mono">
                     {repositoryLabel(repo, workspace.name)}
                     {repo.branch ? ` · ${repo.branch}` : ""}
                   </span>
                   : {repositoryRiskLines(repo).join(", ")}
                 </span>
+                {pushed.has(repo.path) ? (
+                  <span className="shrink-0 text-muted-foreground">Pushed</span>
+                ) : pushable(repo) && (
+                  <Button size="xs" variant="outline" className="shrink-0" disabled={busy || pushing !== null} onClick={() => void pushNow(repo.path)} aria-label={`Push ${repositoryLabel(repo, workspace.name)}`}>
+                    {pushing === repo.path && <Loader2 className="animate-spin" />} Push
+                  </Button>
+                )}
               </div>
             ))}
             {runtime?.kind === "checked" && risks.repositories.length === 0 && runtime.facts.repositories.length > 0 && (
@@ -209,12 +267,24 @@ export function CloudWorkspaceLifecycleDialog({
             )}
             {runtime?.kind === "unsupported" && <span className="text-muted-foreground">This workspace's runtime does not report unpublished work.</span>}
             {runtime?.kind === "error" && <span className="text-muted-foreground">The runtime could not be asked about unpublished work ({runtime.message}).</span>}
+            {pushError && (
+              <span className="text-destructive" role="alert">
+                {pushError}
+              </span>
+            )}
             {(risks.repositories.length > 0 || unverified) && (
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-muted-foreground">Push or copy files out first:</span>
+              <div className="mt-1 flex flex-wrap items-center gap-2" data-testid="cloud-lifecycle-export">
+                <span className="text-muted-foreground">
+                  {risks.repositories.some((repo) => repo.dirtyFiles) ? "Uncommitted files need a commit, or a copy, before they can leave:" : "Push or copy files out first:"}
+                </span>
                 <Button size="xs" variant="outline" onClick={onExport}>
                   Open workspace
                 </Button>
+                {action === "delete" && actions.includes("archive") && (
+                  <Button size="xs" variant="outline" onClick={() => setAction("archive")}>
+                    Archive instead (kept {daysText(retentionDays)})
+                  </Button>
+                )}
               </div>
             )}
           </section>
@@ -256,7 +326,7 @@ export function CloudWorkspaceLifecycleDialog({
   );
 }
 
-function ActionSummary({ action, retentionDays, removedOnDelete }: { action: LifecycleAction; retentionDays: number; removedOnDelete: string[] }) {
+function ActionSummary({ action, retentionDays, removedOnDelete, resume }: { action: LifecycleAction; retentionDays: number; removedOnDelete: string[]; resume: string | null }) {
   const until = dateText(Date.now() + retentionDays * DAY_MS);
   return (
     <dl className="mt-3 grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-xs" data-testid="cloud-lifecycle-summary" data-action={action}>
@@ -264,7 +334,7 @@ function ActionSummary({ action, retentionDays, removedOnDelete }: { action: Lif
       <dd>{action === "delete" ? "Removed." : "Stops. Nothing runs until it is resumed."}</dd>
       <dt className="text-muted-foreground">Data</dt>
       <dd>
-        {action === "stop" && "Everything is kept: files, repositories, conversations."}
+        {action === "stop" && "Kept: the files in the workspace, its repositories among them, and the saved conversations."}
         {action === "archive" && `Kept for ${retentionDays} days, until ${until}, then deleted automatically. Unarchive any time before.`}
         {action === "delete" &&
           `Removed once the provider confirms${removedOnDelete.length ? `: ${removedOnDelete.map(cleanupKindText).join(", ").toLowerCase()}` : ""}.`}
@@ -272,7 +342,7 @@ function ActionSummary({ action, retentionDays, removedOnDelete }: { action: Lif
       <dt className="text-muted-foreground">Charges</dt>
       <dd>{action === "delete" ? "Stop once the provider confirms the removal." : "Storage keeps billing at the provider while it is kept."}</dd>
       <dt className="text-muted-foreground">Undo</dt>
-      <dd>{action === "stop" ? "Resume at any time." : action === "archive" ? "Unarchive, then resume." : "Not possible."}</dd>
+      <dd data-testid="cloud-lifecycle-undo">{action === "stop" ? (resume ?? "Resume at any time.") : action === "archive" ? "Unarchive, then resume." : "Not possible."}</dd>
     </dl>
   );
 }
@@ -321,6 +391,8 @@ export function DeletionProgress({
   const [operation, setOperation] = useState<CloudWorkspaceOperation>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The operation was read here, cleanup report included (a list row carries none).
+  const [readId, setReadId] = useState<string | null>(null);
   const changed = useRef(onChanged);
   changed.current = onChanged;
   const running = isOpen(operation);
@@ -339,6 +411,7 @@ export function DeletionProgress({
         .then((snapshot) => {
           if (!live) return;
           setOperation(snapshot.operation);
+          setReadId(snapshot.operation.id);
           if (!isOpen(snapshot.operation)) changed.current();
         })
         .catch((e: unknown) => {
@@ -372,6 +445,7 @@ export function DeletionProgress({
 
   const items = operation.cleanup?.items ?? [];
   const left = operation.cleanup ? remaining(operation.cleanup) : [];
+  const failure = operation.state === "failed" ? deleteFailure(operation, item.workspace.provider, { idRead: readId === operation.id }) : null;
   return (
     <div className="flex flex-col gap-1 text-xs" data-testid="cloud-deletion-progress" data-state={operation.state}>
       <span className={running ? "text-muted-foreground" : "text-destructive"}>
@@ -379,8 +453,8 @@ export function DeletionProgress({
           ? items.length
             ? `Deleting: ${items.length - left.length} of ${items.length} removed.`
             : "Deleting…"
-          : operation.state === "failed"
-            ? `The delete stopped: ${operationFailureText(operation)}`
+          : failure
+            ? `The delete stopped: ${failure.text}`
             : "Deleted."}
       </span>
       {left.length > 0 && (
@@ -395,10 +469,10 @@ export function DeletionProgress({
           ))}
         </ul>
       )}
-      {operation.state === "failed" && (
+      {failure?.retry && (
         <div className="flex items-center gap-2">
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void retry()}>
-            {busy && <Loader2 className="animate-spin" />} Retry delete
+            {busy && <Loader2 className="animate-spin" />} {RETRY_DELETE}
           </Button>
           <span className="text-muted-foreground">Resumes the same cleanup; nothing is created again.</span>
         </div>
@@ -409,6 +483,20 @@ export function DeletionProgress({
 }
 
 /** How long an archived workspace is kept, and what its final save did. */
+/**
+ * A delete in a row's own words: how far the cleanup is while it runs, why it
+ * stopped when it failed. Null when the workspace is not being deleted.
+ */
+export function deletionLine(item: CloudWorkspaceListItem): string | null {
+  const state = deletion(item);
+  const operation = item.latestOperation;
+  if (!state || !operation) return null;
+  // The same sentence as the stopped delete's own view gives (PRO-52).
+  if (state !== "running") return `The delete stopped: ${deleteFailure(operation, item.workspace.provider).text}`;
+  const items = operation.cleanup?.items ?? [];
+  return items.length ? `Deleting: ${items.length - remaining(operation.cleanup!).length} of ${items.length} removed.` : "Deleting…";
+}
+
 export function archiveLine(item: CloudWorkspaceListItem, now = Date.now()): string {
   const { deleteAfter } = item.workspace;
   if (!deleteAfter) return "Archived.";

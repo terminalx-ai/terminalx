@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
+import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
+import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
@@ -52,12 +54,14 @@ export function AccountTab() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
-        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
+        <OrganizationOnboarding key={identity.email} organizationName={identity.organization} organizationId={identity.organizationId ?? null} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
         {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}
+        {identity.organization && <OrganizationCloudTeardown contextRevision={status.context?.revision ?? ""} organizationId={identity.organizationId ?? null} organizationName={identity.organization} member={activeRole === "member"} />}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

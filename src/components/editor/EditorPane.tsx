@@ -14,7 +14,7 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, openSearchPanel, searchKeymap } from "@codemirror/search";
 import { AlertTriangle, FolderOpen, Save } from "lucide-react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Segmented } from "@/components/ui/controls";
@@ -26,7 +26,7 @@ import { languageFor, raccoonHighlight, raccoonTheme } from "@/lib/codemirror";
 import { diffLines } from "@/lib/diff";
 import { clearJump, editorLinkContext, getEditors, isMarkdown, setEditorDirty, setViewMode, type EditorEntry, type ViewMode } from "@/lib/editors";
 import { changedSince, fileErrorText, isConflict, stashBuffer, takeStashedBuffer, useFileSource, type FileState } from "@/lib/workspaceFiles";
-import { keycaps } from "@/lib/hotkeys";
+import { useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { cn } from "@/lib/cn";
 import { FindBar, findPanel, type FindPanelHandle } from "./FindPanel";
 
@@ -172,6 +172,20 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
 
   const save = useCallback(() => write(fileState.current.etag), [write]);
 
+  // Save and Find are the reader's shortcuts, not CodeMirror's fixed keys. They act on the editor that has the focus.
+  const saveKeys = useShortcutKeys("files.save");
+  const focused = () => {
+    const view = viewRef.current;
+    return view && view.dom.contains(document.activeElement) ? view : null;
+  };
+  const saveFocused = useCallback(() => (focused() ? (void save(), true) : false), [save]);
+  const findFocused = useCallback(() => {
+    const view = focused();
+    return view ? (openSearchPanel(view), true) : false;
+  }, []);
+  useShortcut("files.save", saveFocused, { enabled: visible });
+  useShortcut("files.find", findFocused, { enabled: visible });
+
   /**
    * Resolve a conflict in favour of the buffer: overwrite what is there now,
    * knowingly — still conditional on that version, so a change after this
@@ -262,10 +276,10 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           EditorState.readOnly.of(source.readOnly),
           EditorView.editable.of(!source.readOnly),
           keymap.of([
-            { key: "Mod-s", run: () => (void save(), true) },
             ...closeBracketsKeymap,
             ...defaultKeymap,
-            ...searchKeymap,
+            // Find is the app's shortcut (below), so the reader can move it.
+            ...searchKeymap.filter((binding) => binding.key !== "Mod-f"),
             ...historyKeymap,
             indentWithTab,
           ]),
@@ -364,9 +378,13 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
   useEffect(() => {
     if (status !== "ready" || !source) return;
     if (source.watch) {
-      return source.watch((paths) => {
+      const stop = source.watch((paths) => {
         if (paths === null || paths.includes(entry.rel)) void checkForChange();
       });
+      // The file was read before this subscription existed. A change that
+      // landed in between was announced to no one, so look once now.
+      void checkForChange();
+      return stop;
     }
     if (!visible) return;
     const t = window.setInterval(() => void checkForChange(), 2000);
@@ -403,7 +421,7 @@ export function EditorPane({ entry, visible }: { entry: EditorEntry; visible: bo
           <Button variant="ghost" size="xs" onClick={() => void save()} disabled={!dirty || readOnly || !source} aria-label="Save">
             <Save className="size-3.5" />
             Save
-            <kbd className="ml-1 text-[10px] text-faint">{keycaps("mod+s").join("")}</kbd>
+            <kbd className="ml-1 text-[10px] text-faint">{saveKeys.join("")}</kbd>
           </Button>
         </span>
       </div>

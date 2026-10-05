@@ -1,7 +1,9 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { TabEntry } from "@/types/session";
 import { accessibilityPress, mouseClick } from "@/test/press";
 
@@ -18,19 +20,25 @@ vi.mock("@/components/chat/Dictation", () => ({
   // Only what the composer hands it: whether dictating into this composer is off.
   MicButton: ({ disabled }: { disabled?: boolean }) => (disabled === undefined ? null : <button aria-label="Dictate" disabled={disabled} />),
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
+const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[] }));
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "auto", label: "Auto", hint: "" }],
   modeLabel: () => "Auto",
   refreshModels: vi.fn(),
   upgradeHint: () => null,
-  useModels: () => [],
+  useModels: () => listed.models,
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 
 const { Composer } = await import("./Composer");
+const { setPrefs } = await import("@/lib/prefs");
+const { sendShortcut } = await import("@/lib/shortcuts");
 const { resetComposerHistory, sentMessages } = await import("./useComposerHistory");
 const { buildTranscript } = await import("@/lib/transcript");
 const { RECOVERY_PROMPT } = await import("@/lib/recovery");
@@ -188,6 +196,62 @@ describe("composer attachments", () => {
     expect(await screen.findByAltText("drop.webp")).toBeTruthy();
   });
 
+  it("a file dropped from this computer is mentioned to a local agent, and left alone for a cloud one", async () => {
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? null : []));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    function Dropped({ remote }: { remote: boolean }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote={remote} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<Dropped remote={false} />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(box.value).toBe("@/Users/me/notes.txt ");
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
+    view.unmount();
+    listening = 0;
+
+    render(<Dropped remote />);
+    const cloudBox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop images to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt"] } }));
+    expect(cloudBox.value).toBe("");
+    // It says why, instead of ignoring the file without a word (an over-5 MB image reads the same way).
+    expect(screen.getByTestId("attach-notice").textContent).toBe("notes.txt was not attached: only images (PNG, JPEG, GIF, WebP) up to 5 MB can be sent to a cloud agent.");
+    // The next image attached clears it.
+    invoke.mockImplementation(async (command: string) => (command === "read_image_file" ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : []));
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/shot.png"] } }));
+    expect(screen.queryByTestId("attach-notice")).toBeNull();
+    expect(await screen.findByAltText("shot.png")).toBeTruthy();
+  });
+
+  it("hands over the very same image when a failed send is tried again", async () => {
+    const sent: unknown[] = [];
+    const onSend = vi.fn(async (_text: string, images: unknown[]) => {
+      sent.push(images[0]);
+      if (sent.length === 1) throw new Error("offline");
+    });
+    const { container } = render(<TestComposer onSend={onSend} />);
+    const image = new File([new Uint8Array([1, 2, 3])], "retry.png", { type: "image/png" });
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files: [image], types: ["Files"] } });
+    await screen.findByAltText("retry.png");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    expect(sent[1]).toBe(sent[0]);
+  });
+
   it("keeps an attachment when sending fails", async () => {
     const onSend = vi.fn().mockRejectedValue(new Error("offline"));
     const { container } = render(<TestComposer onSend={onSend} />);
@@ -211,7 +275,7 @@ describe("composer pickers", () => {
   it("the model and permission pickers open on a real mouse click and close on a second one", async () => {
     const models = await import("@/lib/models");
     render(<TestComposer onSend={vi.fn()} />);
-    for (const [name, label] of [[/default/, "Model"], [/Auto/, "Permissions"]] as const) {
+    for (const [name, label] of [[/Default/, "Model"], [/Auto/, "Permissions"]] as const) {
       mouseClick(picker(name));
       const menu = await screen.findByRole("menu");
       expect(menu.textContent).toContain(label);
@@ -225,12 +289,109 @@ describe("composer pickers", () => {
 
   it("open on an accessibility press (a click with no pointerdown)", async () => {
     render(<TestComposer onSend={vi.fn()} />);
-    for (const name of [/default/, /Auto/]) {
+    for (const name of [/Default/, /Auto/]) {
       accessibilityPress(picker(name));
       await screen.findByRole("menu");
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     }
+  });
+});
+
+describe("a Claude alias in the model picker (#256)", () => {
+  const claude = (id: string, label: string, extra: Partial<import("@/lib/api").ModelInfo> = {}) => ({ id, label, harness: "claude", efforts: [], defaultEffort: null, acceptsImages: true, isDefault: false, upgrade: null, description: null, ...extra });
+  const onOpus: TabEntry = { ...tab, harness: "claude", model: "opus" };
+  const show = (props: Partial<Parameters<typeof Composer>[0]> = {}) =>
+    render(<Composer tab={onOpus} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
+
+  beforeEach(() => {
+    listed.models = [claude("opus", "Opus", { alias: true, resolved: "claude-opus-5-5", isDefault: true, efforts: ["low", "high"], defaultEffort: "high" }), claude("claude-opus-5-5", "Opus 5.5"), claude("claude-opus-5", "Opus 5")];
+  });
+  afterEach(() => {
+    listed.models = [];
+  });
+
+  it("names the version the CLI says the alias runs, and says the alias follows the latest", () => {
+    show();
+    const button = screen.getByTitle("Model: Opus (latest, running Opus 5.5)");
+    expect(button.textContent).toBe("Opus 5.5latest");
+  });
+
+  it("reads differently on the alias and on the same version pinned", () => {
+    show({ tab: { ...onOpus, model: "claude-opus-5-5" } });
+    expect(screen.getByTitle("Model: Opus 5.5").textContent).toBe("Opus 5.5");
+  });
+
+  it("names what the session itself reported over what the CLI listed", () => {
+    show({ reportedModel: "claude-opus-5" });
+    expect(screen.getByTitle("Model: Opus (latest, running Opus 5)").textContent).toBe("Opus 5latest");
+  });
+
+  it("claims no version for a cloud tab until its session reports one", () => {
+    const view = show({ modelsAreLocal: false });
+    expect(screen.getByTitle("Model: Opus (latest)").textContent).toBe("Opuslatest");
+    view.unmount();
+    show({ modelsAreLocal: false, reportedModel: "claude-opus-5-5" });
+    expect(screen.getByTitle("Model: Opus (latest, running Opus 5.5)").textContent).toBe("Opus 5.5latest");
+  });
+
+  it("offers a cloud tab the aliases only, and keeps a pinned version it is already on", async () => {
+    const view = show({ modelsAreLocal: false });
+    mouseClick(screen.getByTitle("Model: Opus (latest)"));
+    let menu = await screen.findByRole("menu");
+    // The desktop's pinned versions may not exist on the workspace's CLI.
+    expect(menu.textContent).not.toContain("Pinned version");
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+    view.unmount();
+    show({ modelsAreLocal: false, tab: { ...onOpus, model: "claude-opus-5" } });
+    mouseClick(screen.getByTitle("Model: Opus 5"));
+    menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 5" }).getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("offers the alias and, apart, the versions that can be pinned", async () => {
+    const onSetModel = vi.fn();
+    show({ onSetModel });
+    mouseClick(screen.getByTitle("Model: Opus (latest, running Opus 5.5)"));
+    const menu = await screen.findByRole("menu");
+    expect(menu.textContent).toContain("Pinned version");
+    const items = within(menu).getAllByRole("menuitemradio").map((item) => item.textContent);
+    expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
+    expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+  });
+
+  it("offers the VM's pinned versions and resolved alias, then aliases only when disconnected", async () => {
+    const runtime = new FakeAgentRuntime();
+    runtime.agents[0].models = [claude("opus", "Opus", { alias: true, isDefault: true, resolved: "claude-opus-4-6" }), claude("claude-opus-4-6", "Opus 4.6")];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    const onSetModel = vi.fn();
+    show({ modelsAreLocal: false, modelClient: client, onSetModel });
+    const button = await screen.findByTitle("Model: Opus (latest, running Opus 4.6)");
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByText("latest · Opus 4.6")).toBeTruthy();
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5" })).toBeNull();
+    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" }));
+    expect(onSetModel).toHaveBeenCalledWith("claude-opus-4-6");
+    act(() => runtime.emit({ state: "suspended" }));
+    mouseClick(screen.getByTitle("Model: Opus (latest)"));
+    const offline = await screen.findByRole("menu");
+    expect(within(offline).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+  });
+
+  it("reads a stored pinned id the list no longer carries", async () => {
+    show({ tab: { ...onOpus, model: "claude-opus-4-8" } });
+    // Still what the tab runs: it is named, not passed off as the default,
+    const button = screen.getByTitle("Model: Opus 4.8");
+    expect(button.textContent).toBe("Opus 4.8");
+    // and it keeps the effort menu of its family and its own ticked row.
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "Opus 4.8", "low", "high"]);
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.8" }).getAttribute("aria-checked")).toBe("true");
   });
 });
 
@@ -457,6 +618,61 @@ describe("composer history (PRO-85)", () => {
     await waitFor(() => expect(field().value).toBe(""));
   });
 
+  describe("with the reader's own keys (Settings → Shortcuts)", () => {
+    afterEach(() => setPrefs({ shortcuts: {} }));
+
+    it("sends on the chosen key, and Return then only breaks the line", async () => {
+      // `mod` is Ctrl in jsdom, which is not a Mac.
+      setPrefs({ shortcuts: { "composer.send": ["mod+enter"] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      // Not taken by the composer: the textarea breaks the line itself.
+      expect(press("Enter")).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+      expect(press("Enter", { ctrlKey: true })).toBe(true);
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
+
+    it("does not send at all when Send has no key", () => {
+      setPrefs({ shortcuts: { "composer.send": [] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      expect(press("Enter")).toBe(false);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("breaks the line on a New line key that is not Return", () => {
+      setPrefs({ shortcuts: { "composer.newLine": ["mod+j"] } });
+      render(<HistoryComposer onSend={vi.fn()} />);
+      type("one two", 3);
+      expect(!fireEvent.keyDown(field(), { key: "j", code: "KeyJ", ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("one\n two");
+      expect(field().selectionStart).toBe(4);
+    });
+
+    it("recalls messages on the chosen keys, and the arrows only move the caret", () => {
+      setPrefs({ shortcuts: { "composer.historyPrevious": ["mod+up"], "composer.historyNext": ["mod+down"] } });
+      render(<HistoryComposer />);
+      expect(press("ArrowUp")).toBe(false);
+      expect(field().value).toBe("");
+      expect(press("ArrowUp", { ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("third message");
+      expect(press("ArrowDown", { ctrlKey: true })).toBe(true);
+      expect(field().value).toBe("");
+    });
+
+    it("runs Send from the command palette whatever its key is", async () => {
+      setPrefs({ shortcuts: { "composer.send": [] } });
+      const onSend = vi.fn();
+      render(<HistoryComposer onSend={onSend} />);
+      type("a new message");
+      sendShortcut("composer.send", field());
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("a new message", []));
+    });
+  });
+
   it("an open @ or / menu takes the arrows", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "list_slash_commands") return [{ name: "compact", description: "", source: "builtin" }, { name: "clear", description: "", source: "builtin" }];
@@ -488,6 +704,125 @@ describe("composer history (PRO-85)", () => {
     expect(field().value).toBe("third message");
   });
 
+  // The flake behind four blocked merges: the list's arrival used to queue a "back to the first row" in a
+  // passive effect, and a key that landed after the rows were painted but before that effect ran was
+  // answered first and then undone by it.
+  it("a key pressed in the frame the @ list arrives still moves the highlight", async () => {
+    let deliver: (hits: { path: string; name: string; score: number }[]) => void = () => {};
+    invoke.mockImplementation((command: string) => (command === "search_files" ? new Promise((resolve) => (deliver = resolve)) : Promise.resolve(command === "list_slash_commands" ? [] : null)));
+    render(<HistoryComposer cwd="/repo-race" />);
+    const selected = () => screen.getAllByRole("option").find((option) => option.getAttribute("aria-selected") === "true")?.textContent;
+
+    type("@");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_files", expect.anything()));
+
+    // Outside act, as in the app: React commits the rows, and runs the commit's passive effects in a
+    // later task. The observer's callback is the first thing to run after the commit, before them.
+    const scope = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const acting = scope.IS_REACT_ACT_ENVIRONMENT;
+    scope.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      await new Promise<void>((resolve) => {
+        const painted = new MutationObserver(() => {
+          if (!screen.queryByText("b.ts")) return;
+          painted.disconnect();
+          field().dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+          resolve();
+        });
+        painted.observe(document.body, { childList: true, subtree: true });
+        deliver([{ path: "src/a.ts", name: "a.ts", score: 1 }, { path: "src/b.ts", name: "b.ts", score: 1 }]);
+      });
+      // Let the commit's passive effects and the key's own render run.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      scope.IS_REACT_ACT_ENVIRONMENT = acting;
+    }
+    await act(async () => {});
+    expect(selected()).toContain("b.ts");
+  });
+
+  it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
+    const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
+    const load = vi.fn(async () => list);
+    function CloudComposer({ sourceKey }: { sourceKey: string }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} commands={{ key: sourceKey, known: () => null, load }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<CloudComposer sourceKey="cloud|restricted|live" />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["/compactShorten"]);
+    expect(screen.getByTestId("picker-note").textContent).toBe(list.note);
+    // A command that is not offered: the list stays to say why, with nothing to pick.
+    fireEvent.change(box, { target: { value: "/model", selectionStart: 6 } });
+    expect(screen.queryAllByRole("option")).toEqual([]);
+    expect(screen.getByRole("listbox").textContent).toContain(list.note);
+    // The same source on a later render is not read again; another one is.
+    view.rerender(<CloudComposer sourceKey="cloud|restricted|live" />);
+    expect(load).toHaveBeenCalledTimes(1);
+    view.rerender(<CloudComposer sourceKey="cloud|all|live" />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(invoke).not.toHaveBeenCalledWith("list_slash_commands", expect.anything());
+  });
+
+  it("lists a cloud tab's files from its source, and completes the mention with the path on the workspace", async () => {
+    const search = vi.fn(async (query: string) => (query === "log" ? [{ path: "src/auth/login.rs", name: "login.rs", score: 1 }] : [{ path: "README.md", name: "README.md", score: 0 }]));
+    function CloudComposer({ connected }: { connected: boolean }) {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} files={connected ? { key: "cloud:o:w|s-1", search } : null} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const view = render(<CloudComposer connected />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    // The button opens the list on the shallowest files, as a bare `@` does locally.
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
+    expect((await screen.findByRole("option")).textContent).toContain("README.md");
+    fireEvent.change(box, { target: { value: "read @log", selectionStart: 9 } });
+    await waitFor(() => expect(screen.getByRole("option").textContent).toContain("src/auth/login.rs"));
+    expect(search).toHaveBeenLastCalledWith("log", 30);
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(box.value).toBe("read @src/auth/login.rs ");
+    expect(invoke).not.toHaveBeenCalledWith("search_files", expect.anything());
+    // Not connected: no list and no button, and nothing is asked.
+    view.rerender(<CloudComposer connected={false} />);
+    search.mockClear();
+    expect(screen.queryByRole("button", { name: "Mention a file" })).toBeNull();
+    fireEvent.change(box, { target: { value: "read @", selectionStart: 6 } });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("asks a cloud tab's source again when the reader starts a command and the list is still empty", async () => {
+    const lists = [Promise.reject(new Error("unavailable")), Promise.resolve({ commands: [], note: null }), Promise.resolve({ commands: [{ name: "compact", description: "", source: "builtin" as const }], note: null })];
+    lists[0]!.catch(() => undefined);
+    const load = vi.fn(() => lists[Math.min(load.mock.calls.length - 1, 2)]!);
+    function CloudComposer() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} commands={{ key: "cloud|all|live", known: () => null, load }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    render(<CloudComposer />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    // The CLI had not answered; then it listed nothing; the third `/` gets the list.
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
+    fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+    expect((await screen.findByRole("option")).textContent).toBe("/compact");
+    expect(load).toHaveBeenCalledTimes(3);
+    // With a list in hand, starting a command asks nobody.
+    fireEvent.change(box, { target: { value: "", selectionStart: 0 } });
+    fireEvent.change(box, { target: { value: "/c", selectionStart: 2 } });
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it("a cloud tab with no source and no directory has no command list", () => {
+    render(<TestComposer onSend={vi.fn()} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/", selectionStart: 1 } });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("an empty menu (no match) takes the arrows too", async () => {
     invoke.mockImplementation(async (command: string) => (command === "list_slash_commands" ? [{ name: "compact", description: "", source: "builtin" }] : []));
     render(<HistoryComposer cwd="/repo-empty" />);
@@ -513,7 +848,7 @@ describe("composer history (PRO-85)", () => {
 
   it("the model and permission menus take the arrows while open", async () => {
     render(<HistoryComposer />);
-    for (const name of [/default/, /Auto/]) {
+    for (const name of [/Default/, /Auto/]) {
       mouseClick(screen.getByRole("button", { name, hidden: true }));
       await screen.findByRole("menu");
       expect(press("ArrowUp")).toBe(false);

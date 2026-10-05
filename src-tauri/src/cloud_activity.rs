@@ -13,8 +13,10 @@
 //! - at most one report per [`MIN_INTERVAL`];
 //! - a report whenever something was noted or the counts changed, and every
 //!   [`KEEPALIVE`] while a turn runs or an approval waits;
-//! - `attachment` every [`KEEPALIVE`] while a client is attached, so a person
-//!   working only over the relay is never suspended as idle.
+//! - `attachment` every [`KEEPALIVE`] while a client that can type is
+//!   attached, so a person working only over the relay is never suspended as
+//!   idle. A viewer or a phone that only reads is not such a client: looking
+//!   does not hold compute (terminalx-saas contract 9.4.1).
 //!
 //! The notes are process-wide and cost an atomic operation, so the desktop
 //! build, which never starts a reporter, pays nothing for them.
@@ -63,13 +65,14 @@ impl Kind {
 static NOTED: AtomicU8 = AtomicU8::new(0);
 static ATTACHED: AtomicUsize = AtomicUsize::new(0);
 static REGISTRATIONS: AtomicU64 = AtomicU64::new(0);
+static LAUNCHING: AtomicUsize = AtomicUsize::new(0);
 
 /// Something happened that counts as use of the workspace.
 pub fn note(kind: Kind) {
     NOTED.fetch_or(kind.bit(), Ordering::Relaxed);
 }
 
-/// A client is attached over the relay until the guard drops.
+/// A client that can type is attached over the relay until the guard drops.
 #[must_use]
 pub fn attached() -> Attached {
     ATTACHED.fetch_add(1, Ordering::Relaxed);
@@ -82,6 +85,31 @@ pub struct Attached(());
 impl Drop for Attached {
     fn drop(&mut self) {
         ATTACHED.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The workspace's launch (cloning its repositories, starting its agent) is
+/// running until the guard drops. It is reported as a running turn: nobody
+/// is attached yet and no agent turn exists, but suspending now would lose
+/// the launch.
+#[must_use]
+pub fn launching() -> Launching {
+    LAUNCHING.fetch_add(1, Ordering::Relaxed);
+    note(Kind::AgentTurn);
+    Launching(())
+}
+
+/// Launches running now.
+#[cfg(test)]
+pub(crate) fn launches() -> usize {
+    LAUNCHING.load(Ordering::Relaxed)
+}
+
+pub struct Launching(());
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        LAUNCHING.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -100,6 +128,11 @@ pub struct Counts {
 impl Counts {
     fn busy(self) -> bool {
         self.active_turns > 0 || self.pending_approvals > 0
+    }
+
+    /// With `launches` running launches counted as turns.
+    fn with_launches(self, launches: usize) -> Self {
+        Self { active_turns: self.active_turns.saturating_add(launches), ..self }
     }
 }
 
@@ -198,7 +231,7 @@ where
                 noted: NOTED.swap(0, Ordering::Relaxed),
                 attached: ATTACHED.load(Ordering::Relaxed),
                 registrations: REGISTRATIONS.load(Ordering::Relaxed),
-                counts: counts(),
+                counts: counts().with_launches(LAUNCHING.load(Ordering::Relaxed)),
             };
             let now = Instant::now();
             if let Some(report) = schedule.tick(now, observed) {
@@ -233,6 +266,39 @@ mod tests {
         let report = schedule.tick(now, seen)?;
         schedule.sent(now, &report, true);
         Some(report)
+    }
+
+    #[test]
+    fn a_running_launch_keeps_the_workspace_busy_with_nobody_attached() {
+        let start = Instant::now();
+        let mut schedule = Schedule::default();
+        let launching = || observed(&[], 0, 1, Counts::default().with_launches(1));
+        let first = step(&mut schedule, start, observed(&[Kind::AgentTurn], 0, 1, Counts::default().with_launches(1))).expect("a report when the launch starts");
+        assert_eq!(first, json!({ "v": 1, "activity": ["agent-turn"], "activeTurns": 1, "pendingApprovals": 0 }));
+        // A clone that runs for half an hour: reported busy at least every 60 s.
+        let mut last = 0;
+        for s in 1..=1800 {
+            if let Some(report) = step(&mut schedule, secs(start, s), launching()) {
+                assert_eq!(report["activeTurns"], 1);
+                assert!(s - last <= 60, "busy report overdue at t={s}");
+                last = s;
+            }
+        }
+        assert!(last >= 1800 - 60);
+        // The launch ends: one report says so.
+        let done = step(&mut schedule, secs(start, 1801 + 15), idle(1)).expect("a report when the launch ends");
+        assert_eq!(done["activeTurns"], 0);
+    }
+
+    #[test]
+    fn the_launch_guard_counts_only_while_it_is_held() {
+        {
+            let _launching = launching();
+            assert!(LAUNCHING.load(Ordering::Relaxed) >= 1);
+            assert_ne!(NOTED.load(Ordering::Relaxed) & Kind::AgentTurn.bit(), 0);
+        }
+        assert_eq!(Counts { active_turns: 2, pending_approvals: 1 }.with_launches(1), Counts { active_turns: 3, pending_approvals: 1 });
+        assert_eq!(Counts::default().with_launches(0), Counts::default());
     }
 
     #[test]

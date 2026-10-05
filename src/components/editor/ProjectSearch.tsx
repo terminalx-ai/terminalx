@@ -8,7 +8,7 @@ import { SearchCheck, SearchToggle } from "@/components/editor/SearchControls";
 import type { ReplaceTarget, TextHit, TextSearch } from "@/lib/api";
 import { liveEditorPathsUnder, liveEditorsFor } from "@/lib/editorViews";
 import { openFile } from "@/lib/editors";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { hitKey, planReplace, replaceInOpenBuffers, splitTargets, type ReplacePlan, type ReplaceSpec } from "@/lib/replace";
 import { cn } from "@/lib/cn";
 import { fileErrorText, localFileSource, StaleRequestError, type FileSource } from "@/lib/workspaceFiles";
@@ -48,11 +48,11 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
   const replaceInput = useRef<HTMLInputElement>(null);
   const focusNext = useRef<"find" | "replace">("find");
 
-  useHotkey("mod+shift+f", () => {
+  useShortcut("files.search", () => {
     focusNext.current = "find";
     setOpen(true);
   });
-  useHotkey("mod+shift+h", () => {
+  useShortcut("files.replace", () => {
     if (!canRewrite) return;
     focusNext.current = "replace";
     setReplaceOpen(true);
@@ -217,7 +217,7 @@ export function ProjectSearch({ sessionId, root, source }: { sessionId: string; 
         <div className="border-b border-hairline">
           <div className="flex items-center gap-2 px-3">
             {canRewrite && (
-              <WithTooltip label={replaceOpen ? "Hide replace" : "Replace"} keys={keycaps("mod+shift+h")}>
+              <WithTooltip label={replaceOpen ? "Hide replace" : "Replace"} shortcut="files.replace">
                 <button
                   type="button"
                   aria-label={replaceOpen ? "Hide replace" : "Show replace"}

@@ -130,7 +130,8 @@ fn scan_snapshot(store_root: &Path) -> Result<StatsUsageSnapshot> {
     scan_snapshot_with(
         store_root,
         || discover_sources(store_root),
-        || Ok((app_stats()?, usage_scope()?)),
+        // Activity is attached separately; a competing owner must not block tokens.
+        || Ok((AppStats::default(), usage_scope()?)),
     )
 }
 

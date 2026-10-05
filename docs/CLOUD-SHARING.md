@@ -13,14 +13,31 @@ negotiated as its own namespace (`collab/1`).
 
 ## Who may do what
 
+**Any member creates a cloud workspace and manages the ones they created
+(PRO-73).** "Manages" is stop, resume, archive, unarchive, delete, the access
+mode, shares, and the runtime-scope work below. Owners and admins manage
+every workspace, as before. The API reports whoever manages a workspace as
+its `manager`, so everything in the app that keys on that role (the lifecycle
+menu, visibility, sharing, adding tabs and terminals) follows by itself. The
+server says it has this rule with the capability
+`cloud.workspaces.member-managed.v1` (`status.memberWorkspaces`); against a
+server without it, creating stays with owners and admins and a creator who is
+a plain member is a `driver`, which is what the "against a server from before
+PRO-73" notes below describe. A new session a member starts only reuses or
+wakes a workspace they manage; with none of their own in the project it
+creates one (`planCloudStart`). The organization's limits apply to everyone,
+and an organization may also cap the running workspaces per person
+(Settings → Compute, "Running per person"; blank is no cap).
+
 Two things decide a connection's rights:
 
-- **Attachment authority** (PRO-13): `manage` for an organization admin's
-  desktop, `participate` for everyone else and every phone. Runtime-scope
+- **Attachment authority** (PRO-13): `manage` for the desktop of whoever
+  manages the workspace (an organization owner or admin, or its creator),
+  `participate` for everyone else and every phone. Runtime-scope
   work (create or kill terminals, file and Git writes, create, close or
   configure agent tabs, rotate the key) stays `manage`.
-- **Role** (per person, from the API): `manager` (owners and admins),
-  `driver` (the workspace's creator, and members shared as drivers), `viewer`
+- **Role** (per person, from the API): `manager` (owners and admins, and
+  the workspace's creator), `driver` (members shared as drivers), `viewer`
   (members shared as viewers), or `none` (any other member). `canApprove` is
   separate: managers and the creator always approve; a share says whether its
   person does. A viewer may approve.
@@ -31,9 +48,62 @@ Two things decide a connection's rights:
 | Presence, notes | | ✓ | ✓ | ✓ |
 | Workspace content key (`keys.get`) | | ✓ | ✓ | ✓ |
 | Send, steer, stop (mailbox) | | | ✓ (lease) | ✓ (lease) |
-| Take control of and type into a terminal | | | ✓ | ✓ |
+| Slash commands `/clear`, `/compact`, `/help` | | | ✓ (lease) | ✓ (lease) |
+| Any other slash command (`/model`, `/permissions`, `/login`, `/mcp`, …), a message starting with `!` | | | `canApprove` | ✓ |
+| Model, effort and permission mode | | | `canApprove` | ✓ |
+| Take control of and type into a terminal (a shell) | | | `canApprove` | ✓ |
+| Watch an agent tab's own terminal (its terminal view) | | ✓ | ✓ | ✓ |
+| Type into an agent tab's own terminal | | | `canApprove` (lease) | ✓ (lease) |
 | Take over another person's tab lease | | | | ✓ |
 | Permission decisions | `canApprove` | `canApprove` | `canApprove` | ✓ |
+
+### What each role can really do (PRO-88)
+
+The table is what the runtime checks. This is what it adds up to, so that
+nobody shares a workspace expecting a tighter line than there is.
+
+**The line between a driver and an approver only means something on tabs in
+a mode that asks.** A new tab starts in `bypassPermissions` unless another
+mode is chosen (`DEFAULT_PERMISSION_MODE`). In that mode the agent runs
+anything without asking, so a plain driver gets code execution as the
+workspace's user by asking for it in prose, and nothing below holds them. A
+manager or an approver has to put the tab in `manual`, `plan` or
+`acceptEdits` for the rest of this section to apply; a plain driver cannot
+change the mode back.
+
+- **Viewer.** Reads everything the workspace shows: transcripts, terminal
+  output (whatever was printed there, secrets included), files, Git, and
+  holds the content key. Changes nothing. A viewer with `canApprove` answers
+  the agent's permission requests: they decide whether a command the agent
+  asked for runs, never which command.
+- **Driver without `canApprove`** (a "plain" driver). Sends, steers and stops
+  the agent in prose, and sends `/clear`, `/compact` and `/help` (per CLI,
+  below). They cannot change a tab's model, effort or permission mode by any
+  route (the pickers, a message's settings, a slash command), cannot answer
+  permission requests, cannot type into a shell or into the agent's own
+  terminal, and cannot make the CLI act by itself: a message that starts
+  with `!` (a shell command in both CLIs) or mentions a file outside the
+  project with `@` is refused. In a mode that asks, each tool use the mode
+  does not cover waits for someone who can approve; in `acceptEdits` the
+  agent edits files in the project without asking, which is what that mode
+  is.
+- **Driver with `canApprove`**, which the workspace's creator always is.
+  Everything above, and decides what the agent may do on its own: its
+  settings, every slash command, `!` commands, the permission requests, and
+  the agent's own terminal. They also type into shells, which is code
+  execution as the workspace's user with nothing in between: a shell can
+  read the tokens in the environment, edit the agent's settings files, or
+  start an agent with other flags. Give `canApprove` to a driver only if
+  they may do all of that.
+- **Manager** (organization owners and admins, and the workspace's creator). Everything, plus the
+  runtime-scope work of a `manage` attachment (create and kill terminals,
+  file and Git writes, tabs and sessions, the key) and other people's leases.
+
+`canApprove` is therefore one right: answering permission requests (any
+role), and, for a driver, everything that decides what the agent does
+without asking (`Access::can_configure` in the runtime, `mayConfigure` and
+`canTypeInTerminals` on the desktop): the tab's settings, the slash and `!`
+commands, shells, and the agent's own terminal (PRO-86).
 
 The API lists everyone whose role is not `none` on every `/refresh`
 (`collaboration`, advertised by the runtime as `collaboration-v1`) and stamps
@@ -103,8 +173,11 @@ role changed).
   over explicitly. `AgentTabInfo` carries `lease`, and every queued follow-up
   its sender (`followUps[].actorId`).
 - **Terminals.** Unchanged ownership (PRO-26): one controller per terminal.
-  Drivers may now take control too. Terminals and `pty.control`
-  notifications carry `controllerId`, so clients show who is typing.
+  A driver who may approve permissions may take control too; a plain driver
+  and a viewer watch (PRO-88: `pty.write`, `pty.resize` and `pty.control`
+  answer `forbidden` with `data.reason: "approval-required"`). Terminals and
+  `pty.control` notifications carry `controllerId`, so clients show who is
+  typing.
 - **Taking the wheel (fair use).** `lease.acquire` without input holds an
   idle tab for two minutes. Asking again while holding it does not extend it
   (only input the agent receives does), and after one's own idle lease lapses
@@ -126,6 +199,86 @@ role changed).
   composer says "Your model, effort or mode change was not applied: you can
   no longer approve permissions"; the same is said when a receipt arrives
   with `settingsIgnored`.
+- **What the CLI runs by itself** (PRO-88). A message is typed into the
+  agent's CLI, and the CLI does not read every message as a prompt. Checked
+  on 2026-10-03 against Claude Code 2.1.288 and Codex 0.153.4, in throwaway
+  runs (a temporary home, a key that is not one), pasting the way the app
+  does (Ctrl+U, a bracketed paste, Enter):
+
+  | Message | Claude Code | Codex |
+  | --- | --- | --- |
+  | `!command` | runs it as a shell command, no permission request (manual mode) | runs it, no request, outside its read-only sandbox |
+  | ` !command` (leading space) | prose | runs it |
+  | `!command` on a later line | prose | prose |
+  | `/model` typed, or pasted alone | runs the command | runs the command |
+  | `/model` as the first line of several | runs it, the other lines as its argument | runs it |
+  | ` /model` (leading space) | prose | prose |
+  | `/mod` typed | completed to `/model` | completed to `/model` |
+  | `/help`, `/reset` | known | "Unrecognized command", left in the composer |
+  | `@/etc/hosts …` | reads the file, no permission request | sent as written (nothing shown as attached) |
+  | `@"x y/../../outside.txt"` (double quotes, a space) | reads the file outside the project | not run |
+  | `@'x y/../../outside.txt'` (single quotes) | prose | not run |
+  | `！ls`, `／model` (full-width) | prose | prose |
+  | `#…` | prose (no memory shortcut) | not run |
+
+  So for a plain driver the runtime decides (`cloud_agents/slash.rs`),
+  wherever input reaches an agent: a mailbox `send` or `steer` (also one
+  that waited in the mailbox while the workspace was stopped: it is judged
+  when it is leased, by the sender's access then), a queued follow-up right
+  before it is typed, and the live `session.send`. From a manager or someone
+  with `canApprove` everything passes. From a plain driver:
+  - **`!`**: a message whose first line starts with `!` is refused
+    (`shell-command-forbidden`).
+  - **`/`**: on the first line, only the tab's CLI's harmless commands pass,
+    typed exactly: Claude Code `/clear` (also `/reset`, `/new`), `/compact`,
+    `/help`; Codex `/clear`, `/new`, `/compact`; any other agent, none.
+    Everything else that starts with `/` is refused
+    (`slash-command-forbidden`), not only the commands known to be
+    sensitive, so no list of the CLIs' commands has to be kept complete. An
+    allowed command with a control character, an `@` or a `\` is refused
+    too: typed as keys they are a key, a picker and a line continuation.
+  - **`@`**: anywhere in the message, a mention of a file outside the
+    project is refused (`file-mention-forbidden`): a path under `~`, an
+    absolute path that is not under the session's working directory, or a
+    relative one that climbs above it, with `.` and `..` resolved as text. A
+    quoted mention (`@"a b/c"`) is read to its closing quote. A mention
+    starts a word, also after an invisible character (zero-width and
+    bidirectional controls, the soft hyphen and the like). A resource named
+    by URI (`@server:file:///etc/hosts`, an MCP server's) is judged by the
+    path after its scheme, so only a file of the project passes. `@src/main.rs`, the
+    project's own files by absolute path, and `name@example.com` pass.
+  - **The project's own commands** (`.claude/commands`, `.claude/skills`)
+    are not allowed. A plain driver can have the agent write one (in
+    `acceptEdits`, without a request), and its front matter can name tools
+    that run without asking (`allowed-tools`) or change the model.
+
+  "First line" is the first line that is not blank, after whitespace and
+  invisible characters are skipped (Codex trims before it looks). Later
+  lines are prose to both CLIs, so a Markdown image (`![shot](a.png)`), a
+  path on its own line or a quoted command there does not stop a message.
+  The full-width `！` and `／` are prose to both CLIs and are not refused.
+
+  **What the check cannot see.** It reads text. A symbolic link inside the
+  project that points out of it makes `@link/secret` a path inside the
+  project here and a file outside it to the CLI; so does any other way the
+  file system differs from the text (a mount, a hard link). A plain driver
+  cannot create a link without the agent, and in a mode that asks the agent
+  needs approval to run `ln`.
+
+  A refused mailbox command settles `rejected` with its category, never
+  reaches the agent and does not claim the tab; its receipt carries
+  `command` (as typed, shortened) and `message`. `session.send` answers
+  `forbidden` with `data.reason` of the same name. A queued follow-up that
+  became refusable (its sender lost `canApprove` while it waited) is dropped
+  with a note in the transcript. A slash or `!` command is never left in the
+  session's own queue behind a running turn, whoever sends it, because
+  nothing re-checks that queue: a mailbox `steer` of one while a turn runs
+  is `rejected` with category `command-not-queued`, and the live
+  `session.send` answers `conflict` with `data.reason` of the same name.
+  Prose steers and queues as before; a mailbox `send` of a command waits in
+  the follow-up queue, which is re-checked. The desktop
+  shows the runtime's sentence for these refusals, on the outbox entry or as
+  the send's error.
 - **Permission decisions** are not lease-bound; they need `canApprove`.
 
 ### Revocation
@@ -137,11 +290,13 @@ list:
    attachments the API revoked are closed as before. Streams (terminals,
    file watches, agent tabs) of anyone left without access are ended, also
    on the first list after a start.
-2. A person who may no longer drive loses terminal control (announced) and
-   their tab leases.
+2. A person who may no longer drive loses their tab leases. A person who
+   may no longer type into terminals (no longer a driver, or no longer an
+   approver) loses terminal control (announced).
 3. Queued follow-ups of anyone who may no longer drive are dropped, with a
-   note in the transcript. Each follow-up is also re-checked right before it
-   is typed.
+   note in the transcript; so are queued slash commands of a driver who may
+   no longer approve. Each follow-up is also re-checked right before it is
+   typed.
 4. The workspace content key rotates when anyone lost access, as it does for
    revocations and for a workspace turning private. Who was handed the
    current key is recorded durably (`<data dir>/cloud-agent/key-holders.json`),
@@ -242,8 +397,9 @@ organization-visible. A workspace created from the sidebar starts private
   switches back to `private`; the server revokes every share with it.
 * Someone who cannot manage shares gets the same list titled "Who has
   access", with neutral copy.
-* Visibility is the API's owner-or-admin switch. A creator who is a plain
-  member (`you.role` is not `manager`) manages the shares of a workspace that
+* Visibility is for whoever manages the workspace. Against a server from
+  before PRO-73 a creator who is a plain member is not a manager
+  (`you.role` is not `manager`): they manage the shares of a workspace that
   is already organization-visible; "Share…" on their private workspace and
   "Make private again" are disabled with the reason.
 * The two calls of "make visible and share" can part ways. If the share is
@@ -317,7 +473,9 @@ granted:
 **Terminals.** A terminal controlled by someone else names them ("Alice is
 typing in this terminal", from `controllerId` in the terminal description and
 `pty.control`). "Take control" is offered to manage attachments and to
-drivers and managers of a shared workspace; viewers never get it.
+managers and approving drivers of a shared workspace (`canTypeInTerminals`).
+A viewer never gets it; a plain driver reads "You can watch; typing in a
+terminal needs the right to approve permissions; ask an admin."
 
 **Not shared.** A participate connection whose role is `none` sees "This
 workspace has not been shared with you" instead of empty terminal and agent
@@ -370,7 +528,8 @@ organization is live in the sidebar. Sharing follows them there:
   open composer. The "+" menu's Terminal wakes a stopped workspace only for
   someone who would manage it (terminals are a manager's); a viewer or driver
   is not offered a wake that would end in a refusal.
-* **Terminals.** Drivers get "Take control" and see who is typing.
+* **Terminals.** Managers and approving drivers get "Take control"; everyone
+  sees who is typing, and a plain driver reads why they only watch.
 * **Workspace actions.** Resume, Stop, Archive and Delete are the API's
   manage actions (organization owners and admins), so only a `manager` is
   offered them, in the project menu, a workspace row's menu and the header
@@ -460,6 +619,25 @@ people the runtime lists (`collab.presence` with a different set of people,
 roles or approval rights), or a share or visibility change made in the
 dialog. All of these only list; none attaches to or resumes a workspace.
 
+**One request for every organization (PRO-74).** On a server that advertises
+`cloud.desktop.catalog-feed.v1` (and authorizes by membership), the poll above
+is one request for all live organizations, `cloud_catalog_feed`
+(`GET /v1/desktop/cloud-catalog`, saas contract §23), at the pace of the
+organization that needs it soonest (3 s while a workspace anywhere is
+changing state). The desktop sends back the last answer's cursor, and an
+unchanged catalog answers 304: no row is touched. A changed one replaces each
+organization's rows in one step (`refreshCloudFeed` in
+`src/lib/cloudCatalog.ts`), so the sidebar never shows an empty state in
+between and the selection stays. An organization the server could not list
+keeps its rows with the error; a failed request keeps everything. Natively
+(`CloudWorkspaceService::catalog_feed`) the answer is fenced by the account
+that asked, each organization by membership as of the answer, and each list
+is validated like a single organization's. Refreshing one organization (after
+an action there, or an access change) still lists that organization alone.
+The organization's selected repositories are read per organization every
+five minutes, as before. On a server without the capability, or one that
+refuses the feed, each organization is listed on its own timer as before.
+
 Not moved yet: the full participants bar (names, windows, tabs) stays on the
 workspace page; SessionView shows the compact avatars.
 
@@ -472,13 +650,189 @@ the "live two-user test" blocks of `SessionView.cloud.test.tsx`,
 `src/components/layout/cloud/CloudSections.test.tsx`,
 `packages/portable/src/workspaceCollab.test.ts`,
 `src/components/cloud/CloudShareDialog.test.tsx`, the PRO-30 blocks of
-`CloudAgents.test.tsx` and `CloudSessionPage.test.tsx`, and the
+`CloudAgents.test.tsx` and `CloudWorkspaceView.test.tsx`, and the
 `cloud_workspaces::tests::share*` Rust tests. `src/lib/cloudSessions.access.test.ts`
 covers what is forgotten when access ends and read again when it returns.
 `pnpm test:webkit-layout` (after `pnpm build`) measures in WebKit what jsdom
 cannot: the composer's toolbar at 1000x520 and 1280x760 with the Notes drawer
 open (no control overlaps another), and a modal dialog's overlay covering the
 Notes drawer.
+
+## An agent tab's terminal view (PRO-86)
+
+A cloud agent tab switches between its chat and its terminal view like a
+local one: the same header button and `mod+shift+t`, remembered per tab. The
+terminal view is the tab's own CLI, the process the chat is a projection of,
+so switching starts, stops and restarts nothing and both views show the same
+turn. It shows what the CLI draws: prompts, menus, slash-command pickers and
+login or first-run screens, which is where those are answered.
+
+### Runtime: `agent-pty/1`
+
+Every agent tab's CLI already runs in a terminal the runtime owns (the pane
+`tab:<tabId>`, `SessionManager::pane_id`). `agent-pty/1`, granted in
+`rpc.hello` when asked for, lets a connection address that pane through the
+shell terminals' own methods, as `ptyId: "tab:<tabId>"`. It adds no method.
+
+| Call | On an agent's terminal |
+| --- | --- |
+| `pty.attach` | Replays recent output (the runtime keeps the last 1 MiB from the CLI's first byte, in memory), then streams. `sinceOffset` resumes. The result also carries `tabId` and `running`. Starts nothing. |
+| `pty.write` | The controller's input, numbered and applied once, as for a shell. With `report: true` (shells too) the bytes are the client's terminal emulator speaking for itself (a focus report, the answer to a query): delivered from the controller only, and neither activity nor a lease claim. |
+| `pty.resize` | The controller's size. Anyone else gets `not_controller`. |
+| `pty.control` | Take the input and size, optionally at this view's size. `start: true` also starts the tab's CLI when it is not running (`ensure_started`); without it nothing is ever started. |
+| `pty.detach` | End the stream. |
+| `pty.list`, `pty.kill`, `pty.create` | Never: it is not listed or counted as a shell, and `pty.kill` is `forbidden`. It closes with its tab. |
+
+Without the capability every one of them answers `capability_not_granted` for
+a `tab:` id, so an older client never meets it. The terminal stays through
+every CLI the tab starts in the pane (a restart for a setting, a resume after
+an exit): one stream of offsets, and the controller's size is applied to each
+new process. Whether a CLI runs is the tab's `process` in `session.tabs`,
+sent again when a process starts or ends.
+
+Who may do what (checked on every call, against the latest member list):
+
+- **Watch**: anyone the workspace is shared with (role viewer or above). No
+  role, no terminal (`forbidden` or `not_found`).
+- **Type, size, take control**: a driver or manager, and only while nobody
+  else holds the tab's driver lease (`lease_held`, with the lease, the same
+  refusal a send gets). Accepted input claims or extends the typist's lease,
+  as a send does. A manager takes a held lease over by taking the terminal
+  (`pty.control`), never by a keystroke.
+- **Approval rights**: a driver also needs `canApprove`. This matches the
+  rule that only a manager or an approver changes a tab's model, effort and
+  permission mode, all of which the agent's own screen can change. It is that
+  rule applied to the terminal, not a complete barrier: someone who may type
+  can do whatever the CLI lets its user do. A driver who may not approve
+  watches (`forbidden`, `data.needs: "canApprove"`), and one whose approval
+  rights are withdrawn stops being the terminal's controller (announced) and
+  the tab's lease they held is released.
+- **One controller**: input and size follow one device, as for shells
+  (`control`, `controllerId`, `pty.control` and `pty.resized` notifications).
+  A second viewer's window never resizes the program.
+- **After a stop and a wake** the app that stayed open is a new device to
+  the runtime: a stop revokes every attachment, and the wake issues a new
+  attachment and device. Where the runtime process survived the stop (a
+  frozen container), the terminal's controller is still the old device.
+  When the API sends `installationKey`, the runtime recognises the same
+  person on the same installation and gives them the terminal back without a
+  click, and their writer's `seq` continues (see "A person's own terminal
+  after a stop and a wake" below). Without a key (an older API or runtime)
+  the returning person watches ("You control this terminal from another
+  window or device") until they press "Take control", which is not done for
+  them. The runtime then counts a writer's `seq` per device, so the open
+  app's first write is refused with `conflict`; the client starts a new
+  writer, and types that write under it when it was sent only once (it was
+  refused, so it cannot have been applied) or reports it when it had been
+  resent after a drop. A runtime that restarted knows no controller: the
+  terminal starts over, as after any restart. Shells follow the same rules.
+- **Revocation** is the shells': a person who lost access has their
+  connection closed and their streams ended; one who may no longer drive
+  loses control, announced.
+
+**What a later viewer can read.** Attaching replays the terminal's last
+1 MiB, to anyone who has a role at that moment, including someone the
+workspace was shared with afterwards. That can include things the transcript
+never holds: a `/login` code or URL, the output of a `!` shell command, text
+typed into the CLI's composer and not sent. The ring exists only in the
+runtime's memory: it is gone when the tab is removed, and when the runtime
+process ends (a stop, a restart).
+
+**A person's own terminal after a stop and a wake.** A stop revokes every
+attachment, and the wake issues the app that stayed open a new attachment
+and device. With an API that sends `installationKey` on each attachment
+(asked for with the runtime capability `attachment-installation-v1`; the
+same key at every mint for one person's client installation), a runtime
+process that survived the stop (a frozen container) gives the terminal back
+to the person who controlled it, on their new device, without `pty.control`.
+All of this must hold, for shells and agent terminals alike:
+
+- the same person (`userId`, supplied by the API) and the same installation
+  key; the key is never compared without the person;
+- the old device has no connection left (with two, both must end; a view
+  that was already watching is then told `pty.control: you`);
+- the person may still type: a manager, or a driver who may approve, and for
+  an agent's terminal nobody else holds the tab's lease. Otherwise the view
+  reads `other`, exactly what its writes would be told;
+- it happens on attach, on the shell list, and on a key or a resize from
+  that person, never on a `report` write: what a terminal says by itself
+  moves nothing.
+
+Nothing else moves control by itself: another person, the same person's
+other installation, a controller whose access the runtime saw revoked (that
+clears the controller; sharing again does not restore it), or any link
+without a key (an older API): they watch until `pty.control`. Access that is
+removed and restored entirely while the workspace is stopped is different:
+the runtime only sees the final member list, never the revocation, so that
+person's terminal comes back to them without a click (they may type at that
+point anyway). A writer's `seq` is counted
+per person and installation key (per device without one), so the open app
+continues with the next number and a write it resends is answered, not
+typed again. Coming back is not activity and claims no lease. A runtime
+that restarted has no controller to give back.
+
+Nothing new is stored. Output is kept only in the runtime's memory, and
+keystrokes go from the desktop to the runtime as `pty.write` over the same
+end-to-end encrypted relay channel as shell input: not through the API
+mailbox, not into a transcript or checkpoint, and not onto either disk.
+
+### Desktop
+
+`SessionBackend.terminalView(tab)` says whether the switch is offered and
+why not; `SessionBackend.agentTerminal` is what a cloud tab's view attaches
+to. `src/lib/cloudTerminals.ts` keeps the view (its xterm, stream and resume
+point) beside the shell terminals' but apart from them, and
+`src/components/cloud/CloudAgentTerminal.tsx` is the view.
+
+- **Offered** on Claude Code and Codex tabs while the runtime grants
+  `agent-pty/1`. On an older runtime, or for an agent that does not run in a
+  terminal, the switch is off and its tooltip says why. A stopped workspace
+  follows what its runtime last said; if this desktop never saw it running,
+  the switch is offered.
+- **Looking never wakes compute.** On a stopped workspace the view says
+  "Stopped" and asks the server for nothing. Typing there wakes the workspace
+  once, the same single wake a send asks for (`wakeCloudWorkspaceOnce`); what
+  was typed while it slept is not kept or sent. That holds for every way
+  text gets in. Input the view drops (stopped, watching, the key that only
+  starts the agent) or that is refused is also removed from xterm's hidden
+  input field, where an accessibility tool, dictation or voice control leaves
+  what it inserted until Return or a blur and would otherwise hand it over
+  again with the next insertion. Input that was waiting out a dropped
+  connection is refused the moment the drop turns out to be a stop; it is
+  never sent after the wake. Cloud shells follow the same rules.
+- **It streams only while it shows.** Leaving the view or the tab detaches;
+  coming back resumes after the last byte seen. After a runtime restart the
+  view starts over on the new process instead of ending.
+- **Looking never starts the agent.** With the CLI not running the view says
+  so and offers "Start agent"; pressing a key does the same, and that key is
+  not typed: it only starts the CLI and takes control. From the moment the
+  runtime reports the tab's process running, keys are sent, also while the
+  CLI is still drawing its first screen: the terminal holds them and the CLI
+  reads them once it is ready, as with a local tab.
+- **Control.** If nobody controls the terminal and this person may type, the
+  view takes control at its own size when it opens. While someone else
+  controls it, it shows their size and "<Name> controls this terminal; you
+  are watching." with "Take control". The tab's lease bar sits above it as it
+  does above the chat. After a stop and a wake of a runtime that kept
+  running, the person's own terminal comes back to them when the API sends
+  `installationKey`. Only without a key (an older API or runtime) does it
+  read "You control this terminal from another window or device", and "Take
+  control" takes it (see "A person's own terminal after a stop and a wake").
+- **Read-only** for a viewer, for a driver while someone else drives the tab,
+  and for a driver who may not approve; the view says which, and sends no
+  input, size or control request.
+- Escape is the agent's in this view (it does not stop the turn from here).
+- **Only what a person does is input.** Key presses, paste and IME text may
+  wake a stopped workspace, take control or start the agent. What the
+  terminal emulator says by itself (focus in and out, answers to cursor,
+  device and colour queries, mouse reports) never does: it is forwarded as a
+  `report` only from a view that controls the terminal, and dropped
+  otherwise. Queries found in replayed output are not answered at all. When
+  the workspace stops, its terminals' views forget the focus and mouse modes
+  their programs had set. The same holds for cloud shell terminals.
+
+Not done here: the phone, and keeping the stream attached while the chat
+shows.
 
 ## Development and tests
 
@@ -491,6 +845,23 @@ and attachments may carry `userId`. The file is re-read on every refresh.
   `presence_and_notes_…` and `the_driver_lease_…`, and `cloud_agents::mailbox`
   tests for viewers, approvers, narrowed roles, the lease and dropped
   follow-ups.
+- PRO-88: `cloud_agents::slash` (the rule itself: `!`, `@`, whitespace,
+  lines, prefixes, hidden keys, each CLI's commands); `cloud_agents::mailbox`
+  `a_plain_drivers_slash_command_is_refused_…`,
+  `the_allowed_commands_follow_the_tabs_agent`,
+  `a_slash_command_queued_while_the_workspace_slept_…` and
+  `a_queued_slash_command_is_dropped_…`; `remote::server`
+  `a_plain_drivers_slash_command_is_refused_on_the_live_send_too`,
+  `a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_withdrawn`
+  and `shells_and_agent_terminals_need_the_same_right_on_every_call`.
+- An agent tab's terminal view (PRO-86): `remote::server` tests
+  `an_agent_terminal_…`, `attaching_to_an_agent_terminal_…`,
+  `only_the_lease_holder_types_…`, `a_second_viewer_never_resizes_…` and
+  `revoked_access_ends_an_agent_terminal_stream` (a real shell stands in for
+  the CLI); `src/lib/cloudAgentTerminals.test.ts` (the store and the backend
+  capability) and `src/components/session/SessionView.terminalView.test.tsx`
+  (the switch on local and cloud tabs, against a fake runtime). Not covered by
+  the relay e2e.
 - Relay e2e (`scripts/remote-runtime/e2e.sh`,
   `a_shared_workspace_serializes_input_and_stops_access_when_revoked`): an
   admin, a driver, an approving viewer and an unshared member over the real

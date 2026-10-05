@@ -1,11 +1,11 @@
-import { useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CalendarClock, CircleDot, Cloud, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { openAutomations, renameWorkspace, selectSession, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
@@ -27,18 +27,21 @@ import { useTabLog } from "@/lib/agentEvents";
 import type { TabEntry } from "@/types/session";
 import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { workspaceName } from "@/lib/dashboard";
-import { localSessionBackend } from "@/lib/sessionBackend";
+import { localSessionBackend, terminalViewOf } from "@/lib/sessionBackend";
 import type { CloudSessionModel } from "@/lib/cloudSession";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
 import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { AccessChip, NotSharedNotice, PresenceAvatars } from "@/components/cloud/CloudCollab";
+import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
+import { lastSavedText } from "@/lib/cloudLifecycle";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
+import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { useAccount } from "@/lib/account";
 
 function managedWorkspaceFor(session: SessionEntry) {
@@ -128,6 +131,11 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
  * 3. Only then the title truncates.
  * 4. In a header too narrow for all of that (`HEADER_TIGHT`), the project and
  *    the branch chip are left out: the sidebar row shows both.
+ * 5. In that same narrow header the terminal-view switch (PRO-86) must not
+ *    cost the title its first 12 characters. A switch that is only a disabled
+ *    placeholder ("not available here") is left out. A switch that works
+ *    stays, and the location chip is left out instead: the sidebar row says
+ *    where the session runs and has the same workspace menu.
  *
  * The connection and role chips never shrink. The shrink factors do the
  * ordering: a larger one takes (nearly) all the squeeze until it is at its
@@ -148,18 +156,30 @@ function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
   return terminal ? `Terminal ${terminal.number}` : null;
 }
 
+/** When a stopped workspace was last saved, as its stop reported it (PRO-33). */
+function CloudLastSaved({ cloud }: { cloud: CloudSessionModel }) {
+  const item = findCloudWorkspace(useCloudCatalog(), cloud.orgId, cloud.workspaceId);
+  const saved = item ? lastSavedText(item) : null;
+  return saved ? (
+    <span className="max-w-md px-6 text-center text-xs text-faint" data-testid="cloud-last-saved">
+      {saved}
+    </span>
+  ) : null;
+}
+
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
-function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
+function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /** Left out of a tight header (see the order above). */ yields?: boolean }) {
   const { location, connection } = cloud;
   const catalog = useCloudCatalog();
   const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
   const menu = useRowMenu();
   const [request, setRequest] = useState<LifecycleRequest | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
+  const [mirror, setMirror] = useState(false);
   const { status } = useAccount();
   const [error, run] = useLifecycleRun();
   const title = `Runs in the cloud workspace ${cloud.workspaceName} (${location.provider}, ${location.org}), not on this computer.`;
-  const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS);
+  const chipClass = cn("ml-1 flex max-w-[30%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", HEADER_CHIP_YIELDS, yields && HEADER_TIGHT);
   const chip = (
     <>
       <Cloud className={HEADER_CHIP_ICON} />
@@ -185,6 +205,13 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
           <DropdownMenuContent align="start" className="w-[17rem]">
             <DropdownMenuLabel className="truncate">Workspace · {cloud.workspaceName}</DropdownMenuLabel>
             {item && <WorkspaceActionItems item={item} onLifecycle={setRequest} run={run} archived={item.workspace.state === "archived"} />}
+            {/* For anyone who can read the workspace's files; a locked session has none to copy. */}
+            {item && !cloud.locked && (
+              <>
+                <DropdownMenuSeparator />
+                <CloudMirrorMenuItem onSelect={() => setMirror(true)} />
+              </>
+            )}
             {diagnosticsOffered && (
               <>
                 {item && <DropdownMenuSeparator />}
@@ -206,6 +233,8 @@ function CloudLocation({ cloud }: { cloud: CloudSessionModel }) {
       )}
       {request && <WorkspaceLifecycleDialog request={request} onClose={() => setRequest(null)} />}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId }} onClose={() => setDiagnostics(false)} />}
+      {mirror && <CloudMirrorDialog request={{ orgId: cloud.orgId, workspaceId: cloud.workspaceId, workspaceName: cloud.workspaceName }} onClose={() => setMirror(false)} />}
+      {!cloud.locked && <CloudMirrorChip orgId={cloud.orgId} workspaceId={cloud.workspaceId} onOpen={() => setMirror(true)} />}
       {/* One connection chip (is it live) and one role chip (what this person may do); a locked session has no connection to report. */}
       {!cloud.locked && (
         <span
@@ -259,13 +288,24 @@ export function SessionView({
   }, [local]);
   const requested = terminals.selected[session.id];
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
+  // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
+  // when anyone adds one. It decides what this view opens on, once: from then the view stays on
+  // the tab it shows until this person picks another (or that tab closes), so a tab someone else
+  // adds never takes the view. Until the runtime's active tab is known and listed, the tab shown
+  // is a guess that it may still correct.
+  const shownTab = useRef<{ sessionId: string; tab: SelectedSessionTab } | null>(null);
+  const kept = cloud && shownTab.current?.sessionId === session.id ? shownTab.current.tab : null;
+  const agentIds = session.tabs.map((tab) => tab.id);
   const selected: SelectedSessionTab | null = resolveSessionTab({
     requested,
-    agentIds: session.tabs.map((tab) => tab.id),
+    current: kept,
+    agentIds,
     activeTab: session.activeTab,
     terminalIds,
     browserIds: browserPages.map((page) => page.id),
   });
+  const opened = !!kept || (!!session.activeTab && agentIds.includes(session.activeTab));
+  shownTab.current = cloud && selected && opened ? { sessionId: session.id, tab: selected } : null;
   // The sidebar marks the row of the tab that is on screen.
   const selectedKind = selected?.kind ?? null;
   const selectedId = selected?.id ?? null;
@@ -276,15 +316,18 @@ export function SessionView({
   const activeTab = selected?.kind === "agent" ? session.tabs.find((tab) => tab.id === selected.id) : undefined;
   const activeShell = selected?.kind === "terminal" ? shellPanes.find((pane) => pane.id === selected.id) : undefined;
   const tabViews = useTabViews();
-  const activeInTerminal = !!activeTab && tabViews.views[activeTab.id] === "terminal";
+  // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
+  const terminalOffer = activeTab && !cloud?.locked ? terminalViewOf(backend, activeTab) : null;
+  const activeInTerminal = !!activeTab && !!terminalOffer?.available && tabViews.views[activeTab.id] === "terminal";
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
-  useHotkey("mod+shift+t", () => {
-    if (activeTab && local) void toggleTabView(session, activeTab);
+  // One action for local and cloud tabs, so a remapped shortcut switches either.
+  useShortcut("session.toggleTerminalView", () => {
+    if (activeTab && terminalOffer?.available) void toggleTabView(session, activeTab, { remote: !local });
   });
   const ed = useEditors();
   const hasEditors = ed.editors.some((e) => e.sessionId === session.id);
@@ -307,7 +350,7 @@ export function SessionView({
     presenceTab(presenceKey, presenceTarget);
   }, [presenceKey, presenceTarget]);
 
-  useHotkey("mod+j", () => {
+  useShortcut("session.latestShell", () => {
     if (local) void activateLatestTerminal(session.id, session.cwd);
     else if (cloudTerminals.length) selectSessionTab(session.id, { kind: "terminal", id: cloudTerminals[cloudTerminals.length - 1].id });
   });
@@ -320,7 +363,7 @@ export function SessionView({
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && (
-            <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+            <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
               </Button>
@@ -387,7 +430,18 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
-            {cloud && <CloudLocation cloud={cloud} />}
+            {session.worktreeBase && (
+              <span
+                role={session.worktreeBase.warning ? "status" : undefined}
+                className="truncate text-[11px] text-muted-foreground"
+                title={session.worktreeBase.warning ?? `Base commit: ${session.worktreeBase.commit}`}
+              >
+                {session.worktreeBase.warning
+                  ? "Base may be out of date"
+                  : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
+              </span>
+            )}
+            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} />}
             {renameError && (
               <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
                 {renameError}
@@ -405,22 +459,39 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            {activeTab && local && (
-              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} keys={keycaps("mod+shift+t")}>
+            {activeTab && terminalOffer?.available && (
+              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   aria-label={activeInTerminal ? "Back to chat" : "Show terminal view"}
                   aria-pressed={activeInTerminal}
                   disabled={switching}
-                  onClick={() => void toggleTabView(session, activeTab)}
+                  onClick={() => void toggleTabView(session, activeTab, { remote: !local })}
                   className={cn(activeInTerminal && "bg-veil-strong text-foreground")}
                 >
                   {activeInTerminal ? <MessageSquare /> : <Terminal />}
                 </Button>
               </WithTooltip>
             )}
-            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} keys={keycaps("mod+e")}>
+            {activeTab && terminalOffer && !terminalOffer.available && (
+              // Not offered here (an older runtime, or an agent with no terminal): the switch stays in its place, off, and says why.
+              <WithTooltip label={terminalOffer.reason ?? undefined}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Terminal view is not available"
+                  aria-disabled
+                  title={terminalOffer.reason ?? undefined}
+                  data-testid="terminal-view-unavailable"
+                  className={cn("cursor-not-allowed opacity-40 hover:bg-transparent", cloud && HEADER_TIGHT)}
+                  onClick={(event) => event.preventDefault()}
+                >
+                  <Terminal />
+                </Button>
+              </WithTooltip>
+            )}
+            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -432,6 +503,7 @@ export function SessionView({
             </WithTooltip>
           </div>
         </header>
+        {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
@@ -525,6 +597,7 @@ export function SessionView({
                         <span className="text-xs text-faint">
                           {cloud.backend.readOnlyReason ? "Its saved conversations appear here; nothing runs while it is stopped." : "Its saved conversations appear here; nothing runs until you send a message."}
                         </span>
+                        <CloudLastSaved cloud={cloud} />
                       </>
                     ) : !cloud.connected ? (
                       <span data-testid="cloud-session-loading">Loading the session…</span>
@@ -532,7 +605,7 @@ export function SessionView({
                       <>
                         <span>No tabs in this session</span>
                         <span className="text-xs text-faint">
-                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "A workspace admin can add an agent tab or a terminal."}
+                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "Only this workspace's creator or an organization owner or admin can add an agent tab or a terminal."}
                         </span>
                       </>
                     )

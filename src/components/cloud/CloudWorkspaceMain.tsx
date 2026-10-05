@@ -7,13 +7,14 @@ import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { workspaceRowState } from "@/components/layout/cloud/rowState";
 import { useCloudSections } from "@/components/layout/cloud/CloudSections";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
-import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudSessionPage";
+import { WorkspaceLifecycleDialog } from "./WorkspaceActions";
+import { ExecutionLocation, WorkspaceView, describe, describeWorkspace, type OpenedWorkspace } from "./CloudWorkspaceView";
 import { workspaceTargetKey, type CloudWorkspaceListItem } from "@/lib/api";
 import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnections, type CloudLease } from "@/lib/cloudConnections";
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
-import { archiving, deletion, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
+import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { errorCode } from "@/lib/cloudTerminals";
-import { keycaps } from "@/lib/hotkeys";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
 
@@ -31,8 +32,7 @@ function openable(item: CloudWorkspaceListItem): boolean {
  * shows its workspace here. The connection is a lease from the connection
  * manager, so the sidebar's session list follows it live.
  *
- * the existing workspace view (terminals, agent, files, git) of the
- * full-window cloud page. Selecting only looks: it connects with `connect`,
+ * The workspace view (terminals, agent, files, git). Selecting only looks: it connects with `connect`,
  * never `wake`, so a stopped workspace shows its saved agent conversations
  * and stays stopped until Resume is pressed.
  */
@@ -51,12 +51,19 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const [held, setHeld] = useState<{ lease: CloudLease; name: string; provider: OpenedWorkspace["provider"]; workspaceState: OpenedWorkspace["workspaceState"] } | null>(null);
   const connection = useSyncExternalStore(subscribeCloudConnections, () => held?.lease.current() ?? null, () => null);
   const state = useSyncExternalStore<WorkspaceConnectionState>(subscribeCloudConnections, () => held?.lease.state() ?? NOT_CONNECTED, () => NOT_CONNECTED);
-  const opened = useMemo<OpenedWorkspace | null>(
-    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: held.workspaceState } : null),
-    [held, connection],
-  );
   const [error, setError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
+  // The list's state of now, so the view's chips follow a stop or a resume instead of what was true when it was opened.
+  const listState = item?.workspace.state ?? null;
+  // A resume is under way while this window's request is out, or while the list shows one running.
+  // A refused one (the running limit) ends both, and the chips read stopped again.
+  const waking = resuming || (!!item?.latestOperation && isOpen(item.latestOperation) && item.latestOperation.action === "resume");
+  const opened = useMemo<OpenedWorkspace | null>(
+    () => (held && connection ? { connection, name: held.name, provider: held.provider, workspaceState: listState ?? held.workspaceState, waking } : null),
+    [held, connection, listState, waking],
+  );
+  // A retried delete the server refuses because work is still running: the delete dialog says what would be lost and asks.
+  const [forcing, setForcing] = useState(false);
 
   useEffect(() => {
     if (!parsed || !item || !canOpen) return;
@@ -98,6 +105,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
 
   const rowState = item ? workspaceRowState(item) : null;
   const stopped = item?.workspace.state === "suspended";
+  const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
   const org = parsed ? catalog.orgs[parsed.orgId] : undefined;
 
@@ -109,7 +117,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
       >
         {!sidebarOpen && (
-          <WithTooltip label="Show sidebar" keys={keycaps("mod+b")}>
+          <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
             <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
               <PanelLeft />
             </Button>
@@ -131,8 +139,10 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
       {stopped && (
         <div className="shrink-0 border-b border-hairline bg-well px-4 py-1.5 text-xs text-muted-foreground" role="status" data-testid="cloud-stopped-banner">
           Stopped. Saved agent conversations are shown; nothing runs until you resume it.
+          {saved && <span data-testid="cloud-last-saved"> {saved}</span>}
         </div>
       )}
+      {member && item && parsed && <CloudResourceNotice workspaceKey={cloudWorkspaceKey(parsed.orgId, parsed.workspaceId)} manage={state.state === "connected" && state.authority === "manage"} />}
       {error && <p className="shrink-0 px-4 py-1 text-xs text-destructive">Could not open: {error}</p>}
       {!member ? (
         <Centered>
@@ -151,7 +161,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         </Centered>
       ) : deleting ? (
         <div className="p-4">
-          <DeletionProgress item={item} onChanged={() => void refreshCloudCatalog(item.workspace.orgId)} onForceNeeded={() => undefined} />
+          <DeletionProgress item={item} onChanged={() => void refreshCloudCatalog(item.workspace.orgId)} onForceNeeded={() => setForcing(true)} />
+          {forcing && <WorkspaceLifecycleDialog request={{ item, action: "delete" }} onClose={() => setForcing(false)} />}
         </div>
       ) : !canOpen ? (
         <Centered>{describeWorkspace(item)}</Centered>

@@ -1,6 +1,8 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import type { HarnessInfo, Project } from "@/types/session";
 import type { CloudProject } from "@/types/target";
 import { accessibilityPress, mouseClick } from "@/test/press";
@@ -10,8 +12,9 @@ import { accessibilityPress, mouseClick } from "@/test/press";
 // workspace, or asks for the one-time cost confirmation before creating one.
 // No local path command runs for a cloud draft.
 
-const { invoke, flow, draft, mayStart } = vi.hoisted(() => ({
+const { invoke, flow, draft, mayStart, noLocal, modelConnection } = vi.hoisted(() => ({
   invoke: vi.fn(),
+  modelConnection: { client: null as import("@terminalx/portable/workspace").WorkspaceRpcClient | null, targets: vi.fn() },
   flow: {
     planCloudStart: vi.fn(),
     startInWorkspace: vi.fn(),
@@ -21,6 +24,8 @@ const { invoke, flow, draft, mayStart } = vi.hoisted(() => ({
   draft: { value: null as { project: CloudProject | null; orgName: string; mayStart: boolean | null } | null },
   /** Whether this account may start cloud sessions in the organization (an owner or admin). */
   mayStart: { value: true as boolean | null },
+  /** This computer has no local projects (a member who only uses the organization's cloud projects). */
+  noLocal: { value: false },
 }));
 
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }) }));
@@ -33,26 +38,33 @@ vi.mock("@/components/chat/Dictation", () => ({
   MicButton: () => null,
   NEW_SESSION_TARGET: "new-session",
   useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
-vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn() }));
-vi.mock("@/lib/models", () => ({
+vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
+vi.mock("@/lib/models", async (original) => ({
+  // The pure helpers stay real; only the list and its loading are stubbed.
+  ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "bypassPermissions", label: "Bypass", hint: "" }],
   refreshModels: vi.fn(),
   upgradeHint: () => null,
-  useModels: () => [{ id: "opus", label: "Opus", efforts: [], defaultEffort: null, isDefault: true }],
+  useModels: () => [
+    { id: "opus", label: "Opus", harness: "claude", efforts: [], defaultEffort: null, isDefault: true, alias: true, resolved: "claude-opus-5-5" },
+    { id: "claude-opus-5", label: "Opus 5", harness: "claude", efforts: [], defaultEffort: null, isDefault: false },
+  ],
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: { claude: "claude-opus-5" }, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  getPrefs: () => ({}),
   setPrefs: vi.fn(),
 }));
 const local = { path: "/repos/raccoon", name: "raccoon" } as Project;
 // Claude is not installed on this computer; it is on the cloud workspace.
 const harness = { id: "claude", name: "Claude", available: false, installHint: "" } as HarnessInfo;
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({ projects: [local], harnesses: [harness], selectedProject: local.path, workspaces: {}, newSessionPreset: null, cloudSessionPreset: { projectKey: "cloud:org-a:github.com/acme/api" } }),
+  useSessionStore: () => ({ projects: noLocal.value ? [] : [local], harnesses: [harness], selectedProject: local.path, workspaces: {}, newSessionPreset: null, cloudSessionPreset: { projectKey: "cloud:org-a:github.com/acme/api" } }),
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
   selectProject: vi.fn(),
@@ -67,6 +79,13 @@ vi.mock("./CloudNewSession", async (importOriginal) => ({
   useCloudProjectChoices: () => [{ orgId: "org-a", orgName: "Acme", mayStart: mayStart.value, projects: [project, { ...project, key: "cloud:org-a:blank/scratch", identity: "blank/scratch", fullName: "scratch", blank: true }] }],
 }));
 vi.mock("@/lib/cloudNewSession", () => flow);
+vi.mock("@/lib/cloudModels", async (original) => ({
+  ...(await original<typeof import("@/lib/cloudModels")>()),
+  useCloudModelClient: (target: unknown) => {
+    modelConnection.targets(target);
+    return target ? modelConnection.client : null;
+  },
+}));
 vi.mock("@/components/cloud/RunningLimitNotice", () => ({
   RunningLimitNotice: ({ orgId }: { orgId: string }) => <div data-testid="running-limit-notice">{orgId}</div>,
 }));
@@ -96,7 +115,10 @@ beforeEach(() => {
     throw new Error(`no local command for a cloud draft: ${command}`);
   });
   for (const fn of Object.values(flow)) fn.mockReset();
+  modelConnection.client = null;
+  modelConnection.targets.mockClear();
   mayStart.value = true;
+  noLocal.value = false;
   draft.value = { project, orgName: "Acme", mayStart: true };
 });
 
@@ -122,9 +144,39 @@ describe("new session in a cloud project", () => {
     type("Fix the login redirect");
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
+    // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
+    // and the button claims no version for it.
+    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("uses the existing workspace's versions, and falls back to aliases when it stops", async () => {
+    const runtime = new FakeAgentRuntime();
+    const base = { efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
+    runtime.agents[0].models = [
+      { ...base, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true },
+      { ...base, id: "claude-opus-4-6", label: "Opus 4.6", isDefault: false },
+    ];
+    const client = new WorkspaceRpcClient(runtime);
+    runtime.connect();
+    modelConnection.client = client;
+    flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
+    flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
+    const view = render(<NewSessionView />);
+    const button = await screen.findByRole("button", { name: "Opus (latest · Opus 4.6)" });
+    expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" })).toBeTruthy();
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5" })).toBeNull();
+    fireEvent.keyDown(menu, { key: "Escape" });
+    act(() => runtime.emit({ state: "suspended" }));
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    view.rerender(<NewSessionView />);
+    expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
   });
 
   it("asks once for the cost, showing the quota, before creating a workspace", async () => {
@@ -261,6 +313,25 @@ describe("the project picker", () => {
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["raccoon", "acme/api", "scratchno repo", "Add a project…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /scratch/ }));
     expect(sessions.startCloudSessionIn).toHaveBeenCalledWith("cloud:org-a:blank/scratch");
+  });
+});
+
+describe("the project picker with no local projects", () => {
+  it("shows no Local heading over nothing, and starts with the organization's group (no rule above it)", async () => {
+    noLocal.value = true;
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /acme\/api/ }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByText("Local")).toBeNull();
+    expect(within(menu).queryByText("Projects")).toBeNull();
+    expect(within(menu).getByText("Acme cloud")).toBeTruthy();
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["acme/api", "scratchno repo", "Add a project…"]);
+    // The first thing in the menu is the cloud group's heading, not a separator under an empty section.
+    const group = within(menu).getByRole("group", { name: "Acme cloud projects" });
+    expect(menu.firstElementChild).toBe(group);
+    expect(group.firstElementChild?.textContent).toBe("Acme cloud");
+    // One rule is left: the one above "Add a project…".
+    expect(within(menu).getAllByRole("separator")).toHaveLength(1);
   });
 });
 

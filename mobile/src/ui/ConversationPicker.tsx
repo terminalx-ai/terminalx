@@ -31,7 +31,8 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
       accessibilityRole="button"
       accessibilityLabel={`Open ${conversation.label}`}
       accessibilityHint={`${status} · ${session.title}`}
-      accessibilityState={{ selected }}
+      accessibilityState={{ selected, disabled: horizontal && selected }}
+      disabled={horizontal && selected}
       onPress={() => onSelect(conversation)}
       onLayout={({ nativeEvent }) => {
         offsets.current[conversation.id] = nativeEvent.layout.x;
@@ -43,7 +44,7 @@ export function ConversationPicker({ session, selectedTabId, onSelect, horizonta
       }]}
     >
       <StatusDot color={color} />
-      <View style={styles.label}>
+      <View style={[styles.label, horizontal && styles.chipLabel]}>
         <Text numberOfLines={1} style={[styles.name, { color: palette.ink }]}>{conversation.label}</Text>
         <Text style={[styles.status, { color }]}>{status}</Text>
       </View>
@@ -59,6 +60,7 @@ const styles = StyleSheet.create({
   row: { borderTopWidth: StyleSheet.hairlineWidth },
   chip: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, minWidth: 140, maxWidth: 260 },
   label: { flex: 1, gap: 2 },
+  chipLabel: { flex: 0, flexShrink: 1 },
   name: { fontSize: 14, fontWeight: "600" },
   status: { fontSize: 12 },
   empty: { padding: 14, paddingTop: 0, fontSize: 13 },

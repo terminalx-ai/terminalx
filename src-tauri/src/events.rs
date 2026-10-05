@@ -116,6 +116,10 @@ pub struct Usage {
     pub context_max: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// The full id of the model that produced this reading, when the agent
+    /// says: what a family alias actually ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,6 +214,12 @@ pub enum Payload {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_session_id: Option<String>,
+        /// The `seq` of a queued `user_message` this turn was started by:
+        /// one the CLI held until the turn it was queued behind was over.
+        /// The message is not published a second time, so this is what
+        /// says it is the new turn's prompt and no longer a note in the old.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_seq: Option<u64>,
     },
     TurnCompleted {
         status: TurnStatus,

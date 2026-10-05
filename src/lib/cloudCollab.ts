@@ -143,36 +143,43 @@ export const VIEWER_REASON = "You can view this workspace; ask an admin for driv
 export const NOT_SHARED_REASON = "This workspace has not been shared with you. Ask an organization admin or its creator to share it.";
 /** Shown on the model, effort and mode pickers to someone who may not change them (review M1). */
 export const SETTINGS_LOCKED_REASON = "Only a workspace admin or someone who can approve permissions changes the model, effort or permission mode";
+/**
+ * Shown in an agent tab's terminal view (PRO-86) to a driver who may not
+ * approve: the agent's own screen answers its permission prompts and changes
+ * its mode, so typing there needs the same rights as changing its settings.
+ */
+export const TERMINAL_APPROVAL_REASON =
+  "Typing in the agent's terminal can answer its permission requests and change its mode, so it needs approval rights. You can watch here and send messages from the chat.";
 /** Shown on permission requests to someone who may not answer them. */
 export const APPROVE_BLOCKED_REASON = "Waiting for someone who can approve";
 
 /** Shown when a setting change was dropped because this person may no longer change settings (the receipt's `settingsIgnored`). */
 export const SETTINGS_IGNORED_REASON = "Your model, effort or mode change was not applied: you can no longer approve permissions";
-/** Why a creator who is a plain member cannot switch a workspace between private and organization-visible. */
-export const VISIBILITY_ADMIN_REASON = "Only an organization owner or admin can change whether a workspace is private or visible to the organization";
+/** Why someone who does not manage a workspace cannot switch it between private and organization-visible (PRO-73: its creator and owners and admins manage it). */
+export const VISIBILITY_ADMIN_REASON = "Only this workspace's creator or an organization owner or admin can change whether it is private or visible to the organization";
 /** Shown to an approver whose connection cannot change a tab's settings live: they ride with the next message. */
 export const SETTINGS_WITH_NEXT_MESSAGE = "Model, effort and mode changes apply with your next message";
 /** The lock pane of someone whose access ended while they had the session, or who had it before. */
 export const ACCESS_REMOVED_TITLE = "Your access to this workspace was removed.";
-/** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for owners and admins. */
-export const LIFECYCLE_ADMIN_REASON = "Only an organization owner or admin can stop, archive or delete a cloud workspace";
+/** Why Stop, Resume, Archive and Delete are not offered: the API keeps them for whoever manages the workspace, its creator and owners and admins (PRO-73). */
+export const LIFECYCLE_ADMIN_REASON = "Only this workspace's creator or an organization owner or admin can stop, archive or delete it";
 /**
- * Why a member is not offered a new cloud session: creating a workspace,
- * resuming one from the sidebar and adding a session to a running one are an
- * owner's or admin's. (A driver's message still wakes a stopped workspace it
- * is shared on; that is sending, not starting a session.)
+ * Why a member is not offered a new cloud session, against a server from
+ * before PRO-73 only: there, creating a workspace is an owner's or admin's.
+ * (With PRO-73 every member starts sessions, in workspaces of their own.)
  */
 export const NEW_SESSION_ADMIN_REASON = "Only an organization owner or admin can start a new cloud session";
-/** Why a member is not offered "New cloud workspace…": the same rule as a new session, which is what creates one. */
+/** Why a member is not offered "New cloud workspace…" against such a server: the same rule as a new session, which is what creates one. */
 export const NEW_WORKSPACE_ADMIN_REASON = "Only an organization owner or admin can create a cloud workspace";
 
 /**
  * What the API lets this person do to a workspace as a whole, from the
  * workspace list (saas contract §21.2) and what opening it would grant:
  *
- * - `lifecycle`: stop, resume, archive, unarchive and delete are an
- *   organization owner's or admin's (the API's manage check), whoever created
- *   or drives the workspace.
+ * - `lifecycle`: stop, resume, archive, unarchive, delete and the access
+ *   mode are for whoever manages the workspace: the API's `manager` role,
+ *   which is an organization owner or admin and, since PRO-73, the member
+ *   who created it. A share never grants it.
  * - `viewShares`: anyone who sees the workspace may read who it is shared
  *   with (the API allows the list to every member who can see it).
  * - `manageShares`: owners, admins and the creator change it.
@@ -399,6 +406,48 @@ export function canDrive(you: WorkspaceYou | null): boolean {
 
 export function canApprove(you: WorkspaceYou | null): boolean {
   return you?.role === "manager" || !!you?.canApprove;
+}
+
+/**
+ * A shell is arbitrary code as the workspace's user, so typing into a
+ * terminal needs what changing an agent's settings needs: a manager, or a
+ * driver who may approve permissions (PRO-88; the runtime refuses the rest).
+ */
+export function canTypeInTerminals(you: WorkspaceYou | null): boolean {
+  return you?.role === "manager" || (canDrive(you) && !!you?.canApprove);
+}
+
+/** Why a driver without the approval right only watches terminals. */
+export const TERMINAL_APPROVER_REASON = "typing in a terminal needs the right to approve permissions; ask an admin.";
+
+/**
+ * Receipt categories of a message the runtime refused because the agent's CLI
+ * would run it by itself: a slash command, a `!` shell command, or an `@`
+ * mention of a file outside the project (PRO-88). Only a manager or an
+ * approver sends those.
+ */
+const INPUT_REFUSALS: Record<string, string> = {
+  "slash-command-forbidden": "Not sent: that command needs someone who can approve permissions.",
+  "shell-command-forbidden": "Not sent: a message that starts with ! runs as a shell command, which needs someone who can approve permissions.",
+  "file-mention-forbidden": "Not sent: attaching a file from outside the project needs someone who can approve permissions.",
+  // For everyone: a slash or `!` command is not queued behind a running turn.
+  "command-not-queued": "Not sent: a turn is running. Send this command when it has ended.",
+  // For everyone (PRO-22): the message names an image the runtime does not hold.
+  "attachment-missing": "Not sent: an image of this message did not reach the workspace. Attach it and send again.",
+};
+
+/**
+ * Why the runtime refused a message, or null when the category is not one of
+ * these. The receipt's own `message` names the command and what this agent's
+ * CLI accepts instead; without a readable receipt (its key is gone) the
+ * category's sentence is shown.
+ */
+export function inputRefusalText(category: string | null | undefined, receipt: Record<string, unknown> | null | undefined): string | null {
+  const fallback = category ? INPUT_REFUSALS[category] : undefined;
+  if (!fallback) return null;
+  const message = receipt?.message;
+  if (typeof message !== "string" || !message.trim() || message.length > 400) return fallback;
+  return /^not sent/i.test(message) ? message : `Not sent: ${message.replace(/ was not sent: /, ": ")}`;
 }
 
 /** A participate connection the workspace is not shared with: it sees no content. */

@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
 import { cn } from "@/lib/cn";
-import { keycaps, useHotkey } from "@/lib/hotkeys";
+import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import {
   closeAllEditors,
@@ -64,14 +64,14 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
     document.documentElement.style.setProperty("--editor-w", `${prefs.editorPaneWidth}px`);
   }, [prefs.editorPaneWidth]);
 
-  useHotkey(
-    "mod+shift+p",
+  useShortcut(
+    "files.togglePreview",
     () => {
       if (activeId) toggleViewMode(activeId);
     },
     { enabled: active && !!activeId },
   );
-  useHotkey("mod+alt+w", () => void closeAllEditors(sessionId), { enabled: active });
+  useShortcut("files.closeAll", () => void closeAllEditors(sessionId), { enabled: active });
 
   if (!editors.length) return null;
 
@@ -149,7 +149,7 @@ export function EditorSplit({ sessionId, active, fill = false }: { sessionId: st
             <PanelRightClose />
           </Button>
         </WithTooltip>
-        <WithTooltip label="Close all files" keys={keycaps("mod+alt+w")}>
+        <WithTooltip label="Close all files" shortcut="files.closeAll">
           <Button variant="ghost" size="icon-xs" aria-label="Close all files" onClick={() => void closeAllEditors(sessionId)}>
             <X />
           </Button>

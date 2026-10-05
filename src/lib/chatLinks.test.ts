@@ -3,10 +3,13 @@ import { fs, type LocalPathInfo } from "@/lib/api";
 import { openBrowserTab } from "@/lib/browser";
 import { editorLinkContext, getEditors, openFile } from "@/lib/editors";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getPrefs, setPrefs } from "@/lib/prefs";
+import { scrollToInOwnScroller } from "@/lib/shellScroll";
 import { openChatLink, parseChatLink } from "./chatLinks";
 
 vi.mock("@/lib/api", () => ({ fs: { inspectPath: vi.fn(), openPath: vi.fn() } }));
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
+vi.mock("@/lib/shellScroll", () => ({ scrollToInOwnScroller: vi.fn() }));
 vi.mock("@/lib/editors", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/editors")>();
   return {
@@ -27,7 +30,11 @@ const info = (patch: Partial<LocalPathInfo> = {}): LocalPathInfo => ({
   ...patch,
 });
 
-beforeEach(() => vi.clearAllMocks());
+const initialPrefs = getPrefs();
+beforeEach(() => {
+  vi.clearAllMocks();
+  setPrefs({ ...initialPrefs, linkBrowser: "system" });
+});
 
 describe("chat link parsing", () => {
   it.each([
@@ -59,7 +66,22 @@ describe("chat link parsing", () => {
 });
 
 describe("chat link routing", () => {
-  it("opens web URLs in the captured session workspace", async () => {
+  it("opens nothing before a browser is chosen in ask mode", async () => {
+    setPrefs({ linkBrowser: "ask" });
+    await openChatLink(parseChatLink("https://example.test"), context);
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("opens web URLs only in the selected system browser", async () => {
+    const href = "https://example.test/a?q=1#x";
+    await openChatLink(parseChatLink(href), context);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(href);
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("opens web URLs in the captured session workspace when TerminalX is selected", async () => {
+    setPrefs({ linkBrowser: "terminalx" });
     const destination = parseChatLink("https://example.test/a?q=1#x");
     await openChatLink(destination, context);
     expect(openBrowserTab).toHaveBeenCalledWith("origin-session", "/workspace", "https://example.test/a?q=1#x");
@@ -78,6 +100,7 @@ describe("chat link routing", () => {
   });
 
   it("keeps the originating workspace when an outside Markdown preview opens web and nested file links", async () => {
+    setPrefs({ linkBrowser: "terminalx" });
     vi.mocked(fs.inspectPath).mockResolvedValueOnce(info({ path: "/tmp/Outside.md", root: "/tmp", rel: "Outside.md" }));
     await openChatLink(parseChatLink("/tmp/Outside.md"), context);
     const entry = getEditors().editors.find((candidate) => candidate.rel === "Outside.md")!;
@@ -109,9 +132,27 @@ describe("chat link routing", () => {
     await expect(openChatLink(parseChatLink("missing.txt"), context)).rejects.toThrow("unavailable");
   });
 
-  it("uses registered system handlers only for supported application schemes", async () => {
-    await openChatLink(parseChatLink("mailto:hello@example.test"), context);
-    expect(openUrl).toHaveBeenCalledWith("mailto:hello@example.test");
+  it.each(["mailto:hello@example.test", "tel:+15551234567"])("uses the registered system handler for %s", async (href) => {
+    await openChatLink(parseChatLink(href), context);
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(href);
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("scrolls anchors without opening a browser", async () => {
+    const target = document.createElement("h2");
+    target.id = "section";
+    document.body.append(target);
+    try {
+      await openChatLink(parseChatLink("#section"), context);
+      expect(scrollToInOwnScroller).toHaveBeenCalledWith(target);
+      expect(openUrl).not.toHaveBeenCalled();
+      expect(openBrowserTab).not.toHaveBeenCalled();
+    } finally {
+      target.remove();
+    }
+  });
+
+  it("rejects executable schemes", async () => {
     await expect(openChatLink(parseChatLink("javascript:alert(1)"), context)).rejects.toThrow("not allowed");
   });
 });

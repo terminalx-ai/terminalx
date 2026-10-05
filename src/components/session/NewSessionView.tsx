@@ -14,17 +14,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
-import { AgentMark } from "@/components/AgentMark";
-import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto } from "@/components/chat/Dictation";
+import { DictationStatus, MicButton, NEW_SESSION_TARGET, useDictationInto, useDictationShortcuts } from "@/components/chat/Dictation";
+import { insertNewLine } from "@/components/chat/Composer";
 import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@/components/chat/useImageAttachments";
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { EFFORT_LABEL, PERMISSION_MODES, refreshModels, upgradeHint, useModels } from "@/lib/models";
+import { PERMISSION_MODES } from "@/lib/models";
+import { useCloudModelClient } from "@/lib/cloudModels";
+import { useSessionAgent } from "@/lib/useSessionAgent";
+import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
-import { useHotkey } from "@/lib/hotkeys";
+import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
 import type { WorkStatus } from "@/types/session";
@@ -67,10 +70,6 @@ export function NewSessionView({
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
-  // Every picker opens on a click and an accessibility press, not only the project one.
-  const agentMenu = useRowMenu();
-  const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
-  const effortMenu = useRowMenu();
   const modeMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
@@ -82,13 +81,13 @@ export function NewSessionView({
   const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
   const isGit = cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
-  const harness = store.harnesses.find((h) => h.id === prefs.lastAgent) ?? store.harnesses[0] ?? null;
+  const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
+  const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
+    ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
+  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
+  const { harness, modelId, effort } = agentSelection;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
-  const models = useModels(harness?.id);
-  const modelId = harness ? (prefs.lastModel[harness.id] ?? models.find((m) => m.isDefault)?.id ?? models[0]?.id ?? "") : "";
-  const model = models.find((m) => m.id === modelId) ?? null;
-  const effort = harness ? (prefs.lastEffort[harness.id] ?? model?.defaultEffort ?? null) : null;
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode)
     ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -134,7 +133,10 @@ export function NewSessionView({
   };
 
   const dictation = useDictationInto(NEW_SESSION_TARGET, text, setText, ref);
-  useHotkey("mod+shift+d", dictation.toggle);
+  useDictationShortcuts(dictation);
+  const keymap = useKeymap();
+  const sendKeys = keymap["composer.send"][0];
+  const newLineKeys = keymap["composer.newLine"][0];
   const attach = useImageAttachments({ textareaRef: ref, draft: text, onDraftChange: setText });
   const hasImages = attach.attachments.length > 0;
 
@@ -286,7 +288,8 @@ export function NewSessionView({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start">
-                <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>
+                {/* A heading only over something: no "Local" above nothing when there are no local projects. */}
+                {store.projects.length > 0 && <DropdownMenuLabel>{cloudChoices.length ? "Local" : "Projects"}</DropdownMenuLabel>}
                 {store.projects.map((p) => (
                   <DropdownMenuItem
                     key={p.path}
@@ -301,9 +304,9 @@ export function NewSessionView({
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
-                {cloudChoices.map((section) => (
+                {cloudChoices.map((section, index) => (
                   <DropdownMenuGroup key={section.orgId} aria-label={`${section.orgName} cloud projects`}>
-                    <DropdownMenuSeparator />
+                    {(index > 0 || store.projects.length > 0) && <DropdownMenuSeparator />}
                     <DropdownMenuLabel>{section.orgName} cloud</DropdownMenuLabel>
                     {/* A member's cloud projects are listed but not startable: the server keeps new cloud sessions for owners and admins. */}
                     {section.mayStart === false && (
@@ -332,71 +335,7 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <DropdownMenu {...agentMenu.root}>
-              <DropdownMenuTrigger asChild {...agentMenu.trigger}>
-                <Button variant="secondary" size="sm" className={pill}>
-                  {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
-                  {harness?.name ?? "Agent"}
-                  <ChevronDown className="text-faint" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuLabel>Agent</DropdownMenuLabel>
-                {store.harnesses.map((h) => (
-                  <DropdownMenuItem key={h.id} disabled={!cloud && !h.available} onSelect={() => setPrefs({ lastAgent: h.id })}>
-                    <AgentMark id={h.id} decorative brand />
-                    <span>{h.name}</span>
-                    {!cloud && !h.available && <span className="ml-auto pl-3 text-[11px] text-faint">not installed</span>}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            {harness && models.length > 0 && (
-              <DropdownMenu {...modelMenu.root}>
-                <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-                  <Button variant="secondary" size="sm" className={pill}>
-                    {model?.label ?? modelId ?? "Model"}
-                    <ChevronDown className="text-faint" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-[12rem]">
-                  <DropdownMenuLabel>Model</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={modelId} onValueChange={(v) => setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: v } })}>
-                    {models.map((m) => {
-                      const upgrade = upgradeHint(m, models);
-                      return (
-                        <DropdownMenuRadioItem key={m.id} value={m.id}>
-                          {m.label}
-                          {upgrade ? <span className="ml-1.5 text-faint">→ {upgrade}</span> : null}
-                        </DropdownMenuRadioItem>
-                      );
-                    })}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-
-            {harness && model && model.efforts.length > 0 && (
-              <DropdownMenu {...effortMenu.root}>
-                <DropdownMenuTrigger asChild {...effortMenu.trigger}>
-                  <Button variant="secondary" size="sm" className={pill}>
-                    {effort ? (EFFORT_LABEL[effort] ?? effort) : "Effort"}
-                    <ChevronDown className="text-faint" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuLabel>Effort</DropdownMenuLabel>
-                  <DropdownMenuRadioGroup value={effort ?? ""} onValueChange={(v) => setPrefs({ lastEffort: { ...prefs.lastEffort, [harness.id]: v } })}>
-                    {model.efforts.map((e) => (
-                      <DropdownMenuRadioItem key={e} value={e}>
-                        {EFFORT_LABEL[e] ?? e}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            <SessionAgentControls selection={agentSelection} />
 
             <DropdownMenu {...modeMenu.root}>
               <DropdownMenuTrigger asChild {...modeMenu.trigger}>
@@ -494,9 +433,13 @@ export function NewSessionView({
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                if (e.nativeEvent.isComposing) return;
+                if (matchesShortcut(e.nativeEvent, "composer.send")) {
                   e.preventDefault();
                   void create();
+                } else if (matchesShortcut(e.nativeEvent, "composer.newLine") && e.key !== "Enter") {
+                  e.preventDefault();
+                  insertNewLine(e.currentTarget);
                 }
               }}
               rows={3}
@@ -523,7 +466,17 @@ export function NewSessionView({
                   </span>
                 ) : (
                   <>
-                    <kbd className="rounded-sm bg-veil-raised px-1 font-sans">⏎</kbd> to send, <kbd className="rounded-sm bg-veil-raised px-1 font-sans">⇧⏎</kbd> for a new line
+                    {sendKeys && (
+                      <>
+                        <kbd className="rounded-sm bg-veil-raised px-1 font-sans">{keycaps(sendKeys).join("")}</kbd> to send
+                      </>
+                    )}
+                    {sendKeys && newLineKeys && ", "}
+                    {newLineKeys && (
+                      <>
+                        <kbd className="rounded-sm bg-veil-raised px-1 font-sans">{keycaps(newLineKeys).join("")}</kbd> for a new line
+                      </>
+                    )}
                   </>
                 )}
               </div>

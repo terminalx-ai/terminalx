@@ -31,19 +31,27 @@ export function useVisibleSessionTab(sessionId: string): SelectedSessionTab | nu
 
 /**
  * The tab a session shows for a request: the requested one while it exists,
- * else the session's active agent tab, its first agent tab, its first terminal.
+ * else the one it already shows (`current`, when the caller says so), else
+ * the session's active agent tab, its first agent tab, its first terminal.
+ *
+ * `current` is for a session other people share. Its active tab is the
+ * runtime's, one value for everyone: it moves to a tab the moment anyone adds
+ * one. A view that was showing a tab by fallback (nobody here picked one)
+ * stays on it; the active tab only decides what a view opens on.
  */
 export function resolveSessionTab(input: {
   requested: SelectedSessionTab | undefined;
+  current?: SelectedSessionTab | null;
   agentIds: readonly string[];
   activeTab?: string | null;
   terminalIds: readonly string[];
   browserIds?: readonly string[];
 }): SelectedSessionTab | null {
-  const { requested, agentIds, terminalIds } = input;
-  if (requested?.kind === "agent" && agentIds.includes(requested.id)) return requested;
-  if (requested?.kind === "terminal" && terminalIds.includes(requested.id)) return requested;
-  if (requested?.kind === "browser" && input.browserIds?.includes(requested.id)) return requested;
+  const { agentIds, terminalIds } = input;
+  const exists = (tab: SelectedSessionTab | null | undefined): tab is SelectedSessionTab =>
+    !!tab && (tab.kind === "agent" ? agentIds.includes(tab.id) : tab.kind === "terminal" ? terminalIds.includes(tab.id) : !!input.browserIds?.includes(tab.id));
+  if (exists(input.requested)) return input.requested;
+  if (exists(input.current)) return input.current;
   const agent = (input.activeTab && agentIds.includes(input.activeTab) ? input.activeTab : null) ?? agentIds[0];
   if (agent) return { kind: "agent", id: agent };
   return terminalIds.length ? { kind: "terminal", id: terminalIds[0] } : null;

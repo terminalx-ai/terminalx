@@ -1,7 +1,9 @@
 import { useCallback, useState } from "react";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import { REMOTE_DROP_REFUSAL, type TerminalDropRefusal } from "@/components/terminal/TerminalDrop";
 import { TerminalView, createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
+import { TERMINAL_APPROVER_REASON, canDrive } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { cloudTerminalFactory, errorCode, takeControl, type CloudTerminal } from "@/lib/cloudTerminals";
 import { getInstance } from "@/lib/terminal";
@@ -9,7 +11,8 @@ import { getInstance } from "@/lib/terminal";
 /**
  * One cloud shell (PRO-26): its xterm, and who controls its input. Shared by
  * the cloud workspace page and a cloud session's terminal tabs. On a shared
- * workspace (PRO-30) it names who is typing and lets a driver take control.
+ * workspace (PRO-30) it names who is typing and lets a manager or an
+ * approving driver take control (PRO-88).
  */
 export function CloudTerminalPane({
   workspace,
@@ -26,7 +29,7 @@ export function CloudTerminalPane({
   client: WorkspaceRpcClient;
   connected: boolean;
   manage: boolean;
-  /** May take control (manage authority, or a driver or manager of a shared workspace). */
+  /** May take control (manage authority, or a manager or approving driver of a shared workspace). */
   mayControl?: boolean;
   /** Set on a runtime with `collab/1`. */
   you?: WorkspaceYou | null;
@@ -78,10 +81,23 @@ export function CloudTerminalPane({
       )}
       {error && <p className="px-3 py-1 text-xs text-red-500">{error}</p>}
       <div className="min-h-0 flex-1">
-        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} />
+        <TerminalView id={terminal.id} visible create={create} fit={controlling && !terminal.gone} dropRefusal={dropRefusal(terminal, mayControl)} />
       </div>
     </div>
   );
+}
+
+/**
+ * What a cloud terminal does not take by drag and drop. A dropped file is
+ * never typed: its path is one on this computer, not on the workspace.
+ * Whoever cannot type there cannot drop text there either.
+ */
+export function dropRefusal(terminal: CloudTerminal, mayControl: boolean): TerminalDropRefusal {
+  let watching: string | null = null;
+  if (terminal.gone || terminal.exited) watching = "This terminal has ended. Nothing can be dropped on it.";
+  else if (terminal.control !== "you") watching = mayControl ? "You are watching this terminal. Take control to drop into it." : "View only: you cannot drop into this terminal.";
+  if (watching) return { files: watching, text: watching };
+  return { files: REMOTE_DROP_REFUSAL.files };
 }
 
 /** Why this view only watches the terminal, and who controls it. */
@@ -97,19 +113,27 @@ export function viewerText(
   if (controller) {
     const who = nameOf(controller);
     // Holding control is not typing: the banner says who has the input, not what they are doing with it.
-    return mayControl ? `${who} controls this terminal; you are watching.` : `${who} controls this terminal. View only: you can watch; ask an admin for driver access to type.`;
+    if (mayControl) return `${who} controls this terminal; you are watching.`;
+    return canDrive(you) ? `${who} controls this terminal. You can watch; ${TERMINAL_APPROVER_REASON}` : `${who} controls this terminal. View only: you can watch; ask an admin for driver access to type.`;
   }
-  if (you && !mayControl) return "View only: you can watch this terminal; ask an admin for driver access to type.";
+  if (you && !mayControl) {
+    return canDrive(you) ? `You can watch this terminal; ${TERMINAL_APPROVER_REASON}` : "View only: you can watch this terminal; ask an admin for driver access to type.";
+  }
+  // An agent's own terminal starts with no controller at all.
+  if (terminal.tabId && terminal.control === "none") return "Nobody controls this terminal yet; you are watching.";
   if (manage || mayControl) return "Another device controls this terminal's input and size; you are watching.";
   return "View only: this attachment cannot type into or resize terminals.";
 }
 
-function inputErrorText(code: string): string {
+export function inputErrorText(code: string, agent = false): string {
+  if (agent && code === "unavailable") return "the agent is not running.";
   switch (code) {
+    case "lease_held":
+      return "someone else is driving this tab.";
     case "not_controller":
       return "another device controls this terminal. Take control to type.";
     case "forbidden":
-      return "your access to this workspace does not allow typing in terminals.";
+      return "your access to this workspace does not allow typing in terminals (it needs a workspace admin, or a driver who can approve permissions).";
     case "unavailable":
       return "the shell has exited.";
     case "not_found":

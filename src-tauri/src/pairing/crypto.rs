@@ -11,12 +11,20 @@ use super::model::{AccountPairingEnvelope, PairingOffer};
 
 pub const HPKE_ALGORITHM: &str = "HPKE-Base-X25519-HKDF-SHA256-ChaCha20Poly1305";
 
-pub fn encode_pairing_offer(offer: &PairingOffer) -> Result<String> {
+/// The pairing link. `name` is this computer's name, for the phone to show
+/// instead of "Paired Mac" (PRO-87). It rides beside the offer as its own
+/// query parameter, not inside it: phones parse the offer strictly, so a new
+/// field there would make every phone build before this one refuse to pair,
+/// while an extra parameter is simply not read by them. It is a label only;
+/// nothing identifies or authenticates by it.
+pub fn encode_pairing_offer(offer: &PairingOffer, name: Option<&str>) -> Result<String> {
     let payload = serde_json::to_vec(offer)?;
-    Ok(format!(
-        "terminalx://pair?code={}",
-        general_purpose::URL_SAFE_NO_PAD.encode(payload)
-    ))
+    let mut link = format!("terminalx://pair?code={}", general_purpose::URL_SAFE_NO_PAD.encode(payload));
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        link.push_str("&name=");
+        link.extend(url::form_urlencoded::byte_serialize(name.as_bytes()));
+    }
+    Ok(link)
 }
 
 pub fn seal_account_offer(

@@ -207,8 +207,13 @@ impl OrganizationComputeService {
             "allowedMachineClasses",
             "allowedLocations",
         ];
+        // PRO-73: the per-person fields are optional. A server from before
+        // them rejects an unknown key, so the webview sends each only to a
+        // server that reported it.
+        const OPTIONAL: [&str; 3] = ["maxRunningWorkspacesPerMember", "maxCreatesPerMemberPerHour", "maxCreatesPerMemberPerDay"];
         let object = policy.as_object().ok_or_else(|| OrganizationComputeError::local("cloud_workspace_request_invalid"))?;
-        if object.len() != KEYS.len() || !KEYS.iter().all(|key| object.contains_key(*key)) {
+        let required = object.len() - OPTIONAL.iter().filter(|key| object.contains_key(**key)).count();
+        if required != KEYS.len() || !KEYS.iter().all(|key| object.contains_key(*key)) {
             return Err(OrganizationComputeError::local("cloud_workspace_request_invalid"));
         }
         self.run(Some(context_revision), Method::Put, "policy", Some(policy.clone()))
@@ -348,6 +353,31 @@ mod tests {
         let revision = AccountManager::context_revision(&context());
         let error = service.update_policy(&json!({"maxWorkspaces": 4}), &revision).unwrap_err();
         assert_eq!(error.code, "cloud_workspace_request_invalid");
+        // An unknown key is still refused, with or without the optional one.
+        let mut policy = json!({
+            "expectedVersion": 2, "maxWorkspaces": 4, "maxRunningWorkspaces": null, "maxIdleSuspendMinutes": 30,
+            "allowedMachineClasses": {}, "allowedLocations": {}, "provisioningPaused": true
+        });
+        assert_eq!(service.update_policy(&policy, &revision).unwrap_err().code, "cloud_workspace_request_invalid");
+        policy["maxRunningWorkspacesPerMember"] = json!(1);
+        assert_eq!(service.update_policy(&policy, &revision).unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn forwards_the_per_member_running_cap_when_the_webview_sends_it() {
+        let revision = AccountManager::context_revision(&context());
+        for cap in [json!(1), Value::Null] {
+            let policy = json!({
+                "expectedVersion": 2, "maxWorkspaces": 4, "maxRunningWorkspaces": null, "maxRunningWorkspacesPerMember": cap,
+                "maxCreatesPerMemberPerHour": 5, "maxCreatesPerMemberPerDay": null,
+                "maxIdleSuspendMinutes": 30, "allowedMachineClasses": {}, "allowedLocations": {}
+            });
+            let (base, server) = serve_once("200 OK", VIEW);
+            service(&base).update_policy(&policy, &revision).unwrap();
+            let request = server.join().unwrap();
+            assert!(request.contains(&format!(r#""maxRunningWorkspacesPerMember":{cap}"#)), "{request}");
+            assert!(request.contains(r#""maxCreatesPerMemberPerHour":5"#) && request.contains(r#""maxCreatesPerMemberPerDay":null"#), "{request}");
+        }
     }
 
     #[test]

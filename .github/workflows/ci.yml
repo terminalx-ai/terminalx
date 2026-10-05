@@ -9,18 +9,36 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to a pull request replaces the run in progress. On main the
+# run in progress finishes (a newer push waits its turn): main's run is the
+# one that saves the cargo cache every pull request starts from, and when it
+# was cancelled by the next merge no cache was ever saved.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  legacy-runtime-probe:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test legacy AppImage diagnostic
+        run: python3 scripts/linux-runtime-probe.test.py
+
   check:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v4
@@ -50,8 +68,13 @@ jobs:
       - name: Show the Rust toolchain
         run: rustup show && cargo --version && cargo clippy --version
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # Restored everywhere, saved only from main (the last step). A cache
+      # saved from a pull request can be read by that pull request alone, and
+      # at 2.4 GB each a handful of them pushed everything else out of the
+      # repository's 10 GB.
+      - name: Restore the cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry/index
@@ -66,6 +89,16 @@ jobs:
 
       - name: vitest
         run: pnpm vitest run
+
+      # Layout checks that jsdom cannot make: the built app in WebKit, measured.
+      - name: Build the frontend
+        run: pnpm build
+
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+
+      - name: WebKit layout checks
+        run: pnpm test:webkit-layout
 
       # The computer-use helper is a Swift package with its own unit tests.
       # It is built before the Rust checks so tauri-build packages a real
@@ -83,6 +116,17 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+
+      - name: Save the cargo cache
+        if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   # The headless runtime a cloud workspace boots. The runner has no WebView,
   # GTK or ALSA development packages, so a GUI dependency fails the build.
@@ -119,7 +163,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # windows-latest is off until a Windows runner is set up: the job never
+        # got a runner and left every run unfinished. Add it back here; the
+        # Windows-only steps below are still in place.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:

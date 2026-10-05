@@ -6,7 +6,9 @@ import { useSyncExternalStore } from "react";
  * ~/.raccoon/settings.json instead (see store/settings.rs).
  */
 export interface Prefs {
-  linkBrowser: "terminalx" | "system";
+  linkBrowser: "terminalx" | "system" | "ask";
+  /** The reader used Settings or remembered a browser choice, rather than inheriting a default. */
+  linkBrowserChosen: boolean;
   linkActions: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
@@ -28,11 +30,6 @@ export interface Prefs {
   useWorktree: boolean;
   /** The reader ticked "don't ask again" on the bypass warning. */
   bypassConfirmed: boolean;
-  /**
-   * Organization sections with cloud projects and workspaces in the sidebar
-   * (PRO-23). The kill switch until the full-window cloud page is removed.
-   */
-  cloudSidebar: boolean;
   /**
    * Sidebar sections the reader expanded or collapsed, by key (`local`, or
    * `org:<orgId>`). A section not listed uses its default: Local and the
@@ -56,10 +53,23 @@ export interface Prefs {
   cloudPinned: Record<string, string[]>;
   /** Cloud projects the reader collapsed, by project key (`cloud:<orgId>:<identity>`); expanded by default. */
   cloudCollapsed: Record<string, true>;
+  /**
+   * Keyboard shortcuts the reader changed, by action id (see `@/lib/shortcuts`):
+   * the bindings that replace the action's defaults, an empty list for none.
+   * Kept per machine. An action not listed uses its defaults.
+   */
+  shortcuts: Record<string, string[]>;
+  /**
+   * The sidebar's session filter per person, by account email (`local` while
+   * signed out). Only a filter that is on is kept; someone not listed sees
+   * every session. One person's choice never carries over to another.
+   */
+  sidebarFilters: Record<string, "unread" | "needs">;
 }
 
 const DEFAULTS: Prefs = {
-  linkBrowser: "terminalx",
+  linkBrowser: "ask",
+  linkBrowserChosen: false,
   linkActions: true,
   sidebarOpen: true,
   sidebarWidth: 268,
@@ -80,12 +90,13 @@ const DEFAULTS: Prefs = {
   issueProvider: "github",
   useWorktree: true,
   bypassConfirmed: false,
-  cloudSidebar: true,
   sidebarSections: {},
   cloudProjects: {},
   cloudBlankProjects: {},
   cloudPinned: {},
   cloudCollapsed: {},
+  shortcuts: {},
+  sidebarFilters: {},
 };
 
 const KEY = "raccoon.prefs";
@@ -95,7 +106,19 @@ function load(): Prefs {
     const raw = localStorage.getItem(KEY);
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw);
-    return { ...DEFAULTS, ...parsed };
+    const prefs = { ...DEFAULTS, ...parsed };
+    // Older versions saved the whole object, including the TerminalX default,
+    // without recording whether it was chosen. Migrate unmarked values once;
+    // choices made in Settings or remembered in the chooser survive this migration.
+    if (prefs.linkBrowser === "terminalx" && prefs.linkBrowserChosen !== true) {
+      prefs.linkBrowser = "system";
+      try {
+        localStorage.setItem(KEY, JSON.stringify(prefs));
+      } catch {
+        // Still use the migrated preferences when storage is unavailable.
+      }
+    }
+    return prefs;
   } catch {
     return { ...DEFAULTS };
   }
@@ -126,6 +149,17 @@ function applyFontScale() {
 }
 
 applyFontScale();
+
+// Another window of the app changed the preferences: take them here too, so a
+// shortcut changed in one window is the shortcut in every window at once.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== KEY || e.storageArea !== localStorage) return;
+    state = load();
+    applyFontScale();
+    for (const l of listeners) l();
+  });
+}
 
 export function subscribePrefs(listener: () => void): () => void {
   listeners.add(listener);

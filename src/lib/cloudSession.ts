@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useRuntimeModels } from "@/lib/cloudModels";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import { collabGranted } from "@terminalx/portable/workspaceCollab";
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
@@ -34,7 +35,7 @@ import { isOpen, machineRunning, stopping } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
-  canDrive,
+  canTypeInTerminals,
   clearCollabAccess,
   ACCESS_GRACE_MS,
   forgetCollabAccess,
@@ -47,16 +48,16 @@ import {
   type AccessLoss,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
-import { clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
+import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", "local-docker": "Local Docker" };
+const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", hetzner: "Hetzner", "local-docker": "Local Docker" };
 
 /** A cloud provider's display name. */
 export function cloudProviderName(provider: string | null | undefined): string {
@@ -81,10 +82,17 @@ export const RECONNECTING_LABEL = "Reconnecting…";
 /** A stop is running: the machine is on its way down, whoever asked. */
 export const STOPPING_LABEL = "Stopping…";
 /** The workspace's machine coming up: being provisioned, or resumed from a stop. */
-export const STARTING_LABEL = "Starting";
+export const STARTING_LABEL = "Starting…";
+/** This desktop woke a stopped workspace, and its machine is coming back. */
+export const RESUMING_LABEL = "Resuming…";
+/**
+ * Every label the chip shows while something is still happening. Each ends in
+ * an ellipsis; a state that has settled ("Live", "Stopped") never does.
+ */
+export const IN_PROGRESS_LABELS = [CONNECTING_LABEL, RECONNECTING_LABEL, STOPPING_LABEL, STARTING_LABEL, RESUMING_LABEL] as const;
 
-/** While waking, the chip only moves forward: Resuming, then Connecting, then Live. */
-export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
+/** While waking, the chip only moves forward: Resuming…, then Connecting…, then Live. */
+export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
 
 /**
  * The connection chip: a short label, and whether it is live, on its way, or
@@ -92,7 +100,7 @@ export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
  * connection still reads connected, unless this desktop woke it. `woke` is
  * set once an interactive action asked for compute (CS-7's single wake).
  *
- * "Starting" is the machine's: a workspace that is being provisioned or
+ * "Starting…" is the machine's: a workspace that is being provisioned or
  * resumed (`starting`, from the workspace list). A workspace that is running
  * and that this window is only attaching to (a member opening a session
  * someone else has live) reads "Connecting…", also while the relay waits for
@@ -100,7 +108,7 @@ export const WAKE_STEPS = ["Resuming", CONNECTING_LABEL] as const;
  *
  * "Live" is the transport's word alone: `state` is the connection's own
  * state, never the workspace list's. While a stop runs (`stopping`, from the
- * list's operation) it reads "Stopping…", then "Stopped": never "Starting"
+ * list's operation) it reads "Stopping…", then "Stopped": never "Starting…"
  * or "Live" for a machine on its way down. A window attaching again after
  * its workspace came back (`reattaching`) reads "Reconnecting…" until the
  * transport is really up.
@@ -480,18 +488,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     return startCollab(workspaceKey, client);
   }, [generation, client, workspaceKey]);
 
-  const [agentList, setAgentList] = useState(DEFAULT_AGENTS);
-  useEffect(() => {
-    if (!generation || !client || !client.hasCapability("agents/1")) return;
-    let cancelled = false;
-    void client.listRuntimeAgents().then(
-      (found) => !cancelled && found.length && setAgentList(found.map((agent) => ({ id: agent.id, name: agent.name }))),
-      () => undefined,
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [generation, client]);
+  const runtimeModels = useRuntimeModels(cloudAsleep(state, workspaceState) ? null : client);
+  const agentList = runtimeModels?.agents ?? DEFAULT_AGENTS;
 
   // Whether this person ever had the session: a role seen in this view, or its conversation kept on this desktop.
   const authority = connected ? state.authority : (item?.workspace.authority ?? null);
@@ -534,6 +532,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   }, [fileSource]);
 
   const asleep = cloudAsleep(state, workspaceState);
+  // Stopped: its terminals' views keep their picture and nothing else, so looking at one says nothing to anyone.
+  useEffect(() => {
+    if (asleep) quietCloudTerminals(workspaceKey);
+  }, [asleep, workspaceKey]);
   // The header chip: Live only while the transport is up, never for a stopped workspace, and monotonic while this desktop wakes it.
   const wakeFloor = useRef(0);
   if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
@@ -568,6 +570,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     },
     [agents.tabs],
   );
+  // PRO-86: whether the runtime serves agent terminals; its last word outlives the connection.
+  const agentPty = agentPtyServed(workspaceKey, connected && client ? client.hasCapability("agent-pty/1") : null);
+  const agentProcess = useCallback((tabId: string) => agents.tabs.find((tab) => tab.tabId === tabId)?.info.process ?? null, [agents.tabs]);
   const backend = useMemo(
     () =>
       cloudSessionBackend({
@@ -586,8 +591,11 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         collabClient: collabLive ? client : null,
         settingsNotice,
         connects,
+        agentPty,
+        terminalBase,
+        agentProcess,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess],
   );
 
   const ownTabs = useMemo(() => {
@@ -747,7 +755,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     collab: { key: workspaceKey, you, live: collabLive, notShared: !!locked },
     locked,
     recheckAccess,
-    mayControlTerminals: manage || (collabLive && canDrive(you)),
+    mayControlTerminals: manage || (collabLive && canTypeInTerminals(you)),
     canWakeForTerminal,
     asleep,
     terminals: locked ? NO_TERMINALS : terminals,

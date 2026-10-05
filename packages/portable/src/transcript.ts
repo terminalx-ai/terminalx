@@ -1,4 +1,5 @@
 import type { AgentEvent, BackgroundTask, FileEdit, Payload, PermissionOption, Question, ToolResult } from "./events";
+import { withoutHarnessBlocks } from "./harnessText";
 
 /** Turns an event log into the platform-neutral transcript model. */
 export interface ToolCall {
@@ -14,12 +15,15 @@ export interface ToolCall {
   subagent?: { id: string; label?: string };
 }
 
+/** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
+const RUNTIME_RESTARTED_NOTICE = "The workspace runtime restarted";
+
 export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; text: string; key: string; seq: number; images?: { url: string }[] }
+  | { kind: "queued"; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
@@ -30,7 +34,7 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
-  prompt?: { text: string; images?: { url: string }[]; ts: string; seq: number };
+  prompt?: { text: string; images?: { url: string; name?: string }[]; ts: string; seq: number };
   work: WorkItem[];
   finalText?: string;
   completed?: { status: string; durationMs?: number; ts: string; head?: string };
@@ -59,6 +63,8 @@ export interface Transcript {
   tasks: BackgroundTask[];
   contextUsed?: number;
   contextMax?: number;
+  /** The full id of the model the agent last said it ran; what an alias came to. */
+  model?: string;
   compacting: boolean;
   retry?: { attempt: number; maxRetries: number; reason?: string };
   modelRequestOpen: boolean;
@@ -87,6 +93,25 @@ function visibleUserText(text: string): string {
   return text;
 }
 
+/**
+ * Take a queued message out of the turn it was a note in. The agent held it
+ * until that turn was over and then took it as its next prompt; a
+ * `turn_started` naming its seq says so (the message itself is published
+ * once, when it is sent). One the agent took mid-turn has no such event and
+ * stays where it is.
+ */
+function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const work = turns[index].work;
+    const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
+    if (at < 0) continue;
+    const [held] = work.splice(at, 1);
+    if (held.kind !== "queued") return undefined;
+    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+  }
+  return undefined;
+}
+
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
   const asks = new Map<string, PendingAsk>();
@@ -94,6 +119,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let tasks: BackgroundTask[] = [];
   let contextUsed: number | undefined;
   let contextMax: number | undefined;
+  let model: string | undefined;
   let compacting = false;
   let retry: Transcript["retry"];
   let modelRequestOpen = false;
@@ -116,9 +142,10 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     const payload: Payload = event.payload;
     switch (payload.type) {
       case "user_message": {
-        const text = visibleUserText(payload.text);
+        const text = withoutHarnessBlocks(visibleUserText(payload.text));
+        if (!text.trim() && !payload.images?.length && text !== payload.text) break;
         if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, images: payload.images });
+          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
@@ -136,8 +163,21 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         workingSince = Date.parse(event.ts);
         break;
       }
-      case "turn_started":
+      case "turn_started": {
+        if (payload.promptSeq == null) break;
+        const prompt = takeQueued(turns, payload.promptSeq);
+        if (!prompt) break;
+        if (current && !current.completed && !current.prompt) {
+          current.prompt = prompt;
+        } else {
+          for (const call of calls.values()) if (!call.result) call.abandoned = true;
+          current = { key: `t${event.seq}`, seq: event.seq, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
+          turns.push(current);
+        }
+        modelRequestOpen = false;
+        workingSince = Date.parse(event.ts);
         break;
+      }
       case "assistant_text": {
         const turn = ensureTurn(event);
         if (payload.text.trim()) turn.work.push({ kind: "text", text: payload.text, key: `a${event.seq}`, seq: event.seq });
@@ -248,6 +288,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "usage_update":
         if (payload.contextUsed != null) contextUsed = payload.contextUsed;
         if (payload.contextMax != null) contextMax = payload.contextMax;
+        if (payload.model) model = payload.model;
         break;
       case "context_compaction_started":
         compacting = true;
@@ -266,6 +307,10 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         rateLimit = { status: payload.status, resetsAt: payload.resetsAt };
         break;
       case "status":
+        // Older apps persisted a readiness guess as a permanent transcript
+        // warning. It never established whether the prompt was delivered;
+        // the recovery state now owns that question, including on reload.
+        if (payload.text === "The agent was slow to start; check that your message arrived.") break;
         if (payload.text.startsWith("rate_limit:")) {
           try {
             const parsed = JSON.parse(payload.text.slice("rate_limit:".length));
@@ -285,6 +330,11 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           }
         } else if (!payload.text.startsWith("tool_pending:")) {
           const turn = ensureTurn(event);
+          // A cloud runtime that restarted several times says so each time;
+          // back to back, that notice is shown once. Every other notice,
+          // local sessions' included, is shown as often as it was said.
+          const last = turn.work[turn.work.length - 1];
+          if (payload.text.startsWith(RUNTIME_RESTARTED_NOTICE) && last?.kind === "status" && last.text === payload.text) break;
           turn.work.push({ kind: "status", text: payload.text, key: `st${event.seq}`, seq: event.seq });
         }
         break;
@@ -316,6 +366,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     tasks,
     contextUsed,
     contextMax,
+    model,
     compacting,
     retry,
     modelRequestOpen,

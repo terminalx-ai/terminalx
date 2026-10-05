@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BarChart3, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -8,7 +8,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
-import { keycaps } from "@/lib/hotkeys";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import type { ShortcutId } from "@/lib/shortcuts";
 import { errorMessage } from "@/lib/api";
 import {
   addProject,
@@ -23,6 +24,7 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
+import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
@@ -35,6 +37,7 @@ import { refreshAccountRoles } from "@/lib/accountRoles";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { TreeToggle } from "./SidebarRows";
 import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
+import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -49,7 +52,6 @@ export function ProjectRail({
   onOpenAutomations,
   onOpenSkills,
   onSearch,
-  onOpenCloudPage,
 }: {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
@@ -59,7 +61,6 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
-  onOpenCloudPage?: () => void;
 }) {
   const store = useSessionStore();
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
@@ -75,8 +76,11 @@ export function ProjectRail({
   const [spinning, setSpinning] = useState(false);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
 
+  const filter = useSidebarFilter();
   const projects = [...store.projects]
     .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
+    // Unread or Needs you: only the projects with such a session.
+    .filter((p) => !filter.active || filter.showsProject(p.path))
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
   const archivedCount = store.projects.filter((p) => p.archived).length;
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
@@ -125,8 +129,33 @@ export function ProjectRail({
     }
   };
 
+  const filterLabel = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const headerActions = (
     <div className="flex items-center">
+      <DropdownMenu>
+        <WithTooltip label={filter.active ? `Showing: ${filterLabel}` : "Filter sessions"}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={filter.active ? `Filter sessions: ${filterLabel}` : "Filter sessions"}
+              className={filter.active ? "bg-veil-strong text-foreground" : undefined}
+              data-testid="sidebar-filter"
+              data-filter={filter.filter}
+            >
+              <ListFilter />
+            </Button>
+          </DropdownMenuTrigger>
+        </WithTooltip>
+        <DropdownMenuContent align="end">
+          {SIDEBAR_FILTERS.map((entry) => (
+            <DropdownMenuItem key={entry.id} onSelect={() => setSidebarFilter(entry.id)} aria-checked={filter.filter === entry.id} role="menuitemradio">
+              {filter.filter === entry.id ? <Check /> : <span aria-hidden className="size-4" />}
+              {entry.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
         <Button
           variant="ghost"
@@ -155,12 +184,24 @@ export function ProjectRail({
   const localRows = (
     <>
       {!localCollapsed && projects.length === 0 && (
-        <div className="px-2 py-6 text-center text-xs text-muted-foreground">
-          {showArchived ? "Nothing archived." : "Add a project to start."}
+        <div className="px-2 py-6 text-center text-xs text-muted-foreground" data-testid={filter.active ? "sidebar-filter-empty" : undefined}>
+          {filter.active ? (
+            <>
+              {filter.empty}{" "}
+              <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => setSidebarFilter("all")}>
+                Show all sessions
+              </button>
+            </>
+          ) : showArchived ? (
+            "Nothing archived."
+          ) : (
+            "Add a project to start."
+          )}
         </div>
       )}
       {!localCollapsed && projects.map((project) => {
-        const expanded = expandedProjects.has(project.path);
+        // A filter shows what it found: its projects are open while it is on.
+        const expanded = filter.active || expandedProjects.has(project.path);
         return (
           <ProjectRow
             key={project.path}
@@ -191,7 +232,7 @@ export function ProjectRail({
         <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
           <Search />
           Search
-          <Keys chord="mod+k" />
+          <Keys shortcut="app.commandPalette" />
         </Button>
         <Button
           variant="ghost"
@@ -200,9 +241,9 @@ export function ProjectRail({
         >
           <CircleDot />
           Issues
-          <Keys chord="mod+i" />
+          <Keys shortcut="app.issues" />
         </Button>
-        <WithTooltip label="Agent dashboard" keys={keycaps("mod+shift+a")}>
+        <WithTooltip label="Agent dashboard" shortcut="app.agentDashboard">
           <Button
             variant="ghost"
             className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
@@ -213,7 +254,7 @@ export function ProjectRail({
             <DashboardTotals buckets={dashboardBuckets} />
           </Button>
         </WithTooltip>
-        <WithTooltip label="Stats & Usage" keys={keycaps("mod+shift+u")}>
+        <WithTooltip label="Stats & Usage" shortcut="app.stats">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
@@ -223,7 +264,7 @@ export function ProjectRail({
             <span className="truncate">Stats &amp; Usage</span>
           </Button>
         </WithTooltip>
-        <WithTooltip label="Automations" keys={keycaps("mod+shift+r")}>
+        <WithTooltip label="Automations" shortcut="app.automations">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
@@ -239,7 +280,7 @@ export function ProjectRail({
             )}
           </Button>
         </WithTooltip>
-        <WithTooltip label="Skills" keys={keycaps("mod+shift+k")}>
+        <WithTooltip label="Skills" shortcut="app.skills">
           <Button
             variant="ghost"
             className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
@@ -247,7 +288,7 @@ export function ProjectRail({
           >
             <Sparkles />
             Skills
-            <Keys chord="mod+shift+k" />
+            <Keys shortcut="app.skills" />
           </Button>
         </WithTooltip>
       </div>
@@ -296,16 +337,20 @@ export function ProjectRail({
         ) : (
           localRows
         )}
-        {sectioned && <CloudSections onOpenCloudPage={onOpenCloudPage} onOpenAccount={onOpenAccount} />}
+        {sectioned && <CloudSections onOpenAccount={onOpenAccount} />}
+        <DevelopmentSection />
       </div>
 
-      <div className="shrink-0 border-t border-hairline p-2">
-        <AccountSidebarEntry onOpenAccount={onOpenAccount} />
-        <Button variant="ghost" className="w-full justify-start gap-2 px-2" onClick={onOpenSettings}>
-          <Settings />
-          Settings
-          <Keys chord="mod+," />
-        </Button>
+      {/* One row: the account (which opens Account) takes the width and truncates; the gear is its own target at the right end. */}
+      <div className="flex shrink-0 items-center gap-1 border-t border-hairline p-2" data-testid="sidebar-account-row">
+        <div className="min-w-0 flex-1">
+          <AccountSidebarEntry onOpenAccount={onOpenAccount} />
+        </div>
+        <WithTooltip label="Settings" shortcut="app.settings" side="top">
+          <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
+            <Settings />
+          </Button>
+        </WithTooltip>
       </div>
     </div>
   );
@@ -335,10 +380,11 @@ function DashboardTotals({ buckets }: { buckets: Record<ColumnId, readonly unkno
   );
 }
 
-function Keys({ chord }: { chord: string }) {
+function Keys({ shortcut }: { shortcut: ShortcutId }) {
+  const keys = useShortcutKeys(shortcut);
   return (
     <span className="ml-auto flex gap-0.5 text-[10px] text-faint">
-      {keycaps(chord).map((k) => (
+      {keys.map((k) => (
         <kbd key={k} className="rounded-sm bg-veil-raised px-1 font-sans">
           {k}
         </kbd>
