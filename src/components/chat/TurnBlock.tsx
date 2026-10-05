@@ -6,6 +6,7 @@ import { formatDuration } from "@/lib/time";
 import type { Turn, WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { Markdown } from "./Markdown";
+import { LinkedText } from "./LinkedText";
 import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
 
@@ -65,7 +66,7 @@ export const TurnBlock = memo(function TurnBlock({
                 )}
               </div>
             ) : null}
-            {turn.prompt.text}
+            <LinkedText text={turn.prompt.text} context={linkContext} />
           </div>
         </div>
       )}
@@ -98,13 +99,13 @@ export const TurnBlock = memo(function TurnBlock({
       {streamThinking.map((s) => (
         <div key={`${s.ref.messageId}:${s.ref.index}`} className="mb-2 flex items-start gap-2 text-[13px] text-thinking">
           <Brain className="mt-1 size-3.5 shrink-0 animate-pulse-soft" />
-          <div className="line-clamp-3 whitespace-pre-wrap italic opacity-80">{s.text.slice(-600)}</div>
+          <div className="line-clamp-3 whitespace-pre-wrap italic opacity-80"><LinkedText text={s.text.slice(-600)} context={linkContext} /></div>
         </div>
       ))}
       {streamingTool && (
         <div className="mb-1 flex items-center gap-2 px-1.5 py-1 text-[13px] text-muted-foreground">
           <span className="text-shimmer">{streamingTool.toolName ?? "Calling a tool"}</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-faint">{previewFromPartialJson(streamingTool.partialJson)}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-faint"><LinkedText text={previewFromPartialJson(streamingTool.partialJson)} context={linkContext} /></span>
         </div>
       )}
       {streamText.map((s) => (
@@ -124,7 +125,7 @@ export const TurnBlock = memo(function TurnBlock({
       {failed && turn.finalText && (
         <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <div className="whitespace-pre-wrap select-text">{turn.finalText}</div>
+          <div className="whitespace-pre-wrap select-text"><LinkedText text={turn.finalText} context={linkContext} /></div>
         </div>
       )}
 
@@ -175,25 +176,25 @@ function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; lin
     case "text":
       return <Markdown text={item.text} className="mb-3" linkContext={linkContext} />;
     case "reasoning":
-      return <ReasoningRow text={item.text} />;
+      return <ReasoningRow text={item.text} linkContext={linkContext} />;
     case "tool":
-      return <ToolCallRow call={item.call} cwd={cwd} />;
+      return <ToolCallRow call={item.call} cwd={cwd} linkContext={linkContext} />;
     case "tool_group":
-      return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} />;
+      return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "queued":
       return (
         <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground">
           <Clock className="size-3.5" />
-          <span className="whitespace-pre-wrap">{item.text}</span>
+          <span className="whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
         </div>
       );
     case "status":
-      return <div className="px-1.5 py-1 text-xs text-faint">{item.text}</div>;
+      return <div className="px-1.5 py-1 text-xs text-faint"><LinkedText text={item.text} context={linkContext} /></div>;
     case "error":
       return (
         <div className="my-1 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
           <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <span className="whitespace-pre-wrap select-text">{item.text}</span>
+          <span className="whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
         </div>
       );
     case "compaction":
@@ -208,41 +209,40 @@ function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; lin
       return (
         <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-warning">
           <RefreshCw className="size-3.5 animate-spin" />
-          Retrying ({item.attempt}/{item.maxRetries}){item.reason ? `: ${item.reason}` : ""}
+          Retrying ({item.attempt}/{item.maxRetries}){item.reason ? <>: <LinkedText text={item.reason} context={linkContext} /></> : null}
         </div>
       );
     case "subagent":
       return (
         <div className="flex items-center gap-2 px-1.5 py-1 text-[13px] text-muted-foreground">
           <Users className="size-3.5" />
-          <span className={cn(!item.done && "text-shimmer")}>{item.label ?? "Subagent"}</span>
+          <span className={cn(!item.done && "text-shimmer")}><LinkedText text={item.label ?? "Subagent"} context={linkContext} /></span>
           {item.done && <Check className="size-3.5 text-faint" />}
         </div>
       );
     case "decision":
       return (
         <div className={cn("px-1.5 py-0.5 text-xs", item.allowed ? "text-faint" : "text-destructive/80")}>
-          {item.label}
+          <LinkedText text={item.label} context={linkContext} />
         </div>
       );
   }
 }
 
-function ReasoningRow({ text }: { text: string }) {
+function ReasoningRow({ text, linkContext }: { text: string; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useState(false);
   const first = text.split("\n").find((l) => l.trim()) ?? "";
   return (
     <div>
-      <button
-        type="button"
+      <div
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] text-thinking hover:bg-veil-raised"
       >
-        <Brain className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate italic opacity-80">{open ? "Thinking" : first}</span>
-        <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
-      </button>
-      {open && <div className="ml-6 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text">{text}</div>}
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-3.5 shrink-0" /></button>
+        <span className="min-w-0 flex-1 truncate italic opacity-80">{open ? "Thinking" : <LinkedText text={first} context={linkContext} />}</span>
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
+      </div>
+      {open && <div className="ml-6 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/cn";
+import { LinkedText } from "./LinkedText";
 import { shortPath } from "@/lib/paths";
 import { diffLines, type DiffLine } from "@/lib/diff";
 
@@ -61,7 +62,7 @@ function DiffRow({ line }: { line: DiffLine }) {
       >
         {line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}
       </span>
-      <span className="pr-3">{line.text || " "}</span>
+      <span className="pr-3"><LinkedText text={line.text || " "} /></span>
     </div>
   );
 }

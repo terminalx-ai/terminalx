@@ -20,6 +20,7 @@ vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { titl
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => "test" }));
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("expo-document-picker", () => ({ getDocumentAsync: vi.fn() }));
 vi.mock("expo-file-system", () => ({ File: class {} }));
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
@@ -29,7 +30,7 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
 } }));
 vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Search", "ChevronUp", "FileText", "MoreVertical", "Paperclip", "Radio", "Send", "Terminal", "X"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {
-  const Box = ({ children }: { children?: ReactNode }) => <div>{children}</div>;
+  const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
   return {
     View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
@@ -98,6 +99,66 @@ beforeEach(() => {
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+
+describe("mobile transcript presentation (#388)", () => {
+  it("makes bare URLs clickable in prompts, reasoning, and notes", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Open https://example.com/prompt"), {
+      ...event("claude", "", 2), payload: { type: "reasoning", text: "Looking at https://example.com/thinking" },
+    }], hasMore: false });
+    mocks.app.api.listNotes.mockResolvedValueOnce([{ id: "note", body: "Reference https://example.com/note", createdAt: 0, author: { userId: "me" } }]);
+    await render();
+    expect(container.querySelectorAll('[role="link"]')).toHaveLength(3);
+  });
+  it("omits the redundant picker for a single conversation", async () => {
+    mocks.app.sessions[0].tabs = [mocks.app.sessions[0].tabs[0]];
+    await render();
+    expect(container.querySelector('[data-testid="screen-title"]')?.textContent).toBe("Claude Code");
+    expect(container.querySelector('[aria-label="Open Claude Code"]')).toBeNull();
+    expect(container.textContent).toContain("claude transcript");
+  });
+
+  it("renders the completed fallback with the same markdown renderer", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Explain this"), {
+      ...event("claude", "", 2), payload: { type: "turn_completed", status: "error", authFailed: false, finalText: "**Final answer** with `code`" },
+    }], hasMore: false });
+    await render();
+    expect(container.textContent).toContain("Final answer");
+    expect(container.textContent).not.toContain("**Final answer**");
+    expect(container.textContent).not.toContain("`code`");
+  });
+
+  it("renders assistant markdown instead of its delimiters", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "Explain this"), {
+      ...event("claude", "", 2), payload: { type: "assistant_text", text: "**Important** and `value`\n\n# Heading\n\n- First\n- Second\n\n| Name | Value |\n| --- | --- |\n| Answer | 42 |" },
+    }], hasMore: false });
+    await render();
+    expect(container.textContent).toContain("Important");
+    expect(container.textContent).toContain("value");
+    expect(container.textContent).toContain("Heading");
+    expect(container.textContent).toContain("First");
+    expect(container.textContent).toContain("Answer");
+    expect(container.textContent).not.toContain("**Important**");
+    expect(container.textContent).not.toContain("`value`");
+    expect(container.textContent).not.toContain("# Heading");
+    expect(container.textContent).not.toContain("- First");
+    expect(container.textContent).not.toContain("| --- | --- |");
+  });
+
+  it("hides harness-only prompts and retains real text around reminders", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [
+      event("claude", "<task-notification>\n<task-id>background-123</task-id>\n<output-file>/tmp/private-task.output</output-file>\n</task-notification>"),
+      event("claude", "Please continue.\n<system-reminder>Internal harness instructions</system-reminder>", 2),
+    ], hasMore: false });
+    await render();
+    expect(container.textContent).toContain("Please continue.");
+    expect(container.textContent).not.toContain("task-notification");
+    expect(container.textContent).not.toContain("background-123");
+    expect(container.textContent).not.toContain("/tmp/private-task.output");
+    expect(container.textContent).not.toContain("system-reminder");
+    expect(container.textContent).not.toContain("Internal harness instructions");
+    expect(mocks.listProps.data).toHaveLength(1);
+  });
+});
 
 describe("mobile conversation navigation", () => {
   it("opens each list row with the exact conversation and searches by agent", async () => {
@@ -389,6 +450,9 @@ describe("mobile latest conversation edge", () => {
     await render(); await scroll(600);
     await act(async () => resolve({ events: [event("claude", "host latest", 2)], hasMore: true }));
     await act(async () => mocks.sessionListeners.get("claude")?.(event("claude", "live latest", 3)));
+    // The authoritative host tail includes the event it just published, both
+    // on reconnect and when this conversation is opened again.
+    mocks.app.api.tail.mockImplementation(async (_session: string, tab: string) => ({ events: [event(tab, tab === "claude" ? "live latest" : "codex transcript", tab === "claude" ? 3 : 1)], hasMore: true }));
     mocks.app = { ...mocks.app, connectionEpoch: 1 }; await render();
     expect(button("Jump to latest")).toBeTruthy();
     expect(mocks.scrollToOffset).not.toHaveBeenCalled();

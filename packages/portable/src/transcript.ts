@@ -1,4 +1,5 @@
 import type { AgentEvent, BackgroundTask, FileEdit, Payload, PermissionOption, Question, ToolResult } from "./events";
+import { withoutHarnessBlocks } from "./harnessText";
 
 /** Turns an event log into the platform-neutral transcript model. */
 export interface ToolCall {
@@ -141,7 +142,8 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     const payload: Payload = event.payload;
     switch (payload.type) {
       case "user_message": {
-        const text = visibleUserText(payload.text);
+        const text = withoutHarnessBlocks(visibleUserText(payload.text));
+        if (!text.trim() && !payload.images?.length && text !== payload.text) break;
         if (payload.queued && current && !current.completed) {
           current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;

@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { cloneElement, isValidElement, memo, useMemo, type ReactElement, type ReactNode } from "react";
 import { defaultRemarkPlugins, Streamdown } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import "streamdown/styles.css";
@@ -6,12 +6,26 @@ import { useTheme } from "@/lib/theme";
 import { chunkStream } from "@/lib/markdownChunks";
 import { chatLinkComponent } from "./ChatLink";
 import { routeMarkdownLinks, type ChatLinkContext } from "@/lib/chatLinks";
+import { textLinks } from "@terminalx/portable/textLinks";
+import { LinkedText } from "./LinkedText";
+import { LinkedCode } from "./LinkedCode";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
 const routedRemarkPlugins = [...Object.values(defaultRemarkPlugins), routeMarkdownLinks];
 
 const Block = memo(function Block({ text, streaming, mode, linkContext }: { text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
-  const components = useMemo(() => (linkContext ? { a: chatLinkComponent(linkContext) } : undefined), [linkContext]);
+  const components = useMemo(() => ({
+    a: chatLinkComponent(linkContext),
+    inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]"><LinkedText text={String(children ?? "")} context={linkContext} /></code>,
+    pre: ({ children }: { children?: ReactNode }) => {
+      if (!isValidElement(children)) return children;
+      const child = children as ReactElement<{ children?: ReactNode; className?: string; "data-block"?: string }>;
+      const code = typeof child.props.children === "string" ? child.props.children : "";
+      if (!textLinks(code).some((part) => part.href)) return cloneElement(child, { "data-block": "true" });
+      const language = child.props.className?.match(/language-([^\s]+)/)?.[1] ?? "text";
+      return <LinkedCode code={code} language={language} mode={mode} plugin={codePlugin} context={linkContext} />;
+    },
+  }), [linkContext, mode]);
   return (
     <div className="prose-chat select-text" data-mode={mode}>
       <Streamdown

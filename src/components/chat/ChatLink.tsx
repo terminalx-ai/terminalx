@@ -18,7 +18,8 @@ import type { LocalPathInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
 
-type Props = AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps & { context: ChatLinkContext };
+type Props = AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps & { context?: ChatLinkContext };
+const EXTERNAL_CONTEXT: ChatLinkContext = { sessionId: "", cwd: "" };
 
 const BROWSER_NAMES = { system: "System Browser", terminalx: "TerminalX Browser" };
 
@@ -26,9 +27,11 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ChatLink({ context, href = "", children, className, node: _node, ...props }: Props) {
+export function ChatLink({ context = EXTERNAL_CONTEXT, href = "", children, className, node: _node, ...props }: Props) {
   const prefs = usePrefs();
-  const primaryBrowser = prefs.linkBrowser === "terminalx" ? "terminalx" : "system";
+  const hasWorkspace = !!context.cwd && !!context.sessionId;
+  const browserPreference = hasWorkspace ? prefs.linkBrowser : "system";
+  const primaryBrowser = browserPreference === "terminalx" ? "terminalx" : "system";
   const alternateBrowser = primaryBrowser === "system" ? "terminalx" : "system";
   const originalHref = originalChatHref(href);
   const destination = useMemo(() => parseChatLink(originalHref), [originalHref]);
@@ -44,7 +47,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
   const [inspecting, setInspecting] = useState<string | null>(null);
   const [chooserIdentity, setChooserIdentity] = useState<string | null>(null);
   const [rememberChoice, setRememberChoice] = useState(false);
-  const asksForBrowser = destination.kind === "web" && prefs.linkBrowser === "ask";
+  const asksForBrowser = destination.kind === "web" && browserPreference === "ask";
   const chooserOpen = asksForBrowser && chooserIdentity === identity;
   const info = inspected?.identity === identity ? inspected.info : null;
 
@@ -87,9 +90,9 @@ export function ChatLink({ context, href = "", children, className, node: _node,
   }, [destination, info, run]);
 
   const activate = (alternate = false) => {
-    const browser = getPrefs().linkBrowser;
+    const browser = hasWorkspace ? getPrefs().linkBrowser : "system";
     if (destination.kind === "web") {
-      if (alternate) {
+      if (alternate && hasWorkspace) {
         // In ask mode the alternate keeps the explicit TerminalX shortcut.
         run(() => openChatLinkInBrowser(destination, context, browser === "terminalx" ? "system" : "terminalx"));
         return;
@@ -100,6 +103,8 @@ export function ChatLink({ context, href = "", children, className, node: _node,
         setChooserIdentity(identity);
         return;
       }
+      run(() => openChatLinkInBrowser(destination, context, browser));
+      return;
     }
     run(() => openChatLink(destination, context));
   };
@@ -118,7 +123,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
       rel={undefined}
       className={`wrap-anywhere font-medium text-primary underline ${className ?? ""}`}
       data-streamdown="link"
-      title={destination.kind === "web" ? `${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : undefined}
+      title={destination.kind === "web" ? `${asksForBrowser ? "Choose a browser" : `Open in ${BROWSER_NAMES[primaryBrowser]}`}${hasWorkspace ? `; ${navigator.platform.toLowerCase().includes("mac") ? "⇧⌘" : "Shift+Ctrl"}-click to open in ${BROWSER_NAMES[alternateBrowser]}` : ""}` : undefined}
       aria-haspopup={asksForBrowser ? "dialog" : undefined}
       aria-expanded={asksForBrowser ? chooserOpen : undefined}
       tabIndex={props.tabIndex ?? (asksForBrowser ? 0 : undefined)}
@@ -156,7 +161,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
           <ContextMenuContent>
             {destination.kind === "web" ? <>
               <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, primaryBrowser))}>Open in {BROWSER_NAMES[primaryBrowser]}</ContextMenuItem>
-              {prefs.linkActions && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, alternateBrowser))}>Open in {BROWSER_NAMES[alternateBrowser]}</ContextMenuItem>}
+              {prefs.linkActions && hasWorkspace && <ContextMenuItem onSelect={() => run(() => openChatLinkInBrowser(destination, context, alternateBrowser))}>Open in {BROWSER_NAMES[alternateBrowser]}</ContextMenuItem>}
             </> : destination.kind === "application" ? (
               <ContextMenuItem onSelect={() => run(() => openChatLink(destination, context))}>Open with default application</ContextMenuItem>
             ) : destination.kind === "local" ? inspecting === identity ? (
@@ -204,7 +209,7 @@ export function ChatLink({ context, href = "", children, className, node: _node,
   );
 }
 
-export function chatLinkComponent(context: ChatLinkContext) {
+export function chatLinkComponent(context?: ChatLinkContext) {
   return function RoutedChatLink(props: AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps) {
     return <ChatLink {...props} context={context} />;
   };

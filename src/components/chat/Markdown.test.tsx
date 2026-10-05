@@ -27,6 +27,27 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("rendered chat links", () => {
+  it("activates URLs inside inline code and fenced code, and copies the destination", async () => {
+    const copy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: copy }, configurable: true });
+    render(<Markdown text={'`https://example.test/inline`\n\n```js\nconst url = "https://example.test/code?q=1#part";\n```'} linkContext={context} />);
+    const code = await screen.findByRole("link", { name: "https://example.test/code?q=1#part" });
+    fireEvent.click(code);
+    expect(openUrl).toHaveBeenCalledWith("https://example.test/code?q=1#part");
+    expect(screen.getByRole("link", { name: "https://example.test/inline" })).toBeDefined();
+    fireEvent.contextMenu(code);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith("https://example.test/code?q=1#part"));
+    expect(document.querySelector("pre code")?.textContent).toBe('const url = "https://example.test/code?q=1#part";');
+  });
+
+  it("opens and copies links on cloud transcripts that have no local workspace", async () => {
+    setPrefs({ linkBrowser: "terminalx" });
+    render(<Markdown text="[Docs](https://example.test/cloud)" />);
+    fireEvent.click(screen.getByRole("link", { name: "Docs" }));
+    expect(openUrl).toHaveBeenCalledWith("https://example.test/cloud");
+    expect(openBrowserTab).not.toHaveBeenCalled();
+  });
   it("offers the chooser for Markdown links and autolinks in ask mode", async () => {
     setPrefs({ linkBrowser: "ask" });
     render(<Markdown text={'[site](https://example.test)\n\n<https://example.test/auto>'} linkContext={context} />);

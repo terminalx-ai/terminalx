@@ -22,6 +22,7 @@ vi.mock("expo-router", () => ({
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: (catalog: any) => catalog?.getSnapshot() ?? { organizations: [], loading: false, error: null, refreshedAt: null } }));
 vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Send", "Square", "Terminal"].map((name) => [name, () => null])));
 vi.mock("react-native", () => {

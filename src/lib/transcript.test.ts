@@ -26,6 +26,51 @@ function toolDone(callId: string): AgentEvent {
 }
 
 describe("buildTranscript", () => {
+  it("ignores harness prompts without splitting the current turn or abandoning its tools (#388)", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Run the task", queued: false }),
+      toolStart("running", "Bash"),
+      ev({ type: "user_message", text: "<task-notification><task-id>internal</task-id></task-notification>", queued: false }),
+      ev({ type: "user_message", text: "<system-reminder>Internal reminder</system-reminder>", queued: true }),
+      ev({ type: "assistant_text", text: "Still working" }),
+    ], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].prompt?.text).toBe("Run the task");
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["tool", "text"]);
+    const call = t.turns[0].work[0];
+    expect(call.kind === "tool" && call.call.abandoned).toBeUndefined();
+  });
+
+  it("removes nested and unfinished harness blocks while preserving surrounding user text", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Before <system-reminder source=\"cli\">secret <system-reminder>nested</system-reminder> more</system-reminder> after", queued: false }),
+      ev({ type: "user_message", text: "Continue <task-notification>unfinished internal payload", queued: false }),
+    ], false);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["Before  after", "Continue"]);
+  });
+
+  it("preserves literal harness tags in code examples and unrelated XML", () => {
+    for (const text of [
+      "Describe `<system-reminder>example</system-reminder>`.",
+      "```xml\n<task-notification>example</task-notification>\n```",
+      "~~~xml\n<system-reminder>example</system-reminder>\n~~~",
+      "    <system-reminder>indented example</system-reminder>",
+      "<custom-element>user content</custom-element>",
+    ]) {
+      expect(buildTranscript([ev({ type: "user_message", text, queued: false })], false).turns[0].prompt?.text).toBe(text);
+    }
+  });
+
+  it("retains image-only prompts after removing a harness block and cleans attributed prompts", () => {
+    const images = [{ url: "data:image/png;base64,example" }];
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "<system-reminder>secret</system-reminder>", images, queued: false }),
+      ev({ type: "user_message", text: '[TerminalX Effective User v1] {"authority":"host","userId":"me"}\nRequest\n<task-notification>secret</task-notification>', queued: false }),
+    ], false);
+    expect(t.turns[0].prompt).toMatchObject({ text: "", images });
+    expect(t.turns[1].prompt?.text).toBe("Request");
+  });
+
   it("drops legacy startup guesses on reload while keeping actual progress and other notices", () => {
     const t = buildTranscript([
       ev({ type: "user_message", text: "implement this", queued: false }),

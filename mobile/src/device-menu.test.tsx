@@ -6,12 +6,12 @@ import MachinesScreen from "../app/(tabs)/index";
 import SessionsScreen from "../app/(tabs)/sessions";
 
 // PRO-87: the device menu (Rename, Reconnect, Remove) on the device list and on the sessions screen.
-const mocks = vi.hoisted(() => ({ app: {} as any, navigate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ app: {} as any, navigate: vi.fn(), dismissTo: vi.fn() }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/pairing/account", () => ({ accountHostIdentityMatches: () => true }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("@mobile/ui/PairingScanner", () => ({ PairingScanner: () => null }));
-vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: mocks.navigate, push: vi.fn() }) }));
+vi.mock("expo-router", () => ({ useRouter: () => ({ navigate: mocks.navigate, dismissTo: mocks.dismissTo, push: vi.fn() }) }));
 vi.mock("expo-camera", () => ({ useCameraPermissions: () => [{ granted: true }, vi.fn()], CameraView: () => null }));
 vi.mock("lucide-react-native", () => Object.fromEntries(["ChevronRight", "Keyboard", "QrCode", "X", "Search", "MoreVertical"].map((name) => [name, () => null])));
 vi.mock("@terminalx/portable/dashboard", () => ({}));
@@ -72,6 +72,7 @@ const menuOpen = () => container.querySelector("[data-modal]") !== null;
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.navigate.mockReset();
+  mocks.dismissTo.mockReset();
   const paired = host();
   mocks.app = {
     ready: true, session: { user: { email: "a@b.c" } }, hosts: [paired], availableHosts: [], installationState: "ready", activeHost: paired,
@@ -159,6 +160,16 @@ it("returns to the device list after removing from the sessions screen", async (
   await click("Remove");
   await click("Remove Paresh’s Mac mini");
   expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
+});
+
+it("opens the session list when a Mac is tapped, dismissing any previous conversation (#388)", async () => {
+  await show(<MachinesScreen />);
+  const row = [...container.querySelectorAll("button")].find((node) => node.textContent?.includes("Paresh’s Mac mini"));
+  expect(row).toBeDefined();
+  await act(async () => row!.click());
+  expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
+  expect(mocks.dismissTo).toHaveBeenCalledWith("/(tabs)/sessions");
+  expect(mocks.navigate).not.toHaveBeenCalled();
 });
 
 it("keeps the fallback for a desktop that never sent its name, and tells two same-named computers apart", async () => {

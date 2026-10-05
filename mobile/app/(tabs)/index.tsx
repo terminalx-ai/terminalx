@@ -27,7 +27,7 @@ export default function MachinesScreen() {
 
   const connect = async (host: (typeof app.hosts)[number]) => {
     await app.connectHost(host);
-    router.navigate("/(tabs)/sessions");
+    router.dismissTo("/(tabs)/sessions");
   };
 
   if (!app.ready) return <Screen><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;

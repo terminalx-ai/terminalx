@@ -15,6 +15,7 @@ import { useTheme } from "@mobile/ui/theme";
 import { conversationKey } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
+import { LinkedText } from "@mobile/ui/LinkedText";
 import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
@@ -48,7 +49,7 @@ export default function SessionScreen() {
     <Stack.Screen options={{ title: conversation?.label ?? params.title ?? "Session" }} />
     {summary ? <>
       <Text numberOfLines={1} style={[styles.sessionContext, { color: palette.muted }]}>{summary.title}</Text>
-      <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} />
+      {summary.tabs.length > 1 ? <ConversationPicker key={JSON.stringify([app.activeHost.id, sessionId])} session={summary} selectedTabId={tabId} horizontal onSelect={({ href }) => router.setParams({ ...href.params, hostId: app.activeHost!.id })} /> : null}
     </> : null}
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
     {MOBILE_TERMINAL_ENABLED ? <View style={[styles.segment, { backgroundColor: palette.raised }]}><Segment label="Chat" selected={view === "chat"} onPress={() => setView("chat")} /><Segment label="Terminal" selected={view === "terminal"} onPress={() => setView("terminal")} /></View> : null}
@@ -315,7 +316,7 @@ function base64Size(value: string): number {
 
 function NoteCard({ note }: { note: ChatNote }) {
   const { palette } = useTheme();
-  return <Card style={styles.note}><Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text><Text selectable style={[styles.body, { color: palette.ink }]}>{note.body}</Text></Card>;
+  return <Card style={styles.note}><Text style={[styles.noteAuthor, { color: palette.accent }]}>{note.author.displayName ?? "Participant"} · note</Text><LinkedText style={[styles.body, { color: palette.ink }]}>{note.body}</LinkedText></Card>;
 }
 
 function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string; sessionId: string; tabId: string; connected: boolean }) {

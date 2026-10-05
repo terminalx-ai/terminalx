@@ -118,3 +118,30 @@ exact y coordinate through live/reconnect/growth/image/pagination updates. Andro
 and physical-device validation remain outstanding. The fixture substitutes data
 arrival for transport; cache loading, reconnect epochs, and agent selection are
 also covered by `src/conversation-screen.test.tsx`.
+
+For the markdown and link regression fixture, send this command while the fixture
+and measurement server are running:
+
+```sh
+curl -X POST http://127.0.0.1:18746/command \
+  -H 'Content-Type: application/json' -d '{"action":"markdown"}'
+```
+
+It uses the production renderer for headings, emphasis, inline/fenced code,
+nested lists, a wide table, and links. Harness-only messages are included in the
+input and should leave no visible prompt. Scroll the table horizontally; tap a
+website link to open it, hold it for **Copy link**, and tap **Copyable host file**
+to copy the host's file reference. The copied value is the full destination,
+including encoded spaces and line fragments. Clipboard support requires a native
+build containing `expo-clipboard`; rebuild an existing development client after
+installing dependencies.
+
+Validated on 2026-10-05 in an iPhone 17 Pro / iOS 26.5 Release simulator build,
+using `ENTRY_FILE=scripts/transcript-viewport/index.tsx` and the isolated bundle id
+`com.terminalx.issue388.fixture`. Native checks covered layout, horizontal table
+scrolling, opening a website in Safari, and copying a host file link through the
+native menu. The iOS hold action and Android menu are also covered by component
+tests. Evidence: [light](../docs/screenshots/issue-388/light.png),
+[dark](../docs/screenshots/issue-388/dark.png),
+[scrolled table](../docs/screenshots/issue-388/table-scrolled.png), and
+[copy menu](../docs/screenshots/issue-388/link-copy-menu.png).
