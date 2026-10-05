@@ -1,12 +1,15 @@
 //! The macOS provider: a signed helper app reached over a unix socket.
 //!
 //! Lifecycle of one connection:
-//! 1. make a private 0700 directory holding `provider.sock` and a 0600
-//!    `provider.token`;
-//! 2. spawn `terminalx-computer-use-macos --agent <sock> --token-file <path>`
+//! 1. make a private 0700 directory holding `provider.sock`;
+//! 2. spawn `terminalx-computer-use-macos --agent <sock> --token-fd 3`
 //!    from inside the helper bundle (spawning the bundle's executable directly
-//!    keeps TCC looking at the helper's identity, not the app that launched it);
-//! 3. connect with retries until the helper binds, then delete the token file;
+//!    keeps TCC looking at the helper's identity, not the app that launched it).
+//!    The per-launch token is handed over on an inherited pipe, never a file,
+//!    so no other process of this user can read it;
+//! 3. connect with retries until the helper binds. The helper serves only the
+//!    process that started it (and, in a release, only if that process is the
+//!    signed TerminalX app): see `PeerTrust` in the Swift package;
 //! 4. `handshake` must answer protocol version 1 and the capability matrix;
 //! 5. every later request carries the token, is answered on one line, and
 //!    times out after 60 s, which tears the connection down;
@@ -274,20 +277,57 @@ extern "C" {
     fn responsibility_spawnattrs_setdisclaim(attrs: *mut libc::posix_spawnattr_t, disclaim: libc::c_int) -> libc::c_int;
 }
 
-/// Spawn `executable --agent <socket> --token-file <token>` with stdio on
-/// /dev/null, no inherited descriptors, and (on macOS) its own TCC identity.
+/// The descriptor the helper finds the per-launch token on.
 #[cfg(unix)]
-fn spawn_helper(executable: &Path, socket: &Path, token: &Path) -> std::io::Result<HelperProcess> {
+const TOKEN_FD: libc::c_int = 3;
+
+/// A pipe that already holds the token, with its write end closed: the helper
+/// reads to end-of-file. Both ends are close-on-exec, so the only process that
+/// ever sees the read end is the helper, which gets it as [`TOKEN_FD`].
+#[cfg(unix)]
+fn token_pipe(token: &str) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (mut read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&read, &write] {
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    // dup2 onto the same number would leave close-on-exec set and the helper
+    // without its token, so the read end must not already sit on TOKEN_FD.
+    if read.as_raw_fd() == TOKEN_FD {
+        let moved = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_DUPFD_CLOEXEC, TOKEN_FD + 1) };
+        if moved < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        read = unsafe { OwnedFd::from_raw_fd(moved) };
+    }
+    std::fs::File::from(write).write_all(token.as_bytes())?;
+    Ok(read)
+}
+
+/// Spawn `executable --agent <socket> --token-fd 3` with stdio on /dev/null,
+/// the token pipe as the only other inherited descriptor, and (on macOS) its
+/// own TCC identity.
+#[cfg(unix)]
+fn spawn_helper(executable: &Path, socket: &Path, token: &str) -> std::io::Result<HelperProcess> {
     use std::ffi::CString;
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
 
+    let token_read = token_pipe(token)?;
     let program = CString::new(executable.as_os_str().as_bytes())?;
     let args = [
         program.clone(),
         CString::new("--agent")?,
         CString::new(socket.as_os_str().as_bytes())?,
-        CString::new("--token-file")?,
-        CString::new(token.as_os_str().as_bytes())?,
+        CString::new("--token-fd")?,
+        CString::new(TOKEN_FD.to_string())?,
     ];
     let mut argv: Vec<*mut libc::c_char> = args.iter().map(|a| a.as_ptr() as *mut _).collect();
     argv.push(std::ptr::null_mut());
@@ -324,6 +364,7 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &Path) -> std::io::Resu
         libc::posix_spawn_file_actions_addopen(&mut actions, 0, dev_null.as_ptr(), libc::O_RDONLY, 0);
         libc::posix_spawn_file_actions_addopen(&mut actions, 1, dev_null.as_ptr(), libc::O_WRONLY, 0);
         libc::posix_spawn_file_actions_addopen(&mut actions, 2, dev_null.as_ptr(), libc::O_WRONLY, 0);
+        libc::posix_spawn_file_actions_adddup2(&mut actions, token_read.as_raw_fd(), TOKEN_FD);
         let mut pid: libc::pid_t = 0;
         let result = libc::posix_spawn(&mut pid, program.as_ptr(), &actions, &attr, argv.as_ptr(), envp.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut actions);
@@ -509,7 +550,9 @@ pub struct StartedSession {
 #[cfg(unix)]
 impl StartedSession {
     pub fn handshake(&mut self) -> Result<Value, ComputerError> {
-        self.transport.request("handshake", json!({})).map_err(|f| f.error)
+        self.transport
+            .request("handshake", handshake_params(super::own_windows_allowed_for_tests()))
+            .map_err(|f| f.error)
     }
 
     pub fn close(self) {
@@ -520,6 +563,17 @@ impl StartedSession {
             capabilities: Value::Null,
         }
         .close();
+    }
+}
+
+/// What the app tells the helper about itself. The test escape hatch travels
+/// only here: the handshake is sent by the app, never forwarded from a
+/// command-line caller, so no request an agent can make carries it.
+pub fn handshake_params(allow_own_windows_for_tests: bool) -> Value {
+    if allow_own_windows_for_tests {
+        json!({"allowOwnWindowsForTests": true})
+    } else {
+        json!({})
     }
 }
 
@@ -592,7 +646,7 @@ fn socket_base_dir(preferred: PathBuf) -> PathBuf {
 /// can drive a fake helper and assert that nothing is left behind.
 #[cfg(unix)]
 pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession, ComputerError> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let socket_dir = base.join(format!("terminalx-computer-use-{}", &suffix[..8]));
@@ -602,19 +656,8 @@ pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession
         .map_err(|e| ComputerError::accessibility(format!("create helper socket directory: {e}")))?;
     let socket_path = socket_dir.join("provider.sock");
     let token = uuid::Uuid::new_v4().to_string();
-    let token_path = socket_dir.join("provider.token");
-    let write_token = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&token_path)
-        .and_then(|mut file| file.write_all(token.as_bytes()));
-    if let Err(error) = write_token {
-        let _ = std::fs::remove_dir_all(&socket_dir);
-        return Err(ComputerError::accessibility(format!("write helper token: {error}")));
-    }
 
-    let mut child = match spawn_helper(executable, &socket_path, &token_path) {
+    let mut child = match spawn_helper(executable, &socket_path, &token) {
         Ok(child) => child,
         Err(error) => {
             let _ = std::fs::remove_dir_all(&socket_dir);
@@ -626,7 +669,6 @@ pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession
 
     match connect_with_retry(&socket_path, &mut child, CONNECT_TIMEOUT) {
         Ok(stream) => {
-            let _ = std::fs::remove_file(&token_path);
             match LineTransport::new(stream, token, REQUEST_TIMEOUT) {
                 Ok(transport) => Ok(StartedSession {
                     transport,
@@ -831,6 +873,15 @@ mod tests {
             Ok(state) => println!("finder tree lines: {}", state["snapshot"]["treeText"].as_str().unwrap_or("").lines().count()),
             Err(error) => println!("finder snapshot: {error}"),
         }
+        assert_eq!(capabilities["supports"]["safety"]["ownAppProtection"], true);
+        assert_eq!(capabilities["supports"]["safety"]["ownWindowsAllowedForTests"], false);
+        // The released TerminalX app is never a target, from any instance.
+        // Refused before anything touches it (or not running at all).
+        let own = provider
+            .action(ActionMethod::Click, json!({"app": "com.terminalx.next", "x": 1, "y": 1}))
+            .err()
+            .unwrap();
+        assert!(matches!(own.code.as_str(), "own_app_protected" | "app_not_found"), "{own}");
         let blocked = provider.snapshot(json!({"app": "com.1password.1password"})).err().unwrap();
         assert!(matches!(blocked.code.as_str(), "app_blocked" | "app_not_found"), "{blocked}");
         let missing = provider.snapshot(json!({"app": "definitely-not-an-app-xyz"})).err().unwrap();
@@ -885,8 +936,16 @@ mod tests {
             r#"#!/bin/sh
 exec /usr/bin/python3 - "$2" "$4" <<'PY'
 import json, os, socket, sys
-sock_path, token_path = sys.argv[1], sys.argv[2]
-token = open(token_path).read().strip()
+sock_path, token_fd = sys.argv[1], int(sys.argv[2])
+token = b""
+while True:
+    chunk = os.read(token_fd, 4096)
+    if not chunk:
+        break
+    token += chunk
+os.close(token_fd)
+token = token.decode().strip()
+assert token, "the token must arrive on the inherited pipe"
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(sock_path)
 server.listen(1)
@@ -930,11 +989,31 @@ PY
 
         let socket_dir = provider.session.as_ref().unwrap().socket_dir.clone();
         assert!(socket_dir.exists());
-        assert!(!socket_dir.join("provider.token").exists(), "token file must be deleted after connect");
+        let left: Vec<_> = std::fs::read_dir(&socket_dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["provider.sock"], "the token is handed over a pipe and never written to disk");
         let pid = provider.session.as_ref().unwrap().child.id();
         provider.shutdown();
         assert!(!socket_dir.exists(), "socket directory must be removed on shutdown");
         assert!(!process_alive(pid), "helper must exit on terminate");
+    }
+
+    #[test]
+    fn the_test_escape_hatch_travels_only_in_the_handshake_and_only_when_asked() {
+        assert_eq!(handshake_params(false), json!({}));
+        assert_eq!(handshake_params(true), json!({"allowOwnWindowsForTests": true}));
+    }
+
+    #[test]
+    fn the_token_pipe_holds_the_whole_token_and_then_ends() {
+        use std::io::Read;
+        let read = token_pipe("per-launch-secret").unwrap();
+        use std::os::fd::AsRawFd;
+        assert_ne!(read.as_raw_fd(), TOKEN_FD);
+        let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "no other child may inherit the token");
+        let mut text = String::new();
+        std::fs::File::from(read).read_to_string(&mut text).unwrap();
+        assert_eq!(text, "per-launch-secret");
     }
 
     fn process_alive(pid: u32) -> bool {

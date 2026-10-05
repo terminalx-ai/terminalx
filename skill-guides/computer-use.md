@@ -109,8 +109,9 @@ printf '%s' "$TEXT" | terminalx computer set-value --app <app> --element-index <
 - Prefer `set-value` for text fields that expose values; it can report verified value writes when the provider can read the refreshed value.
 - Coordinates are window-local; use coordinates from the latest screenshot/state for the same target window.
 - Password managers are blocked (`app_blocked`); secure text fields are never read.
-- TerminalX's own confirmations are the person's to answer. While one is open, every action (click, type, key, paste, set-value, scroll, drag, secondary action) on any app answers `confirmation_pending`; reading state still works. Never answer one, and never turn on a TerminalX setting that asks for the person's confirmation.
-  This pause covers actions sent through `terminalx computer`. It is there so that an agent does not answer by accident; it is not a barrier against software that drives the screen by other means.
+- TerminalX's own windows are the person's to operate. Every action (click, type, key, hotkey, paste, set-value, scroll, drag, secondary action) aimed at the TerminalX app you are running in answers `own_app_protected`, always; so does a key that would land on a TerminalX window that has the focus, and any action aimed at the released TerminalX app from another instance. Reading its accessibility tree still works; its windows are never screenshotted (`screenshotStatus` is `skipped`, reason `own_app_protected`). Another running TerminalX Dev build can be driven by `pid:<n>` as before.
+- TerminalX's own confirmations are the person's to answer. While one is open, every action on any app answers `confirmation_pending`; reading state still works. Never answer one, and never turn on a TerminalX setting that grants an agent more power.
+  What this protects: `terminalx computer` and the computer-use helper will not operate TerminalX's confirmations or settings, and on macOS the helper serves only the TerminalX app itself, not an agent that connects to it or starts its own copy. What it does not: software that drives the screen without the helper (`osascript` / System Events, or any program at all when TerminalX itself has been granted Accessibility). Do not look for such a way around; ask the person.
 
 ## Screenshots
 
@@ -151,6 +152,7 @@ Slack: the accessibility tree may be shallow while the screenshot contains usefu
 - `app_not_found`: run `list-apps` and retry with the returned app name or `pid:<n>` (or a bundle ID on macOS). If the target is a web app such as Gmail, choose the desktop browser app/window that contains it; do not retry `terminalx computer ... --app Gmail` unchanged because `terminalx computer` app selectors refer to desktop apps, not website names.
 - `app_not_running`: the targeted instance quit, and computer use never launches apps. Ask the reader to start it (or start it yourself only if asked), then run `list-apps` and retry with the new `pid:<n>`.
 - `app_blocked`: stop; the target is intentionally blocked from computer-use.
+- `own_app_protected`: stop; computer use never operates TerminalX's own windows. Ask the person to do it themselves, and do not try another route.
 - `confirmation_pending`: stop and wait for the person; only they can answer a TerminalX confirmation. Do not retry in a loop.
 - `window_not_found` / `window_stale`: run `list-windows`, choose a current selector, then rerun `get-app-state`.
 - `window_not_focused`: retry once with `--restore-window`; if the message says restore was already requested, stop retrying restore and bring the app forward manually or check permissions. For editable fields prefer `set-value`, then inspect before assuming keyboard input worked.

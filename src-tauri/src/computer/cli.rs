@@ -600,6 +600,12 @@ fn format_screenshot_status(result: &Value) -> String {
                 s(shot, "format").unwrap_or("png")
             )
         }
+        // TerminalX's own windows are never screenshotted (PRO-90).
+        Some("skipped") if s(&status, "reason") == Some(super::OWN_APP_PROTECTED) => format!(
+            "Screenshot withheld ({}): {}",
+            super::OWN_APP_PROTECTED,
+            s(&status, "message").unwrap_or("")
+        ),
         Some("skipped") => "Screenshot skipped (--no-screenshot)".into(),
         Some("failed") => format!(
             "Screenshot failed ({}): {}",
@@ -972,6 +978,16 @@ mod tests {
             "screenshotStatus": {"state": "captured", "metadata": {"engine": "screenCaptureKit"}},
             "action": {"path": "accessibility", "verification": {"state": "verified", "property": "value"}}
         })
+    }
+
+    #[test]
+    fn a_withheld_screenshot_of_terminalx_says_why() {
+        let mut own = sample_action();
+        own["screenshot"] = Value::Null;
+        own["screenshotStatus"] = json!({"state": "skipped", "reason": "own_app_protected", "message": "never screenshotted"});
+        assert_eq!(format_screenshot_status(&own), "Screenshot withheld (own_app_protected): never screenshotted");
+        own["screenshotStatus"] = json!({"state": "skipped", "reason": "no_screenshot_flag"});
+        assert_eq!(format_screenshot_status(&own), "Screenshot skipped (--no-screenshot)");
     }
 
     #[test]

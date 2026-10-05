@@ -184,9 +184,10 @@ function assertAllowed() {
  * decline), its default button refuses, one is shown at a time, the app's
  * computer use is paused while it is open, and after a refusal or an
  * unanswered question the app does not ask again for a while. That stops
- * mistakes and nagging. It does not stop a hostile agent with a shell, which
- * can reach the computer-use helper or the system's own scripting without
- * going through this app (see skill-guides/terminalx-cli.md).
+ * mistakes and nagging. Computer use never operates this app's own windows
+ * and its helper serves only the app (PRO-90), but a hostile agent with a
+ * shell can still reach the system's own scripting without going through
+ * this app (see skill-guides/terminalx-cli.md and docs/COMPUTER-USE.md).
  */
 async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   if (policy === "setting") return;
