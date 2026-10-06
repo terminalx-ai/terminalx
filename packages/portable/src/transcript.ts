@@ -34,6 +34,8 @@ export type WorkItem =
 export interface Turn {
   key: string;
   seq: number;
+  /** Time of the event that opened this turn, even without a prompt or completion. */
+  ts: string;
   prompt?: { text: string; images?: { url: string; name?: string }[]; ts: string; seq: number };
   work: WorkItem[];
   finalText?: string;
@@ -132,7 +134,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   let current: Turn | null = null;
   const ensureTurn = (event: AgentEvent) => {
     if (!current) {
-      current = { key: `t${event.seq}`, seq: event.seq, work: [], toolCount: 0, editedFiles: 0, live: false };
+      current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, work: [], toolCount: 0, editedFiles: 0, live: false };
       turns.push(current);
     }
     return current;
@@ -152,6 +154,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         current = {
           key: `t${event.seq}`,
           seq: event.seq,
+          ts: event.ts,
           prompt: { text, images: payload.images, ts: event.ts, seq: event.seq },
           work: [],
           toolCount: 0,
@@ -171,7 +174,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           current.prompt = prompt;
         } else {
           for (const call of calls.values()) if (!call.result) call.abandoned = true;
-          current = { key: `t${event.seq}`, seq: event.seq, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
+          current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
           turns.push(current);
         }
         modelRequestOpen = false;
