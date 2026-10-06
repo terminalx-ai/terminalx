@@ -2,6 +2,7 @@
 import http from "node:http";
 let command = {};
 let metrics = {};
+const port = Number(process.env.VIEWPORT_PORT ?? 18746);
 http.createServer(async (req, res) => {
   res.setHeader("Content-Type", "application/json");
   if (req.method === "POST") {
@@ -14,4 +15,4 @@ http.createServer(async (req, res) => {
   } else if (req.url === "/command") {
     res.end(JSON.stringify(command)); command = {};
   } else res.end(JSON.stringify(metrics));
-}).listen(18746, "127.0.0.1", () => console.log("Synthetic viewport driver: http://127.0.0.1:18746"));
+}).listen(port, "127.0.0.1", () => console.log(`Synthetic viewport driver: http://127.0.0.1:${port}`));

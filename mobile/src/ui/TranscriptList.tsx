@@ -5,7 +5,7 @@ import { useTheme } from "./theme";
 const LATEST_THRESHOLD = 80;
 const MAINTAIN_POSITION = { minIndexForVisible: 0 };
 
-type Props<Item> = Pick<FlatListProps<Item>, "data" | "renderItem" | "keyExtractor" | "ListEmptyComponent" | "onScroll"> & {
+type Props<Item> = Pick<FlatListProps<Item>, "data" | "renderItem" | "keyExtractor" | "ListEmptyComponent" | "onScroll" | "contentContainerStyle"> & {
   earlier?: FlatListProps<Item>["ListFooterComponent"];
   latest?: FlatListProps<Item>["ListHeaderComponent"];
 };
@@ -13,7 +13,7 @@ type Props<Item> = Pick<FlatListProps<Item>, "data" | "renderItem" | "keyExtract
 // Give this component a conversation key (or remount its parent) when switching
 // agents. Data stays chronological at the call site; native offset zero is the
 // latest edge, even before cache/host data or variable-height rows finish layout.
-export function TranscriptList<Item>({ data, earlier, latest, onScroll, ...props }: Props<Item>) {
+export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentContainerStyle, ...props }: Props<Item>) {
   const { palette } = useTheme();
   const list = useRef<FlatList<Item>>(null);
   const following = useRef(true);
@@ -31,13 +31,18 @@ export function TranscriptList<Item>({ data, earlier, latest, onScroll, ...props
       testID="conversation-transcript"
       data={newestFirst}
       inverted
+      // Native row measurements determine the window. The initial batch stays
+      // mounted even while reading history, so keep it small as well.
+      initialNumToRender={8}
+      maxToRenderPerBatch={8}
+      windowSize={5}
       // Anchor history readers during host merges and pagination. While following,
       // leave offset zero fixed: native anchoring of estimated cells can otherwise
       // move the latest edge during the first variable-height layout passes.
       maintainVisibleContentPosition={awayFromLatest ? MAINTAIN_POSITION : undefined}
       automaticallyAdjustContentInsets={false}
       contentInsetAdjustmentBehavior="never"
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, contentContainerStyle]}
       keyboardDismissMode="interactive"
       keyboardShouldPersistTaps="handled"
       scrollEventThrottle={16}

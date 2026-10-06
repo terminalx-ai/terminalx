@@ -1,0 +1,55 @@
+{
+  "device": "iPhone 17, iOS 26.5 simulator",
+  "date": "2026-10-05",
+  "baselineWholeTurns": {
+    "mountedRows": 8,
+    "mountedHeight": 78064,
+    "viewportHeight": 681,
+    "mountedScreens": 114.6314,
+    "offset": 0
+  },
+  "heavy-bottom": {
+    "mountedRows": 38,
+    "mountedHeight": 2069,
+    "viewportHeight": 681,
+    "mountedScreens": 3.0382,
+    "offset": 0
+  },
+  "massive-bottom": {
+    "mountedRows": 38,
+    "mountedHeight": 2069,
+    "viewportHeight": 681,
+    "mountedScreens": 3.0382,
+    "offset": 0
+  },
+  "host-preserve": {
+    "anchor": 135,
+    "beforeY": 282,
+    "afterY": 282
+  },
+  "live-preserve": {
+    "anchor": 135,
+    "beforeY": 282,
+    "afterY": 282.00016276041697
+  },
+  "reconnect-preserve": {
+    "anchor": 135,
+    "beforeY": 282.00016276041697,
+    "afterY": 282
+  },
+  "grow-preserve": {
+    "anchor": 135,
+    "beforeY": 282,
+    "afterY": 282
+  },
+  "image-preserve": {
+    "anchor": 135,
+    "beforeY": 282,
+    "afterY": 282
+  },
+  "earlier-preserve": {
+    "anchor": 135,
+    "beforeY": 282,
+    "afterY": 282
+  }
+}
