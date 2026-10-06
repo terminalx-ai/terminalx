@@ -2,6 +2,7 @@
 import { act, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
 
@@ -163,6 +164,70 @@ describe("mobile transcript presentation (#388)", () => {
     expect(container.textContent).not.toContain("system-reminder");
     expect(container.textContent).not.toContain("Internal harness instructions");
     expect(mocks.listProps.data).toHaveLength(1);
+  });
+});
+
+describe("mobile transcript ordering (#384)", () => {
+  const at = (seq: number, ts: string, payload: AgentEvent["payload"]): AgentEvent => ({ ...event("claude", "", seq), ts, payload });
+  // The native list is inverted; its data starts at the newest message.
+  const messages = () => [...mocks.listProps.data].reverse().map((item) => item.kind === "note" ? item.note.body
+    : item.row.kind === "work" ? item.row.item.text
+      : item.row.kind === "markdown" ? item.row.token.text : item.row.text);
+
+  it("keeps an old completed exchange before promptless work and queued follow-ups", async () => {
+    const old = "2026-10-03T10:35:00Z";
+    const recent = "2026-10-04T21:00:00Z";
+    const followups = Array.from({ length: 15 }, (_, index) => [
+      at(4334 + index * 2, recent, { type: "user_message", text: `Follow-up ${index}`, queued: true }),
+      at(4335 + index * 2, recent, { type: "assistant_text", text: `Reply ${index}` }),
+    ]).flat();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [
+      at(4330, old, { type: "user_message", text: "Old prompt", queued: false }),
+      at(4331, old, { type: "assistant_text", text: "Old answer" }),
+      at(4332, old, { type: "turn_completed", status: "ok", authFailed: false }),
+      at(4333, recent, { type: "status", text: "Resuming work" }),
+      ...followups,
+    ], hasMore: false });
+    await render();
+    const expected = ["Old prompt", "Old answer", "Resuming work", ...Array.from({ length: 15 }, (_, index) => [`Follow-up ${index}`, `Reply ${index}`]).flat()];
+    expect(messages()).toEqual(expected);
+
+    await act(async () => mocks.sessionListeners.get("claude")!(at(4364, "2026-10-04T21:13:00Z", { type: "assistant_text", text: "Newest message" })));
+    expect(messages()).toEqual([...expected, "Newest message"]);
+    mocks.app.connectionStage = "reconnecting";
+    await render();
+    expect(messages()).toEqual([...expected, "Newest message"]);
+  });
+
+  it("places notes around a promptless turn using its first event, even after completion", async () => {
+    const events = [
+      at(1, "2026-10-03T10:00:00Z", { type: "user_message", text: "Old prompt", queued: false }),
+      at(2, "2026-10-03T10:01:00Z", { type: "turn_completed", status: "ok", authFailed: false, finalText: "Old answer" }),
+      at(3, "2026-10-04T10:00:00Z", { type: "assistant_text", text: "Continuing without a prompt" }),
+    ];
+    mocks.app.api.tail.mockResolvedValueOnce({ events, hasMore: false });
+    mocks.app.api.listNotes.mockResolvedValueOnce([
+      { id: "after", body: "Later note", createdAt: Date.parse("2026-10-04T10:01:00Z"), author: { userId: "me" } },
+      { id: "before", body: "Earlier note", createdAt: Date.parse("2026-10-04T09:59:00Z"), author: { userId: "me" } },
+    ]);
+    await render();
+    const expected = ["Old prompt", "Old answer", "Earlier note", "Continuing without a prompt", "Later note"];
+    expect(messages()).toEqual(expected);
+    await act(async () => mocks.sessionListeners.get("claude")!(at(4, "2026-10-04T10:02:00Z", { type: "turn_completed", status: "ok", authFailed: false })));
+    expect(messages()).toEqual(expected);
+  });
+
+  it("keeps a partial turn after older history when its prompt arrives on an earlier page", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [
+      at(3, "2026-10-04T10:01:00Z", { type: "assistant_text", text: "Partial-page reply" }),
+    ], hasMore: true }).mockResolvedValueOnce({ events: [
+      at(1, "2026-10-03T10:00:00Z", { type: "turn_completed", status: "ok", authFailed: false, finalText: "Older answer" }),
+      at(2, "2026-10-04T10:00:00Z", { type: "user_message", text: "Missing prompt", queued: false }),
+    ], hasMore: false });
+    await render();
+    expect(messages()).toEqual(["Partial-page reply"]);
+    await click("Load earlier");
+    expect(messages()).toEqual(["Older answer", "Missing prompt", "Partial-page reply"]);
   });
 });
 

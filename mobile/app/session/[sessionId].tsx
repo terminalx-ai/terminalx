@@ -378,7 +378,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
   </View>;
 }
 
-function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.prompt?.ts ?? item.turn.completed?.ts ?? "") || item.turn.seq : item.note.createdAt; }
+function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.ts) : item.note.createdAt; }
 
 const styles = StyleSheet.create({
   transcriptRows: { gap: 0 },

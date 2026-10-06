@@ -91,6 +91,7 @@ describe("buildTranscript", () => {
     ];
     const t = buildTranscript(events, true);
     expect(t.turns).toHaveLength(2);
+    expect(t.turns.map((turn) => turn.ts)).toEqual([events[0].ts, events[3].ts]);
     expect(t.turns[0].completed?.status).toBe("ok");
     expect(t.turns[0].work.filter((w) => w.kind === "text")).toHaveLength(1); // finalText not duplicated
     expect(t.turns[1].live).toBe(true);
@@ -190,6 +191,7 @@ describe("buildTranscript", () => {
     expect(t.turns[0].work.filter((w) => w.kind === "queued").map((w) => w.kind === "queued" && w.text)).toEqual(["and after that"]);
     expect(t.turns[1].work.map((w) => w.kind)).toEqual(["text"]);
     expect(t.turns[1].prompt?.seq).toBe(queued[0].seq);
+    expect(t.turns[1].ts).toBe(events[5].ts);
 
     // And then the second: each is moved by its own event, not by position.
     events.push(ev({ type: "turn_started", promptSeq: queued[1].seq }), ev({ type: "assistant_text", text: "that too" }));

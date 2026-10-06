@@ -4,7 +4,7 @@ import type { Turn } from "@terminalx/portable/transcript";
 import { markdownBlocks, textChunks } from "./markdown-blocks";
 import { turnRows } from "./transcript-rows";
 
-const turn: Turn = { key: "t1", seq: 1, prompt: { text: "Prompt", seq: 1, ts: "" }, work: [], toolCount: 0, editedFiles: 0, live: false };
+const turn: Turn = { key: "t1", seq: 1, ts: "", prompt: { text: "Prompt", seq: 1, ts: "" }, work: [], toolCount: 0, editedFiles: 0, live: false };
 const visibleText = (token: Token): string => "tokens" in token && token.tokens?.length ? token.tokens.map(visibleText).join("") : token.type === "br" ? "\n" : "text" in token ? token.text : token.raw;
 
 describe("transcript virtualization units", () => {
