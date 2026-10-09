@@ -10,6 +10,48 @@ export function useResourceSampling(open: boolean, sample: () => void | Promise<
   }, [open, sample]);
 }
 
+/** The one periodic usage timer. Each tick waits for its refresh to settle
+ * before arming the next, so a slow request is never overlapped and a machine
+ * waking from sleep gets a single late tick rather than every missed one. A
+ * changed interval re-arms from the last tick: shortening it can fire at once,
+ * and no second timer is ever left running. `null` turns the timer off.
+ */
+export function createUsagePolling(refresh: () => void | Promise<void>) {
+  let timer: number | undefined;
+  let interval: number | null = null;
+  let last = Date.now();
+  let disposed = false;
+  const arm = () => {
+    window.clearTimeout(timer);
+    timer = undefined;
+    if (disposed || interval == null) return;
+    timer = window.setTimeout(() => {
+      timer = undefined;
+      void Promise.resolve().then(refresh).catch(() => {}).finally(() => {
+        last = Date.now();
+        // Turned off or changed mid-request: that update already re-armed.
+        if (timer === undefined) arm();
+      });
+    }, Math.max(0, Math.min(last + interval - Date.now(), 2_147_483_647)));
+  };
+  return {
+    update(next: number | null) {
+      if (next === interval) return;
+      interval = next;
+      arm();
+    },
+    /** Count the interval from now: a refresh the timer did not make just settled. */
+    restart() {
+      last = Date.now();
+      arm();
+    },
+    dispose() {
+      disposed = true;
+      window.clearTimeout(timer);
+    },
+  };
+}
+
 /** The backend budgets reset attempts and supplies the next eligible deadline.
  * Consume each deadline once, even if hidden or transport fails; activation
  * revalidates separately. A response with the next deadline rearms the timer.
