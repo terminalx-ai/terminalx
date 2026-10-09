@@ -22,6 +22,8 @@ import { startNotifications } from "@/lib/notify";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
+import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
+import { GuestSessionHost } from "@/components/session/GuestSession";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
@@ -151,6 +153,8 @@ export function AppShell() {
       </div>
       <BypassDialog />
       <CloudShareDialogHost />
+      <ShareSessionDialogHost />
+      <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
       <div className="flex min-h-0 flex-1">

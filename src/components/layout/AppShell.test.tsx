@@ -4,6 +4,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
+vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
+vi.mock("@/components/session/ShareSessionDialog", () => ({ ShareSessionDialogHost: () => null }));
+
 const { sessionStore } = vi.hoisted(() => ({
   sessionStore: {
     loaded: true,

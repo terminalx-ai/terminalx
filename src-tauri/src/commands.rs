@@ -1285,7 +1285,12 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
 }
 
 #[tauri::command]
-pub fn add_tab(session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
+pub fn add_tab(state: State<'_, AppState>, session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
+    let manager = state.manager().ok_or("not ready")?;
+    let sharing = manager.sharing.lock().unwrap();
+    if sharing.sessions.contains_key(&session_id) && crate::store::index::permission_mode_or_default(tab.permission_mode.as_deref()) == "bypassPermissions" {
+        return Err("New tabs in a shared session must use a permission mode other than Bypass.".into());
+    }
     crate::session_ops::add_tab_entry(&session_id, &tab)
 }
 
@@ -1640,6 +1645,31 @@ pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab
     let m = state.manager().ok_or("not ready")?;
     tauri::async_runtime::spawn_blocking(move || m.load_events(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
+
+#[tauri::command]
+pub async fn session_share_create(state: State<'_, AppState>, session_id: String, settings: crate::local_sharing::LinkSettings, direct_only: bool) -> CmdResult<serde_json::Value> {
+    state.pairing.create_share(session_id, settings, direct_only).await.map_err(err)
+}
+#[tauri::command]
+pub fn session_share_status(state: State<'_, AppState>, session_id: String) -> CmdResult<serde_json::Value> {
+    state.pairing.share_status(&session_id).map_err(err)
+}
+#[tauri::command]
+pub fn session_share_change(state: State<'_, AppState>, session_id: String, action: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    state.pairing.change_share(&session_id, &action, params).map_err(err)
+}
+#[tauri::command]
+pub fn session_join_pending(state: State<'_, AppState>) -> Option<String> { state.pairing.pending_join() }
+#[tauri::command]
+pub async fn session_guest_join(state: State<'_, AppState>, link: String) -> CmdResult<serde_json::Value> {
+    state.pairing.join_guest(link).await.map_err(err)
+}
+#[tauri::command]
+pub fn session_guest_send(state: State<'_, AppState>, connection_id: String, request: serde_json::Value) -> CmdResult<()> {
+    state.pairing.guest_send(&connection_id, request).map_err(err)
+}
+#[tauri::command]
+pub fn session_guest_leave(state: State<'_, AppState>, connection_id: Option<String>) { state.pairing.leave_guest_connection(connection_id.as_deref()); }
 
 #[tauri::command]
 pub async fn send_message(

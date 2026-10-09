@@ -1,3 +1,4 @@
+import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CalendarClock, CircleDot, Cloud, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -450,6 +451,7 @@ export function SessionView({
           </div>
 
           <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
+            {local && <LocalShareButton sessionId={session.id} />}
             {/* Keyed by session: a menu left open never carries over to another session. */}
             {!cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
             {activeTab && local && (

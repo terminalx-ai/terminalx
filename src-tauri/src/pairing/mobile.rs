@@ -1391,7 +1391,7 @@ mod tests {
     fn prompt(seq: u64) -> AgentEvent {
         event(
             seq,
-            Payload::UserMessage {
+            Payload::UserMessage { author: None,
                 text: format!("prompt {seq}"),
                 images: Vec::new(),
                 baseline: None,

@@ -31,10 +31,19 @@ pub struct RelayLive {
 
 impl RelayLive {
     pub async fn create_invite(&self, device_id: String) -> Result<RelayPairingOffer> {
+        self.mint_invite(device_id, None).await
+    }
+
+    pub(crate) async fn create_share_invite(&self, device_id: String, expires_at: i64) -> Result<RelayPairingOffer> {
+        self.mint_invite(device_id, Some(expires_at)).await
+    }
+
+    async fn mint_invite(&self, device_id: String, share_expires_at: Option<i64>) -> Result<RelayPairingOffer> {
         let (send, receive) = oneshot::channel();
         self.tx
             .send(ControlCommand::CreateInvite {
                 device_id,
+                share_expires_at,
                 respond: send,
             })
             .map_err(|_| anyhow!("relay control is offline"))?;
@@ -120,6 +129,7 @@ impl RelayLive {
 enum ControlCommand {
     CreateInvite {
         device_id: String,
+        share_expires_at: Option<i64>,
         respond: oneshot::Sender<Result<InviteCreated>>,
     },
     Revoke {
@@ -578,11 +588,11 @@ async fn control_loop(
     loop {
         tokio::select! {
             command = commands.recv() => match command {
-                Some(ControlCommand::CreateInvite { device_id, respond }) => {
+                Some(ControlCommand::CreateInvite { device_id, share_expires_at, respond }) => {
                     let req_id = uuid::Uuid::new_v4().simple().to_string();
-                    socket.send(Message::Text(serde_json::to_string(&serde_json::json!({
-                        "type": "invite-create", "reqId": req_id, "relayDeviceId": device_id,
-                    }))?.into())).await?;
+                    let mut frame = serde_json::json!({ "type": "invite-create", "reqId": req_id, "relayDeviceId": device_id });
+                    if let Some(expires_at) = share_expires_at { frame["sessionShare"] = serde_json::json!({ "expiresAt": expires_at }); }
+                    socket.send(Message::Text(frame.to_string().into())).await?;
                     pending_invites.insert(req_id, respond);
                 }
                 Some(ControlCommand::Revoke { device_id }) => {

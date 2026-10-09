@@ -436,6 +436,7 @@ async function openConnected(authority: "manage" | "participate" = "manage") {
 
 describe("the same SessionView for local and cloud sessions", () => {
   it("renders a local session and a cloud session with one component", async () => {
+    guard.handlers.session_share_status = () => ({ active: false, links: [], people: [], leases: [], notes: [], activity: [], queue: [] });
     guard.strict = false;
     guard.local = () => [];
     guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });

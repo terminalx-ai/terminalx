@@ -246,6 +246,8 @@ pub enum Payload {
 
     // ---- conversation
     UserMessage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<crate::local_sharing::Person>,
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,

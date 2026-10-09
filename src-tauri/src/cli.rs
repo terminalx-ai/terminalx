@@ -41,6 +41,13 @@ Usage:
       [--title TEXT] [--name NAME]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions show SESSION [--json]
+  terminalx share create SESSION [--read-only] [--people EMAIL,EMAIL]
+      [--expires-in SECONDS] [--approve] [--can-approve] [--max-people COUNT]
+      [--single-use] [--local-only] [--json]
+  terminalx share list SESSION [--json]
+  terminalx share edit SESSION LINK --settings JSON [--json]
+  terminalx share revoke SESSION LINK [--keep-guests] [--json]
+  terminalx share stop SESSION [--json]
   terminalx sessions rename SESSION --title TEXT [--json]
   terminalx tabs list SESSION [--json]
   terminalx send SESSION_OR_TAB TEXT [--json]
@@ -308,6 +315,7 @@ fn parse_with_stdin(
         }
         "cloud" => parse_cloud(&mut tokens),
         "sessions" => parse_sessions(&mut tokens),
+        "share" => parse_share(&mut tokens),
         "tabs" => {
             expect_word(&mut tokens, "list", "tabs")?;
             let session = tokens.required_front("session")?;
@@ -390,6 +398,36 @@ fn parse_with_stdin(
         },
     }?;
     Ok(Parsed { json, action })
+}
+
+fn parse_share(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let action = tokens.required_front("share action")?;
+    let session = tokens.required_front("session")?;
+    let mut params = json!({ "sessionId": session });
+    match action.as_str() {
+        "create" => {
+            let role = if tokens.flag("--read-only")? { "viewer" } else { "driver" };
+            let people = tokens.option("--people")?;
+            let lifetime = tokens.option_u64("--expires-in")?.unwrap_or(3600);
+            params["directOnly"] = json!(tokens.flag("--local-only")?);
+            params["settings"] = json!({
+                "audience": if people.is_some() { "people" } else { "anyone" }, "role": role,
+                "people": people.map(|list| list.split(',').map(|email| json!({ "email": email, "role": role })).collect::<Vec<_>>()).unwrap_or_default(),
+                "expiresAt": chrono::Utc::now().timestamp_millis().saturating_add(i64::try_from(lifetime.saturating_mul(1000)).unwrap_or(i64::MAX)),
+                "approveEachPerson": tokens.flag("--approve")?, "canApprove": tokens.flag("--can-approve")?,
+                "maximumPeople": tokens.option_u64("--max-people")?.unwrap_or(8), "singleUse": tokens.flag("--single-use")?
+            });
+        }
+        "list" | "stop" => (),
+        "edit" | "revoke" => {
+            params["linkId"] = json!(tokens.required_front("link id")?);
+            if action == "edit" {
+                params["settings"] = serde_json::from_str(&tokens.option("--settings")?.ok_or_else(|| invalid("--settings JSON is required"))?).map_err(|_| invalid("Invalid settings JSON"))?;
+            } else { params["removeGuests"] = json!(!tokens.flag("--keep-guests")?); }
+        }
+        _ => return Err(invalid("Unknown share action")),
+    }
+    rpc(&format!("share.{action}"), params, tokens)
 }
 
 fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
@@ -722,6 +760,22 @@ mod tests {
             Action::Rpc { command, params, timeout } => (command, params, timeout),
             other => panic!("expected rpc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sharing_cli_carries_explicit_access_policy_and_revocation_semantics() {
+        let (command, params, _) = rpc_of(&["share", "create", "session", "--read-only", "--people", "alice@example.com,bob@example.com", "--approve", "--single-use", "--local-only"]);
+        assert_eq!(command, "share.create");
+        assert_eq!(params["sessionId"], "session");
+        assert_eq!(params["directOnly"], true);
+        assert_eq!(params["settings"]["role"], "viewer");
+        assert_eq!(params["settings"]["canApprove"], false);
+        assert_eq!(params["settings"]["audience"], "people");
+        assert_eq!(params["settings"]["people"][1], json!({ "email": "bob@example.com", "role": "viewer" }));
+        let (command, params, _) = rpc_of(&["share", "revoke", "session", "link", "--keep-guests"]);
+        assert_eq!(command, "share.revoke");
+        assert_eq!(params["removeGuests"], false);
+        assert!(parse(&args(&["share", "edit", "session", "link"])).is_err());
     }
 
     #[test]

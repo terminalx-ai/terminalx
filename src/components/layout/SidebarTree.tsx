@@ -1,3 +1,4 @@
+import { openSessionShare } from "@/lib/localSharing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe,
@@ -501,6 +502,7 @@ function NewTabButton({ session }: { session: SessionEntry }) {
 function SessionMenu({ session }: { session: SessionEntry }) {
   return (
     <DropdownMenuContent align="end">
+      <DropdownMenuItem onSelect={() => openSessionShare(session.id)}>Share session…</DropdownMenuItem>
       <DropdownMenuItem onSelect={() => pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}
       </DropdownMenuItem>

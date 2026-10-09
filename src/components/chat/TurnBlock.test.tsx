@@ -15,6 +15,15 @@ afterEach(cleanup);
 const turn = (images: { url: string; name?: string }[]): Turn =>
   ({ key: "t1", prompt: { text: "what is this?", images, ts: "2026-10-03T00:00:00Z", seq: 1 }, work: [], live: false }) as unknown as Turn;
 
+it("shows verified sender attribution on prompts and queued inputs", () => {
+  const value = turn([]);
+  value.prompt!.author = { userId: "alice", displayName: "Alice" };
+  value.work = [{ kind: "queued", key: "q2", seq: 2, text: "Follow up", author: { userId: "bob", displayName: "Bob" } }];
+  render(<TurnBlock turn={value} sessionId="s" stream={[]} working={false} />);
+  expect(screen.getByText("Alice").getAttribute("data-user-id")).toBe("alice");
+  expect(screen.getByText("Bob:").getAttribute("data-user-id")).toBe("bob");
+});
+
 it("activates bare links in prompts and queued messages without changing their text", async () => {
   setPrefs({ linkBrowser: "system", foldToolCalls: false });
   const value = turn([]);

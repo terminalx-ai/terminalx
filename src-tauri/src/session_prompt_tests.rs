@@ -78,7 +78,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { agent: text.into(), display: text.into() };
+        let prompt = PromptText { shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -110,7 +110,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { agent: text.into(), display: text.into() };
+        let prompt = PromptText { shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -143,6 +143,31 @@ impl Rig {
             })
             .collect()
     }
+}
+
+#[test]
+fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
+    let rig = Rig::new();
+    rig.compose("Undelivered guest input", 0);
+    let (ready, seq) = {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(cli) = &rt.engine else { unreachable!() };
+        (cli.ready.clone(), cli.awaiting_delivery.unwrap())
+    };
+    // No share survives: this is the delayed writer after the kill switch.
+    let permit = crate::local_sharing::WritePermit { connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
+    rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
+        ready: Some(ready), receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while rig.delivery_pending() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
+    let writer = rig.manager.writers.lock().unwrap().get(&rig.pane).unwrap().clone();
+    let _finished = writer.lock().unwrap();
+    let rt = rig.rt.lock().unwrap();
+    assert!(!rt.turn_open);
+    assert_eq!(rt.status, TabStatus::Idle);
+    assert!(rt.recovery.is_none());
+    assert!(matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_none() && cli.echoed.is_empty()));
 }
 
 #[test]

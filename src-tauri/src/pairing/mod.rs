@@ -7,10 +7,12 @@ mod cloud;
 mod crypto;
 mod diagnostics;
 mod direct;
+mod guest;
 mod mobile;
 mod model;
 mod registry;
 mod relay;
+pub(crate) mod sharing;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -62,6 +64,7 @@ struct Inner {
 }
 
 pub struct PairingManager {
+    guest: guest::GuestClient,
     account: Arc<AccountManager>,
     diagnostics: Mutex<diagnostics::DiagnosticLog>,
     secrets: PairingSecrets,
@@ -73,6 +76,7 @@ pub struct PairingManager {
     sessions: OnceLock<SessionManager>,
     inner: Mutex<Inner>,
     epoch: AtomicU64,
+    sharing_blocked_generation: AtomicU64,
     stopped: AtomicBool,
     suspended_account_token: Mutex<Option<String>>,
     connections: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<()>>>>,
@@ -94,6 +98,7 @@ enum PairingConnectionContext {
 impl PairingManager {
     pub fn new(account: Arc<AccountManager>) -> Self {
         Self {
+            guest: guest::GuestClient::default(),
             account,
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
@@ -103,6 +108,7 @@ impl PairingManager {
             sessions: OnceLock::new(),
             inner: Mutex::new(Inner::default()),
             epoch: AtomicU64::new(0),
+            sharing_blocked_generation: AtomicU64::new(u64::MAX),
             stopped: AtomicBool::new(false),
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
@@ -302,6 +308,12 @@ impl PairingManager {
     /// automatic credentials are already unusable before either starts.
     pub async fn sign_out(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.sharing_blocked_generation.store(self.account.current_generation(), Ordering::SeqCst);
+        self.leave_guest();
+        if let Some(sessions) = self.sessions.get() {
+            let ids: Vec<_> = sessions.sharing.lock().unwrap().sessions.keys().cloned().collect();
+            for id in ids { let _ = self.change_share(&id, "stop", serde_json::json!({})); }
+        }
         let context = self.account_context();
         if let Some(context) = context.as_ref() {
             *self.suspended_account_token.lock().unwrap() = Some(context.access_token.clone());
@@ -362,6 +374,12 @@ impl PairingManager {
     }
 
     pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.leave_guest();
+        if let Some(sessions) = self.sessions.get() {
+            let ids: Vec<_> = sessions.sharing.lock().unwrap().sessions.keys().cloned().collect();
+            for id in ids { let _ = self.change_share(&id, "stop", serde_json::json!({})); }
+        }
         self.stopped.store(true, Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         if let Some(relay) = self.inner.lock().unwrap().relay.take() {
@@ -932,10 +950,20 @@ impl PairingManager {
             .ok()
             .flatten()
             .map(|mirror| mirror.binding_generation);
+        if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
+            let authenticated = serde_json::json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
+            send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+            return self.share_socket(socket, session, session_id, link_id).await;
+        }
         let device = self
             .registry
             .find_by_token(&auth.device_token, generation)?
             .ok_or_else(|| anyhow!("paired-device credential was refused"))?;
+        // Session invitations are process-local and must never subscribe to
+        // the mobile runtime's host-wide broadcasts, even via a disk entry.
+        if device.scope == DeviceScope::Session {
+            bail!("Session credentials are valid only for an active session invitation.");
+        }
         if expected_device_id
             .as_deref()
             .is_some_and(|id| id != device.id)
@@ -1023,6 +1051,9 @@ impl PairingManager {
         connection: &PairingConnectionContext,
         mobile_connection: &Arc<mobile::MobileConnection>,
     ) -> serde_json::Value {
+        if device.scope == DeviceScope::Session {
+            return serde_json::json!({ "id": request["id"], "ok": false, "error": { "code": "forbidden", "message": "Session credentials require the scoped session router." } });
+        }
         let id = request
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -1574,6 +1605,9 @@ fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde
 }
 
 fn allowed_method(scope: DeviceScope, method: &str) -> bool {
+    if scope == DeviceScope::Session {
+        return crate::local_sharing::scoped_method(method);
+    }
     const VIEWER: &[&str] = &[
         "status.get",
         "presence.join",

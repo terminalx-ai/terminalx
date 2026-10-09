@@ -150,7 +150,7 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), Some(RecoveryKind::Capacity));
         events.push(event(Payload::Recovery { kind: None }));
         assert_eq!(from_history(&events), None);
-        events.push(event(Payload::UserMessage { text: "Continue".into(), images: vec![], baseline: None, queued: false, cwd: None }));
+        events.push(event(Payload::UserMessage { author: None, text: "Continue".into(), images: vec![], baseline: None, queued: false, cwd: None }));
         assert_eq!(from_history(&events), Some(RecoveryKind::Disconnected));
         events.push(event(Payload::Status { text: SESSION_CLOSED_MESSAGE.into() }));
         assert_eq!(from_history(&events), None);

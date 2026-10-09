@@ -249,6 +249,7 @@ pub struct ControlService {
 #[cfg(feature = "desktop")]
 #[derive(Clone)]
 struct DesktopControl {
+    pairing: Option<Arc<crate::pairing::PairingManager>>,
     computer: Arc<crate::computer::ComputerService>,
     browser: std::sync::Arc<crate::browser::BrowserRuntime>,
 }
@@ -267,7 +268,7 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: None,
-            desktop: Some(DesktopControl { computer, browser }),
+            desktop: Some(DesktopControl { computer, browser, pairing: None }),
         }
     }
 
@@ -297,9 +298,28 @@ impl ControlService {
         }
     }
 
+    #[cfg(feature = "desktop")]
+    pub(crate) fn with_pairing(mut self, pairing: Arc<crate::pairing::PairingManager>) -> Self {
+        if let Some(desktop) = &mut self.desktop { desktop.pairing = Some(pairing); }
+        self
+    }
+
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
+            if let Some(action) = command.strip_prefix("share.") {
+                let pairing = desktop.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
+                let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
+                let result = match action {
+                    "create" => {
+                        let settings = serde_json::from_value(params["settings"].clone()).map_err(ControlError::internal)?;
+                        tauri::async_runtime::block_on(pairing.create_share(session.into(), settings, params["directOnly"].as_bool().unwrap_or(false)))
+                    }
+                    "list" => pairing.share_status(session),
+                    action => pairing.change_share(session, action, params.clone()),
+                };
+                return result.map_err(ControlError::internal);
+            }
             if let Some(method) = command.strip_prefix("computer.") {
                 // Computer-use errors keep their own codes: the skill guide
                 // teaches recovery per code, so they must not collapse into

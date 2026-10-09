@@ -287,7 +287,7 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         return;
     }
     let text = as_typed(prompt);
-    out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 /// A prompt typed while a turn was running. The CLI queues it, hands it to
@@ -312,7 +312,7 @@ fn decode_queued_prompt(v: &Value, out: &mut Vec<Payload>) {
         return;
     }
     let text = as_typed(prompt);
-    out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+    out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
 }
 
 fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
