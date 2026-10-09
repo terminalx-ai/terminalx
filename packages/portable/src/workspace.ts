@@ -37,11 +37,14 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
  *   into its local mirror of the workspace;
  * - `cleanup/1`: the bulk worktree clean-up. The runtime inspects and removes
- *   its own worktrees; this client only names them.
+ *   its own worktrees; this client only names them;
+ * - `workspace/1`: one session's worktree, for the removal dialog:
+ *   `workspace.disposition` and `workspace.remove`. The worktree is named by
+ *   its session, never by a path.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -89,6 +92,7 @@ export const MUTATING_METHODS = new Set([
   "session.addTab",
   "session.delete",
   "cleanup.remove",
+  "workspace.remove",
   "pty.create",
   "fs.write",
   "fs.writePart",
@@ -189,6 +193,13 @@ export interface RuntimeSessionTab {
   status: AgentTabStatus;
   created: string;
   modified: string;
+}
+
+/** `workspace.remove`: the sessions that went with the worktree, and what became of its branch. */
+export interface RuntimeWorkspaceRemoved {
+  deleted: string[];
+  keptBranch?: string | null;
+  rescuedBranch?: string | null;
 }
 
 /** What the clean-up decided about one worktree (`worktree_cleanup.rs`). */
@@ -908,6 +919,26 @@ export class WorkspaceRpcClient {
   async removeCleanup(items: CleanupRemoveItem[]): Promise<CleanupResult[]> {
     const result = await this.mutate<{ results?: CleanupResult[] }>("cleanup.remove", { items });
     return result.results ?? [];
+  }
+
+  /**
+   * `workspace.disposition`: where the checkout a session runs in stands
+   * (`workspace/1`, manage only). `fetch` asks for the clean-and-merged
+   * verdict the removal dialog shows; without it the read stays quick. The
+   * answer is the desktop's `WorkspaceDisposition`, which this package only carries.
+   */
+  async workspaceDisposition<T = Record<string, unknown>>(sessionId: string, options: { fetch?: boolean } = {}): Promise<T> {
+    const result = await this.call<{ disposition: T }>("workspace.disposition", { sessionId, ...(options.fetch ? { fetch: true } : {}) });
+    return result.disposition;
+  }
+
+  /**
+   * `workspace.remove`: remove the worktree a session runs in, with every
+   * session in it. The runtime checks it again and removes one that is not
+   * clean and merged only with the digest of the check that was shown.
+   */
+  async removeSessionWorkspace(sessionId: string, options: { deleteBranch: boolean; confirmedDigest: string | null; expectedSessions: string[] }): Promise<RuntimeWorkspaceRemoved> {
+    return this.mutate<RuntimeWorkspaceRemoved>("workspace.remove", { sessionId, ...options });
   }
 
   /** The agents installed on the runtime, with their models, efforts and modes (`agents/1`). */

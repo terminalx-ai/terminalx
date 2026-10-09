@@ -81,7 +81,7 @@ app. The outbound connections are these nine:
 | TerminalX cloud API | Signed in with an organization, when you open organization settings or cloud workspaces, or act on them | Organization, member, compute, provider-connection, GitHub App, workspace and diagnostics requests to `login.terminalx.ai` under `/v1/desktop/orgs/…`, authorized with your account session |
 | GitHub | You open the Issues view or a PR panel, or become eligible for the local star reminder | Uses your existing `gh` credentials; the reminder checks only whether you starred `terminalx-ai/raccoon`. It stars only when you press **Star on GitHub**; **Open GitHub** opens that repository in your system browser |
 | Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
-| Anthropic usage | The focused status bar lacks a Claude model limit, no more than once every 15 minutes | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
+| Anthropic usage | While the status bar shows usage and the window is on screen, at the **Usage auto-refresh interval** in Settings (one minute by default; Off leaves returning to the app, Refresh and window resets), and less often while Anthropic asks the app to wait | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
 | The update endpoint | You press "Check for updates" | The current version and your channel |
 

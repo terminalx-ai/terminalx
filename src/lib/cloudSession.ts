@@ -50,6 +50,8 @@ import {
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
+import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
 import { selectSessionTab } from "@/lib/terminal";
 import { useTheme } from "@/lib/theme";
@@ -217,6 +219,12 @@ export interface CloudSessionModel {
   selectRepository(repo: string | null): void;
   gitSource: GitSource | undefined;
   fileSource: CloudFileSource | undefined;
+  /**
+   * The worktree this session runs in, removed on the runtime that holds it
+   * (`workspace/1`). Only for a manager of a connected workspace, and absent
+   * for a session in the repository's main directory.
+   */
+  removableWorkspace: RemovableWorkspace | undefined;
   error: string | null;
 }
 
@@ -523,6 +531,24 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   );
 
   // Files: through the runtime's fs/1, read-only unless this attachment manages it.
+  // The runtime names the worktree; the session entry below never does (its `cwd` is a display root).
+  // Only this session's: after a switch the last one read may still be the previous session's.
+  const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
+  const worktreeName = ownSession?.worktreeName ?? null;
+  const worktreePath = ownSession?.cwd ?? "";
+  const removesWorktrees = manage && !!client?.hasCapability("workspace/1");
+  const removableWorkspace = useMemo<RemovableWorkspace | undefined>(
+    () =>
+      client && removesWorktrees && worktreeName
+        ? {
+            host: cloudWorkspaceHost({ orgId, workspaceId, workspaceKey, sessionId: runtimeSessionId, sessionKey: key, client }),
+            projectPath: workspaceKey,
+            path: worktreePath,
+            name: worktreeName,
+          }
+        : undefined,
+    [client, removesWorktrees, worktreeName, worktreePath, orgId, workspaceId, workspaceKey, runtimeSessionId, key],
+  );
   const fileSource = useMemo(() => (connected && client ? cloudFileSource(workspaceKey, client, !manage) : undefined), [connected, client, workspaceKey, manage]);
   useEffect(() => {
     if (!fileSource) return;
@@ -773,6 +799,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     selectRepository: setRepository,
     gitSource: locked ? undefined : gitSource,
     fileSource: locked ? undefined : fileSource,
+    removableWorkspace: locked ? undefined : removableWorkspace,
     error,
   };
 }

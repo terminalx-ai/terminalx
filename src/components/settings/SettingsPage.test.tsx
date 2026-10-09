@@ -114,3 +114,35 @@ describe("the section Settings opens on", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Account");
   });
 });
+
+describe("Usage auto-refresh interval", () => {
+  it("offers Off and four intervals, starts at one minute, and saves the one chosen", async () => {
+    const saved: unknown[] = [];
+    const tauri = window as unknown as { __TAURI_INTERNALS__?: unknown };
+    const previous = tauri.__TAURI_INTERNALS__;
+    tauri.__TAURI_INTERNALS__ = {
+      transformCallback: () => 0,
+      invoke: async (command: string, args: { patch?: Record<string, unknown> }) => {
+        if (command !== "set_status_bar_settings") throw new Error(`unexpected ${command}`);
+        saved.push(args.patch);
+        return { visible: true, usage: true, resources: true, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1, ...args.patch };
+      },
+    };
+    try {
+      render(<SettingsPage initialTab="appearance" onBack={vi.fn()} />);
+      const group = screen.getByRole("radiogroup", { name: "Usage auto-refresh interval" });
+      const choices = within(group).getAllByRole("radio");
+      expect(choices.map((choice) => choice.textContent)).toEqual(["Off", "1 min", "2 min", "5 min", "15 min"]);
+      expect(choices[1].getAttribute("aria-checked")).toBe("true");
+      for (const [index, minutes] of [[3, 5], [0, 0], [1, 1]] as const) {
+        fireEvent.click(choices[index]);
+        // Applied at once, before the save answers.
+        expect(choices[index].getAttribute("aria-checked")).toBe("true");
+        await screen.findByRole("radiogroup", { name: "Usage auto-refresh interval" });
+        expect(saved.at(-1)).toEqual({ usageRefreshMinutes: minutes });
+      }
+    } finally {
+      tauri.__TAURI_INTERNALS__ = previous;
+    }
+  });
+});

@@ -1238,7 +1238,12 @@ export interface StatusBarSettings {
   resources: boolean;
   percent: "used" | "remaining";
   usageMode: "detailed" | "compact";
+  /** Minutes between automatic usage refreshes; 0 turns the timer off. */
+  usageRefreshMinutes: number;
 }
+
+/** What Settings offers for `usageRefreshMinutes`; the backend accepts no others. */
+export const USAGE_REFRESH_MINUTES = [0, 1, 2, 5, 15] as const;
 
 export interface UsageWindow {
   agent: "claude" | "codex";
@@ -1255,7 +1260,8 @@ export interface UsageWindow {
 export interface UsageSnapshot {
   revision?: number;
   claudeAccount?: string | null;
-  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null };
+  claude?: { retryAt: number | null; revalidateAt: number | null; error: string | null; lastSuccessAt?: number | null };
+  codexRefresh?: { retryAt: number | null; error: string | null; lastSuccessAt: number | null };
   windows: UsageWindow[];
   codex?: {
     credits?: {
