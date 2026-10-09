@@ -28,6 +28,7 @@ use serde_json::Value;
 use crate::events::*;
 use crate::recovery::{self, RecoveryKind};
 use crate::harness::host::{Host, LiveChild, Sink, SpawnSpec};
+use crate::harness::settings::{self, Apply, Setting, Settings, Signal};
 use crate::harness::{acp, claude, codex, opencode, tui, Action, CliKind, HarnessId};
 use crate::hooks::{HookFrame, HookReply, Origin};
 use crate::store::index::{self, TabEntry, TabStatus};
@@ -94,6 +95,9 @@ fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::D
 /// transcript to follow, and the conversation id if the app minted one.
 struct CliLaunch {
     command: String,
+    /// The model the CLI was started on, when that is not the one asked for
+    /// (Codex, on an account that cannot run it).
+    model: Option<String>,
     tail: tui::Tail,
     minted: Option<String>,
     /// The only directory this launch's hooks may point the tail into.
@@ -169,6 +173,21 @@ const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(12
 /// queue the CLI discarded must not go on swallowing the same words typed
 /// into the terminal.
 const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a CLI is given to answer a `/model` or `/effort` the app typed
+/// while it was idle. It answers within a second when it is going to.
+const SETTINGS_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// What an agent is called in a sentence the reader is shown.
+fn agent_name(harness: &str) -> &'static str {
+    match HarnessId::parse(harness) {
+        HarnessId::Claude => "Claude Code",
+        HarnessId::Codex => "Codex",
+        HarnessId::Acp(_) => "Cursor",
+        HarnessId::OpenCode => "OpenCode",
+        HarnessId::Other(_) => "The agent",
+    }
+}
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
@@ -304,6 +323,21 @@ pub struct CliTab {
     /// A setting the CLI only reads at startup, changed mid-turn. The restart
     /// waits for the turn to end.
     pub restart_when_idle: bool,
+    /// When a model or effort change was last typed into this CLI and is
+    /// still waiting for it to answer (`harness::settings`). A CLI that never
+    /// answers is given up on by the session watcher.
+    settings_asked_at: Option<Instant>,
+    /// The model and effort this launch was started on because the app asked
+    /// for them, until the CLI first says what it is running. If that is
+    /// something else, the reader is told the change did not take.
+    launched_for: Option<Settings>,
+    /// Whether this launch's status line has named its model. Until it has,
+    /// the model an assistant record names is the next best word.
+    status_names_model: bool,
+    /// Whether the last `/model` or `/effort` the transcript recorded was
+    /// one the app typed. "Set model to …" names no id, so it only settles
+    /// the app's request when it is the answer to the app's own command.
+    settings_command_is_ours: bool,
     /// Set when this CLI's `SessionStart` hook arrives; what the thread that
     /// types into the pane waits on.
     pub ready: Arc<tui::Ready>,
@@ -371,6 +405,10 @@ pub struct TabRuntime {
     /// A timeout the provider reported is a different fact and is not
     /// cleared by the terminal drawing again.
     pub stalled_at: Option<Instant>,
+    /// The last thing the provider said it was running, so the same word
+    /// again (a status line repeats itself) costs nothing. Forgotten whenever
+    /// the app asks for a change, since the answer to that must be heard.
+    last_settings_report: Option<Signal>,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -624,6 +662,7 @@ impl SessionManager {
                 Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn == Some(tui::TurnMark::Ended)),
                 _ => (None, false),
             };
+            self.give_up_on_unanswered_settings(&mut rt, now);
             let silent = now.saturating_duration_since(rt.last_activity);
             if rt.turn_open && ended && silent >= patience.settle {
                 let final_message = match &rt.engine {
@@ -689,6 +728,30 @@ impl SessionManager {
         }
     }
 
+    /// A model or effort change typed into a CLI that has not answered it.
+    /// A CLI mid-turn may be holding the command until the turn is over, so
+    /// the wait is counted from when the turn was last seen running; after
+    /// that, a change still shown as on its way would be a promise nobody is
+    /// keeping, and it is taken back with a reason.
+    fn give_up_on_unanswered_settings(&self, rt: &mut TabRuntime, now: Instant) {
+        let turn_open = rt.turn_open;
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        let Some(asked) = p.settings_asked_at else { return };
+        if turn_open {
+            p.settings_asked_at = Some(now);
+            return;
+        }
+        if now.saturating_duration_since(asked) < SETTINGS_ANSWER_WAIT {
+            return;
+        }
+        p.settings_asked_at = None;
+        for setting in [Setting::Model, Setting::Effort] {
+            if let Err(error) = self.refuse_setting(rt, setting, None, "it did not confirm the change") {
+                log::warn!("drop an unanswered {} change: {error:#}", setting.noun());
+            }
+        }
+    }
+
     /// Settle a PTY-first tab when the pane its CLI ran in exits.
     pub fn follow_pane_exits(&self) {
         let exited = self.clone();
@@ -729,6 +792,7 @@ impl SessionManager {
                 last_activity: Instant::now(),
                 recovery: None,
                 stalled_at: None,
+                last_settings_report: None,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -1242,7 +1306,31 @@ impl SessionManager {
         Ok(SendOutcome { queued: false, events })
     }
 
+    /// With no process there is nobody left to answer a model or effort
+    /// change that was waiting on one: it is simply what the next launch is
+    /// given, and so what the tab is on.
+    fn settle_settings_without_process(&self, rt: &mut TabRuntime) -> Option<Settings> {
+        match self.update_settings(rt, |s| s.launched()) {
+            Ok((_, now)) => Some(now),
+            Err(error) => {
+                log::warn!("settle the settings of {}/{}: {error:#}", rt.session_id, rt.tab_id);
+                None
+            }
+        }
+    }
+
+    /// The tab as a process started now should see it: a change left waiting
+    /// by a process that has since gone rides with this one.
+    fn launching(&self, rt: &mut TabRuntime, tab: &TabEntry) -> TabEntry {
+        let mut tab = tab.clone();
+        if let Some(now) = self.settle_settings_without_process(rt) {
+            now.write(&mut tab);
+        }
+        tab
+    }
+
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+        let tab = &self.launching(rt, tab);
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).with_context(|| format!("start {binary}"))?;
@@ -1250,6 +1338,7 @@ impl SessionManager {
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+        let tab = &self.launching(rt, tab);
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
         self.spawn_child(rt, rt_arc, &plan.program, &plan.args, cwd).context("start OpenCode")?;
@@ -1363,6 +1452,9 @@ impl SessionManager {
             rt.child = None;
             rt.child_pid = None;
             rt.engine = Engine::None;
+            // A headless engine's process is gone too (`release_cli` has
+            // done this for a CLI's).
+            self.settle_settings_without_process(&mut rt);
             self.set_status(&mut rt, TabStatus::Idle);
             (pane, pid)
         };
@@ -1458,27 +1550,35 @@ impl SessionManager {
         Ok(())
     }
 
+    /// The app asks for another model. What every view shows as current only
+    /// moves when the provider is running it (`harness::settings`): at once
+    /// when nothing is running, on the provider's word when something is.
     pub fn set_model(&self, session_id: &str, tab_id: &str, model: &str) -> Result<()> {
-        index::update_tab(session_id, tab_id, |t| {
-            t.model = model.into();
-            Ok(())
-        })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let turn_open = rt.turn_open;
+        let waits = self.change_waits(&rt, Setting::Model);
+        let (before, after) = self.update_settings(&mut rt, |s| s.request_model(model, waits))?;
         let mut restart = false;
         match &mut rt.engine {
-            // Claude's own `/model` takes the change live. Codex's `/model`
-            // opens a picker rather than taking an argument, so its tab is
-            // restarted on the same conversation instead.
+            // Claude's own `/model` takes the change live, and its status
+            // line says when it has. Asking for what is already running while
+            // another change is on its way has to be typed too: it is what
+            // takes that change back.
             Engine::Cli(p) if p.harness == CliKind::Claude => {
-                self.type_command(p, &rt_arc, format!("/model {model}"));
+                if after.requested_model.is_some() || before.requested_model.is_some() {
+                    p.settings_asked_at = after.waiting().then(Instant::now);
+                    self.type_command(p, &rt_arc, format!("/model {model}"));
+                }
             }
+            // Codex's `/model` opens a picker rather than taking an argument,
+            // so its tab is restarted on the same conversation instead: now,
+            // or once the turn it would interrupt is over.
             Engine::Cli(p) => {
                 if turn_open {
-                    p.restart_when_idle = true;
+                    p.restart_when_idle |= before != after;
                 } else {
-                    restart = true;
+                    restart = before != after;
                 }
             }
             Engine::Acp(a) => {
@@ -1488,12 +1588,148 @@ impl SessionManager {
             Engine::OpenCode(o) => o.model = Some(model.into()),
             _ => {}
         }
-        self.publish(&mut rt, Payload::SettingsChanged { model: Some(model.into()), effort: None, permission_mode: None }, None);
         drop(rt);
         if restart {
             self.restart_for_settings(session_id, tab_id)?;
         }
         Ok(())
+    }
+
+    /// Whether a change asked for now has to wait for the provider: for its
+    /// answer, where it takes changes live, or for the turn to end, where it
+    /// has to be restarted. With nothing running the change is only what the
+    /// next launch is given, and that is already what "current" means.
+    fn change_waits(&self, rt: &TabRuntime, setting: Setting) -> bool {
+        let how = HarnessId::parse(&rt.harness).settings().of(setting);
+        match (&rt.engine, how) {
+            (Engine::Cli(_), Apply::Live) => true,
+            (Engine::Cli(_), Apply::Restart) => rt.turn_open,
+            // The reply to `session/set_model` is its answer.
+            (Engine::Acp(a), Apply::Live) => a.session_id.is_some(),
+            // OpenCode names the model on each prompt: nothing to wait for.
+            _ => false,
+        }
+    }
+
+    /// Change the tab's model and effort through `change`, and tell every
+    /// view what moved: a `settings_changed` in the tab's own log when what
+    /// is running changed, and the session itself — which the sidebar, the
+    /// header, the dashboard and a paired device all draw from — whenever
+    /// anything did, a request that is still waiting included.
+    fn update_settings(&self, rt: &mut TabRuntime, mut change: impl FnMut(&mut Settings)) -> Result<(Settings, Settings)> {
+        rt.last_settings_report = None;
+        // Tried on a copy first: most of what a provider reports changes
+        // nothing, and that should not touch the index at all.
+        let current = Settings::of(index::get(&rt.session_id)?.tab(&rt.tab_id).ok_or_else(|| anyhow!("tab {} not found", rt.tab_id))?);
+        let mut wanted = current.clone();
+        change(&mut wanted);
+        if wanted == current {
+            return Ok((current, wanted));
+        }
+        // Then made for real on whatever the index holds by now.
+        let (current, wanted) = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+            let current = Settings::of(t);
+            let mut wanted = current.clone();
+            change(&mut wanted);
+            wanted.write(t);
+            Ok((current, wanted))
+        })?;
+        let model = (wanted.model != current.model).then(|| wanted.model.clone());
+        let effort = (wanted.effort != current.effort).then(|| wanted.effort.clone()).flatten();
+        if model.is_some() || wanted.effort != current.effort {
+            self.publish(rt, Payload::SettingsChanged { model, effort, permission_mode: None }, None);
+        }
+        if let Ok(session) = index::get(&rt.session_id) {
+            self.sink.emit("session_updated", &session);
+        }
+        // A cloud runtime's clients list tabs on their own channel.
+        self.sink.emit(crate::cloud_agents::TABS_CHANGED, &serde_json::json!({ "tabId": rt.tab_id }));
+        Ok((current, wanted))
+    }
+
+    /// The provider said something about its own model or effort: the one
+    /// way a change made on its side — the CLI's `/model`, its picker, a
+    /// default it resolved at startup — reaches the tab.
+    fn provider_settings(&self, rt: &mut TabRuntime, signal: Signal) {
+        if rt.last_settings_report.as_ref() == Some(&signal) {
+            return;
+        }
+        let agent = agent_name(&rt.harness);
+        let result = match &signal {
+            Signal::Current { model, effort } => {
+                // Only Claude's pickers offer aliases a full id has to be read back into.
+                let models = if rt.harness == "claude" { claude::models::known() } else { Vec::new() };
+                // What the launch was meant to put the tab on, for whichever
+                // settings this word names: each is checked against the
+                // first word about it, and once.
+                let (asked_model, asked_effort) = match &mut rt.engine {
+                    Engine::Cli(p) => {
+                        let asked = p.launched_for.as_mut();
+                        let asked_model = asked.as_ref().filter(|_| model.is_some()).map(|asked| asked.model.clone()).filter(|asked| !asked.is_empty());
+                        let asked_effort = asked.as_ref().filter(|_| effort.is_some()).and_then(|asked| asked.effort.clone());
+                        if let Some(asked) = asked {
+                            if model.is_some() {
+                                asked.model.clear();
+                            }
+                            if effort.is_some() {
+                                asked.effort = None;
+                            }
+                            if asked.model.is_empty() && asked.effort.is_none() {
+                                p.launched_for = None;
+                            }
+                        }
+                        (asked_model, asked_effort)
+                    }
+                    _ => (None, None),
+                };
+                self.update_settings(rt, |s| {
+                    let model = model.as_deref().map(|reported| settings::canonical_model(s, reported, &models));
+                    s.reported(model.as_deref(), effort.as_deref());
+                })
+                .map(|(_, now)| {
+                    // A restart was meant to put the tab on something, and
+                    // the first word from the new process says otherwise.
+                    let mut misses = Vec::new();
+                    if let Some(asked) = asked_model.filter(|asked| *asked != now.model) {
+                        misses.push(format!("model {}, not {asked}", now.model));
+                    }
+                    if let Some(asked) = asked_effort.filter(|asked| Some(asked.as_str()) != now.effort.as_deref()) {
+                        misses.push(format!("{} effort, not {asked}", now.effort.as_deref().unwrap_or("default")));
+                    }
+                    if !misses.is_empty() {
+                        self.publish(rt, Payload::Status { text: format!("{agent} is running {}.", misses.join(" and ")) }, None);
+                    }
+                    now
+                })
+            }
+            Signal::Accepted { setting } => self.update_settings(rt, |s| s.accepted(*setting)).map(|(_, now)| now),
+            Signal::Refused { setting, value, message } => self.refuse_setting(rt, *setting, value.as_deref(), message),
+        };
+        match result {
+            Ok(now) => {
+                if let Engine::Cli(p) = &mut rt.engine {
+                    if !now.waiting() {
+                        p.settings_asked_at = None;
+                    }
+                }
+                rt.last_settings_report = Some(signal);
+            }
+            Err(error) => log::warn!("settings reported by {}/{}: {error:#}", rt.session_id, rt.tab_id),
+        }
+    }
+
+    /// A change the provider turned down, or never answered: what the views
+    /// call current never moved, so the request is dropped and the reader
+    /// told why.
+    fn refuse_setting(&self, rt: &mut TabRuntime, setting: Setting, value: Option<&str>, why: &str) -> Result<Settings> {
+        let mut dropped = None;
+        let (_, now) = self.update_settings(rt, |s| dropped = s.refused(setting, value))?;
+        if let Some(value) = dropped {
+            let agent = agent_name(&rt.harness);
+            let why = why.trim().trim_end_matches('.');
+            self.publish(rt, Payload::Status { text: format!("{agent} did not change the {} to {value}: {why}.", setting.noun()) }, None);
+        }
+        Ok(now)
     }
 
     /// Add an agent tab to a session, from whichever surface asked. A shared
@@ -1553,28 +1789,33 @@ impl SessionManager {
 
     /// Claude takes effort live through its own `/effort`. Codex has no such
     /// command, so its tab is restarted on the same conversation; the
-    /// headless peers respawn.
+    /// headless peers have no effort setting at all, and say so rather than
+    /// take a value that would change nothing.
     pub fn set_effort(&self, session_id: &str, tab_id: &str, effort: Option<&str>) -> Result<()> {
-        index::update_tab(session_id, tab_id, |t| {
-            t.effort = effort.map(String::from);
-            Ok(())
-        })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
+        if HarnessId::parse(&rt.harness).settings().effort == Apply::Unsupported && effort.is_some_and(|e| !e.is_empty()) {
+            bail!("{} has no effort setting.", agent_name(&rt.harness));
+        }
         let turn_open = rt.turn_open;
+        let waits = self.change_waits(&rt, Setting::Effort);
+        let (before, after) = self.update_settings(&mut rt, |s| s.request_effort(effort, waits))?;
         let mut respawn = false;
         let mut restart = false;
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 if let Some(e) = effort.filter(|e| !e.is_empty()) {
-                    self.type_command(p, &rt_arc, format!("/effort {e}"));
+                    if after.requested_effort.is_some() || before.requested_effort.is_some() {
+                        p.settings_asked_at = after.waiting().then(Instant::now);
+                        self.type_command(p, &rt_arc, format!("/effort {e}"));
+                    }
                 }
             }
             Engine::Cli(p) => {
                 if turn_open {
-                    p.restart_when_idle = true;
+                    p.restart_when_idle |= before != after;
                 } else {
-                    restart = true;
+                    restart = before != after;
                 }
             }
             Engine::Acp(_) | Engine::OpenCode(_) => {}
@@ -1587,7 +1828,6 @@ impl SessionManager {
             rt.child_pid = None;
             rt.engine = Engine::None;
         }
-        self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: effort.map(String::from), permission_mode: None }, None);
         drop(rt);
         if restart {
             self.restart_for_settings(session_id, tab_id)?;
@@ -1708,6 +1948,20 @@ impl SessionManager {
             }
         }
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+        // A model or effort that was waiting for the process to be replaced
+        // rides with this launch, and is what the tab runs from here on.
+        let waited = Settings::of(tab);
+        let mut launching = waited.clone();
+        launching.launched();
+        let launched_for = (launching != waited).then(|| launching.clone());
+        let tab = &{
+            let mut tab = tab.clone();
+            launching.write(&mut tab);
+            tab
+        };
+        if launched_for.is_some() {
+            self.update_settings(rt, |s| s.launched())?;
+        }
         // A quick chat's scratch directory is ours to keep there: one removed
         // by hand is made again rather than failing the launch.
         if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
@@ -1734,6 +1988,8 @@ impl SessionManager {
             CliKind::Claude => self.claude_launch(entry, tab, &exe)?,
             CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env)?,
         };
+        // The reader has been told about a substitution already.
+        let launched_for = launched_for.map(|asked| Settings { model: launch.model.clone().unwrap_or(asked.model), ..asked });
 
         // A cloud workspace's configuration (`cloud_config`): variables,
         // bound secrets, prompts and MCP servers. Before the grants, so an
@@ -1762,6 +2018,10 @@ impl SessionManager {
             pane_id: pane.clone(),
             generation,
             restart_when_idle: false,
+            settings_asked_at: None,
+            launched_for,
+            status_names_model: false,
+            settings_command_is_ours: false,
             // Claude Code runs its SessionStart hook the moment it is up;
             // Codex has no session, and so no hook, until a prompt makes one.
             ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
@@ -1843,6 +2103,7 @@ impl SessionManager {
         let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
+            model: None,
             tail: tui::Tail::opening(path, claude::transcript::decode_line, carried).marking(claude::transcript::decode_marked),
             minted: (!resume).then_some(provider_id),
             transcript_root,
@@ -1861,11 +2122,9 @@ impl SessionManager {
             Some(sub) => {
                 let text = format!("{} is not available on this account; using {}.", tab.model, sub.label);
                 self.publish(rt, Payload::Status { text }, None);
-                let _ = index::update_tab(&rt.session_id, &rt.tab_id, |t| {
-                    t.model = sub.id.clone();
-                    Ok(())
-                });
-                self.publish(rt, Payload::SettingsChanged { model: Some(sub.id.clone()), effort: None, permission_mode: None }, None);
+                if let Err(error) = self.update_settings(rt, |s| s.model = sub.id.clone()) {
+                    log::warn!("record the substituted Codex model: {error:#}");
+                }
                 sub.id
             }
             None => tab.model.clone(),
@@ -1908,6 +2167,7 @@ impl SessionManager {
         .ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
         Ok(CliLaunch {
             command,
+            model: (model != tab.model).then_some(model),
             tail: match rollout {
                 Some(path) => tui::Tail::opening(path, codex::rollout::decode_line, Default::default()).marking(codex::rollout::decode_marked),
                 None => tui::Tail::unknown(codex::rollout::decode_line).marking(codex::rollout::decode_marked),
@@ -1944,6 +2204,16 @@ impl SessionManager {
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
         let mut rt = rt_arc.lock().unwrap();
         self.start_cli(&mut rt, &rt_arc, &entry, &tab)?;
+        // Codex was restarted to be on these settings, whether they waited
+        // for the turn or were applied at once: its first word is checked
+        // against them. (Its ids are exact; Claude's aliases are not, and
+        // Claude is only restarted for its permission mode.)
+        let now = index::get(session_id).ok().and_then(|entry| entry.tab(tab_id).map(Settings::of));
+        if let (Engine::Cli(p), Some(now)) = (&mut rt.engine, now) {
+            if p.harness == CliKind::Codex && p.launched_for.is_none() {
+                p.launched_for = Some(now);
+            }
+        }
         Ok(())
     }
 
@@ -1959,6 +2229,7 @@ impl SessionManager {
         }
         rt.engine = Engine::None;
         rt.turn_open = false;
+        self.settle_settings_without_process(rt);
         self.set_status(rt, TabStatus::Idle);
         Some(pane)
     }
@@ -2019,6 +2290,17 @@ impl SessionManager {
                 Engine::Cli(p) => consume_composer_echo(&mut p.echoed, &payload),
                 _ => None,
             };
+            match (&payload, &mut rt.engine) {
+                // Whose command the next "Set model to …" answers: one that
+                // came back as an echo was sent from here.
+                (Payload::UserMessage { text, .. }, Engine::Cli(p)) if text.starts_with("/model") || text.starts_with("/effort") => {
+                    p.settings_command_is_ours = echoed.is_some();
+                }
+                // The answer to a command typed in the terminal says nothing
+                // about a change the app is still waiting on.
+                (Payload::ProviderSettings { signal: Signal::Accepted { .. } }, Engine::Cli(p)) if !p.settings_command_is_ours => continue,
+                _ => {}
+            }
             if let Some(echo) = echoed {
                 if matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery == Some(echo.seq)) {
                     self.delivery_confirmed(&mut rt);
@@ -2473,6 +2755,22 @@ impl SessionManager {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {
                 self.emit_usage();
             }
+            // The same frame names the model and effort in force, and the
+            // CLI sends it again whenever either changes, from either side.
+            if let Some(signal) = (kind == CliKind::Claude).then(|| claude::transcript::status_settings(&frame.payload)).flatten() {
+                let mut rt = rt_arc.lock().unwrap();
+                // A restart may have replaced the launch this frame is from.
+                let mine = match &mut rt.engine {
+                    Engine::Cli(p) if p.origin.accepts(&frame) => {
+                        p.status_names_model |= matches!(&signal, Signal::Current { model: Some(_), .. });
+                        true
+                    }
+                    _ => false,
+                };
+                if mine {
+                    self.provider_settings(&mut rt, signal);
+                }
+            }
             return HookReply::default();
         }
         // Stop at hook receipt, before transcript settling/git snapshots, so
@@ -2808,6 +3106,24 @@ impl SessionManager {
     }
 
     fn apply(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) {
+        // A word about the provider's own settings is for the tab, not the log.
+        let payload = match payload {
+            Payload::ProviderSettings { signal } => {
+                if subagent.is_none() {
+                    self.provider_settings(rt, signal);
+                }
+                return;
+            }
+            other => other,
+        };
+        // Claude Code names the model that answered in each assistant record.
+        // Its status line is the better word, and once that has spoken for
+        // this launch it is the only one listened to: a record can name a
+        // fallback the session is not set to.
+        let unnamed_by_status = matches!(&rt.engine, Engine::Cli(p) if p.harness == CliKind::Claude && !p.status_names_model);
+        if let (true, None, Payload::UsageUpdate(Usage { model: Some(model), .. })) = (unnamed_by_status, &subagent, &payload) {
+            self.provider_settings(rt, Signal::Current { model: Some(model.clone()), effort: None });
+        }
         if subagent.is_none() {
             if matches!(&payload, Payload::ModelRequestStarted | Payload::Reasoning { .. } | Payload::Delta(Delta::ThinkingDelta { .. }) | Payload::ToolCallCompleted { .. }) {
                 self.delivery_confirmed(rt);
@@ -2931,6 +3247,7 @@ impl SessionManager {
         rt.child = None;
         rt.child_pid = None;
         rt.engine = Engine::None;
+        self.settle_settings_without_process(&mut rt);
         let pending: Vec<String> = rt.pending.drain().map(|(k, _)| k).collect();
         for request_id in pending {
             self.publish(&mut rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true }, None);

@@ -652,7 +652,7 @@ impl crate::cloud_agents::AgentOps for OneTab {
             title: None,
             harness: "claude".into(),
             model: String::new(),
-            effort: None,
+            effort: None, requested_model: None, requested_effort: None,
             permission_mode: "default".into(),
             status: crate::store::index::TabStatus::Idle,
             process: "running",

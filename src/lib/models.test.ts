@@ -115,10 +115,17 @@ describe("a Claude alias and its pinned versions", () => {
     expect(modelForTab(withEfforts, "opus")?.id).toBe("opus");
     expect(modelForTab(withEfforts, "claude-opus-4-8")).toMatchObject({ id: "claude-opus-4-8", label: "Opus 4.8", alias: false, isDefault: false, efforts: ["low", "high"], defaultEffort: "high" });
     expect(modelForTab(withEfforts, "claude-sonnet-4-6")).toMatchObject({ label: "Sonnet 4.6", efforts: ["low"] });
-    // Anything else unknown still reads as the default, and so does no model at all.
-    expect(modelForTab(withEfforts, "gpt-stale")?.id).toBe("opus");
+    // No model at all reads as the default.
     expect(modelForTab(withEfforts, "")?.id).toBe("opus");
     expect(modelForTab([], "claude-opus-4-8")).toMatchObject({ label: "Opus 4.8", efforts: [] });
+  });
+
+  it("shows a model the list has never heard of as the one in use, not as the default (#404)", () => {
+    const codex = [{ ...model("gpt-5.6-sol", "GPT-5.6 Sol"), isDefault: true, efforts: ["low", "high"], defaultEffort: "low" }, model("gpt-5.6-terra", "GPT-5.6 Terra")];
+    expect(modelForTab(codex, "gpt-9-nova")).toMatchObject({ id: "gpt-9-nova", label: "GPT-9 Nova", harness: "codex", isDefault: false, efforts: ["low", "high"] });
+    // Before any list has loaded, too.
+    expect(modelForTab([], "gpt-9-nova")).toMatchObject({ id: "gpt-9-nova", label: "GPT-9 Nova" });
+    expect(modelForTab([], "")).toBeUndefined();
   });
 
   it("lists the aliases, then the versions that can be pinned", () => {

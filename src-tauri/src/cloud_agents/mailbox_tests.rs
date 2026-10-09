@@ -36,7 +36,7 @@ impl AgentOps for FakeOps {
             title: None,
             harness: Some(self.harness.lock().unwrap().clone()).filter(|harness| !harness.is_empty()).unwrap_or_else(|| "claude".into()),
             model: String::new(),
-            effort: None,
+            effort: None, requested_model: None, requested_effort: None,
             permission_mode: "default".into(),
             status: if *self.busy.lock().unwrap() { TabStatus::InProgress } else { TabStatus::Idle },
             process: "running",

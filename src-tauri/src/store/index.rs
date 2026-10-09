@@ -62,6 +62,12 @@ pub struct TabEntry {
     pub model: String,
     #[serde(default)]
     pub effort: Option<String>,
+    /// A model the app asked for that the provider has not confirmed yet.
+    /// `model` stays what is running until it does (`harness::settings`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_effort: Option<String>,
     #[serde(default = "default_mode", deserialize_with = "mode_or_default")]
     pub permission_mode: String,
     /// The harness's own conversation id (Claude session id, Codex thread id).
@@ -489,7 +495,7 @@ mod tests {
             harness: "codex".into(),
             title: None,
             model: "gpt-5".into(),
-            effort: None,
+            effort: None, requested_model: None, requested_effort: None,
             permission_mode: DEFAULT_PERMISSION_MODE.into(),
             provider_session_id: Some("provider-session".into()),
             status: TabStatus::InProgress,
