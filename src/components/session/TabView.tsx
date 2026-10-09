@@ -14,7 +14,7 @@ import { LeaseBar, NotesPanel, useNowUntil } from "@/components/cloud/CloudColla
 import { SETTINGS_IGNORED_REASON, SETTINGS_LOCKED_REASON, SETTINGS_WITH_NEXT_MESSAGE, TERMINAL_APPROVAL_REASON, presenceTyping, tabGate, useCollab } from "@/lib/cloudCollab";
 import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
-import { Composer } from "@/components/chat/Composer";
+import { Composer, type Handoff } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvent
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { useModels } from "@/lib/models";
+import { openWorkspaceDelete } from "@/lib/dialogs";
+import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
 
@@ -35,16 +37,23 @@ import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/sess
 /**
  * After a turn that touched files, the obvious next steps as one-click
  * prompts. They only fill the composer; the reader still sends.
+ *
+ * `deleteWorkspace` is the step after those, once the worktree's pull request
+ * has merged. It is the app's own action, not a prompt: an agent is never
+ * asked to remove the worktree it runs in. It does not wait for a turn.
  */
-function handoffsFor(t: Transcript, changed: boolean): { label: string; prompt: string }[] | undefined {
+export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: () => void): Handoff[] | undefined {
   const last = t.turns[t.turns.length - 1];
-  if (!last?.completed || last.completed.status !== "ok") return undefined;
-  if (!changed) return undefined;
-  return [
-    { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
-    { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
-    { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
-  ];
+  const prompts: Handoff[] =
+    last?.completed?.status === "ok" && changed
+      ? [
+          { label: "Commit", prompt: "Commit the current changes with a clear, conventional message. Do not push." },
+          { label: "Create PR", prompt: "Push this branch and open a pull request with a title and a short description of the changes." },
+          { label: "Run it", prompt: "Run the project's dev server or test suite in the background and report the first errors, if any." },
+        ]
+      : [];
+  const steps = deleteWorkspace ? [...prompts, { label: "Delete workspace", run: deleteWorkspace }] : prompts;
+  return steps.length ? steps : undefined;
 }
 
 export function TabView({
@@ -54,6 +63,7 @@ export function TabView({
   continuationOpen = false,
   backend: given,
   gitSource,
+  workspace,
 }: {
   session: SessionEntry;
   tab: TabEntry;
@@ -63,6 +73,8 @@ export function TabView({
   backend?: SessionBackend;
   /** A cloud session's Git, for the after-turn handoffs; a local one reads its checkout. */
   gitSource?: GitSource;
+  /** The worktree the session runs in, on the host that owns it; absent in a project's main directory. */
+  workspace?: RemovableWorkspace;
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
@@ -133,6 +145,15 @@ export function TabView({
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
   const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
+
+  // Once the worktree's pull request has merged, the chat offers to delete
+  // it. Read while the tab is shown and no turn runs in this session, so a
+  // merge made elsewhere appears without a new turn.
+  const sessionLive = session.tabs.some((t) => turnLive(t.status));
+  const disposition = useWorkspaceDisposition(workspace?.host, active && !sessionLive);
+  const offerDelete = !!workspace && offersWorkspaceDelete(disposition, sessionLive || workspace.host.turnRunning(disposition?.sessionIds ?? []));
+  // Only ever the standard removal dialog: it checks again, names the sessions that go, and asks.
+  const deleteWorkspace = offerDelete ? () => openWorkspaceDelete(workspace.projectPath, workspace.path, workspace.name, workspace.host) : undefined;
 
   const blockedRef = useRef<string | null>(null);
   blockedRef.current = gate?.blocked ?? null;
@@ -310,7 +331,7 @@ export function TabView({
           modelClient={backend.modelClient}
           contextUsed={transcript.contextUsed ?? tab.contextUsed ?? undefined}
           contextMax={transcript.contextMax ?? tab.contextMax ?? undefined}
-          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0)}
+          handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace)}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
           settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : null}

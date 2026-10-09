@@ -421,13 +421,18 @@ async function onRuntime<T>(row: Pick<CloudSessionRow, "orgId" | "workspaceId">,
   }
 }
 
-function applySession(row: CloudSessionRow, session: RuntimeSession | null, removed: readonly string[] = []) {
+function applySession(row: CloudTarget, session: RuntimeSession | null, removed: readonly string[] = []) {
   const key = cloudWorkspaceKey(row.orgId, row.workspaceId);
   const current = live.get(key);
   if (!current) return;
   let sessions = current.sessions.filter((existing) => !removed.includes(existing.id));
   if (session) sessions = sessions.some((existing) => existing.id === session.id) ? sessions.map((existing) => (existing.id === session.id ? session : existing)) : [...sessions, session];
   takeLive({ orgId: row.orgId, workspaceId: row.workspaceId }, sessions, current.capabilities, current.manage);
+}
+
+/** Sessions the runtime deleted (a worktree removed with everything in it): gone from the live list at once. */
+export function forgetCloudSessions(target: CloudTarget, removed: readonly string[]) {
+  applySession(target, null, removed);
 }
 
 export function updateCloudSession(row: CloudSessionRow, patch: RuntimeSessionPatch): Promise<void> {

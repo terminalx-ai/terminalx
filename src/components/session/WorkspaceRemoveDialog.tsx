@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, FolderInput, GitMerge, GitPullRequest, Loader2, Trash2 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/controls";
-import { api, errorMessage } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
 import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
-import { relocateSession, removeWorkspace } from "@/lib/sessions";
+import { relocateSession } from "@/lib/sessions";
+import { localWorkspaceHost, type WorkspaceHost } from "@/lib/workspaceRemoval";
 import { confirmRiskyRemoval, reportBranchOutcome } from "@/lib/worktreeConfirm";
 import type { Landed, WorkspaceDisposition } from "@/types/session";
 
@@ -39,13 +40,13 @@ export function WorkspaceRemoveDialog() {
   const [busy, setBusy] = useState<"remove" | "relocate" | null>(null);
   const [deleteBranch, setDeleteBranch] = useState(true);
 
-  const check = useCallback(async (projectPath: string, path: string, isLive: () => boolean = () => true) => {
+  const check = useCallback(async (host: WorkspaceHost, isLive: () => boolean = () => true) => {
     setDisp(null);
     setCheckFailed(false);
     try {
       // The one caller that fetches: the answer decides whether this
       // workspace can go with a single confirmation.
-      const d = await api.workspaceDisposition(projectPath, path, { fetch: true });
+      const d = await host.disposition({ fetch: true });
       if (!isLive()) return;
       setDisp(d);
       // The branch goes by default only with a workspace found clean and
@@ -59,18 +60,21 @@ export function WorkspaceRemoveDialog() {
     }
   }, []);
 
+  // The host that owns the workspace: this computer, unless the request names a cloud runtime.
+  const host = useMemo(() => (request ? (request.host ?? localWorkspaceHost(request.projectPath, request.path)) : null), [request]);
+
   useEffect(() => {
-    if (!request) return;
+    if (!host) return;
     setError(null);
     setDeleteBranch(false);
     let live = true;
-    void check(request.projectPath, request.path, () => live);
+    void check(host, () => live);
     return () => {
       live = false;
     };
-  }, [request, check]);
+  }, [host, check]);
 
-  if (!request) return null;
+  if (!request || !host) return null;
   const settle = request.mode === "settle";
   const landed = disp?.landed ?? null;
   // A folder that is not on disk (removed by hand, or on a volume that is not
@@ -91,7 +95,7 @@ export function WorkspaceRemoveDialog() {
     setBusy("remove");
     setError(null);
     try {
-      const report = await removeWorkspace(request.projectPath, request.path, {
+      const report = await host.remove({
         keepSessions: settle,
         deleteBranch,
         confirmedDigest: risky ? (landed?.digest ?? null) : null,
@@ -102,7 +106,7 @@ export function WorkspaceRemoveDialog() {
     } catch (e) {
       // It may have changed since it was checked, or been partly removed:
       // read it again before the next attempt is offered.
-      await check(request.projectPath, request.path);
+      await check(host);
       setError(errorMessage(e));
     } finally {
       setBusy(null);
