@@ -86,6 +86,25 @@ fn sharing_blocks_bypass_before_changing_the_saved_tab_or_runtime() {
     assert!(matches!(&rt.engine, Engine::Cli(p) if p.mode == "default"));
 }
 
+#[test]
+fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "shared", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    let tab = |mode: &str| crate::session_ops::NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
+    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
+        crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+    assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
+    assert_eq!(index::get(SESSION).unwrap().tabs.len(), 1);
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("plan")).unwrap().permission_mode, "plan");
+    rig.manager.sharing.lock().unwrap().sessions.clear();
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
+}
+
 impl Rig {
     /// A tab with no pane process behind it: what its pane draws, and when,
     /// is the test's to say.

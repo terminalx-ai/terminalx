@@ -1363,13 +1363,7 @@ fn announce_session(app: &AppHandle, session_id: &str) {
 
 #[tauri::command]
 pub fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
-    let manager = state.manager().ok_or("not ready")?;
-    let sharing = manager.sharing.lock().unwrap();
-    if sharing.sessions.contains_key(&session_id) && crate::store::index::permission_mode_or_default(tab.permission_mode.as_deref()) == "bypassPermissions" {
-        return Err("New tabs in a shared session must use a permission mode other than Bypass.".into());
-    }
-    let tab = crate::session_ops::add_tab_entry(&session_id, &tab)?;
-    drop(sharing);
+    let tab = state.manager().ok_or("not ready")?.add_tab(&session_id, &tab).map_err(err)?;
     announce_session(&app, &session_id);
     Ok(tab)
 }

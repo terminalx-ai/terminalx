@@ -1406,6 +1406,17 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Add an agent tab to a session, from whichever surface asked. A shared
+    /// session takes no Bypass tab, and the share cannot start between the
+    /// check and the save because both hold the sharing lock.
+    pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
+        let sharing = self.sharing.lock().unwrap();
+        if sharing.sessions.contains_key(session_id) && index::permission_mode_or_default(tab.permission_mode.as_deref()) == "bypassPermissions" {
+            bail!("New tabs in a shared session must use a permission mode other than Bypass.");
+        }
+        crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))
+    }
+
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
         let sharing = self.sharing.lock().unwrap();
         if mode == "bypassPermissions" && sharing.sessions.contains_key(session_id) {
