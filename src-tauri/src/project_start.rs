@@ -235,6 +235,25 @@ fn resolve_parent(parent: &str) -> Result<PathBuf, Failure> {
     }
 }
 
+/// Make `dir` and whatever is missing above it, and say which directory was
+/// the first one made, so a call that ends with nothing can take it away again.
+fn create_dirs(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    let first_made = dir.ancestors().take_while(|ancestor| !ancestor.exists()).last().map(Path::to_path_buf);
+    std::fs::create_dir_all(dir)?;
+    Ok(first_made)
+}
+
+/// Take away the directories `create_dirs` made, while they are still empty:
+/// from `dir` up to `first_made`. One that has gained anything is kept.
+fn remove_made_dirs(dir: &Path, first_made: Option<&Path>) {
+    let Some(first_made) = first_made else { return };
+    for ancestor in dir.ancestors() {
+        if !ancestor.starts_with(first_made) || std::fs::remove_dir(ancestor).is_err() {
+            break;
+        }
+    }
+}
+
 fn is_empty_dir(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
@@ -395,7 +414,7 @@ fn clone_within(id: &str, source: &str, parent: &str, within: Duration, on_progr
     if path.exists() && !is_empty_dir(&path) {
         return Err(Failure::new(DESTINATION_EXISTS, format!("{shown} already exists and is not empty. Choose another folder.")));
     }
-    std::fs::create_dir_all(&parent).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {}: {error}", parent.display())))?;
+    let made = create_dirs(&parent).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {}: {error}", parent.display())))?;
     let staging = staging_dir(&parent, &source.name, id);
     if staging.exists() {
         // A leftover is our own, from a clone the app did not outlive.
@@ -433,6 +452,8 @@ fn clone_within(id: &str, source: &str, parent: &str, within: Duration, on_progr
     });
     if let Err(failure) = finished {
         let _ = std::fs::remove_dir_all(&staging);
+        // A folder made only to hold this clone goes with it.
+        remove_made_dirs(&parent, made.as_deref());
         return Err(failure);
     }
     Ok(CloneOutcome { path: shown, existing: false })
@@ -455,10 +476,11 @@ pub fn create_project(parent: &str, name: &str) -> Result<String, Failure> {
     if existed && !is_empty_dir(&path) {
         return Err(Failure::new(DESTINATION_EXISTS, format!("{shown} already exists. Choose another name.")));
     }
-    std::fs::create_dir_all(&path).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {shown}: {error}")))?;
+    let made = create_dirs(&path).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {shown}: {error}")))?;
     if let Err(error) = init_repository(&path) {
         // Only what this call made is removed.
         let _ = if existed { std::fs::remove_dir_all(path.join(".git")) } else { std::fs::remove_dir_all(&path) };
+        remove_made_dirs(&parent, made.as_deref());
         return Err(Failure::new(FAILED, format!("Could not set up Git in {shown}: {error}")));
     }
     Ok(shown)
@@ -603,7 +625,39 @@ mod tests {
         assert_ne!(failure.code, CANCELED);
         assert!(!failure.message.is_empty());
         assert!(!parent.join("gone").exists());
-        assert!(no_staging(&parent));
+        // The folder made to hold the clone is gone with it.
+        assert!(!parent.exists());
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn a_failed_clone_keeps_a_folder_that_was_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("mine").join("projects");
+        std::fs::create_dir_all(dir.path().join("mine")).unwrap();
+        std::fs::write(dir.path().join("mine/notes.txt"), "kept").unwrap();
+        let missing = file_url(&dir.path().join("nowhere").join("gone"));
+        clone_repository("missing-2", &missing, &parent.to_string_lossy(), |_| {}).unwrap_err();
+        assert!(!parent.exists());
+        assert_eq!(std::fs::read_to_string(dir.path().join("mine/notes.txt")).unwrap(), "kept");
+
+        // An existing destination folder is never removed, empty or not.
+        std::fs::create_dir_all(&parent).unwrap();
+        clone_repository("missing-3", &missing, &parent.to_string_lossy(), |_| {}).unwrap_err();
+        assert!(parent.exists());
+    }
+
+    #[test]
+    fn made_directories_are_removed_only_while_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a").join("b").join("c");
+        let made = create_dirs(&deep).unwrap();
+        assert_eq!(made.as_deref(), Some(dir.path().join("a").as_path()));
+        std::fs::write(dir.path().join("a/keep.txt"), "x").unwrap();
+        remove_made_dirs(&deep, made.as_deref());
+        assert!(!dir.path().join("a/b").exists());
+        assert!(dir.path().join("a/keep.txt").exists());
+        assert_eq!(create_dirs(dir.path()).unwrap(), None);
     }
 
     #[test]
