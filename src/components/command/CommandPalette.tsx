@@ -14,7 +14,9 @@ import {
   CircleDot,
   Command as CommandIcon,
   FileText,
+  FolderGit2,
   FolderOpen,
+  FolderPlus,
   Gauge,
   GitBranch,
   GitPullRequest,
@@ -57,6 +59,7 @@ import { openFile } from "@/lib/editors";
 import { runShortcut, useHotkey } from "@/lib/hotkeys";
 import { issuePrompt, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
 import { getPrefs } from "@/lib/prefs";
+import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import {
   openWorkspace,
   refreshWorkspaces,
@@ -134,6 +137,8 @@ interface ResolvedWorkItem {
   issue?: Issue;
   pullRequest?: PullRequest;
 }
+
+const START_ACTION_ICONS: Record<StartAction["id"], LucideIcon> = { local: FolderOpen, github: FolderGit2, quick: FolderPlus };
 
 function shortcutIcon(shortcut: ShortcutAction): LucideIcon {
   const label = shortcut.label.toLowerCase();
@@ -477,6 +482,19 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
+      // The start screen's three ways to a project, for after the first one exists.
+      ...START_ACTIONS.map((action, index) =>
+        indexPaletteItem({
+          id: `command:add-project:${action.id}`,
+          group: "commands" as const,
+          primary: `Add a project: ${action.label}`,
+          secondary: action.hint,
+          recentAt: 3 - index,
+          icon: START_ACTION_ICONS[action.id],
+          // The palette is closed by then, so a failed folder picker has nowhere to be shown.
+          run: () => Promise.resolve(action.run()).then(() => {}, (cause) => console.error("add project failed", cause)),
+        }, ["add project new open clone create folder repository github quick start"]),
+      ),
       // Narrows the palette to cloud sessions (by kind, not by the word "cloud"). Choosing one only selects it.
       ...(cloud.live
         ? [indexPaletteItem({ id: "command:cloud-go", group: "commands" as const, primary: "Go to cloud session…", secondary: "List the sessions in your organizations' cloud workspaces", recentAt: 1, icon: Cloud, keepOpen: true, run: () => { setCloudOnly(true); setQuery(""); setSelected(0); } }, ["cloud workspace session open"])]

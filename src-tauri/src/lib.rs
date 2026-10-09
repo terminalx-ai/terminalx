@@ -86,6 +86,7 @@ mod models;
 mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
+mod project_start;
 mod pty;
 mod relay_e2ee;
 pub mod remote;
@@ -392,6 +393,11 @@ pub fn run() {
             commands::add_project,
             commands::remove_project,
             commands::select_project,
+            commands::github_repositories,
+            commands::project_clone,
+            commands::project_clone_cancel,
+            commands::project_start_defaults,
+            commands::project_create,
             commands::list_sessions,
             commands::automations_list,
             commands::automation_runs,

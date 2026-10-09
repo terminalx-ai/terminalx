@@ -46,6 +46,20 @@ pub enum RunError {
 /// asked while it runs. Either way the whole process group is killed, so no
 /// transport or credential helper is left behind.
 pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration, stop: &dyn Fn() -> bool) -> std::result::Result<(), RunError> {
+    run_within_reporting(cwd, args, timeout, stop, |_| {})
+}
+
+/// `run_within`, handing each line Git writes to stderr to `on_line` as it
+/// comes. With `--progress` Git redraws a line by ending it with a carriage
+/// return, so those count as lines too. A failure carries only what was not
+/// progress.
+pub fn run_within_reporting(
+    cwd: &Path,
+    args: &[&str],
+    timeout: std::time::Duration,
+    stop: &dyn Fn() -> bool,
+    on_line: impl Fn(&str) + Send + 'static,
+) -> std::result::Result<(), RunError> {
     use std::io::Read;
     let mut command = git();
     command.current_dir(cwd).args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
@@ -56,9 +70,36 @@ pub fn run_within(cwd: &Path, args: &[&str], timeout: std::time::Duration, stop:
     let stderr = child.stderr.take();
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
-        if let Some(mut stderr) = stderr {
-            let _ = stderr.read_to_string(&mut text);
+        let Some(mut stderr) = stderr else { return text };
+        let mut pending = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let emit = |raw: &[u8], redrawn: bool, text: &mut String| {
+            let line = String::from_utf8_lossy(raw);
+            let line = line.trim();
+            if line.is_empty() {
+                return;
+            }
+            on_line(line);
+            // A redrawn line is progress, replaced by the next one.
+            if !redrawn {
+                text.push_str(line);
+                text.push('\n');
+            }
+        };
+        while let Ok(read) = stderr.read(&mut chunk) {
+            if read == 0 {
+                break;
+            }
+            for &byte in &chunk[..read] {
+                if byte == b'\r' || byte == b'\n' {
+                    emit(&pending, byte == b'\r', &mut text);
+                    pending.clear();
+                } else {
+                    pending.push(byte);
+                }
+            }
         }
+        emit(&pending, false, &mut text);
         text
     });
     let deadline = std::time::Instant::now() + timeout;
