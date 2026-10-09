@@ -6,7 +6,7 @@ import { signIn, useAccount } from "@/lib/account";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { registerFileDropTarget } from "@/lib/fileDrop";
-import { START_ACTIONS, attachProject, type StartAction } from "@/lib/projectStart";
+import { START_ACTIONS, attachProject, projectStartDialogOpen, type StartAction } from "@/lib/projectStart";
 import { REPO_URL } from "@/lib/repo";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 
@@ -34,13 +34,15 @@ export function StartScreen({ onOpenSettings }: { onOpenSettings: (tab?: "agents
         anywhere: true,
         onDragChange: (over, kind) => setDragging(over && kind === "files"),
         onDrop: async (paths) => {
-          if (!paths.length) return;
+          // A dialog over the screen is its own task: a drop on it adds nothing behind it.
+          if (!paths.length || projectStartDialogOpen()) return;
           setError(null);
           try {
             await attachProject(paths[0]);
-          } catch {
+          } catch (cause) {
             // Only a folder can be a project; the backend refuses anything else.
-            setError("Drop a folder to open it as a project.");
+            const message = errorMessage(cause);
+            setError(message.startsWith("Not a directory") ? "Drop a folder to open it as a project." : message);
           }
         },
       }),

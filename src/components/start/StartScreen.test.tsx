@@ -162,6 +162,24 @@ describe("the start screen", () => {
     expect(sessions.startSessionIn).not.toHaveBeenCalled();
   });
 
+  it("adds nothing behind an open dialog when a folder is dropped on it", async () => {
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+    act(() => openProjectStart("quick"));
+
+    await emitDrop({ type: "drop", paths: ["/code/dropped"] });
+
+    expect(sessions.addProject).not.toHaveBeenCalled();
+  });
+
+  it("gives the real reason when a dropped folder cannot be a project", async () => {
+    sessions.addProject.mockRejectedValue("That folder is a cloud mirror.");
+    render(<StartScreen onOpenSettings={vi.fn()} />);
+
+    await emitDrop({ type: "drop", paths: ["/code/mirror"] });
+
+    expect((await screen.findByRole("alert")).textContent).toBe("That folder is a cloud mirror.");
+  });
+
   it("says so when no agent is installed, with the install action and a re-check", () => {
     store.harnesses = [{ ...claude, available: false }, codex];
     const onOpenSettings = vi.fn();

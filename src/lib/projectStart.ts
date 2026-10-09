@@ -126,6 +126,11 @@ export function openProjectStart(next: ProjectStartDialog | null) {
   for (const listener of [...listeners]) listener();
 }
 
+/** Whether one of the two dialogs is open. */
+export function projectStartDialogOpen(): boolean {
+  return dialog !== null;
+}
+
 export function useProjectStartDialog(): ProjectStartDialog | null {
   return useSyncExternalStore(
     (listener) => {

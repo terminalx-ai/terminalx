@@ -86,10 +86,13 @@ pub fn run_within_reporting(
                 text.push('\n');
             }
         };
-        while let Ok(read) = stderr.read(&mut chunk) {
-            if read == 0 {
-                break;
-            }
+        loop {
+            let read = match stderr.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            };
             for &byte in &chunk[..read] {
                 if byte == b'\r' || byte == b'\n' {
                     emit(&pending, byte == b'\r', &mut text);

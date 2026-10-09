@@ -154,6 +154,29 @@ describe("Open GitHub project", () => {
     expect(sessions.addProject).not.toHaveBeenCalled();
   });
 
+  it("attaches nothing when a clone finishes after its dialog was closed", async () => {
+    await startClone();
+    const running = clone!;
+
+    act(() => openProjectStart(null));
+    await act(async () => running.resolve({ path: "/home/me/Projects/widgets", existing: false }));
+
+    expect(sessions.addProject).not.toHaveBeenCalled();
+    expect(sessions.startSessionIn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the choice as it was while offering an existing clone", async () => {
+    await startClone();
+    await act(async () => clone!.resolve({ path: "/home/me/Projects/widgets", existing: true }));
+    await screen.findByTestId("start-already-cloned");
+
+    expect((screen.getByLabelText("Or paste a repository URL or owner/name") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Choose folder…" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect((screen.getByLabelText("Or paste a repository URL or owner/name") as HTMLInputElement).disabled).toBe(false);
+  });
+
   it.each([
     ["access-denied", "Git could not access acme/widgets. Check that it exists and that you have access to it.\nremote: Repository not found."],
     ["network", "Could not reach the server for acme/widgets. Check your connection and try again."],

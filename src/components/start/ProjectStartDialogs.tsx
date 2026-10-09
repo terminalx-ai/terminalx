@@ -109,6 +109,8 @@ function GithubProjectDialog() {
   const [dir, setDir] = useProjectsDir();
   const [state, setState] = useState<CloneState>({ phase: "idle" });
   const cloning = useRef<string | null>(null);
+  // Closed dialogs attach nothing: a clone that outlived its cancel is left unopened.
+  const alive = useRef(true);
 
   const load = () => {
     setRepositories(null);
@@ -119,7 +121,13 @@ function GithubProjectDialog() {
   };
   useEffect(load, []);
   // Closed mid-clone (Escape, the close button): the clone is stopped, not left running unseen.
-  useEffect(() => () => void (cloning.current && projectStart.cancelClone(cloning.current).catch(() => {})), []);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (cloning.current) void projectStart.cancelClone(cloning.current).catch(() => {});
+    };
+  }, []);
 
   const listed = repositories?.status === "ready" ? repositories.repositories : [];
   const shown = useMemo(() => {
@@ -131,7 +139,8 @@ function GithubProjectDialog() {
   // An address pasted into the search box, matching nothing listed, is taken as one too.
   const searched = shown.length === 0 && looksLikeSource(query) ? query.trim() : "";
   const source = pasted.trim() || picked || searched;
-  const busy = state.phase === "cloning";
+  // Nothing about the clone changes while it runs, or while the answer about an existing one is on screen.
+  const busy = state.phase !== "idle";
 
   const open = async (path: string) => {
     if (dir) setPrefs({ projectsDir: dir });
@@ -145,13 +154,16 @@ function GithubProjectDialog() {
     cloning.current = id;
     setState({ phase: "cloning", id, progress: null });
     const stop = await projectStart.onCloneProgress(id, (progress) => setState((current) => (current.phase === "cloning" && current.id === id ? { ...current, progress } : current)));
+    if (!alive.current) return stop();
     try {
       const outcome = await projectStart.clone(id, source, dir);
       cloning.current = null;
+      if (!alive.current) return;
       if (outcome.existing) setState({ phase: "existing", path: outcome.path });
       else await open(outcome.path);
     } catch (cause) {
       cloning.current = null;
+      if (!alive.current) return;
       const failure = startFailure(cause);
       setState(failure.code === "canceled" ? { phase: "idle", canceled: true } : { phase: "idle", failure });
     } finally {
@@ -347,6 +359,13 @@ function QuickStartDialog() {
   const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<StartFailure | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!dir || edited) return;
@@ -366,7 +385,8 @@ function QuickStartDialog() {
       const path = await projectStart.create(dir, trimmed);
       setPrefs({ projectsDir: dir });
       await attachProject(path);
-      close();
+      // Closed meanwhile: the project is there, but whatever is open now is not this dialog's to close.
+      if (alive.current) close();
     } catch (cause) {
       setFailure(startFailure(cause));
     } finally {

@@ -151,6 +151,8 @@ pub struct Source {
     pub name: String,
     /// `owner/name` when the repository is on github.com.
     pub github: Option<String>,
+    /// Given as `owner/name`, with no protocol said.
+    pub shorthand: bool,
 }
 
 fn valid_github_part(part: &str) -> bool {
@@ -185,7 +187,7 @@ pub fn parse_source(input: &str) -> Result<Source, Failure> {
     if let Some((owner, name)) = input.split_once('/') {
         let name = name.strip_suffix(".git").unwrap_or(name);
         if !input.contains(':') && valid_github_part(owner) && valid_github_part(name) {
-            return Ok(Source { url: format!("https://{GITHUB_HOST}/{owner}/{name}.git"), name: name.to_string(), github: Some(format!("{owner}/{name}")) });
+            return Ok(Source { url: format!("https://{GITHUB_HOST}/{owner}/{name}.git"), name: name.to_string(), github: Some(format!("{owner}/{name}")), shorthand: true });
         }
     }
     let scheme = input.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase());
@@ -198,7 +200,7 @@ pub fn parse_source(input: &str) -> Result<Source, Failure> {
         return Err(invalid());
     }
     let name = name_from_url(input).ok_or_else(invalid)?;
-    Ok(Source { url: input.to_string(), name, github: crate::issues::github_repo_from_url(input) })
+    Ok(Source { url: input.to_string(), name, github: crate::issues::github_repo_from_url(input), shorthand: false })
 }
 
 /// Two addresses of one repository: the same GitHub `owner/name`, or the
@@ -308,10 +310,16 @@ fn clones() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
 }
 
 /// Stop the clone started with `id`. Git is killed and what it fetched is removed.
+/// A cancel that arrives before the clone has registered is kept for it.
 pub fn cancel_clone(id: &str) {
-    if let Some(flag) = clones().lock().unwrap().get(id) {
-        flag.store(true, Ordering::SeqCst);
-    }
+    clones().lock().unwrap().entry(id.to_string()).or_default().store(true, Ordering::SeqCst);
+}
+
+/// The staging directory of one clone: named by its id too, so two clones of
+/// the same name never share one, and neither clears the other's.
+fn staging_dir(parent: &Path, name: &str, id: &str) -> PathBuf {
+    let id: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).take(12).collect();
+    parent.join(format!("{STAGING_PREFIX}{name}-{id}"))
 }
 
 /// What Git wrote, without the progress it kept when a step finished.
@@ -353,7 +361,8 @@ fn transport(source: &Source) -> (String, Vec<String>) {
     }
     let Some(gh) = crate::binpath::resolve("gh").filter(|_| gh_signed_in()) else { return (source.url.clone(), Vec::new()) };
     let protocol = gh_output(&["config", "get", "git_protocol", "--host", GITHUB_HOST]).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string()).unwrap_or_default();
-    if protocol == "ssh" {
+    // Only where the reader named no protocol: a pasted HTTPS URL stays HTTPS, so it is a way out when SSH fails.
+    if protocol == "ssh" && source.shorthand {
         return (format!("git@{GITHUB_HOST}:{repository}.git"), Vec::new());
     }
     // What `gh auth setup-git` writes, for this one command.
@@ -388,14 +397,13 @@ fn clone_within(id: &str, source: &str, parent: &str, within: Duration, on_progr
         return Err(Failure::new(DESTINATION_EXISTS, format!("{shown} already exists and is not empty. Choose another folder.")));
     }
     std::fs::create_dir_all(&parent).map_err(|error| Failure::new(INVALID_DESTINATION, format!("Could not create {}: {error}", parent.display())))?;
-    let staging = parent.join(format!("{STAGING_PREFIX}{}", source.name));
+    let staging = staging_dir(&parent, &source.name, id);
     if staging.exists() {
         // A leftover is our own, from a clone the app did not outlive.
         std::fs::remove_dir_all(&staging).map_err(|error| Failure::io("Could not clear an unfinished clone", error))?;
     }
 
-    let canceled = Arc::new(AtomicBool::new(false));
-    clones().lock().unwrap().insert(id.to_string(), canceled.clone());
+    let canceled = clones().lock().unwrap().entry(id.to_string()).or_default().clone();
     let (url, config) = transport(&source);
     let staging_arg = staging.to_string_lossy().into_owned();
     let mut args = vec!["-c", LOW_SPEED_LIMIT, "-c", LOW_SPEED_TIME];
@@ -484,6 +492,10 @@ mod tests {
         remote
     }
 
+    fn no_staging(parent: &Path) -> bool {
+        std::fs::read_dir(parent).map(|entries| entries.filter_map(Result::ok).all(|entry| !entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX))).unwrap_or(true)
+    }
+
     fn file_url(path: &Path) -> String {
         format!("file://{}", path.to_string_lossy())
     }
@@ -538,7 +550,7 @@ mod tests {
         assert!(!outcome.existing);
         assert_eq!(Path::new(&outcome.path), parent.join("widgets"));
         assert!(parent.join("widgets/README.md").exists());
-        assert!(!parent.join(".terminalx-clone-widgets").exists());
+        assert!(no_staging(&parent));
         assert!(seen.lock().unwrap().iter().all(|progress| progress.id == "clone-1"));
         assert!(clones().lock().unwrap().get("clone-1").is_none());
     }
@@ -581,7 +593,7 @@ mod tests {
         assert_ne!(failure.code, CANCELED);
         assert!(!failure.message.is_empty());
         assert!(!parent.join("gone").exists());
-        assert!(!parent.join(".terminalx-clone-gone").exists());
+        assert!(no_staging(&parent));
     }
 
     #[test]
@@ -606,7 +618,27 @@ mod tests {
             }
             Ok(outcome) => assert!(Path::new(&outcome.path).join(".git").exists()),
         }
-        assert!(!parent.join(".terminalx-clone-widgets").exists());
+        assert!(no_staging(&parent));
+    }
+
+    #[test]
+    fn a_cancel_that_arrives_before_the_clone_starts_still_stops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = remote_with_commit(dir.path());
+        let parent = dir.path().join("projects");
+        cancel_clone("early");
+        let failure = clone_repository("early", &file_url(&remote), &parent.to_string_lossy(), |_| {}).unwrap_err();
+        assert_eq!(failure.code, CANCELED);
+        assert!(!parent.join("widgets").exists());
+        assert!(no_staging(&parent));
+        assert!(clones().lock().unwrap().get("early").is_none());
+    }
+
+    #[test]
+    fn only_a_shorthand_follows_the_ssh_preference() {
+        assert!(parse_source("acme/widgets").unwrap().shorthand);
+        assert!(!parse_source("https://github.com/acme/widgets").unwrap().shorthand);
+        assert_ne!(staging_dir(Path::new("/p"), "widgets", "aaaa-1"), staging_dir(Path::new("/p"), "widgets", "bbbb-2"));
     }
 
     #[test]
@@ -617,7 +649,7 @@ mod tests {
         let failure = clone_within("slow", &file_url(&remote), &parent.to_string_lossy(), Duration::ZERO, |_| {}).unwrap_err();
         assert_eq!(failure.code, TIMED_OUT);
         assert!(!parent.join("widgets").exists());
-        assert!(!parent.join(".terminalx-clone-widgets").exists());
+        assert!(no_staging(&parent));
     }
 
     #[test]
