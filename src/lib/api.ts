@@ -1148,6 +1148,12 @@ export interface ComputerPermissionStatus {
   platform: string;
   helperAppPath: string | null;
   helperUnavailableReason: string | null;
+  /**
+   * What this launch's removal of older computer-use helpers' permissions
+   * reported (PRO-90); absent until it has run. `removed: false` means macOS
+   * would not clear them and the person has to remove the old entry.
+   */
+  legacyHelper?: { removed: boolean; bundleIds: string[] } | null;
   permissions: ComputerPermissionState[];
 }
 

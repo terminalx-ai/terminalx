@@ -186,9 +186,13 @@ function assertAllowed() {
  * computer use is paused while it is open, and after a refusal or an
  * unanswered question the app does not ask again for a while. That stops
  * mistakes and nagging. Computer use never operates this app's own windows
- * and its helper serves only the app (PRO-90), but a hostile agent with a
- * shell can still reach the system's own scripting without going through
- * this app (see skill-guides/terminalx-cli.md and docs/COMPUTER-USE.md).
+ * and this version's helper serves only the app (PRO-90). A hostile agent
+ * with a shell can still press the button by other means: a helper from an
+ * older version while it holds Accessibility (the app tries to remove that
+ * grant at every launch and warns when it could not), the system's own
+ * scripting,
+ * or anything at all when TerminalX itself was granted Accessibility (see
+ * skill-guides/terminalx-cli.md and docs/COMPUTER-USE.md, Security).
  */
 async function confirmInWindow(what: string, okLabel: string): Promise<void> {
   if (policy === "setting") return;

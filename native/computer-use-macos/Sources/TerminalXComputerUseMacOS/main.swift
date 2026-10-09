@@ -321,16 +321,19 @@ final class Provider {
         if forAction, protection != nil {
             throw ProviderError.coded(OwnAppProtection.errorCode, OwnAppProtection.actionRefusal(targetName: app.name))
         }
-        if params["restoreWindow"]?.bool == true {
+        // Why: looking at a protected app must not change it either; restoring
+        // activates, unminimises and raises its window.
+        let restoreWindow = params["restoreWindow"]?.bool == true && protection == nil
+        if restoreWindow {
             try recoverWindow(app)
         }
         let snapshot = try buildSnapshot(
             app: app,
             includeScreenshot: params["noScreenshot"]?.bool != true,
-            screenshotWithheld: protection != nil,
+            protectedTarget: protection != nil,
             windowId: windowId,
             windowIndex: windowIndex,
-            restoreWindow: params["restoreWindow"]?.bool == true
+            restoreWindow: restoreWindow
         )
         // Why: cached snapshots only validate element identity for follow-up
         // actions; retaining MB-scale screenshot base64 in the long-lived agent grows memory.
@@ -682,7 +685,7 @@ final class Provider {
     private func buildSnapshot(
         app: AppDescriptor,
         includeScreenshot: Bool,
-        screenshotWithheld: Bool,
+        protectedTarget: Bool,
         windowId: CGWindowID?,
         windowIndex: Int?,
         restoreWindow: Bool
@@ -692,11 +695,15 @@ final class Provider {
             // should open macOS privacy prompts/settings; runtime calls stay quiet.
             throw ProviderError.coded(
                 "permission_denied",
-                "Accessibility permission is required for TerminalX Computer Use. Run `terminalx computer permissions` or open TerminalX Settings > General > Computer use, grant Accessibility to TerminalX Computer Use, then retry."
+                "Accessibility permission is required for TerminalX Computer Use Helper. Run `terminalx computer permissions` or open TerminalX Settings > General > Computer use, grant Accessibility to TerminalX Computer Use Helper, then retry."
             )
         }
         let appElement = AXUIElementCreateApplication(app.pid)
-        enableManualAccessibilityIfNeeded(appElement, app: app)
+        // Why: this writes accessibility attributes on the target; a protected
+        // app is not written to at all.
+        if !protectedTarget {
+            enableManualAccessibilityIfNeeded(appElement, app: app)
+        }
         let windowCandidates = WindowCapture.candidates(pid: app.pid)
         let focused = try focusedWindow(
             appElement: appElement,
@@ -705,7 +712,7 @@ final class Provider {
             allowRecovery: restoreWindow
         )
         let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
-        let wantsScreenshot = includeScreenshot && !screenshotWithheld
+        let wantsScreenshot = includeScreenshot && !protectedTarget
         let canCaptureScreenshot = wantsScreenshot && screenCaptureTrustedSettled()
         guard let capture = WindowCapture.resolve(
             candidates: windowCandidates,
@@ -725,14 +732,22 @@ final class Provider {
             focused: focusedElement(appElement: appElement),
             compactBrowserTabs: app.isKnownBrowser
         )
-        renderer.render(window)
+        if protectedTarget {
+            // Why: TerminalX's windows show secrets as plain text (the phone
+            // pairing code, invite links, other sessions' terminals), and a
+            // secret also reaches the summaries of the elements around it.
+            // Nothing of the tree is read, so nothing can leak.
+            renderer.withhold(reason: OwnAppProtection.treeRefusal)
+        } else {
+            renderer.render(window)
+        }
         let screenshot = wantsScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
-        } else if includeScreenshot && screenshotWithheld {
+        } else if includeScreenshot && protectedTarget {
             .withheld(OwnAppProtection.screenshotRefusal)
         } else if includeScreenshot && !canCaptureScreenshot {
-            .failed("Screen Recording permission is required for TerminalX Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
+            .failed("Screen Recording permission is required for TerminalX Computer Use Helper; grant permission or pass --no-screenshot to inspect accessibility state only.")
         } else if includeScreenshot {
             .failed("window screenshot capture returned no image; retry with --no-screenshot if accessibility state is sufficient.")
         } else {
@@ -1212,7 +1227,7 @@ private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleW
         if let window = settledWindow, outcome.settled {
             return window
         }
-        throw ProviderError.coded("permission_denied", "app '\(app.name)' has visible windows but no accessibility window (AX reads stayed blocked for \(outcome.waitedMs)ms after retries). macOS Accessibility may need TerminalX Computer Use toggled off and on again in System Settings.")
+        throw ProviderError.coded("permission_denied", "app '\(app.name)' has visible windows but no accessibility window (AX reads stayed blocked for \(outcome.waitedMs)ms after retries). macOS Accessibility may need TerminalX Computer Use Helper toggled off and on again in System Settings.")
     }
     throw ProviderError.coded("window_not_found", "app '\(app.name)' has no accessibility window; make sure the app has a visible window, then retry with --restore-window.")
 }
@@ -1891,6 +1906,14 @@ private final class TreeRenderer {
         self.windowBounds = windowBounds
         self.focused = focused
         self.compactBrowserTabs = compactBrowserTabs
+    }
+
+    /// Drop everything rendered so far; nothing of the window is served.
+    func withhold(reason: String) {
+        lines = ["(\(reason))"]
+        records = [:]
+        focusedSummary = nil
+        focusedElementId = nil
     }
 
     func render(_ element: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {
@@ -3099,7 +3122,7 @@ private final class PermissionWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Enable TerminalX Computer Use"
+        window.title = "Enable TerminalX Computer Use Helper"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.backgroundColor = PermissionPalette.background
@@ -3225,9 +3248,9 @@ private enum PermissionKind: CaseIterable {
     var dragInstruction: String {
         switch self {
         case .accessibility:
-            "Drag TerminalX Computer Use into the list above to allow Accessibility."
+            "Drag TerminalX Computer Use Helper into the list above to allow Accessibility."
         case .screenshots:
-            "Drag TerminalX Computer Use into the list above to allow Screenshots."
+            "Drag TerminalX Computer Use Helper into the list above to allow Screenshots."
         }
     }
 
@@ -3329,7 +3352,7 @@ private final class PermissionView: NSView {
 
         let titleText = checking
             ? "Checking Computer Use"
-            : (ready ? "Computer Use is Ready" : "Enable TerminalX Computer Use")
+            : (ready ? "Computer Use is Ready" : "Enable TerminalX Computer Use Helper")
         let title = label(titleText, size: 22, weight: .bold)
         let subtitle = label(
             checking
@@ -3508,7 +3531,7 @@ private final class PermissionDragAssistantController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Drag TerminalX Computer Use"
+        window.title = "Drag TerminalX Computer Use Helper"
         window.backgroundColor = .clear
         window.isOpaque = false
         window.isReleasedWhenClosed = false
@@ -3920,7 +3943,7 @@ private final class DraggableAppTile: NSView, NSDraggingSource {
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = NSTextField(labelWithString: "TerminalX Computer Use")
+        let title = NSTextField(labelWithString: "TerminalX Computer Use Helper")
         title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         title.textColor = PermissionPalette.primaryText
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -4363,7 +4386,7 @@ private func writePermissionStatus(to path: String) {
 }
 
 private func runStdio() {
-    fputs("TerminalX Computer Use provider must be launched by TerminalX in app-agent mode.\n", stderr)
+    fputs("TerminalX Computer Use Helper provider must be launched by TerminalX in app-agent mode.\n", stderr)
     exit(13)
 }
 

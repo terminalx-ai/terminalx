@@ -58,7 +58,7 @@ final class OwnAppProtectionTests: XCTestCase {
         XCTAssertNil(reason(pid: 77, bundle: "com.apple.finder", owner: releaseOwner))
         XCTAssertNil(reason(pid: 77, bundle: nil, owner: releaseOwner))
         // The helper's own bundle id is not the app.
-        XCTAssertNil(reason(pid: 78, bundle: "com.terminalx.next.computer-use", owner: releaseOwner))
+        XCTAssertNil(reason(pid: 78, bundle: "com.terminalx.next.computer-use.v2", owner: releaseOwner))
     }
 
     func testTheTestEscapeHatchLiftsOnlyTheOwnerRule() {
@@ -66,6 +66,12 @@ final class OwnAppProtectionTests: XCTestCase {
         XCTAssertNil(reason(pid: 600, bundle: nil, owner: unbundledOwner, tests: true))
         XCTAssertEqual(reason(pid: 142, bundle: "com.terminalx.next", owner: releaseOwner, tests: true), .releaseApp)
         XCTAssertEqual(reason(pid: 142, bundle: "com.terminalx.next", owner: devOwner, tests: true), .releaseApp)
+    }
+
+    func testTheRefusalsSayWhatIsWithheldAndWhy() {
+        XCTAssertTrue(OwnAppProtection.treeRefusal.contains("does not read TerminalX's own windows"))
+        XCTAssertTrue(OwnAppProtection.treeRefusal.contains("pairing codes"))
+        XCTAssertTrue(OwnAppProtection.screenshotRefusal.contains("never screenshotted"))
     }
 
     func testOnlyALocallyBuiltHelperHonorsTheEscapeHatch() {

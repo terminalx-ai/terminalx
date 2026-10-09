@@ -11,8 +11,9 @@ public struct ComputerUseOwner: Equatable, Sendable {
 
 /// TerminalX's own windows are the person's to operate: its confirmations and
 /// its Settings switches are how they keep an agent in check. The helper never
-/// acts on them, whether or not a confirmation is open, and never screenshots
-/// them (a pairing QR code or a secret on screen would leak).
+/// acts on them, whether or not a confirmation is open, and never reads them:
+/// no screenshot and no accessibility tree (a pairing code, an invite link or
+/// another session's terminal would leak).
 public enum OwnAppProtection {
     public static let errorCode = "own_app_protected"
     /// The released TerminalX app. No instance's helper acts on it, so an
@@ -66,5 +67,8 @@ public enum OwnAppProtection {
         "keyboard input was stopped because a TerminalX window has the keyboard focus: its confirmations and settings are the person's to operate. Ask the person, then bring the target window forward and retry."
 
     public static let screenshotRefusal =
-        "TerminalX's own windows are never screenshotted by computer use (a pairing code or a secret on screen would leak); the accessibility tree is returned without pixels."
+        "TerminalX's own windows are never screenshotted by computer use: a pairing code or a secret on screen would leak."
+
+    public static let treeRefusal =
+        "accessibility tree withheld: computer use does not read TerminalX's own windows. They show pairing codes, invite links and other sessions' terminals as plain text. Ask the person, or use the terminalx CLI for what it offers."
 }

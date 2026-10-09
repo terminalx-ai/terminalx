@@ -18,7 +18,7 @@ const COMPUTER_PERMISSIONS: { id: ComputerPermissionId; label: string; descripti
 ];
 
 /**
- * Computer use permissions belong to the bundled "TerminalX Computer Use"
+ * Computer use permissions belong to the bundled "TerminalX Computer Use Helper"
  * helper app, not to TerminalX itself, so an agent shell needs no grants of
  * its own. Each Grant button opens the macOS prompt through that helper; the
  * status re-polls while a prompt is open so the row flips without a restart.
@@ -91,6 +91,13 @@ export function ComputerUseRows() {
   );
   const unavailable = status?.helperUnavailableReason ?? null;
   const allGranted = status?.permissions.every((p) => p.status === "granted") ?? false;
+  // Helpers from older versions trust whoever starts them (PRO-90), so this
+  // version's helper is a new app to macOS and the app removes the old one's
+  // permission at every launch. `legacyHelper` is what this launch's removal
+  // reported; only a removal that failed asks the person to do it by hand.
+  const legacy = !unavailable ? status?.legacyHelper ?? null : null;
+  const explainNewHelper = Boolean(legacy) && !allGranted;
+  const removalFailed = legacy?.removed === false;
   return (
     <div className="flex flex-col" data-testid="computer-use-settings">
       <SettingRow
@@ -98,8 +105,8 @@ export function ComputerUseRows() {
         stacked
         description={
           unavailable
-            ? `The TerminalX Computer Use helper app is missing (${unavailable}). Reinstall TerminalX to restore desktop automation for agents.`
-            : "Agents drive desktop apps through terminalx computer … using the bundled TerminalX Computer Use helper, which holds these permissions so shells never need them."
+            ? `The TerminalX Computer Use Helper app is missing (${unavailable}). Reinstall TerminalX to restore desktop automation for agents.`
+            : "Agents drive desktop apps through terminalx computer … using the bundled TerminalX Computer Use Helper, which holds these permissions so shells never need them. TerminalX itself should not be listed under Accessibility or Screen Recording in System Settings: remove it if it is, or every program an agent runs has those permissions too."
         }
         control={
           !unavailable && status ? (
@@ -133,8 +140,23 @@ export function ComputerUseRows() {
             </div>
           );
         })}
+      {(explainNewHelper || removalFailed) && (
+        <div className="ml-3 mt-1 rounded-md border border-hairline bg-well px-3 py-2 text-xs leading-relaxed text-muted-foreground" role="note" data-testid="computer-use-upgrade-note">
+          {explainNewHelper && (
+            <p>
+              <span className="font-medium text-foreground">If you allowed computer use in an earlier TerminalX:</span> its helper was replaced for security by "TerminalX Computer Use Helper", which only answers TerminalX itself. macOS treats it as a new app, so grant both permissions to it here once more.
+              {legacy?.removed ? " The old helper's permission has been removed." : ""}
+            </p>
+          )}
+          {removalFailed && (
+            <p className={explainNewHelper ? "mt-1.5" : undefined} role="alert">
+              <span className="font-medium text-foreground">Remove the old helper yourself.</span> TerminalX could not remove the permission of the helper from an older version. Open System Settings → Privacy & Security and, under both Accessibility and Screen Recording, remove "TerminalX Computer Use" with the − button. Keep "TerminalX Computer Use Helper". While the old one is listed, any program on this Mac can use it to press TerminalX's buttons. TerminalX tries again each time it starts.
+            </p>
+          )}
+        </div>
+      )}
       {polling && !allGranted && (
-        <div className="ml-6 mt-1 text-xs text-muted-foreground">Waiting for the macOS prompt… allow "TerminalX Computer Use" in System Settings.</div>
+        <div className="ml-6 mt-1 text-xs text-muted-foreground">Waiting for the macOS prompt… allow "TerminalX Computer Use Helper" in System Settings.</div>
       )}
       {error && <div className="mt-1 text-xs text-destructive">{error}</div>}
     </div>
