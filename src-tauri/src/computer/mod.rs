@@ -270,6 +270,12 @@ impl ComputerService {
     /// previous crash are swept here.
     pub fn set_resource_dir(&self, dir: PathBuf) {
         *self.resource_dir.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir);
+        // Older helpers must lose their permissions before the current one
+        // is started or probed (PRO-90). Off the main thread: it runs tccutil.
+        let helper = self.helper_app_path();
+        std::thread::spawn(move || {
+            permissions::legacy_cleanup(helper.as_deref());
+        });
         #[cfg(unix)]
         {
             let removed = macos_native::sweep_stale_socket_dirs();
@@ -344,7 +350,16 @@ impl ComputerService {
             ));
         };
         let outcome = match method {
-            "capabilities" => provider.capabilities(),
+            "capabilities" => provider.capabilities().map(|mut capabilities| {
+                // A helper without its permissions answers the handshake all
+                // the same; say so here instead of at the first action.
+                if cfg!(target_os = "macos") {
+                    if let Ok(status) = permissions::status(self.helper_app_path().as_deref()) {
+                        permissions::attach_to_capabilities(&mut capabilities, &status);
+                    }
+                }
+                capabilities
+            }),
             "listApps" => provider.list_apps(),
             "listWindows" => provider.list_windows(params),
             "getAppState" => provider
@@ -392,6 +407,15 @@ impl ComputerService {
         let Some(executable) = helper_executable_in(&app) else {
             return Ok(None);
         };
+        // A helper from before PRO-90 trusts whoever starts it. Never run one,
+        // wherever the override or a stale build points.
+        if cfg!(target_os = "macos") && permissions::read_bundle_id(&app).is_ok_and(|id| permissions::is_legacy_helper(&id)) {
+            return Err(ComputerError::new(
+                "provider_incompatible",
+                format!("{} is a computer-use helper from an older TerminalX, which this app does not use", app.display()),
+            ));
+        }
+        permissions::legacy_cleanup(Some(&app));
         Ok(Some(Box::new(macos_native::MacosNativeProvider::new(executable))))
     }
 }

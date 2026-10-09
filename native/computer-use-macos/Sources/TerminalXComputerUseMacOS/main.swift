@@ -321,16 +321,19 @@ final class Provider {
         if forAction, protection != nil {
             throw ProviderError.coded(OwnAppProtection.errorCode, OwnAppProtection.actionRefusal(targetName: app.name))
         }
-        if params["restoreWindow"]?.bool == true {
+        // Why: looking at a protected app must not change it either; restoring
+        // activates, unminimises and raises its window.
+        let restoreWindow = params["restoreWindow"]?.bool == true && protection == nil
+        if restoreWindow {
             try recoverWindow(app)
         }
         let snapshot = try buildSnapshot(
             app: app,
             includeScreenshot: params["noScreenshot"]?.bool != true,
-            screenshotWithheld: protection != nil,
+            protectedTarget: protection != nil,
             windowId: windowId,
             windowIndex: windowIndex,
-            restoreWindow: params["restoreWindow"]?.bool == true
+            restoreWindow: restoreWindow
         )
         // Why: cached snapshots only validate element identity for follow-up
         // actions; retaining MB-scale screenshot base64 in the long-lived agent grows memory.
@@ -682,7 +685,7 @@ final class Provider {
     private func buildSnapshot(
         app: AppDescriptor,
         includeScreenshot: Bool,
-        screenshotWithheld: Bool,
+        protectedTarget: Bool,
         windowId: CGWindowID?,
         windowIndex: Int?,
         restoreWindow: Bool
@@ -705,7 +708,7 @@ final class Provider {
             allowRecovery: restoreWindow
         )
         let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
-        let wantsScreenshot = includeScreenshot && !screenshotWithheld
+        let wantsScreenshot = includeScreenshot && !protectedTarget
         let canCaptureScreenshot = wantsScreenshot && screenCaptureTrustedSettled()
         guard let capture = WindowCapture.resolve(
             candidates: windowCandidates,
@@ -725,11 +728,19 @@ final class Provider {
             focused: focusedElement(appElement: appElement),
             compactBrowserTabs: app.isKnownBrowser
         )
-        renderer.render(window)
+        if protectedTarget {
+            // Why: TerminalX's windows show secrets as plain text (the phone
+            // pairing code, invite links, other sessions' terminals), and a
+            // secret also reaches the summaries of the elements around it.
+            // Nothing of the tree is read, so nothing can leak.
+            renderer.withhold(reason: OwnAppProtection.treeRefusal)
+        } else {
+            renderer.render(window)
+        }
         let screenshot = wantsScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
-        } else if includeScreenshot && screenshotWithheld {
+        } else if includeScreenshot && protectedTarget {
             .withheld(OwnAppProtection.screenshotRefusal)
         } else if includeScreenshot && !canCaptureScreenshot {
             .failed("Screen Recording permission is required for TerminalX Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
@@ -1891,6 +1902,14 @@ private final class TreeRenderer {
         self.windowBounds = windowBounds
         self.focused = focused
         self.compactBrowserTabs = compactBrowserTabs
+    }
+
+    /// Drop everything rendered so far; nothing of the window is served.
+    func withhold(reason: String) {
+        lines = ["(\(reason))"]
+        records = [:]
+        focusedSummary = nil
+        focusedElementId = nil
     }
 
     func render(_ element: AXUIElement, depth: Int = 0, ancestors: [AXUIElement] = []) {

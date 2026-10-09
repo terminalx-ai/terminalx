@@ -92,10 +92,11 @@ TerminalX as its ancestor. It is not root and cannot change a signed app.
   `identifier "com.terminalx.next"` plus the team's Developer ID certificate,
   verified against the code the peer is running. Being a child of TerminalX,
   or carrying its bundle id, earns nothing. So an agent that connects to the
-  app's helper is refused even with the token, a copy of the helper that an
+  app's helper is refused even with the token, a copy of *this* helper that an
   agent starts refuses the agent, and a copy started through LaunchServices
   (`open`) has no launcher and serves nobody. A helper that cannot confirm its
-  own signature serves nobody.
+  own signature serves nobody. None of this is true of helpers from older
+  versions; see "Older helpers" below.
 - *The token.* It travels on a pipe only the helper inherits. There is no
   token file to read.
 - *TerminalX's own windows.* Every action (click, type, key, hotkey, paste,
@@ -112,11 +113,16 @@ TerminalX as its ancestor. It is not root and cannot change a signed app.
   keyboard focus. Before every key the helper checks the focused and the
   frontmost app and stops with `own_app_protected` if it is a protected one.
   Synthetic clicks were already fenced to the target window.
-- *Reading.* The accessibility tree of TerminalX's own windows can still be
-  read (secure text fields are never read). Its windows are never
-  screenshotted: `screenshotStatus` says `skipped` with reason
-  `own_app_protected`, so a pairing QR code or a secret on screen does not
-  leave as pixels. Text the app shows in clear is still in the tree.
+- *Reading.* Nothing of TerminalX's own windows is read. There is no
+  screenshot (`screenshotStatus` says `skipped` with reason
+  `own_app_protected`) and no accessibility tree: `treeText` holds one line
+  saying it is withheld and there are no element indexes. The windows show
+  the phone pairing code, invite links and other sessions' terminals as plain
+  text, so the tree is not served at all rather than filtered. `list-windows`
+  still lists the windows with their titles, and `--restore-window` does
+  nothing to them: looking never activates, raises or unminimises the app.
+  The same holds for the released app seen from another instance. A Dev build
+  seen from a different instance is not protected and is read in full.
 - The app also answers `own_app_protected` itself for `--app pid:<its own
   pid>` on every platform, and keeps answering `confirmation_pending` for
   every action while one of its questions is open.
@@ -129,6 +135,39 @@ for the app, no `terminalx computer` request carries it, a release build of
 the app does not read it, and a released helper ignores it. It never lifts
 the rule for the released app. Starting another test build with it set only
 lets that build drive itself.
+
+**Older helpers (0.2.8 and earlier).** macOS keys a permission to an app's
+signing identity, not its version. Helpers released before this change are
+signed as `com.terminalx.next.computer-use`, trust whoever starts them, and
+have no own-window rule. They are public. While one of them still has
+Accessibility, any program can run a copy and press TerminalX's buttons with
+it, whatever version of TerminalX is installed. So:
+
+- this helper has a new identity, `com.terminalx.next.computer-use.v2`
+  (`…dev.computer-use.v2` for dev builds); the old permission does not apply
+  to it, and people grant Accessibility and Screen Recording once more;
+- once, at the first launch of a version with the new helper and before the
+  helper is started or probed, the app runs `tccutil reset Accessibility` and
+  `tccutil reset ScreenCapture` for the old ids (no administrator password is
+  needed for one's own entries). It records that in
+  `computer-use-legacy-helper-reset.json` in the TerminalX home and does not
+  repeat it; a failed reset is not recorded and is tried again at the next
+  launch, without holding up startup. A debug build clears only the old dev
+  id, so it does not break an older installed TerminalX on a development
+  machine;
+- `tccutil` only resets an app macOS can still find. If the old helper is no
+  longer anywhere on disk after the update, the reset is refused ("No such
+  bundle identifier") and the app cannot tell whether an old permission
+  remains. Settings → General → Computer use then asks the person to remove
+  every "TerminalX Computer Use" entry under Accessibility and Screen
+  Recording in System Settings and grant again;
+- the app refuses to start a helper that declares an old id, and the build
+  script refuses to build one.
+
+**A helper from 0.2.8 or earlier keeps working for whoever starts it until
+its permission is removed**, which the app does as described above. Someone
+who adds an old helper back by hand in System Settings, or grants it again by
+running an older TerminalX, reopens the hole; the reset is not repeated.
 
 **What a local build cannot promise.** A helper that is ad-hoc or development
 signed has no signing identity to check the app against, so it trusts its
@@ -147,9 +186,12 @@ drives the screen without the helper:
   them too and can post events or read the screen directly (measured: an
   unsigned test binary run from an agent shell reported
   `AXIsProcessTrusted() == true`, and `false` once started with the
-  responsibility disclaimed). TerminalX does not need either permission for
-  itself; only "TerminalX Computer Use" should be listed. Remove TerminalX
-  from both lists if it is there.
+  responsibility disclaimed). **TerminalX itself must not hold Accessibility
+  or Screen Recording.** It never asks for either (it declares no usage
+  string for them and calls neither API; its only privacy prompts are the
+  microphone and speech recognition for dictation), so an entry for
+  "TerminalX" was added by hand. Only "TerminalX Computer Use" should be
+  listed; remove TerminalX from both lists. Settings says so too.
 - `osascript` / System Events, or any other app the person has granted
   Accessibility, can press the same buttons.
 - For the same reason a copy of the helper started from an agent shell is
@@ -177,7 +219,7 @@ prompts open from `terminalx computer permissions --id accessibility` or
 `tccutil` so a stale denial can be re-prompted.
 
 The dev build (`pnpm tauri:dev`) uses a helper with bundle id
-`com.terminalx.next.dev.computer-use` and the display name "TerminalX Dev
+`com.terminalx.next.dev.computer-use.v2` and the display name "TerminalX Dev
 Computer Use", so dev and release helpers get separate rows under Privacy &
 Security. Signing with an Apple Development certificate (the build script
 picks one up from the keychain when present) gives the helper a designated

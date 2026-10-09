@@ -57,7 +57,140 @@ pub struct PermissionStatusResult {
     pub platform: String,
     pub helper_app_path: Option<String>,
     pub helper_unavailable_reason: Option<String>,
+    /// What happened to the permissions of helpers released before PRO-90.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_helper: Option<LegacyHelperCleanup>,
     pub permissions: Vec<PermissionState>,
+}
+
+/// Helpers released before PRO-90 trust whoever starts them and act on
+/// TerminalX's own windows. macOS keys a permission to the signing identity,
+/// not the version, so while one of these is still granted Accessibility any
+/// program can run an old copy and use it. The current helper therefore has a
+/// new bundle id, and the app takes the old ones' permissions away. This
+/// module is the only code that may name the old ids.
+pub const LEGACY_HELPER_BUNDLE_IDS: [&str; 2] = ["com.terminalx.next.computer-use", "com.terminalx.next.dev.computer-use"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyHelperCleanup {
+    /// True when macOS confirmed every old permission is gone. False means
+    /// the person has to remove the old entry in System Settings themselves:
+    /// `tccutil` only resets an app macOS can still find, and after an
+    /// update the old helper is usually no longer on disk.
+    pub removed: bool,
+    pub bundle_ids: Vec<String>,
+}
+
+pub fn is_legacy_helper(bundle_id: &str) -> bool {
+    LEGACY_HELPER_BUNDLE_IDS.iter().any(|legacy| legacy.eq_ignore_ascii_case(bundle_id.trim()))
+}
+
+/// Which old identities this build clears. A test build leaves the released
+/// helper's permissions alone: an installed TerminalX of an older version
+/// may still be in use on a development machine. The id of the helper in use
+/// is never reset, whatever it is.
+pub fn legacy_ids_to_reset(test_build: bool, current: Option<&str>) -> Vec<&'static str> {
+    LEGACY_HELPER_BUNDLE_IDS
+        .into_iter()
+        .filter(|id| !test_build || id.contains(".dev."))
+        .filter(|id| current.is_none_or(|current| !current.eq_ignore_ascii_case(id)))
+        .collect()
+}
+
+/// Run `reset(service, bundle_id)` for each old identity and both services.
+pub fn reset_legacy_helpers(ids: &[&str], mut reset: impl FnMut(&str, &str) -> bool) -> LegacyHelperCleanup {
+    let mut removed = true;
+    for id in ids {
+        for service in [PermissionId::Accessibility, PermissionId::Screenshots] {
+            // Every pair is attempted even after a failure.
+            removed &= reset(service.tcc_service(), id);
+        }
+    }
+    LegacyHelperCleanup {
+        removed,
+        bundle_ids: ids.iter().map(|id| id.to_string()).collect(),
+    }
+}
+
+/// What one launch did about the old helpers' permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyReset {
+    /// An earlier launch already removed them; nothing was run.
+    AlreadyDone,
+    /// Removed now, and recorded.
+    Ran,
+    /// macOS refused at least one reset. Nothing is recorded, so the next
+    /// launch tries again.
+    Failed,
+}
+
+const LEGACY_RESET_MARKER: &str = "computer-use-legacy-helper-reset.json";
+
+/// Remove the old helpers' permissions once. `marker` records which ids
+/// were cleared; it is written only when every reset succeeded.
+pub fn run_legacy_reset(marker: &Path, ids: &[&str], reset: impl FnMut(&str, &str) -> bool) -> LegacyReset {
+    let done: Vec<String> = crate::store::read_json(marker).ok().flatten().unwrap_or_default();
+    if ids.iter().all(|id| done.iter().any(|d| d == id)) {
+        return LegacyReset::AlreadyDone;
+    }
+    if !reset_legacy_helpers(ids, reset).removed {
+        return LegacyReset::Failed;
+    }
+    // A marker that cannot be written only means the reset runs again.
+    let _ = crate::store::write_json(marker, &ids);
+    LegacyReset::Ran
+}
+
+/// Take the old helpers' permissions away before anything starts or probes
+/// the current helper: once per installation, attempted at most once per
+/// launch. `None` off macOS and in tests, which never run `tccutil`.
+pub fn legacy_cleanup(helper_app: Option<&Path>) -> Option<LegacyHelperCleanup> {
+    static DONE: std::sync::OnceLock<Option<LegacyHelperCleanup>> = std::sync::OnceLock::new();
+    if cfg!(test) || !cfg!(target_os = "macos") {
+        return None;
+    }
+    DONE.get_or_init(|| {
+        let current = helper_app.and_then(|app| read_bundle_id(app).ok());
+        let ids = legacy_ids_to_reset(cfg!(debug_assertions), current.as_deref());
+        let marker = crate::store::root().ok()?.join(LEGACY_RESET_MARKER);
+        if ids.is_empty() {
+            return None;
+        }
+        let outcome = run_legacy_reset(&marker, &ids, |service, id| {
+            std::process::Command::new("/usr/bin/tccutil")
+                .args(["reset", service, id])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .is_ok_and(|output| output.status.success())
+        });
+        match outcome {
+            LegacyReset::AlreadyDone => {}
+            LegacyReset::Ran => log::info!("computer use: removed the permissions of older helpers"),
+            LegacyReset::Failed => log::warn!("computer use: macOS would not remove the permissions of older helpers; trying again at the next launch"),
+        }
+        Some(LegacyHelperCleanup {
+            removed: outcome != LegacyReset::Failed,
+            bundle_ids: ids.iter().map(|id| id.to_string()).collect(),
+        })
+    })
+    .clone()
+}
+
+/// `terminalx computer capabilities` must not look fine while the helper has
+/// no permission: add the permission states and, when one is missing, how to
+/// give it.
+pub fn attach_to_capabilities(capabilities: &mut serde_json::Value, status: &PermissionStatusResult) {
+    let Some(object) = capabilities.as_object_mut() else {
+        return;
+    };
+    object.insert("permissions".into(), serde_json::json!(status.permissions));
+    if let Some(step) = next_step(&status.permissions) {
+        object.insert(
+            "nextStep".into(),
+            serde_json::json!(format!("{step} Run `terminalx computer permissions`, or open TerminalX Settings > General > Computer use.")),
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,11 +244,14 @@ pub fn next_step(permissions: &[PermissionState]) -> Option<String> {
         .find(|permission| permission.status != "granted")
         .map(|missing| {
             format!(
-                "Grant {} to TerminalX Computer Use, then retry get-app-state.",
+                "Grant {} to TerminalX Computer Use, then retry get-app-state. {UPGRADE_NOTE}",
                 missing.id.human()
             )
         })
 }
+
+/// Why someone who granted computer use before is asked again.
+pub const UPGRADE_NOTE: &str = "The Computer Use helper was updated for security and macOS treats it as a new app, so these permissions are granted once more. If System Settings still lists an older \"TerminalX Computer Use\" under Accessibility or Screen Recording, remove it: an old helper that keeps its permission can be used by any program.";
 
 pub fn status(helper_app: Option<&Path>) -> Result<PermissionStatusResult, ComputerError> {
     if !cfg!(target_os = "macos") {
@@ -123,6 +259,7 @@ pub fn status(helper_app: Option<&Path>) -> Result<PermissionStatusResult, Compu
             platform: platform(),
             helper_app_path: None,
             helper_unavailable_reason: None,
+            legacy_helper: None,
             permissions: unsupported_states(),
         });
     }
@@ -154,6 +291,7 @@ pub fn status(helper_app: Option<&Path>) -> Result<PermissionStatusResult, Compu
         platform: platform(),
         helper_app_path: Some(app.to_string_lossy().into_owned()),
         helper_unavailable_reason: None,
+        legacy_helper: legacy_cleanup(Some(app)),
         permissions: vec![state(PermissionId::Accessibility), state(PermissionId::Screenshots)],
     })
 }
@@ -163,6 +301,7 @@ fn unavailable(reason: String, app: Option<&Path>) -> PermissionStatusResult {
         platform: platform(),
         helper_app_path: app.map(|p| p.to_string_lossy().into_owned()),
         helper_unavailable_reason: Some(reason),
+        legacy_helper: None,
         permissions: not_granted_states(),
     }
 }
@@ -338,6 +477,7 @@ pub fn reset(helper_app: Option<&Path>) -> Result<PermissionResetResult, Compute
                 platform: platform(),
                 helper_app_path: None,
                 helper_unavailable_reason: None,
+                legacy_helper: None,
                 permissions: unsupported_states(),
             },
             bundle_id: None,
@@ -437,10 +577,9 @@ mod tests {
             PermissionState { id: PermissionId::Accessibility, status: "granted".into() },
             PermissionState { id: PermissionId::Screenshots, status: "not-granted".into() },
         ];
-        assert_eq!(
-            next_step(&missing).unwrap(),
-            "Grant Screen Recording to TerminalX Computer Use, then retry get-app-state."
-        );
+        assert!(next_step(&missing)
+            .unwrap()
+            .starts_with("Grant Screen Recording to TerminalX Computer Use, then retry get-app-state."));
     }
 
     #[test]
@@ -465,11 +604,11 @@ mod tests {
         std::fs::create_dir_all(app.join("Contents")).unwrap();
         std::fs::write(
             app.join("Contents/Info.plist"),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.terminalx.next.dev.computer-use</string></dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.terminalx.next.dev.computer-use.v2</string></dict></plist>\n",
         )
         .unwrap();
         if cfg!(target_os = "macos") {
-            assert_eq!(read_bundle_id(&app).unwrap(), "com.terminalx.next.dev.computer-use");
+            assert_eq!(read_bundle_id(&app).unwrap(), "com.terminalx.next.dev.computer-use.v2");
         }
     }
 
@@ -490,4 +629,123 @@ mod tests {
         assert_eq!(json["permissions"][0]["id"], "screenshots");
         assert_eq!(json["launchedHelper"], true);
     }
+    #[test]
+    fn a_release_clears_both_old_identities_and_a_test_build_only_the_dev_one() {
+        assert_eq!(
+            legacy_ids_to_reset(false, Some("com.terminalx.next.computer-use.v2")),
+            ["com.terminalx.next.computer-use", "com.terminalx.next.dev.computer-use"]
+        );
+        assert_eq!(
+            legacy_ids_to_reset(true, Some("com.terminalx.next.dev.computer-use.v2")),
+            ["com.terminalx.next.dev.computer-use"]
+        );
+        assert_eq!(legacy_ids_to_reset(false, None).len(), 2);
+    }
+
+    #[test]
+    fn the_helper_in_use_is_never_reset_even_if_it_carries_an_old_id() {
+        assert_eq!(
+            legacy_ids_to_reset(false, Some("com.terminalx.next.computer-use")),
+            ["com.terminalx.next.dev.computer-use"]
+        );
+        assert!(legacy_ids_to_reset(true, Some("COM.terminalx.next.dev.computer-use")).is_empty());
+    }
+
+    #[test]
+    fn old_identities_are_recognised_and_the_new_ones_are_not() {
+        assert!(is_legacy_helper("com.terminalx.next.computer-use"));
+        assert!(is_legacy_helper(" com.terminalx.next.dev.computer-use\n"));
+        assert!(!is_legacy_helper("com.terminalx.next.computer-use.v2"));
+        assert!(!is_legacy_helper("com.terminalx.next.dev.computer-use.v2"));
+        assert!(!is_legacy_helper("com.terminalx.next"));
+    }
+
+    #[test]
+    fn both_services_are_reset_for_every_old_identity_and_one_failure_is_reported() {
+        let mut calls = Vec::new();
+        let done = reset_legacy_helpers(&["a", "b"], |service, id| {
+            calls.push(format!("{service} {id}"));
+            true
+        });
+        assert_eq!(calls, ["Accessibility a", "ScreenCapture a", "Accessibility b", "ScreenCapture b"]);
+        assert!(done.removed);
+        assert_eq!(done.bundle_ids, ["a", "b"]);
+
+        // macOS no longer knows the old helper: nothing was removed, the
+        // person is told, and the other resets are still attempted.
+        let mut attempts = 0;
+        let failed = reset_legacy_helpers(&["a", "b"], |_, id| {
+            attempts += 1;
+            id != "a"
+        });
+        assert!(!failed.removed);
+        assert_eq!(attempts, 4);
+    }
+
+    #[test]
+    fn the_old_permissions_are_removed_once_and_a_failure_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("reset.json");
+        let ids = ["old.release", "old.dev"];
+
+        // Failed: nothing is recorded.
+        let mut calls = 0;
+        assert_eq!(run_legacy_reset(&marker, &ids, |_, _| { calls += 1; false }), LegacyReset::Failed);
+        assert_eq!(calls, 4);
+        assert!(!marker.exists());
+
+        // Next launch: tried again, succeeds, recorded.
+        let mut seen = Vec::new();
+        assert_eq!(run_legacy_reset(&marker, &ids, |service, id| { seen.push(format!("{service} {id}")); true }), LegacyReset::Ran);
+        assert_eq!(seen, ["Accessibility old.release", "ScreenCapture old.release", "Accessibility old.dev", "ScreenCapture old.dev"]);
+        assert!(marker.exists());
+
+        // Already done: tccutil is not called again.
+        assert_eq!(
+            run_legacy_reset(&marker, &ids, |_, _| panic!("the reset must not run twice")),
+            LegacyReset::AlreadyDone
+        );
+        // A build that retires one more id runs again for it.
+        assert_eq!(run_legacy_reset(&marker, &["old.release", "old.dev", "older"], |_, _| true), LegacyReset::Ran);
+        // An unreadable marker is treated as not done.
+        std::fs::write(&marker, b"not json").unwrap();
+        assert_eq!(run_legacy_reset(&marker, &ids, |_, _| true), LegacyReset::Ran);
+    }
+
+    #[test]
+    fn capabilities_say_when_a_permission_is_missing_and_how_to_give_it() {
+        let status = |a: &str, s: &str| PermissionStatusResult {
+            platform: "macos".into(),
+            helper_app_path: None,
+            helper_unavailable_reason: None,
+            legacy_helper: None,
+            permissions: vec![
+                PermissionState { id: PermissionId::Accessibility, status: a.into() },
+                PermissionState { id: PermissionId::Screenshots, status: s.into() },
+            ],
+        };
+        let mut missing = serde_json::json!({"provider": "x"});
+        attach_to_capabilities(&mut missing, &status("not-granted", "granted"));
+        assert_eq!(missing["permissions"][0]["status"], "not-granted");
+        let step = missing["nextStep"].as_str().unwrap();
+        assert!(step.starts_with("Grant Accessibility to TerminalX Computer Use"));
+        assert!(step.contains("updated for security"));
+        assert!(step.contains("terminalx computer permissions"));
+
+        let mut granted = serde_json::json!({"provider": "x"});
+        attach_to_capabilities(&mut granted, &status("granted", "granted"));
+        assert_eq!(granted["permissions"][1]["status"], "granted");
+        assert!(granted.get("nextStep").is_none());
+    }
+
+    #[test]
+    fn the_next_step_says_why_the_person_is_asked_again() {
+        let step = next_step(&not_granted_states()).unwrap();
+        assert!(step.contains("Grant Accessibility to TerminalX Computer Use"));
+        assert!(step.contains("updated for security"));
+        assert!(step.contains("granted once more"));
+        assert!(step.contains("remove it"));
+        assert!(legacy_cleanup(None).is_none(), "tests never run tccutil");
+    }
+
 }

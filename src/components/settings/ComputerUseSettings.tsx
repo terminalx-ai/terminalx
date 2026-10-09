@@ -17,6 +17,16 @@ const COMPUTER_PERMISSIONS: { id: ComputerPermissionId; label: string; descripti
   },
 ];
 
+const LEGACY_ACK_KEY = "terminalx.computerUse.legacyHelperRemoved";
+
+function legacyAcknowledged() {
+  try {
+    return globalThis.localStorage?.getItem(LEGACY_ACK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Computer use permissions belong to the bundled "TerminalX Computer Use"
  * helper app, not to TerminalX itself, so an agent shell needs no grants of
@@ -29,6 +39,7 @@ export function ComputerUseRows() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ComputerPermissionId | "reset" | null>(null);
   const [polling, setPolling] = useState(false);
+  const [legacyAck, setLegacyAck] = useState(legacyAcknowledged);
   const refresh = async () => {
     try {
       const next = await api.computerPermissionStatus();
@@ -91,6 +102,20 @@ export function ComputerUseRows() {
   );
   const unavailable = status?.helperUnavailableReason ?? null;
   const allGranted = status?.permissions.every((p) => p.status === "granted") ?? false;
+  // Helpers from older versions trust whoever starts them (PRO-90). This
+  // version's helper is a new app to macOS, so people are asked again, and an
+  // old one that keeps its permission stays usable by any program: say both.
+  const legacy = !unavailable ? status?.legacyHelper ?? null : null;
+  const askedAgain = Boolean(legacy) && !allGranted;
+  const removeOld = Boolean(legacy) && !legacy?.removed && !legacyAck;
+  const acknowledgeLegacy = () => {
+    try {
+      globalThis.localStorage?.setItem(LEGACY_ACK_KEY, "1");
+    } catch {
+      // Private storage is a convenience; the notice simply shows again.
+    }
+    setLegacyAck(true);
+  };
   return (
     <div className="flex flex-col" data-testid="computer-use-settings">
       <SettingRow
@@ -99,7 +124,7 @@ export function ComputerUseRows() {
         description={
           unavailable
             ? `The TerminalX Computer Use helper app is missing (${unavailable}). Reinstall TerminalX to restore desktop automation for agents.`
-            : "Agents drive desktop apps through terminalx computer … using the bundled TerminalX Computer Use helper, which holds these permissions so shells never need them."
+            : "Agents drive desktop apps through terminalx computer … using the bundled TerminalX Computer Use helper, which holds these permissions so shells never need them. TerminalX itself should not be listed under Accessibility or Screen Recording in System Settings: remove it if it is, or every program an agent runs has those permissions too."
         }
         control={
           !unavailable && status ? (
@@ -133,6 +158,26 @@ export function ComputerUseRows() {
             </div>
           );
         })}
+      {(askedAgain || removeOld) && (
+        <div className="ml-3 mt-1 rounded-md border border-hairline bg-well px-3 py-2 text-xs leading-relaxed text-muted-foreground" role="note" data-testid="computer-use-upgrade-note">
+          {askedAgain && (
+            <p>
+              <span className="font-medium text-foreground">Updated for security: grant once more.</span> The Computer Use helper was replaced by one that only answers TerminalX itself and never operates or reads TerminalX's own windows. macOS treats it as a new app, so Accessibility and Screen Recording need to be granted to it again.
+              {legacy?.removed ? " The older helper's permissions have been removed." : ""}
+            </p>
+          )}
+          {removeOld && (
+            <>
+              <p className={askedAgain ? "mt-1.5" : undefined}>
+                <span className="font-medium text-foreground">Remove the older helper.</span> If you used computer use with an earlier TerminalX, macOS may still list that helper, and TerminalX could not remove it for you. Open System Settings → Privacy & Security, and under both Accessibility and Screen Recording remove every "TerminalX Computer Use" entry with the − button, then use Grant… here. While an older helper keeps its permission, any program on this Mac can use it to press TerminalX's buttons.
+              </p>
+              <Button className="mt-2" size="xs" variant="outline" onClick={acknowledgeLegacy}>
+                I have removed it
+              </Button>
+            </>
+          )}
+        </div>
+      )}
       {polling && !allGranted && (
         <div className="ml-6 mt-1 text-xs text-muted-foreground">Waiting for the macOS prompt… allow "TerminalX Computer Use" in System Settings.</div>
       )}

@@ -74,4 +74,41 @@ describe("ComputerUseRows", () => {
     await screen.findByRole("button", { name: "Grant Accessibility" });
     await screen.findByRole("button", { name: "Grant Screen Recording" });
   });
+
+  it("says why permissions are asked again after the helper changed, and that the old ones were removed", async () => {
+    localStorage.clear();
+    mocks.invoke.mockResolvedValue({ ...status("not-granted", "not-granted"), legacyHelper: { removed: true, bundleIds: ["com.terminalx.next.computer-use"] } });
+    render(<ComputerUseRows />);
+    const note = await screen.findByTestId("computer-use-upgrade-note");
+    expect(note.textContent).toContain("Updated for security: grant once more.");
+    expect(note.textContent).toContain("macOS treats it as a new app");
+    expect(note.textContent).toContain("The older helper's permissions have been removed.");
+    expect(note.textContent).not.toContain("Remove the older helper.");
+    expect(screen.getByText(/TerminalX itself should not be listed under Accessibility or Screen Recording/)).toBeTruthy();
+  });
+
+  it("tells the person to remove the older helper when macOS would not, until they say they have", async () => {
+    localStorage.clear();
+    mocks.invoke.mockResolvedValue({ ...status("granted", "granted"), legacyHelper: { removed: false, bundleIds: ["com.terminalx.next.computer-use"] } });
+    render(<ComputerUseRows />);
+    const note = await screen.findByTestId("computer-use-upgrade-note");
+    // Already granted again: nothing to explain, but the old entry still matters.
+    expect(note.textContent).not.toContain("Updated for security");
+    expect(note.textContent).toContain("remove every \"TerminalX Computer Use\" entry");
+    expect(note.textContent).toContain("any program on this Mac can use it");
+    fireEvent.click(screen.getByRole("button", { name: "I have removed it" }));
+    await waitFor(() => expect(screen.queryByTestId("computer-use-upgrade-note")).toBeNull());
+    cleanup();
+    render(<ComputerUseRows />);
+    await screen.findByRole("button", { name: "Accessibility granted" });
+    expect(screen.queryByTestId("computer-use-upgrade-note")).toBeNull();
+  });
+
+  it("shows no upgrade note once everything is granted and the old permissions are gone", async () => {
+    localStorage.clear();
+    mocks.invoke.mockResolvedValue({ ...status("granted", "granted"), legacyHelper: { removed: true, bundleIds: [] } });
+    render(<ComputerUseRows />);
+    await screen.findByRole("button", { name: "Accessibility granted" });
+    expect(screen.queryByTestId("computer-use-upgrade-note")).toBeNull();
+  });
 });

@@ -432,6 +432,10 @@ pub fn format_capabilities(value: &Value) -> String {
         ),
         format!("  Actions: {}", actions.join(", ")),
     ]
+    .into_iter()
+    .chain(value.get("permissions").map(|_| format!("  Permissions: {}", format_permission_list(value))))
+    .chain(s(value, "nextStep").map(|step| format!("  Permission missing: {step}")))
+    .collect::<Vec<_>>()
     .join("\n")
 }
 
@@ -988,6 +992,20 @@ mod tests {
         assert_eq!(format_screenshot_status(&own), "Screenshot withheld (own_app_protected): never screenshotted");
         own["screenshotStatus"] = json!({"state": "skipped", "reason": "no_screenshot_flag"});
         assert_eq!(format_screenshot_status(&own), "Screenshot skipped (--no-screenshot)");
+    }
+
+    #[test]
+    fn capabilities_output_names_a_missing_permission_and_the_way_to_grant_it() {
+        let mut value = json!({"provider": "terminalx-computer-use-macos", "platform": "darwin", "protocolVersion": 1,
+            "permissions": [{"id": "accessibility", "status": "not-granted"}, {"id": "screenshots", "status": "granted"}],
+            "nextStep": "Grant Accessibility to TerminalX Computer Use, then retry get-app-state."});
+        let text = format_capabilities(&value);
+        assert!(text.contains("  Permissions: accessibility=not-granted, screenshots=granted"), "{text}");
+        assert!(text.ends_with("  Permission missing: Grant Accessibility to TerminalX Computer Use, then retry get-app-state."), "{text}");
+        value.as_object_mut().unwrap().remove("nextStep");
+        value.as_object_mut().unwrap().remove("permissions");
+        let plain = format_capabilities(&value);
+        assert!(!plain.contains("Permission"), "{plain}");
     }
 
     #[test]

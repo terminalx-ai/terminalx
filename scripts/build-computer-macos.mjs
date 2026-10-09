@@ -7,8 +7,15 @@
 // once to the helper lets the TerminalX app, the terminalx CLI, and any agent
 // shell use computer use without holding those permissions themselves.
 //
-//   node scripts/build-computer-macos.mjs          release identity (com.terminalx.next.computer-use)
-//   node scripts/build-computer-macos.mjs --dev    dev identity (com.terminalx.next.dev.computer-use)
+//   node scripts/build-computer-macos.mjs          release identity (com.terminalx.next.computer-use.v2)
+//   node scripts/build-computer-macos.mjs --dev    dev identity (com.terminalx.next.dev.computer-use.v2)
+//
+// The ids end in .v2 on purpose (PRO-90). Helpers released under the old ids
+// trust whoever starts them, and macOS keys a permission to the signing
+// identity, not the version: a new id is what makes the permission people gave
+// the old helper not apply to this one, and lets the app take the old one away
+// (LEGACY_HELPER_BUNDLE_IDS in src-tauri/src/computer/permissions.rs). Never
+// build a helper under an old id.
 //
 // Environment:
 //   TERMINALX_COMPUTER_MACOS_UNIVERSAL=1      build arm64 + x86_64 and lipo them
@@ -18,6 +25,7 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { helperBundleId, legacyHelperBundleIds } from './computer-macos-identity.mjs'
 
 const repoRoot = path.resolve(import.meta.dirname, '..')
 const packagePath = path.join(repoRoot, 'native', 'computer-use-macos')
@@ -31,9 +39,7 @@ const appExecutablePath = path.join(appPath, 'Contents', 'MacOS', 'terminalx-com
 const appIconPath = path.join(appPath, 'Contents', 'Resources', 'AppIcon.icns')
 const iconSource = path.join(repoRoot, 'src-tauri', dev ? 'icons-dev' : 'icons', 'icon.icns')
 const entitlementsPath = path.join(repoRoot, 'src-tauri', 'Entitlements.computer-use.plist')
-const bundleId =
-  process.env.TERMINALX_COMPUTER_MACOS_BUNDLE_ID ??
-  (dev ? 'com.terminalx.next.dev.computer-use' : 'com.terminalx.next.computer-use')
+const bundleId = helperBundleId({ dev, override: process.env.TERMINALX_COMPUTER_MACOS_BUNDLE_ID })
 const displayName = dev ? 'TerminalX Dev Computer Use' : 'TerminalX Computer Use'
 const universal = process.env.TERMINALX_COMPUTER_MACOS_UNIVERSAL === '1'
 
@@ -89,6 +95,14 @@ function createHelperApp() {
   writeFileSync(path.join(appPath, 'Contents', 'Info.plist'), infoPlist(), 'utf8')
   run('codesign', codesignArgs(signingIdentity, appPath))
   run('codesign', ['--verify', '--deep', '--strict', appPath])
+  // The bundle is rebuilt from nothing above, so no older helper can be left
+  // inside it; check what was actually assembled all the same.
+  const built = spawnSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Contents', 'Info.plist')], { encoding: 'utf8' })
+  const builtId = built.stdout?.trim()
+  if (built.status !== 0 || builtId !== bundleId || legacyHelperBundleIds.includes(builtId)) {
+    console.error(`build-computer-macos: the assembled helper declares "${builtId}", expected "${bundleId}"`)
+    process.exit(1)
+  }
 }
 
 function codesignArgs(identity, targetPath) {
