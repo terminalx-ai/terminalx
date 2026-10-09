@@ -19,6 +19,7 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use uuid::Uuid;
 
 use crate::events::AgentEvent;
+use crate::harness::settings::allowed_while_shared;
 use crate::local_sharing::{
     self, Guest, Link, LinkSettings, QueuedInput, Role, Share, IDENTITY_MS,
 };
@@ -114,7 +115,7 @@ fn shareable(session: &str) -> Result<()> {
     if entry
         .tabs
         .iter()
-        .any(|t| t.permission_mode == "bypassPermissions")
+        .any(|t| !allowed_while_shared(&t.permission_mode) || t.requested_permission_mode.as_deref().is_some_and(|mode| !allowed_while_shared(mode)))
     {
         bail!("Change every tab out of Bypass before sharing this session.");
     }
@@ -593,7 +594,7 @@ impl PairingManager {
         if write
             && tab
                 .as_ref()
-                .is_none_or(|t| t.permission_mode == "bypassPermissions")
+                .is_none_or(|t| !allowed_while_shared(&t.permission_mode))
         {
             bail!("This tab cannot be driven while sharing.");
         }
@@ -776,7 +777,7 @@ impl PairingManager {
                     .tab(&input.tab_id)
                     .cloned()
                     .context("Tab closed.")?;
-                if tab.permission_mode == "bypassPermissions" {
+                if !allowed_while_shared(&tab.permission_mode) {
                     bail!("Tab is in Bypass.");
                 }
                 let person = share.admit(
@@ -1053,6 +1054,21 @@ mod tests {
         })
         .unwrap();
         assert!(shareable("session").is_ok());
+        // Nor may a tab be on its way into Bypass, or in a stance with no
+        // sandbox under another name (#417).
+        index::update_tab("session", "safe", |tab| {
+            tab.requested_permission_mode = Some("bypassPermissions".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(shareable("session").is_err());
+        index::update_tab("session", "safe", |tab| {
+            tab.requested_permission_mode = None;
+            tab.permission_mode = "on-request, danger-full-access".into();
+            Ok(())
+        })
+        .unwrap();
+        assert!(shareable("session").is_err());
     }
     #[test]
     fn router_rejects_other_sessions_unknown_methods_and_internal_identifiers() {

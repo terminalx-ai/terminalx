@@ -33,6 +33,24 @@ pub fn normalize_mode(mode: &str) -> &'static str {
     }
 }
 
+/// The tab's mode for the one Claude Code reports it is in (#417), on a hook
+/// frame or in its transcript. It reports "ask every time" as `default` and
+/// takes it as `manual`. A tab already in that mode under another spelling
+/// keeps its own, and a mode this app has no entry for is kept as reported.
+pub fn mode_reported(reported: &str, current: &str) -> String {
+    let mode = match reported.trim() {
+        "default" | "manual" => "manual",
+        other => other,
+    };
+    // `normalize_mode` reads a mode it does not know as `manual`: that is how
+    // it would launch, not what it is.
+    let asks = |m: &str| matches!(m.trim(), "manual" | "default" | "ask");
+    if normalize_mode(current) == mode && (mode != "manual" || asks(current)) {
+        return current.to_string();
+    }
+    mode.to_string()
+}
+
 pub fn control_line(request_id: &str, request: Value) -> String {
     json!({"type": "control_request", "request_id": request_id, "request": request}).to_string()
 }
@@ -101,6 +119,23 @@ mod tests {
         // Unset is not unknown: it is the default launch mode.
         assert_eq!(normalize_mode(""), "bypassPermissions");
         assert_eq!(normalize_mode(crate::store::index::DEFAULT_PERMISSION_MODE), "bypassPermissions");
+    }
+
+    #[test]
+    fn a_reported_mode_is_read_back_into_the_tabs_own() {
+        // What a hook frame calls the mode `--permission-mode manual` starts.
+        assert_eq!(mode_reported("default", "plan"), "manual");
+        assert_eq!(mode_reported("acceptEdits", "manual"), "acceptEdits");
+        assert_eq!(mode_reported("bypassPermissions", "auto"), "bypassPermissions");
+        // The same mode under the spelling the tab already has is no change.
+        assert_eq!(mode_reported("default", "ask"), "ask");
+        assert_eq!(mode_reported("default", "default"), "default");
+        assert_eq!(mode_reported("bypassPermissions", ""), "");
+        // Modes the picker does not offer are the mode in force all the same.
+        assert_eq!(mode_reported("dontAsk", "auto"), "dontAsk");
+        assert_eq!(mode_reported("something-newer", "auto"), "something-newer");
+        // An unknown mode in the tab launches as `manual`, but is not `manual`.
+        assert_eq!(mode_reported("default", "something-newer"), "manual");
     }
 
     #[test]

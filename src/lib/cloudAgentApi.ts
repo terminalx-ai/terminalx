@@ -83,6 +83,7 @@ export interface Projection {
   requestedModel?: string | null;
   requestedEffort?: string | null;
   permissionMode: string;
+  requestedPermissionMode?: string | null;
   status: AgentTabStatus;
   process: AgentProcessState;
   events: AgentEvent[];

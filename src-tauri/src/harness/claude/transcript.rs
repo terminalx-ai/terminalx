@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
-use crate::harness::settings::{Setting, Signal};
+use crate::harness::settings::{Setting, Signal, Stance};
 use crate::harness::tui::TurnMark;
 
 /// Where a session's transcript actually is.
@@ -401,6 +401,25 @@ pub fn status_settings(frame: &Value) -> Option<Signal> {
     Signal::current(frame["model"]["id"].as_str(), frame["effort"]["level"].as_str())
 }
 
+/// The permission mode a hook frame says the CLI is in (#417).
+///
+/// Nothing is sent when the reader cycles the mode with Shift+Tab: the status
+/// line is run again but does not carry the mode, and the transcript's own
+/// `permission-mode` record is written some time later. What does carry it,
+/// as `permission_mode`, is every hook that fires around work — the next
+/// prompt, the next tool call — and that is before the mode is used to judge
+/// anything (2.1.295). `SessionStart` has no such field.
+///
+/// A frame from inside a subagent is not read: an agent can be defined with
+/// a mode of its own, which is not the session's.
+pub fn hook_permissions(frame: &Value) -> Option<Signal> {
+    if frame.get("agent_id").is_some_and(|id| !id.is_null()) {
+        return None;
+    }
+    let mode = frame["permission_mode"].as_str().map(str::trim).filter(|mode| !mode.is_empty())?;
+    Some(Signal::Permissions { stance: Stance::Mode { mode: mode.into() } })
+}
+
 /// A prompt typed while a turn was running. The CLI queues it, hands it to
 /// the model alongside the next tool result, and records it as a
 /// `queued_command` attachment instead of a `user` record — so this is the
@@ -768,6 +787,55 @@ mod tests {
         let old = serde_json::json!({"model": {"id": "claude-opus-5", "display_name": "Opus 5"}, "rate_limits": {}});
         assert_eq!(status_settings(&old), Some(Signal::Current { model: Some("claude-opus-5".into()), effort: None }));
         assert_eq!(status_settings(&serde_json::json!({"rate_limits": {}})), None);
+    }
+
+    /// Claude Code 2.1.295, started with `--permission-mode manual` and taken
+    /// round its Shift+Tab cycle twice with a prompt after each press: the
+    /// hook frames it sent, whole but for the paths.
+    const MODE_FRAMES: &str = include_str!("fixtures/permission_mode_hooks.jsonl");
+
+    #[test]
+    fn a_hook_frame_names_the_permission_mode_in_force() {
+        let read: Vec<(String, Option<String>)> = MODE_FRAMES
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .map(|frame| {
+                let mode = hook_permissions(&frame["payload"]).map(|signal| match signal {
+                    Signal::Permissions { stance: Stance::Mode { mode } } => mode,
+                    other => panic!("{other:?}"),
+                });
+                (frame["event"].as_str().unwrap().to_string(), mode)
+            })
+            .collect();
+        let prompt = |mode: &str| ("UserPromptSubmit".to_string(), Some(mode.to_string()));
+        assert_eq!(
+            read,
+            [
+                ("SessionStart".to_string(), None),
+                prompt("acceptEdits"),
+                prompt("plan"),
+                prompt("auto"),
+                // What the CLI takes as `manual` it reports as `default`.
+                prompt("default"),
+                prompt("acceptEdits"),
+                prompt("plan"),
+                prompt("auto"),
+                ("SessionEnd".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_frame_from_a_subagent_or_with_no_mode_says_nothing() {
+        let tool = |extra: Value| {
+            let mut frame = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "permission_mode": "bypassPermissions"});
+            frame.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            hook_permissions(&frame)
+        };
+        assert!(tool(serde_json::json!({})).is_some());
+        assert_eq!(tool(serde_json::json!({"agent_id": "a1b2", "agent_type": "Explore"})), None);
+        assert_eq!(hook_permissions(&serde_json::json!({"hook_event_name": "Stop", "permission_mode": " "})), None);
+        assert_eq!(hook_permissions(&serde_json::json!({"hook_event_name": "SessionStart"})), None);
     }
 
     /// #250. The CLI files a transcript under the folder the conversation

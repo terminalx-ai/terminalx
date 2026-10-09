@@ -24,8 +24,37 @@ pub fn stance(mode: &str) -> (&'static str, &'static str) {
     match mode.trim() {
         "plan" => ("on-request", "read-only"),
         // No mode at all is the product default launch mode.
-        "bypassPermissions" | "bypass" | "" => (pty::BYPASS, "danger-full-access"),
+        "bypassPermissions" | "bypass" | "" => (pty::BYPASS, NO_SANDBOX),
         _ => ("on-request", "workspace-write"),
+    }
+}
+
+/// The sandbox that is no sandbox.
+pub const NO_SANDBOX: &str = "danger-full-access";
+
+/// The tab's mode for the approval policy and sandbox Codex reports it is
+/// under (#417), which the reader can change in the terminal with
+/// `/permissions`.
+///
+/// Several of our modes share a stance — "ask every time" is the app's own
+/// gate on top of `on-request` — so a report cannot say which of them the tab
+/// is in. The tab's mode is kept whenever it launches the stance reported.
+/// Otherwise the stance is named by the mode that launches it, and one no
+/// mode launches is kept as reported.
+pub fn mode_reported(approval: &str, sandbox: &str, current: &str) -> String {
+    // The rollout records the bypass flag as the pair it comes down to.
+    let reported = if (approval, sandbox) == ("never", NO_SANDBOX) { (pty::BYPASS, NO_SANDBOX) } else { (approval, sandbox) };
+    // `stance` launches a mode it does not know as `on-request` in the
+    // workspace; that is not what such a tab is in.
+    let known = matches!(current.trim(), "" | "plan" | "manual" | "default" | "ask" | "auto" | "acceptEdits" | "bypassPermissions" | "bypass");
+    if known && stance(current) == reported {
+        return current.to_string();
+    }
+    match reported {
+        ("on-request", "read-only") => "plan".into(),
+        ("on-request", "workspace-write") => "auto".into(),
+        (pty::BYPASS, NO_SANDBOX) => "bypassPermissions".into(),
+        _ => format!("{approval}, {sandbox}"),
     }
 }
 
@@ -50,6 +79,29 @@ mod tests {
         assert_eq!(stance("bypassPermissions"), (pty::BYPASS, "danger-full-access"));
         assert_eq!(stance(""), (pty::BYPASS, "danger-full-access"), "unset is the default, bypass");
         assert_eq!(stance(crate::store::index::DEFAULT_PERMISSION_MODE), (pty::BYPASS, "danger-full-access"));
+    }
+
+    #[test]
+    fn a_reported_stance_is_read_back_into_the_tabs_own_mode() {
+        // The three presets of `/permissions`, from a tab in another mode.
+        assert_eq!(mode_reported("on-request", "read-only", "auto"), "plan");
+        assert_eq!(mode_reported("on-request", "workspace-write", "plan"), "auto");
+        assert_eq!(mode_reported("never", "danger-full-access", "auto"), "bypassPermissions");
+        // A stance the tab's mode launches says nothing new: which of the
+        // modes sharing it the tab is in is the app's to know.
+        for mode in ["manual", "ask", "auto", "acceptEdits"] {
+            assert_eq!(mode_reported("on-request", "workspace-write", mode), mode);
+        }
+        assert_eq!(mode_reported("on-request", "read-only", "plan"), "plan");
+        assert_eq!(mode_reported("never", "danger-full-access", "bypassPermissions"), "bypassPermissions");
+        assert_eq!(mode_reported("never", "danger-full-access", ""), "");
+        // No mode launches these, so they are shown as they are, and go on
+        // being shown that way while they are reported.
+        assert_eq!(mode_reported("never", "workspace-write", "auto"), "never, workspace-write");
+        assert_eq!(mode_reported("never", "workspace-write", "never, workspace-write"), "never, workspace-write");
+        assert_eq!(mode_reported("on-request", "danger-full-access", "plan"), "on-request, danger-full-access");
+        // And leaving one is a change like any other.
+        assert_eq!(mode_reported("on-request", "workspace-write", "never, workspace-write"), "auto");
     }
 
     #[test]

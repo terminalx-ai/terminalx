@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "@/lib/api";
-import { EFFORT_LABEL, aliasRuns, modelForTab, modelGroups, modelLabel, modelNote, modelOptionText, offeredOn, prettyModelId, runningModelName, upgradeHint } from "@/lib/models";
+import { BYPASS_MODE, EFFORT_LABEL, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelLabel, modelNote, modelOptionText, offeredOn, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, upgradeHint } from "@/lib/models";
 
 const model = (id: string, label: string, upgrade: string | null = null): ModelInfo => ({
   id,
@@ -136,5 +136,41 @@ describe("a Claude alias and its pinned versions", () => {
     // A harness with no aliases is one plain list.
     const codex = [model("gpt-5.6-sol", "GPT-5.6 Sol")];
     expect(modelGroups(codex)).toEqual([{ title: null, models: codex }]);
+  });
+});
+
+describe("a permission mode reported by the agent (#417)", () => {
+  it("names the picker's modes, under whichever spelling a tab carries", () => {
+    expect(modeLabel("acceptEdits")).toBe("Accept edits");
+    expect(modeLabel("manual")).toBe("Ask every time");
+    // What Claude Code calls it, and what older tabs stored.
+    expect(modeLabel("default")).toBe("Ask every time");
+    expect(modeLabel("ask")).toBe("Ask every time");
+    expect(modeLabel("")).toBe("Bypass permissions");
+    expect(pickerMode("default")?.id).toBe("manual");
+  });
+
+  it("names a mode the picker does not offer as it was reported, never as Bypass", () => {
+    expect(modeLabel("dontAsk")).toBe("dontAsk");
+    expect(modeLabel("never, workspace-write")).toBe("never, workspace-write");
+    expect(pickerMode("dontAsk")).toBeUndefined();
+  });
+
+  it("marks Bypass, and any Codex stance with no sandbox, as unguarded", () => {
+    expect(modeIsUnguarded(BYPASS_MODE)).toBe(true);
+    expect(modeIsUnguarded("")).toBe(true);
+    expect(modeIsUnguarded("on-request, danger-full-access")).toBe(true);
+    expect(modeIsUnguarded("never, workspace-write")).toBe(false);
+    expect(modeIsUnguarded("dontAsk")).toBe(false);
+  });
+
+  it("says a mode asked for mid-turn applies after the turn", () => {
+    expect(pendingSettingsNote({ requestedPermissionMode: "plan" }, [], true)).toBe("Switching to Plan after this turn");
+    expect(pendingSettingsNote({ requestedPermissionMode: "plan" }, [], false)).toBe("Switching to Plan…");
+    expect(pendingSettingsNote({ requestedModel: "gpt-6-astra", requestedEffort: "high", requestedPermissionMode: BYPASS_MODE }, [], true)).toBe(
+      "Switching to GPT-6 Astra · High and Bypass permissions mode after this turn",
+    );
+    expect(pendingSettingsNote({ requestedEffort: "high", requestedPermissionMode: "auto" }, [], false)).toBe("Switching to High effort and Auto mode…");
+    expect(pendingSettingsNote({}, [], true)).toBeNull();
   });
 });

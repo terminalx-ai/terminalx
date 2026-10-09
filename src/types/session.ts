@@ -16,7 +16,10 @@ export interface TabEntry {
   /** A model asked for that the agent has not confirmed yet. Drawn as pending, never as current. */
   requestedModel?: string | null;
   requestedEffort?: string | null;
+  /** The mode the agent is in: what its next tool call is judged under. */
   permissionMode: string;
+  /** A mode asked for that waits for the restart that applies it. Drawn as pending, never as current. */
+  requestedPermissionMode?: string | null;
   providerSessionId?: string | null;
   status: TabStatus;
   created: string;

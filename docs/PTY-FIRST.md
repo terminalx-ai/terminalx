@@ -263,17 +263,63 @@ Things that follow from this:
   to record a picker change; the first prompt's `turn_context` reports it a
   moment after the prompt is sent.
 
-**Permission mode has the same shape of problem** and is not solved here.
-Claude Code's mode can be cycled in the terminal (Shift+Tab); it reaches the
-app only in the `permission_mode` of later hook frames and a `permission-mode`
-transcript record written lazily, not when the key is pressed. Codex records
-`approval_policy` and its sandbox in the same `turn_context` and
-`thread_settings_applied` records read here for the model. The signal could
-carry it, but two things need their own design first: the app's modes do not
-map one-to-one onto either CLI's (Codex's "ask every tool" is the app's own
-gate, with the same stance as another mode), and a shared session forbids
-Bypass, which a report from the terminal would have to be reconciled with
-rather than simply stored. Tracked in #417.
+### One permission mode, whichever side changed it
+
+The permission mode is held the same way (#417): a tab has the **effective**
+mode, the one its next tool call is judged under and the one every view
+draws, and a **requested** mode that waits for the restart that applies it.
+
+Neither CLI takes a mode from the app while it runs, so a change from the
+chat always means replacing the process on the same conversation. With no
+turn open that happens at once. Mid-turn it waits for the turn, and until
+then the composer says "Switching to … after this turn" and the picker goes
+on showing the mode the turn is running under.
+
+| | Changed in the terminal with | Says what it is in |
+| --- | --- | --- |
+| Claude Code | Shift+Tab (manual → accept edits → plan → auto) | `permission_mode` on every hook frame that fires around work: the next `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`. Nothing carries it at the moment the key is pressed: the status line is run again then, but has no mode in it, and the transcript's `permission-mode` record is written later. `SessionStart` has no mode. A frame from inside a subagent (`agent_id`) is ignored, since an agent can be defined with a mode of its own. |
+| Codex | `/permissions` (Ask for approval, Approve for me, Full Access) | `thread_settings_applied`, written the moment a preset is confirmed, with `approval_policy` and a `permission_profile`; each turn's `turn_context`, with `approval_policy` and `sandbox_policy.type` |
+
+What a CLI reports is its own stance (`settings::Stance`), not one of the
+app's modes, and the two do not map one-to-one. Each harness reads a report
+back against the mode the tab is in (`claude::mode_reported`,
+`codex::mode_reported`):
+
+- **The tab keeps its mode when that is one way of saying what was reported.**
+  Claude Code reports "ask every time" as `default` and takes it as `manual`;
+  an older tab may hold `ask`. On Codex, "Ask every time", "Auto" and "Accept
+  edits" all launch `on-request` in the workspace sandbox ("ask every time"
+  is the app's own `PreToolUse` gate on top), so a report of that stance
+  cannot say which of them the tab is in, and does not need to: the app
+  knows. A profile is read as the sandbox it comes down to (none when it is
+  `disabled`, the workspace sandbox when it may write anywhere, read-only
+  when it may not).
+- **Otherwise the report names the mode.** Codex's read-only sandbox is Plan,
+  `on-request` in the workspace is Auto, and `never` with no sandbox is
+  Bypass. When the reader leaves "ask every time" in the Codex terminal, the
+  app's gate goes with it: the gate follows the effective mode.
+- **A mode the app has no entry for is stored and shown as reported**: Claude
+  Code's `dontAsk`, a mode from a newer CLI, or a Codex pair no mode launches
+  (`never, workspace-write`). The picker lists it as "Set in the terminal".
+  If the tab is later restarted it launches the way an unknown mode always
+  has (asking), and the next report says so.
+- "Approve for me" changes who reviews an approval (`approvals_reviewer`),
+  not the policy or the sandbox, and is not told apart from "Ask for
+  approval".
+
+**A shared session may not be in Bypass**, nor in any Codex stance with no
+sandbox (`settings::allowed_while_shared`). Choosing one in the chat is
+refused, as before. One reported from the terminal is never stored: the CLI
+is let go of at once, under the sharing lock, so no guest's prompt can be
+typed into it, any open turn is closed as aborted, and the CLI is started
+again in the mode the tab was in, with a line in the chat saying what
+happened and that the share has to be stopped first. A session cannot be
+shared while a tab is in such a mode or waiting to switch into one.
+
+Limits: Claude Code's mode is only known as of its last hook frame, so a
+Shift+Tab in an idle terminal shows in the chat with the next prompt. For
+that reason choosing a mode in the chat for an idle tab always restarts the
+CLI, even when it is the mode shown.
 
 ### Replacing the process in a pane
 

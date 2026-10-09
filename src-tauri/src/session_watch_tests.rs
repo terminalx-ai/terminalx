@@ -184,6 +184,7 @@ impl Rig {
             recovery: None,
             stalled_at: None,
             last_settings_report: None,
+            reported_mode_to_judge: None,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -775,7 +776,7 @@ impl Rig {
 
     /// The `settings_changed` events in the tab's log, as (model, effort).
     fn changes(&self) -> Vec<(Option<String>, Option<String>)> {
-        self.events().into_iter().filter_map(|e| match e.payload { Payload::SettingsChanged { model, effort, .. } => Some((model, effort)), _ => None }).collect()
+        self.events().into_iter().filter_map(|e| match e.payload { Payload::SettingsChanged { model, effort, .. } => Some((model, effort)), _ => None }).filter(|(model, effort)| model.is_some() || effort.is_some()).collect()
     }
 
     fn notices(&self) -> Vec<String> {
@@ -1205,4 +1206,265 @@ fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
     }
     assert_eq!(rig.status(), TabStatus::Waiting);
     assert_eq!(rig.recovery(), None);
+}
+// ---- #417: one permission mode, whichever side changed it
+
+const CLAUDE_MODE_FRAMES: &str = include_str!("harness/claude/fixtures/permission_mode_hooks.jsonl");
+const CODEX_PERMISSIONS: &str = include_str!("harness/codex/fixtures/permissions.jsonl");
+
+impl Rig {
+    /// A running tab the index knows, launched in `mode`.
+    fn in_mode(kind: CliKind, mode: &str) -> Self {
+        let rig = Self::of(kind, "");
+        let harness = {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.mode = mode.into();
+            rt.harness.clone()
+        };
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+            "title": "watched", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": harness, "model": "m", "permissionMode": mode, "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        rig
+    }
+
+    /// The mode every view draws, and one asked for that is still waiting.
+    fn mode(&self) -> (String, Option<String>) {
+        let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
+        (tab.permission_mode, tab.requested_permission_mode)
+    }
+
+    /// The modes the tab's log says it moved into.
+    fn mode_changes(&self) -> Vec<String> {
+        self.events().into_iter().filter_map(|e| match e.payload { Payload::SettingsChanged { permission_mode, .. } => permission_mode, _ => None }).collect()
+    }
+
+    /// The mode the app's own every-tool gate goes by.
+    fn launch_mode(&self) -> Option<String> {
+        match &self.rt.lock().unwrap().engine {
+            Engine::Cli(p) => Some(p.mode.clone()),
+            _ => None,
+        }
+    }
+
+    fn share(&self) {
+        self.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(), crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+        // The restart a refused mode brings on goes as far as letting go of
+        // the CLI: launching a real one is refused here.
+        self.rt.lock().unwrap().stopping = true;
+    }
+
+    fn released(&self) -> bool {
+        matches!(self.rt.lock().unwrap().engine, Engine::None)
+    }
+}
+
+fn now_in(mode: &str) -> (String, Option<String>) {
+    (mode.into(), None)
+}
+
+/// The frames a real Claude Code sent as its mode was cycled with Shift+Tab,
+/// a prompt after each press: the prompt's own hook is where each is heard.
+#[test]
+fn a_mode_cycled_in_the_claude_terminal_reaches_the_tab_with_the_next_prompt() {
+    let rig = Rig::in_mode(CliKind::Claude, "manual");
+    let (sent, updated) = std::sync::mpsc::channel();
+    rig.manager.sink.listen("session_updated", Box::new(move |payload| {
+        let session: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let _ = sent.send(session["tabs"][0]["permissionMode"].as_str().unwrap().to_string());
+    }));
+    let mut seen = Vec::new();
+    for frame in CLAUDE_MODE_FRAMES.lines() {
+        let frame: serde_json::Value = serde_json::from_str(frame).unwrap();
+        rig.hook(frame["event"].as_str().unwrap(), frame["payload"].clone());
+        seen.push(rig.mode().0);
+    }
+    // SessionStart names no mode; `default` is the picker's "Ask every
+    // time"; SessionEnd changes nothing.
+    assert_eq!(seen, ["manual", "acceptEdits", "plan", "auto", "manual", "acceptEdits", "plan", "auto", "auto"]);
+    let moved = ["acceptEdits", "plan", "auto", "manual", "acceptEdits", "plan", "auto"];
+    assert_eq!(rig.mode_changes(), moved);
+    assert_eq!(updated.try_iter().collect::<Vec<_>>(), moved, "and every view is told each time");
+    assert_eq!(rig.launch_mode().as_deref(), Some("auto"));
+}
+
+/// A tool call's frame carries the mode too, so a change mid-turn is known
+/// before the tool it would judge is.
+#[test]
+fn a_mode_changed_mid_turn_reaches_the_tab_with_the_next_tool_call() {
+    let rig = Rig::in_mode(CliKind::Claude, "plan");
+    rig.hook("UserPromptSubmit", json!({ "permission_mode": "plan", "prompt": "go" }));
+    assert_eq!(rig.mode(), now_in("plan"));
+    assert!(rig.mode_changes().is_empty(), "the mode it is in is no news");
+    rig.hook("PreToolUse", json!({ "permission_mode": "acceptEdits", "tool_name": "Edit", "tool_input": {}, "tool_use_id": "t1" }));
+    assert_eq!(rig.mode(), now_in("acceptEdits"));
+    // A subagent's own mode is not the session's.
+    rig.hook("PreToolUse", json!({ "permission_mode": "bypassPermissions", "agent_id": "a1", "tool_name": "Bash", "tool_input": {}, "tool_use_id": "t2" }));
+    assert_eq!(rig.mode(), now_in("acceptEdits"));
+}
+
+#[test]
+fn a_mode_the_app_has_no_entry_for_is_shown_as_reported() {
+    let rig = Rig::in_mode(CliKind::Claude, "auto");
+    rig.hook("UserPromptSubmit", json!({ "permission_mode": "dontAsk" }));
+    assert_eq!(rig.mode(), now_in("dontAsk"));
+    rig.hook("UserPromptSubmit", json!({ "permission_mode": "something-newer" }));
+    assert_eq!(rig.mode(), now_in("something-newer"));
+
+    // One rig at a time: each holds the test home.
+    drop(rig);
+    let rig = Rig::in_mode(CliKind::Codex, "auto");
+    rig.append("{\"type\":\"turn_context\",\"payload\":{\"approval_policy\":\"never\",\"sandbox_policy\":{\"type\":\"workspace-write\"}}}\n");
+    assert_eq!(rig.mode(), now_in("never, workspace-write"));
+    assert_eq!(rig.mode_changes(), ["never, workspace-write"]);
+}
+
+/// What a real Codex wrote as its `/permissions` menu was taken through its
+/// three presets, from a tab launched in Plan.
+#[test]
+fn a_stance_changed_in_the_codex_terminal_reaches_the_tab() {
+    let rig = Rig::in_mode(CliKind::Codex, "plan");
+    let mut seen = Vec::new();
+    for record in CODEX_PERMISSIONS.lines() {
+        rig.append(&format!("{record}\n"));
+        seen.push(rig.mode().0);
+    }
+    assert_eq!(seen, ["plan", "auto", "auto", "auto", "auto", "bypassPermissions", "bypassPermissions", "bypassPermissions"]);
+    assert_eq!(rig.mode_changes(), ["auto", "bypassPermissions"]);
+}
+
+/// "Ask every time" is the app's own gate over a stance other modes share,
+/// so a report of that stance leaves the tab in it. Leaving the stance in
+/// the terminal leaves the gate behind too.
+#[test]
+fn a_codex_tab_keeps_its_own_mode_under_a_stance_that_mode_launches() {
+    let rig = Rig::in_mode(CliKind::Codex, "manual");
+    let turn = |approval: &str, sandbox: &str| format!("{{\"type\":\"turn_context\",\"payload\":{{\"approval_policy\":\"{approval}\",\"sandbox_policy\":{{\"type\":\"{sandbox}\"}}}}}}\n");
+    rig.append(&turn("on-request", "workspace-write"));
+    assert_eq!(rig.mode(), now_in("manual"));
+    assert!(codex::asks_every_tool(&rig.launch_mode().unwrap()));
+    rig.append(&turn("never", "danger-full-access"));
+    assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    assert!(!codex::asks_every_tool(&rig.launch_mode().unwrap()), "the reader took the tab out of asking");
+}
+
+/// The CLI is only restarted between turns, so a mode chosen in the chat
+/// mid-turn is not the mode the turn is being judged under, and is not shown
+/// as if it were.
+#[test]
+fn a_mode_from_the_chat_mid_turn_is_pending_until_the_restart_that_applies_it() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "auto");
+        rig.rt.lock().unwrap().turn_open = true;
+        rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+        assert_eq!(rig.mode(), ("auto".into(), Some("plan".into())));
+        assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.restart_when_idle));
+        assert!(rig.mode_changes().is_empty());
+        assert_eq!(rig.launch_mode().as_deref(), Some("auto"));
+
+        // What the running turn reports meanwhile is still where it is.
+        if kind == CliKind::Claude {
+            rig.hook("PreToolUse", json!({ "permission_mode": "auto", "tool_name": "Read", "tool_input": {}, "tool_use_id": "t1" }));
+            assert_eq!(rig.mode(), ("auto".into(), Some("plan".into())));
+        }
+
+        // The restart, as far as letting go of the old process.
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            rt.turn_open = false;
+            rt.stopping = true;
+        }
+        assert!(rig.manager.restart_for_settings(SESSION, TAB).is_err());
+        assert_eq!(rig.mode(), now_in("plan"), "what the next launch is given");
+        assert_eq!(rig.mode_changes(), ["plan"]);
+    }
+}
+
+#[test]
+fn asking_for_the_mode_the_tab_is_in_takes_a_waiting_change_back() {
+    let rig = Rig::in_mode(CliKind::Claude, "auto");
+    rig.rt.lock().unwrap().turn_open = true;
+    rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    rig.manager.set_permission_mode(SESSION, TAB, "auto").unwrap();
+    assert_eq!(rig.mode(), now_in("auto"));
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if !p.restart_when_idle), "and the restart with it");
+
+    // Codex may have a model waiting on the same restart.
+    // One rig at a time: each holds the test home.
+    drop(rig);
+    let rig = Rig::in_mode(CliKind::Codex, "auto");
+    rig.rt.lock().unwrap().turn_open = true;
+    rig.manager.set_model(SESSION, TAB, "gpt-6-astra").unwrap();
+    rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    rig.manager.set_permission_mode(SESSION, TAB, "auto").unwrap();
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.restart_when_idle));
+}
+
+#[test]
+fn a_mode_for_a_tab_that_is_not_running_is_current_at_once() {
+    let rig = Rig::in_mode(CliKind::Claude, "auto");
+    rig.rt.lock().unwrap().engine = Engine::None;
+    rig.manager.set_permission_mode(SESSION, TAB, "plan").unwrap();
+    assert_eq!(rig.mode(), now_in("plan"));
+    assert_eq!(rig.mode_changes(), ["plan"]);
+}
+
+/// Outside a share, Bypass reached in the terminal is the mode the tab is in.
+#[test]
+fn bypass_chosen_in_the_terminal_is_shown_when_nothing_forbids_it() {
+    let rig = Rig::in_mode(CliKind::Claude, "auto");
+    rig.hook("UserPromptSubmit", json!({ "permission_mode": "bypassPermissions" }));
+    assert_eq!(rig.mode(), now_in("bypassPermissions"));
+    assert!(!rig.released());
+}
+
+/// A shared session may not be in Bypass, and a guest's prompt must never be
+/// typed into a CLI that is. Showing the mode would not undo it: the CLI is
+/// let go of at once and brought back in the mode the tab was in.
+#[test]
+fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
+    // Codex: "Full Access" confirmed in the TUI's `/permissions`.
+    let rig = Rig::in_mode(CliKind::Codex, "auto");
+    rig.share();
+    rig.rt.lock().unwrap().turn_open = true;
+    for record in CODEX_PERMISSIONS.lines() {
+        rig.append(&format!("{record}\n"));
+    }
+    assert_eq!(rig.mode(), now_in("auto"), "never stored");
+    assert!(rig.mode_changes().iter().all(|mode| mode != "bypassPermissions"));
+    assert!(rig.released(), "the CLI that was in it is gone before anything else is typed");
+    assert!(!rig.turn_open());
+    assert_eq!(
+        rig.notices(),
+        ["Codex was switched to Bypass in the terminal. A shared session cannot be in Bypass, so Codex was restarted in Auto. Stop sharing this session before switching to Bypass."]
+    );
+
+    // Claude Code, and a stance with no sandbox under any other name.
+    // One rig at a time: each holds the test home.
+    drop(rig);
+    let rig = Rig::in_mode(CliKind::Claude, "plan");
+    rig.share();
+    rig.hook("PreToolUse", json!({ "permission_mode": "bypassPermissions", "tool_name": "Bash", "tool_input": {}, "tool_use_id": "t1" }));
+    assert_eq!(rig.mode(), now_in("plan"));
+    assert!(rig.released());
+
+    // One rig at a time: each holds the test home.
+    drop(rig);
+    let rig = Rig::in_mode(CliKind::Codex, "plan");
+    rig.share();
+    rig.append("{\"type\":\"turn_context\",\"payload\":{\"approval_policy\":\"on-request\",\"sandbox_policy\":{\"type\":\"danger-full-access\"}}}\n");
+    assert_eq!(rig.mode(), now_in("plan"));
+    assert!(rig.released());
+
+    // Any other mode changed in the terminal of a shared session is just shown.
+    // One rig at a time: each holds the test home.
+    drop(rig);
+    let rig = Rig::in_mode(CliKind::Claude, "plan");
+    rig.share();
+    rig.hook("UserPromptSubmit", json!({ "permission_mode": "acceptEdits" }));
+    assert_eq!(rig.mode(), now_in("acceptEdits"));
+    assert!(!rig.released());
 }
