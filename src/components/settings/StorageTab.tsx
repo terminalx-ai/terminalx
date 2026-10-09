@@ -3,6 +3,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
+import { openWorktreeCleanup } from "@/lib/dialogs";
 import { formatSize } from "@/lib/workspaceSizes";
 import type { Leftover } from "@/types/session";
 
@@ -109,6 +110,16 @@ export function StorageTab() {
         Agent conversations are matched to a removed workspace by the folder they say they were written in. If another install of the app (a
         development build, for example) still has a session from that workspace, its conversations are among them.
       </p>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-lg bg-well px-3 py-2">
+        <p className="min-w-0 flex-1 text-xs leading-relaxed text-muted-foreground">
+          Worktrees that still have sessions are not leftovers. To review and remove the safe ones across all open projects, on this computer and on
+          connected cloud workspaces, use the worktree clean-up.
+        </p>
+        <Button variant="secondary" size="sm" onClick={() => openWorktreeCleanup()}>
+          Clean up worktrees…
+        </Button>
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void scan()}>

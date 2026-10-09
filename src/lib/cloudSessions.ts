@@ -97,7 +97,7 @@ function capabilitiesOf(client: WorkspaceRpcClient): string[] {
 }
 
 /** The runtime reports the effective authority: a demoted admin's manage attachment reads participate. */
-function managesOf(client: WorkspaceRpcClient): boolean {
+export function managesOf(client: WorkspaceRpcClient): boolean {
   const state = client.connection;
   return state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
 }

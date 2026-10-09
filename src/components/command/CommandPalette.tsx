@@ -35,6 +35,7 @@ import {
   Terminal,
   Cloud,
   type LucideIcon,
+  Trash2,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { AgentMark } from "@/components/AgentMark";
@@ -81,6 +82,7 @@ import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
 import { relativeTime } from "@/lib/time";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
+import { openWorktreeCleanup } from "@/lib/dialogs";
 import type { Project, SessionEntry } from "@/types/session";
 
 const GROUP_CAPS: Record<string, number> = {
@@ -484,6 +486,7 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:mode:light", group: "commands" as const, primary: "Appearance: Light", secondary: theme.mode === "light" ? "Current appearance" : "Use the light appearance", recentAt: 4, icon: Sun, run: () => setMode("light") }),
       indexPaletteItem({ id: "command:mode:dark", group: "commands" as const, primary: "Appearance: Dark", secondary: theme.mode === "dark" ? "Current appearance" : "Use the dark appearance", recentAt: 3, icon: Moon, run: () => setMode("dark") }),
       indexPaletteItem({ id: "command:settings:appearance", group: "commands" as const, primary: "Open Appearance settings", secondary: "Themes, type and transcript layout", recentAt: 2, icon: Settings, run: () => onOpenSettings("appearance") }),
+      indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
       // The start screen's three ways to a project, for after the first one exists.
       ...START_ACTIONS.map((action, index) =>
         indexPaletteItem({

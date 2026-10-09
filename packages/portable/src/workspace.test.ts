@@ -177,6 +177,17 @@ class FakeRuntime implements WorkspaceTransport {
         return ok({ agents: [{ id: "claude", name: "Claude Code", caps: { effort: true }, models: [{ id: "opus", label: "Opus 5.5", efforts: ["high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }], modes: ["plan", "bypassPermissions"], defaultMode: "bypassPermissions" }] });
       case "pty.list":
         return ok({ epoch: this.epoch, terminals: [{ ptyId: "p1", epoch: this.epoch, sessionId: "s1" }, { ptyId: "p2", epoch: this.epoch }] });
+      case "cleanup.scan":
+        return ok({ projects: [{ path: "/w", name: "w", note: null, candidates: [] }] });
+      case "cleanup.size":
+        return ok({ bytes: params.path === "/w/cancelled" ? null : 4096 });
+      case "cleanup.cancel":
+        return ok({});
+      case "cleanup.remove": {
+        const result = { results: (params.items as { projectPath: string; path: string }[]).map((item) => ({ ...item, outcome: "removed" })) };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
     }
@@ -561,6 +572,32 @@ describe("workspace RPC client", () => {
         expect(method).toMatchObject({ authority: "Manage", idempotent: true });
         expect(MUTATING_METHODS.has(name), name).toBe(true);
       }
+    });
+
+    it("cleanup/1: the runtime is asked about its own worktrees, a removal is one idempotent request, and an older runtime is never asked", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.scanCleanup()).toEqual([{ path: "/w", name: "w", note: null, candidates: [] }]);
+      expect(await client.cleanupSize("1", "/w", "/w/a")).toBe(4096);
+      expect(await client.cleanupSize("2", "/w", "/w/cancelled")).toBeNull();
+      await client.cancelCleanupSizes();
+      const results = await client.removeCleanup([{ projectPath: "/w", path: "/w/a", token: "t" }]);
+      expect(results).toEqual([expect.objectContaining({ path: "/w/a", outcome: "removed" })]);
+      const sent = runtime.sent.find((frame) => frame.method === "cleanup.remove")!.params as Record<string, unknown>;
+      expect(sent).toMatchObject({ items: [{ projectPath: "/w", path: "/w/a", token: "t" }] });
+      expect(typeof sent.clientRequestId).toBe("string");
+      expect(MUTATING_METHODS.has("cleanup.remove")).toBe(true);
+      client.close();
+
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(SESSION_1);
+      expect(before.hasCapability("cleanup/1")).toBe(false);
+      await expect(before.scanCleanup()).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.removeCleanup([{ projectPath: "/w", path: "/w/a", token: "t" }])).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(old.sent.some((frame) => frame.method.startsWith("cleanup."))).toBe(false);
+      before.close();
     });
 
     it("a session/1 runtime is never sent a session/2, pty/2 or agents/1 call", async () => {
