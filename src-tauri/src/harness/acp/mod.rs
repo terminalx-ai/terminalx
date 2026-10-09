@@ -195,11 +195,12 @@ impl Acp {
 
     /// A session has opened on `agent_model`, the agent's own choice. The
     /// tab's model is asked for if that is not it; a tab with none learns
-    /// what the agent chose.
+    /// what the agent chose. An agent that names no model is not asked: it
+    /// may not take `session/set_model` at all.
     fn settle_model(&mut self, agent_model: Option<&str>) -> Vec<Action> {
         self.agent_model = agent_model.map(String::from);
         match (self.model.clone(), self.session_id.clone()) {
-            (Some(wanted), Some(sid)) if agent_model != Some(wanted.as_str()) => {
+            (Some(wanted), Some(sid)) if agent_model.is_some_and(|current| current != wanted) => {
                 vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": wanted}), Pending::SetModel { model: wanted, opening: true }))]
             }
             _ => self.model_is(agent_model).into_iter().collect(),
@@ -301,7 +302,7 @@ impl Acp {
                 // A change somebody asked for is turned down in the agent's
                 // words. The tab's own model failing on a new session leaves
                 // the session on the agent's choice, and the tab says so.
-                Pending::SetModel { opening: false, .. } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, message } })],
+                Pending::SetModel { model, opening: false } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, value: Some(model), message } })],
                 Pending::SetModel { model, opening: true } => {
                     let mut out = vec![Action::Emit(Payload::Status { text: format!("Could not use {model}: {message}") })];
                     let agent_model = self.agent_model.clone();
@@ -604,6 +605,18 @@ mod tests {
         assert_eq!(signals(&acts), [now("auto")]);
     }
 
+    /// An agent that lists no models is not asked to change one.
+    #[test]
+    fn an_agent_that_names_no_model_is_left_alone_when_a_session_opens() {
+        let mut a = Acp::new("/tmp/x", None, Some("sonnet-4".into()), "auto");
+        a.start("hi".into(), vec![]);
+        a.handle(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#);
+        let acts = a.handle(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#);
+        assert!(!writes(&acts).iter().any(|w| w["method"] == "session/set_model"));
+        assert!(signals(&acts).is_empty());
+        assert_eq!(a.model.as_deref(), Some("sonnet-4"));
+    }
+
     #[test]
     fn a_model_change_is_current_once_the_agent_agrees_and_dropped_when_it_does_not() {
         let (mut a, _) = opened(None, "auto");
@@ -616,7 +629,7 @@ mod tests {
 
         let asked = writes(&a.set_model("gone-1"))[0].clone();
         let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"error":{"code":-32602,"message":"Unknown model"}}).to_string());
-        assert_eq!(signals(&acts), [Signal::Refused { setting: Setting::Model, message: "Unknown model".into() }]);
+        assert_eq!(signals(&acts), [Signal::Refused { setting: Setting::Model, value: Some("gone-1".into()), message: "Unknown model".into() }]);
         assert_eq!(a.model.as_deref(), Some("sonnet-4"));
 
         // A change made on the agent's side.

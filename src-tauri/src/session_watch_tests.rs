@@ -161,6 +161,7 @@ impl Rig {
                 settings_asked_at: None,
                 launched_for: None,
                 status_names_model: false,
+                settings_command_is_ours: false,
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
                 tail: tail.clone(),
                 echoed: Default::default(),
@@ -806,19 +807,19 @@ fn a_model_or_effort_changed_in_the_claude_terminal_reaches_the_tab() {
             // Startup: `opus` is what the tab was on, and stays an alias; the
             // effort the CLI resolved is not the one the tab had stored.
             shown("opus", Some("medium"), None, None),
-            shown("claude-sonnet-5-5", Some("medium"), None, None),
-            shown("claude-sonnet-5-5", Some("high"), None, None),
-            shown("claude-opus-5-5", Some("medium"), None, None),
-            shown("claude-opus-5-5", Some("xhigh"), None, None),
+            shown("sonnet", Some("medium"), None, None),
+            shown("sonnet", Some("high"), None, None),
+            shown("opus", Some("medium"), None, None),
+            shown("opus", Some("xhigh"), None, None),
         ]
     );
     // Each one is in the log, and went to every view of the session.
     assert_eq!(rig.changes().len(), 5);
-    assert_eq!(rig.changes()[1], (Some("claude-sonnet-5-5".into()), None));
+    assert_eq!(rig.changes()[1], (Some("sonnet".into()), None));
     assert_eq!(rig.changes()[4], (None, Some("xhigh".into())));
     let views: Vec<_> = updated.try_iter().collect();
     assert_eq!(views.len(), 5);
-    assert_eq!(views[4], (json!("claude-opus-5-5"), json!("xhigh")));
+    assert_eq!(views[4], (json!("opus"), json!("xhigh")));
 
     // The same frame again — the CLI repeats itself after every reply — is not news.
     rig.status_line("claude-opus-5-5", "xhigh");
@@ -850,9 +851,53 @@ fn a_change_from_the_chat_is_pending_until_claude_says_it_is_running() {
 fn claude_taking_the_command_settles_a_change_the_status_line_never_named() {
     let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
     rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
+    // The command as the CLI recorded it, then what it printed.
+    let command = CLAUDE_COMMANDS.lines().find(|line| line.contains("<command-args>sonnet</command-args>")).unwrap();
     let taken = CLAUDE_COMMANDS.lines().find(|line| line.contains("Set model to `Sonnet 5.5`")).unwrap();
-    rig.append(&format!("{taken}\n"));
+    rig.append(&format!("{command}\n{taken}\n"));
     assert_eq!(rig.shown(), shown("sonnet", Some("high"), None, None));
+    assert!(!rig.kinds().iter().any(|k| k == "user_message"), "the app's own keystrokes are not a message");
+}
+
+/// "Set model to …" names no id. Printed for a `/model` the reader typed in
+/// the terminal, it is not the answer to a change the app is waiting on.
+#[test]
+fn a_model_command_typed_in_the_terminal_does_not_settle_the_apps_request() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.manager.set_model(SESSION, TAB, "haiku").unwrap();
+    let typed = CLAUDE_COMMANDS.lines().find(|line| line.contains("<command-args>sonnet</command-args>")).unwrap();
+    let taken = CLAUDE_COMMANDS.lines().find(|line| line.contains("Set model to `Sonnet 5.5`")).unwrap();
+    rig.append(&format!("{typed}\n{taken}\n"));
+    assert_eq!(rig.shown(), shown("opus", Some("high"), Some("haiku"), None));
+    // Nor does the CLI turning down something else the reader typed.
+    let refused: String = CLAUDE_COMMANDS.lines().filter(|line| line.contains("nonsense-model")).map(|line| format!("{line}\n")).collect();
+    rig.append(&refused);
+    assert_eq!(rig.shown(), shown("opus", Some("high"), Some("haiku"), None));
+    assert!(rig.notices().is_empty());
+}
+
+/// Two changes waiting, one taken back: the other still has its deadline.
+#[test]
+fn taking_one_change_back_leaves_the_other_its_deadline() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.manager.set_effort(SESSION, TAB, Some("low")).unwrap();
+    rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
+    rig.manager.set_model(SESSION, TAB, "opus").unwrap();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, Some("low")));
+    rig.advance(SETTINGS_ANSWER_WAIT * 2);
+    rig.tick();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, None));
+}
+
+/// Asked for max, given high: what the CLI printed is what is running.
+#[test]
+fn an_effort_the_cli_set_to_something_else_is_not_shown_as_the_one_asked_for() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("low"));
+    rig.manager.set_effort(SESSION, TAB, Some("max")).unwrap();
+    let command = CLAUDE_COMMANDS.lines().find(|line| line.contains("<command-args>high</command-args>")).unwrap().replace("<command-args>high", "<command-args>max");
+    let printed = CLAUDE_COMMANDS.lines().find(|line| line.contains("Set effort level to high")).unwrap();
+    rig.append(&format!("{command}\n{printed}\n"));
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, Some("max")));
 }
 
 #[test]
@@ -902,7 +947,7 @@ fn a_change_claude_never_answers_is_taken_back() {
 fn the_model_an_assistant_record_names_stands_in_for_a_silent_status_line() {
     let rig = Rig::on(CliKind::Claude, "", None);
     rig.start_turn();
-    assert_eq!(rig.shown(), shown("claude-haiku-4-5-20251001", None, None, None));
+    assert_eq!(rig.shown(), shown("haiku", None, None, None));
     // One rig at a time: each holds the test home.
     drop(rig);
 
@@ -958,6 +1003,26 @@ fn a_change_to_codex_mid_turn_is_pending_until_the_restart_that_applies_it() {
     assert_eq!(rig.changes(), [(Some("gpt-6-astra".into()), Some("high".into()))]);
 }
 
+/// A headless agent that exits before answering leaves nothing "switching":
+/// the change is what its next launch is given.
+#[test]
+fn a_change_a_headless_agent_never_answered_is_settled_when_it_exits() {
+    let rig = Rig::on(CliKind::Claude, "auto", None);
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = "cursor".into();
+        rt.engine = Engine::None;
+        rt.child_pid = Some(4242);
+    }
+    index::update_tab(SESSION, TAB, |t| {
+        t.requested_model = Some("sonnet-4.5".into());
+        Ok(())
+    })
+    .unwrap();
+    rig.manager.on_exit(&rig.rt, 4242, Some(1));
+    assert_eq!(rig.shown(), shown("sonnet-4.5", None, None, None));
+}
+
 #[test]
 fn a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so() {
     let rig = Rig::on(CliKind::Codex, "gpt-6-astra", Some("high"));
@@ -972,6 +1037,30 @@ fn a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so() {
     // Said once: the next report is only a report.
     rig.append("{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"}}\n");
     assert_eq!(rig.notices().len(), 1);
+}
+
+/// A tab on Codex's own default was not restarted onto any model in
+/// particular, so whichever one it reports is not a miss.
+#[test]
+fn a_restarted_tab_on_the_default_model_is_not_told_it_missed() {
+    let rig = Rig::on(CliKind::Codex, "", Some("high"));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.launched_for = Some(Settings { effort: Some("high".into()), ..Default::default() });
+    }
+    rig.append(&format!("{}\n", CODEX_SETTINGS.lines().next().unwrap()));
+    assert_eq!(rig.shown(), shown("gpt-5.6-sol", Some("high"), None, None));
+    assert!(rig.notices().is_empty());
+}
+
+/// Clearing the effort mid-turn still needs the restart that applies it.
+#[test]
+fn clearing_codex_effort_mid_turn_still_schedules_the_restart() {
+    let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("high"));
+    rig.rt.lock().unwrap().turn_open = true;
+    rig.manager.set_effort(SESSION, TAB, None).unwrap();
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.restart_when_idle));
 }
 
 /// A tab that is not running has nobody to wait for: the choice is what the

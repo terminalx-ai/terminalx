@@ -104,8 +104,15 @@ pub enum Signal {
     /// It took the last change to this setting, without naming the value in
     /// a form worth reading (Claude Code prints "Set model to Opus 5.5").
     Accepted { setting: Setting },
-    /// It turned the last change down, and why in its own words.
-    Refused { setting: Setting, message: String },
+    /// It turned a change down, and why in its own words. `value` is what
+    /// had been asked of it, where it says: a refusal of something other than
+    /// what the app asked for is somebody else's, typed in the terminal.
+    Refused {
+        setting: Setting,
+        #[serde(default)]
+        value: Option<String>,
+        message: String,
+    },
 }
 
 impl Signal {
@@ -176,6 +183,11 @@ impl Settings {
         }
     }
 
+    /// Whether anything asked for is still waiting on the provider.
+    pub fn waiting(&self) -> bool {
+        self.requested_model.is_some() || self.requested_effort.is_some()
+    }
+
     /// A process is being started, or the one that was running is gone:
     /// whatever was waiting rides with the launch, and is what the tab runs.
     pub fn launched(&mut self) {
@@ -225,11 +237,15 @@ impl Settings {
     /// The provider turned the change down, or never answered. The effective
     /// value was never touched, so dropping the request is the whole revert.
     /// Returns what had been asked for, if anything was waiting.
-    pub fn refused(&mut self, setting: Setting) -> Option<String> {
-        match setting {
-            Setting::Model => self.requested_model.take(),
-            Setting::Effort => self.requested_effort.take(),
+    pub fn refused(&mut self, setting: Setting, value: Option<&str>) -> Option<String> {
+        let waiting = match setting {
+            Setting::Model => &mut self.requested_model,
+            Setting::Effort => &mut self.requested_effort,
+        };
+        if value.is_some_and(|value| waiting.as_deref() != Some(value)) {
+            return None;
         }
+        waiting.take()
     }
 }
 
@@ -258,9 +274,10 @@ fn names(chosen: &str, reported: &str, models: &[Model]) -> bool {
 /// Providers report full ids (`claude-opus-5-5`); the pickers also offer
 /// aliases (`opus`). What was asked for, or what the tab is already on, is
 /// kept when it names the same model, so a report never turns "latest Opus"
-/// into a pinned version. Otherwise the alias that runs it, and failing that
-/// the id exactly as reported: a model this app has never heard of is still
-/// the model in use.
+/// into a pinned version. Otherwise the alias that runs it — by the list's
+/// word, or by family when the list could not say — and failing that the id
+/// exactly as reported: a model this app has never heard of is still the
+/// model in use.
 pub fn canonical_model(current: &Settings, reported: &str, models: &[Model]) -> String {
     for chosen in [current.requested_model.as_deref(), Some(current.model.as_str())].into_iter().flatten() {
         if !chosen.is_empty() && names(chosen, reported, models) {
@@ -270,6 +287,7 @@ pub fn canonical_model(current: &Settings, reported: &str, models: &[Model]) -> 
     models
         .iter()
         .find(|m| m.alias && m.resolved.as_deref() == Some(reported))
+        .or_else(|| models.iter().find(|m| m.alias && names(&m.id, reported, models)))
         .map(|m| m.id.clone())
         .unwrap_or_else(|| reported.to_string())
 }
@@ -332,11 +350,14 @@ mod tests {
     fn a_refused_change_reverts_to_what_is_running() {
         let mut s = on("opus", Some("high"));
         s.request_model("claude-nope-9", true);
-        assert_eq!(s.refused(Setting::Model).as_deref(), Some("claude-nope-9"));
+        // A refusal that names something else was typed in the terminal.
+        assert_eq!(s.refused(Setting::Model, Some("haiku")), None);
+        assert_eq!(s.pending(Setting::Model), Some("claude-nope-9"));
+        assert_eq!(s.refused(Setting::Model, Some("claude-nope-9")).as_deref(), Some("claude-nope-9"));
         assert_eq!(s, on("opus", Some("high")));
         // Nothing waiting: a refusal of somebody else's command is not ours.
-        assert_eq!(s.refused(Setting::Model), None);
-        assert_eq!(s.refused(Setting::Effort), None);
+        assert_eq!(s.refused(Setting::Model, None), None);
+        assert_eq!(s.refused(Setting::Effort, None), None);
     }
 
     #[test]
@@ -425,7 +446,9 @@ mod tests {
     #[test]
     fn an_unknown_model_is_kept_exactly_as_reported() {
         let models = claude_models();
-        assert_eq!(canonical_model(&on("opus", None), "claude-sonnet-9-1", &models), "claude-sonnet-9-1");
+        assert_eq!(canonical_model(&on("opus", None), "claude-nova-1-0", &models), "claude-nova-1-0");
+        // A release of another family the list has not caught up with is that family's latest.
+        assert_eq!(canonical_model(&on("opus", None), "claude-sonnet-9-1", &models), "sonnet");
         assert_eq!(canonical_model(&on("gpt-5.6-sol", None), "gpt-9-nova", &[]), "gpt-9-nova");
         // A newer release of the family the tab follows: the list is stale,
         // and the tab is still on "latest Opus".
@@ -442,9 +465,10 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "opus" && m.alias && m.resolved.is_none()));
         assert_eq!(canonical_model(&on("opus", None), "claude-opus-5-5", &models), "opus");
         assert_eq!(canonical_model(&on("opus", None), "claude-opus-9-9", &models), "opus");
-        // Another family is another model; which alias runs it is not known,
-        // so it is kept by the id that is.
-        assert_eq!(canonical_model(&on("opus", None), "claude-sonnet-5-5", &models), "claude-sonnet-5-5");
+        // Another family is that family's alias, and a tab on the CLI's
+        // default goes on following a family rather than one version.
+        assert_eq!(canonical_model(&on("opus", None), "claude-sonnet-5-5", &models), "sonnet");
+        assert_eq!(canonical_model(&on("", None), "claude-opus-5-5", &models), "opus");
     }
 
     #[test]

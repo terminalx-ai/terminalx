@@ -184,7 +184,7 @@ fn command_output(text: &str) -> bool {
 /// "Set effort level to xhigh (this session only): …". `command` is which
 /// command printed it, where the record says; anything it printed that is
 /// not one of these is its reason for not doing as asked.
-fn command_result(command: Option<&str>, stdout: &str, out: &mut Vec<Payload>) {
+fn command_result(command: Option<(&str, &str)>, stdout: &str, out: &mut Vec<Payload>) {
     let mut say = |signal| out.push(Payload::ProviderSettings { signal });
     let ticked = |text: &str| text.split('`').nth(1).map(str::trim).filter(|word| !word.is_empty()).map(String::from);
     if let Some(rest) = stdout.strip_prefix("Set model to ") {
@@ -194,18 +194,23 @@ fn command_result(command: Option<&str>, stdout: &str, out: &mut Vec<Payload>) {
             say(Signal::Current { model: None, effort: Some(effort) });
         }
     } else if let Some(rest) = stdout.strip_prefix("Set effort level to ") {
+        // The level it names is the level in force, whatever was asked for
+        // (it may have clamped it): that alone settles a matching request.
         let level: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        if !level.is_empty() {
+        if level.is_empty() {
+            say(Signal::Accepted { setting: Setting::Effort });
+        } else {
             say(Signal::Current { model: None, effort: Some(level) });
         }
-        say(Signal::Accepted { setting: Setting::Effort });
     } else {
-        let setting = match command {
-            Some("model") => Setting::Model,
-            Some("effort") => Setting::Effort,
+        let Some((name, args)) = command else { return };
+        let setting = match name {
+            "model" => Setting::Model,
+            "effort" => Setting::Effort,
             _ => return,
         };
-        say(Signal::Refused { setting, message: stdout.to_string() });
+        let value = Some(args.trim()).filter(|args| !args.is_empty()).map(String::from);
+        say(Signal::Refused { setting, value, message: stdout.to_string() });
     }
 }
 
@@ -215,7 +220,7 @@ fn command_result(command: Option<&str>, stdout: &str, out: &mut Vec<Payload>) {
 fn decode_local_command(v: &Value, out: &mut Vec<Payload>) {
     let Some(command) = v["commandRun"]["command"].as_str() else { return };
     if let Some(stdout) = v["content"].as_str().and_then(|content| tagged(content, "local-command-stdout")) {
-        command_result(Some(command.trim_start_matches('/')), stdout, out);
+        command_result(Some((command.trim_start_matches('/'), v["commandRun"]["args"].as_str().unwrap_or(""))), stdout, out);
     }
 }
 
@@ -685,7 +690,7 @@ mod tests {
         assert_eq!(p.len(), typed.len() + signals(&p).len(), "nothing else is drawn");
 
         let effort = |level: &str| Signal::Current { model: None, effort: Some(level.into()) };
-        let refused = |message: &str| Signal::Refused { setting: Setting::Model, message: message.into() };
+        let refused = |value: &str, message: &str| Signal::Refused { setting: Setting::Model, value: Some(value.into()), message: message.into() };
         assert_eq!(
             signals(&p),
             [
@@ -693,19 +698,17 @@ mod tests {
                 Signal::Accepted { setting: Setting::Model },
                 // /effort high
                 effort("high"),
-                Signal::Accepted { setting: Setting::Effort },
                 // The /model picker: Opus, and the effort chosen beside it.
                 Signal::Accepted { setting: Setting::Model },
                 effort("medium"),
                 // The /effort slider, with no argument typed.
                 effort("xhigh"),
-                Signal::Accepted { setting: Setting::Effort },
                 // /model default
                 Signal::Accepted { setting: Setting::Model },
                 // /model claude-haiku-5-5 and /model nonsense-model, both
                 // turned down (this capture had no working credentials).
-                refused("Authentication failed. Please check your API credentials."),
-                refused("Authentication failed. Please check your API credentials."),
+                refused("claude-haiku-5-5", "Authentication failed. Please check your API credentials."),
+                refused("nonsense-model", "Authentication failed. Please check your API credentials."),
             ]
         );
         // None of it opens or ends a turn but the commands themselves.
@@ -715,22 +718,25 @@ mod tests {
 
     #[test]
     fn a_command_result_is_read_for_what_it_says_and_no_more() {
-        let result = |command: Option<&str>, stdout: &str| {
+        let result = |command: Option<(&str, &str)>, stdout: &str| {
             let mut out = Vec::new();
             command_result(command, stdout, &mut out);
             signals(&out)
         };
         // Another command's output is not about the settings, whoever ran it.
         assert!(result(None, "Compacted the conversation").is_empty());
-        assert!(result(Some("compact"), "Compacted the conversation").is_empty());
+        assert!(result(Some(("compact", "")), "Compacted the conversation").is_empty());
         // A failure only counts where the record says which command failed.
         assert!(result(None, "Model 'x' not found").is_empty());
-        assert_eq!(result(Some("effort"), "Invalid effort level: ultra"), [Signal::Refused { setting: Setting::Effort, message: "Invalid effort level: ultra".into() }]);
-        // A level this app has no name for is reported as it is.
         assert_eq!(
-            result(None, "Set effort level to ultra (this session only): More"),
-            [Signal::Current { model: None, effort: Some("ultra".into()) }, Signal::Accepted { setting: Setting::Effort }]
+            result(Some(("effort", "ultra")), "Invalid effort level: ultra"),
+            [Signal::Refused { setting: Setting::Effort, value: Some("ultra".into()), message: "Invalid effort level: ultra".into() }]
         );
+        // A level this app has no name for is reported as it is. The level
+        // printed is the answer: asking for one and being given another must
+        // not read as the one asked for.
+        assert_eq!(result(None, "Set effort level to ultra (this session only): More"), [Signal::Current { model: None, effort: Some("ultra".into()) }]);
+        assert_eq!(result(None, "Set effort level to (auto)"), [Signal::Accepted { setting: Setting::Effort }]);
         // "with" in a model's name is not an effort.
         assert_eq!(result(None, "Set model to `Opus with tools`"), [Signal::Accepted { setting: Setting::Model }]);
     }

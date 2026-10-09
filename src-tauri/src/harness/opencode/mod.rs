@@ -254,22 +254,19 @@ impl OpenCode {
                     vec![Action::Emit(Payload::Delta(Delta::TextDelta { block: block(&key), text: delta }))]
                 }
             }
-            // Each reply says which model wrote it. That is the prompt's own
-            // model when one was named, and the server's choice when a tab
-            // has none, or after it was changed on the server's side (#404).
+            // Each reply says which model wrote it. A tab that named a model
+            // sends it with every prompt, so its replies have nothing to
+            // add — and one still arriving from before a change would undo
+            // that change. A tab that named none learns here what the
+            // server chose (#404).
             "message.updated" => {
                 let info = &p["info"];
-                if !mine(&info["sessionID"]) || info["role"].as_str() != Some("assistant") {
+                if self.model.is_some() || !mine(&info["sessionID"]) || info["role"].as_str() != Some("assistant") {
                     return Vec::new();
                 }
                 let (Some(provider), Some(model)) = (info["providerID"].as_str(), info["modelID"].as_str()) else { return Vec::new() };
-                let model = format!("{provider}/{model}");
-                if self.model.as_deref() == Some(model.as_str()) {
-                    return Vec::new();
-                }
-                // Not adopted as the tab's choice here: the session manager
-                // decides what the tab is on, and `set_model` says so.
-                Signal::current(Some(&model), None).map(|signal| Action::Emit(Payload::ProviderSettings { signal })).into_iter().collect()
+                // Not adopted as the model to send: the tab goes on following the server's choice.
+                Signal::current(Some(&format!("{provider}/{model}")), None).map(|signal| Action::Emit(Payload::ProviderSettings { signal })).into_iter().collect()
             }
             "session.idle" => {
                 if !mine(&p["sessionID"]) {
@@ -508,7 +505,9 @@ mod tests {
         assert!(o.handle(&reply("s", "user")).is_empty());
         assert!(o.handle(&reply("other", "assistant")).is_empty());
 
-        let mut o = OpenCode::new(1, "/tmp/x", None, Some("anthropic/claude-sonnet-4".into()), "auto");
+        // A tab that named its model is not moved by a reply, least of all
+        // by one still arriving from before the model was changed.
+        let mut o = OpenCode::new(1, "/tmp/x", None, Some("openai/gpt-5".into()), "auto");
         o.start("x".into(), vec![]);
         o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s"}}}"#);
         assert!(o.handle(&reply("s", "assistant")).is_empty());
