@@ -7,6 +7,7 @@ import { getCloudAgents, loadCloudAgents, subscribeAllCloudAgents, type CloudAge
 import { blankIdentity, cloudOrganizations, getCloudCatalog, liveCloudOrgIds, repositoryOf, subscribeCloudCatalog, type CloudCatalogState } from "@/lib/cloudCatalog";
 import { cloudConnectionInfo, subscribeCloudConnections } from "@/lib/cloudConnections";
 import { isArchived } from "@/lib/cloudLifecycle";
+import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { buildCloudSessions, liveCloudSessionList, subscribeCloudSessionLists } from "@/lib/cloudSessions";
 import { selectCloudSession } from "@/lib/sessions";
 import { selectSessionTab } from "@/lib/terminal";
@@ -41,6 +42,8 @@ export interface CloudDashboardTab extends DashboardTab {
   waitingOn: string | null;
   /** Where a `waiting` status came from: the live runtime, this desktop's cache, or the server's list. */
   from: "live" | "cache" | "list";
+  /** A workspace recovery failure needs the reader even without a pending permission. */
+  failure?: boolean;
 }
 
 export interface CloudDashboardSession extends DashboardSession {
@@ -201,6 +204,16 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
       if (!cachedWorking.some((tab) => tab.status === "in_progress") && first && first.status !== "waiting") first.status = "in_progress";
     }
   }
+  // Recovery failures use the row's existing state rules and remain attention
+  // across every organization, including sections hidden on this desktop.
+  if (deriveCloudActivity(item).tone === "attention") {
+    const target = newestFirstTab as CloudDashboardTab | null;
+    if (target) {
+      target.status = "waiting";
+      target.failure = true;
+      target.from = connected ? "live" : listed ? "list" : "cache";
+    }
+  }
   return sessions;
 }
 
@@ -324,7 +337,7 @@ export function attentionTab(session: CloudDashboardSession): CloudDashboardTab 
 // ---- attention: which waits and finishes to raise --------------------------
 
 export interface CloudAttention {
-  kind: "waiting" | "done";
+  kind: "waiting" | "done" | "failed";
   session: CloudDashboardSession;
   tab: CloudDashboardTab;
 }
@@ -358,6 +371,7 @@ export function createCloudAttentionTracker(now: () => number = Date.now) {
   /** When each workspace was last seen connected. */
   const connectedAt = new Map<string, number>();
   const lastStatus = new Map<string, DashboardTabStatus>();
+  const failures = new Set<string>();
 
   const remember = (ids: readonly string[]) => {
     for (const id of ids) seenRequests.add(id);
@@ -376,6 +390,9 @@ export function createCloudAttentionTracker(now: () => number = Date.now) {
         const tabKey = `${session.key}/${tab.tabId}`;
         const previous = lastStatus.get(tabKey);
         lastStatus.set(tabKey, tab.status);
+        const newFailure = !!tab.failure && !failures.has(tabKey);
+        if (tab.failure) failures.add(tabKey);
+        else failures.delete(tabKey);
         if (tab.status !== "waiting") {
           if (previous === "in_progress" && tab.status === "completed" && tab.from === "live" && session.fresh) out.push({ kind: "done", session, tab });
           continue;
@@ -389,27 +406,27 @@ export function createCloudAttentionTracker(now: () => number = Date.now) {
         const workspace = waitingWorkspaces.get(workspaceKey);
         const live = tab.from === "live";
         if (!workspace) waitingWorkspaces.set(workspaceKey, { claimable: !live || !session.fresh });
-        else if (live && workspace.claimable) {
+        else if (live && workspace.claimable && !newFailure) {
           // The wait the list (or the cache) already stood for, now seen live: the same wait.
           workspace.claimable = false;
           continue;
         }
-        if (tabKnown) continue;
+        if (tabKnown && !newFailure) continue;
         // Only a live runtime or a list fetched in this launch raises; what the saved cache says is known already.
         if (!session.fresh || tab.from === "cache") continue;
         // The workspace's wait was already raised: another source for it, or another tab of it seen through the list.
-        if (workspace && !live) continue;
+        if (workspace && !live && !newFailure) continue;
         // Nothing new to ask: a request already seen (a reconnect, another connection, a source switch).
-        if (tab.requestIds.length && !newRequests.length) continue;
+        if (tab.requestIds.length && !newRequests.length && !newFailure) continue;
         // Back right after it ended with nothing to tell it apart: a source switch, not a new wait.
         const ended = endedAt.get(workspaceKey);
-        if (!tab.requestIds.length && !live && ended !== undefined && at - ended < ATTENTION_GRACE_MS) continue;
-        if (tab.from === "list") {
+        if (!tab.requestIds.length && !live && ended !== undefined && at - ended < ATTENTION_GRACE_MS && !newFailure) continue;
+        if (tab.from === "list" && !newFailure) {
           // The list may lag behind a connection that just showed the wait answered.
           const lastConnected = connectedAt.get(workspaceKey);
           if (lastConnected !== undefined && (session.reportedAt === null || session.reportedAt <= lastConnected)) continue;
         }
-        out.push({ kind: "waiting", session, tab });
+        out.push({ kind: tab.failure ? "failed" : "waiting", session, tab });
       }
     }
     for (const tabKey of [...waitingTabs]) if (!seenTabs.has(tabKey)) waitingTabs.delete(tabKey);
@@ -421,7 +438,7 @@ export function createCloudAttentionTracker(now: () => number = Date.now) {
     // One notice per session and pass: several of its tabs starting to wait together are one thing to look at.
     const raised = new Set<string>();
     return out.filter((event) => {
-      if (event.kind !== "waiting") return true;
+      if (event.kind === "done") return true;
       const key = cloudWorkspaceKey(event.session.orgId, event.session.workspaceId) + "/" + event.session.sessionId;
       if (raised.has(key)) return false;
       raised.add(key);

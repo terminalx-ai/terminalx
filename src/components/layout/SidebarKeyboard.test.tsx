@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
@@ -100,7 +100,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  prefs.setPrefs({ cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, cloudCollapsed: {}, sidebarSections: {} });
+  prefs.setPrefs({ cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, cloudCollapsed: {}, sidebarSections: {}, hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null });
   await act(async () => {
     await catalog.ingestCloudList({ workspaces: [cloudItem], quota: { used: 1, limit: 2 } }, ORG);
     await catalog.ingestCloudList({ workspaces: [], quota: { used: 0, limit: 2 } }, "org-b");
@@ -145,6 +145,39 @@ function expectNoWake() {
 }
 
 describe("tree keyboard across Local and organization sections", () => {
+  it("lets the One-mode header switcher own ArrowDown and choose an organization", async () => {
+    prefs.setPrefs({ organizationDisplay: "one", selectedOrganization: ORG });
+    mount();
+    const picker = screen.getByRole("button", { name: "Choose organization in sidebar" });
+    picker.focus();
+    press("ArrowDown");
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Beta" }));
+    expect(screen.getAllByTestId("cloud-org-section").map((section) => section.getAttribute("data-org"))).toEqual(["org-b"]);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose organization in sidebar" })));
+    expectNoWake();
+  });
+
+  it("skips hidden sections without gaps, reaches the hidden-organizations link, and keeps Local when all are hidden", () => {
+    prefs.setPrefs({ hiddenOrganizations: ["org-b"] });
+    const tree = mount();
+    within(tree).getByRole("button", { name: "Local" }).focus();
+    press("End");
+    expect(focusedItem()).toBe("1 organization hidden");
+    press("ArrowUp");
+    expect(focusedItem()).toBe("Fix login redirect");
+    press("ArrowDown");
+    expect(focusedItem()).toBe("1 organization hidden");
+    expect(within(tree).queryByRole("treeitem", { name: "Beta organization" })).toBeNull();
+    act(() => prefs.setPrefs({ hiddenOrganizations: [ORG, "org-b"] }));
+    within(tree).getByRole("button", { name: "Local" }).focus();
+    press("End");
+    expect(focusedItem()).toBe("2 organizations hidden");
+    press("Home");
+    expect(focusedItem()).toBe("Local section");
+    expectNoWake();
+  });
+
   it("puts the Local header in the tree as a section, with its projects under it", () => {
     const tree = mount();
     const local = within(tree).getByRole("treeitem", { name: "Local section" });
