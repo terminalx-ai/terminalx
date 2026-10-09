@@ -388,6 +388,9 @@ fn require_driver(device: &DeviceEntry) -> Result<()> {
     }
 }
 
+/// The group a paired phone files quick chats under.
+const QUICK_CHATS_PROJECT: &str = "Quick chats";
+
 fn session_summaries() -> Result<Value> {
     let snippets: HashMap<_, _> = summaries::collect(None)?
         .into_iter()
@@ -396,14 +399,22 @@ fn session_summaries() -> Result<Value> {
     let mut sessions = Vec::new();
     for session in store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived) {
         let summary = snippets.get(&session.id);
-        let project = file_name(&session.project_path);
-        let worktree = session
-            .worktree_name
-            .clone()
-            .or_else(|| session.branch.clone())
-            .unwrap_or_else(|| file_name(&session.cwd));
+        // A quick chat has no project: its path is a scratch directory named
+        // for the session, which would give the phone one group per chat.
+        let quick = session.is_quick();
+        let project = if quick { QUICK_CHATS_PROJECT.to_string() } else { file_name(&session.project_path) };
+        let worktree = if quick && store::quick::is_scratch(&session.id, &session.cwd) {
+            "scratch".to_string()
+        } else {
+            session
+                .worktree_name
+                .clone()
+                .or_else(|| session.branch.clone())
+                .unwrap_or_else(|| file_name(&session.cwd))
+        };
         sessions.push(json!({
             "id": session.id,
+            "kind": if quick { "quick" } else { "project" },
             "title": session.title,
             "project": project,
             "worktree": worktree,

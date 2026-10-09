@@ -39,13 +39,16 @@ vi.mock("@/lib/prefs", () => ({
 
 const project = { path: "/repos/raccoon", name: "raccoon" } as Project;
 const harness = { id: "claude", name: "Claude", available: true, installHint: "" } as HarnessInfo;
+const store = { projects: [project] as Project[], selectedProject: project.path as string | null };
+const { createQuickChat, selectSession } = vi.hoisted(() => ({ createQuickChat: vi.fn(), selectSession: vi.fn() }));
 vi.mock("@/lib/sessions", () => ({
-  useSessionStore: () => ({ projects: [project], harnesses: [harness], selectedProject: project.path, workspaces: {}, newSessionPreset: null }),
+  useSessionStore: () => ({ projects: store.projects, harnesses: [harness], selectedProject: store.selectedProject, workspaces: {}, newSessionPreset: null }),
+  createQuickChat,
   addProject: vi.fn(),
   clearNewSessionPreset: vi.fn(),
   selectProject: vi.fn(),
   selectProjectInSidebar: vi.fn(),
-  selectSession: vi.fn(),
+  selectSession,
   startSessionIn: vi.fn(),
   upsertSession: vi.fn(),
 }));
@@ -65,6 +68,11 @@ beforeEach(() => {
     throw new Error(`unexpected command ${cmd}`);
   });
   openDialog.mockReset();
+  createQuickChat.mockReset();
+  createQuickChat.mockResolvedValue({ id: "quick-1", kind: "quick", tabs: [{ id: "quick-tab" }] });
+  selectSession.mockReset();
+  store.projects = [project];
+  store.selectedProject = project.path;
   project.kind = "git";
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
   vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
@@ -160,5 +168,61 @@ describe("folder projects", () => {
     expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
     expect(screen.queryByText("Folder · no Git")).toBeNull();
+  });
+});
+
+describe("starting a quick chat", () => {
+  it("needs no project: with none attached, a prompt starts a chat in a scratch folder and is sent", async () => {
+    store.projects = [];
+    store.selectedProject = null;
+    const onCreated = vi.fn();
+    render(<NewSessionView quick compact onCreated={onCreated} />);
+    const prompt = screen.getByPlaceholderText("Ask a question or describe a task.");
+    const start = screen.getByRole("button", { name: "Start" });
+    expect(start.hasAttribute("disabled")).toBe(true);
+    // Nothing about projects or worktrees is offered.
+    expect(screen.queryByText("Choose project")).toBeNull();
+    expect(screen.queryByText(/New worktree/)).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getByRole("button", { name: "Working directory" }).textContent).toContain("Scratch folder");
+
+    fireEvent.change(prompt, { target: { value: "What is a monad?\nIn one paragraph." } });
+    await waitFor(() => expect(start.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(start);
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith("quick-1", "quick-tab", "What is a monad?\nIn one paragraph.", []));
+    expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
+    expect(selectSession).toHaveBeenCalledWith("quick-1");
+    // No project session was made, and no git was read.
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([]);
+  });
+
+  it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {
+    openDialog.mockResolvedValue("/Users/me/notes");
+    const { addProject } = await import("@/lib/sessions");
+    vi.mocked(addProject).mockClear();
+    render(<NewSessionView quick onCreated={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Working directory" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Choose folder…" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Working directory" }).textContent).toContain("notes"));
+    expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
+
+    fireEvent.change(screen.getByPlaceholderText("Ask a question or describe a task."), { target: { value: "Summarise these" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(createQuickChat).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/Users/me/notes" })));
+    expect(addProject).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith("create_session", expect.anything());
+  });
+
+  it("says what went wrong and keeps the prompt when the chat cannot be created", async () => {
+    createQuickChat.mockRejectedValue(new Error("Not a directory: /nope"));
+    const onCreated = vi.fn();
+    render(<NewSessionView quick onCreated={onCreated} />);
+    const prompt = screen.getByPlaceholderText("Ask a question or describe a task.") as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Not a directory: /nope")).toBeTruthy();
+    expect(prompt.value).toBe("hello");
+    expect(onCreated).not.toHaveBeenCalled();
   });
 });

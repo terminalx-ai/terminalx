@@ -488,6 +488,7 @@ mod tests {
     fn a_session(id: &str, tabs: Vec<TabEntry>) -> SessionEntry {
         SessionEntry {
             id: id.into(),
+            kind: crate::store::index::SessionKind::Project,
             project_path: "/p".into(),
             cwd: "/p".into(),
             worktree_name: None,

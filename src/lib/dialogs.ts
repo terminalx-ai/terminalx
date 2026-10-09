@@ -19,11 +19,15 @@ export interface WorkspaceRemoveRequest {
 interface State {
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
+  /** The session being renamed. */
+  renameSession: string | null;
+  /** The quick chat being moved into a project. */
+  moveToProject: string | null;
   /** The bulk worktree clean-up is open. */
   worktreeCleanup: boolean;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, worktreeCleanup: false };
+let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, worktreeCleanup: false };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -79,6 +83,24 @@ export function chooseMode(harness: string, mode: string, apply: (mode: string) 
 
 export function closeBypass() {
   set({ bypass: null });
+}
+
+/** Rename a session: one dialog, in whichever window asked. */
+export function openRenameSession(sessionId: string) {
+  set({ renameSession: sessionId });
+}
+
+export function closeRenameSession() {
+  set({ renameSession: null });
+}
+
+/** Move a quick chat into a project. */
+export function openMoveToProject(sessionId: string) {
+  set({ moveToProject: sessionId });
+}
+
+export function closeMoveToProject() {
+  set({ moveToProject: null });
 }
 
 /** The bulk clean-up of worktrees across open projects. Opening it only scans. */

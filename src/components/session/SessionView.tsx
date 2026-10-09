@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CalendarClock, CircleDot, Cloud, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,30 @@ import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { useAccount } from "@/lib/account";
+import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
+import { SessionTabStrip } from "./SessionTabStrip";
+
+/** Why a quick chat's panel has no Changes, Repo or PR. */
+const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
+
+/**
+ * What a window draws around a session. The session itself (its tabs, their
+ * bodies, the actions on them) is the same wherever it is shown; a shell says
+ * which of the surrounding chrome it has room for.
+ */
+export interface SessionChrome {
+  /**
+   * One narrow column: no sidebar toggle, no project breadcrumb and no right
+   * panel. `leading` then stands where the breadcrumb was.
+   */
+  compact?: boolean;
+  /** The session's tabs in a row under the header, for a window with no sidebar to list them. */
+  tabStrip?: boolean;
+  /** At the left of the header, in place of the breadcrumb (a compact window's session switcher). */
+  leading?: ReactNode;
+  /** At the right of the header, after the session's own actions. */
+  trailing?: ReactNode;
+}
 
 function managedWorkspaceFor(session: SessionEntry) {
   if (!session.worktreeName || session.worktreeRemoved) return undefined;
@@ -51,14 +75,15 @@ function managedWorkspaceFor(session: SessionEntry) {
 
 /** The right panel reads the active tab's log for the changes range. */
 function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
-  const project = useSessionStore().projects.find((p) => p.path === session.projectPath);
+  const isGit = useSessionIsGit(session);
   const log = useTabLog(session.id, tab.id);
   const live = tab.status === "in_progress" || tab.status === "waiting";
   const workspace = managedWorkspaceFor(session);
   return (
     <RightPanel
       cwd={session.cwd}
-      isGit={project?.kind !== "folder"}
+      isGit={isGit}
+      gitNote={isQuickChat(session) && !isGit ? NO_REPOSITORY : undefined}
       branch={session.branch ?? null}
       baseRef={session.baseRef}
       events={log.events}
@@ -266,13 +291,19 @@ export function SessionView({
   sidebarOpen,
   onToggleSidebar,
   cloud,
+  chrome,
 }: {
   session: SessionEntry;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   /** A cloud session: its backend, terminals, sources and location. */
   cloud?: CloudSessionModel;
+  /** What this window draws around the session; the main window's full chrome when absent. */
+  chrome?: SessionChrome;
 }) {
+  const compact = !!chrome?.compact;
+  const isGit = useSessionIsGit(session);
+  const quick = isQuickChat(session);
   const prefs = usePrefs();
   const store = useSessionStore();
   const backend = cloud?.backend ?? localSessionBackend(session.id);
@@ -338,9 +369,10 @@ export function SessionView({
   // anything by itself: that could wake a stopped workspace.
   useEffect(() => {
     if (!local || session.tabs.length) return;
-    if (!getPrefs().panelOpen) setPrefs({ panelOpen: true });
+    // A compact window has no panel to open.
+    if (!compact && !getPrefs().panelOpen) setPrefs({ panelOpen: true });
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
-  }, [local, session.id, session.cwd, session.tabs.length]);
+  }, [local, compact, session.id, session.cwd, session.tabs.length]);
 
   // PRO-30 presence: what this person looks at in a shared workspace.
   const presenceKey = cloud?.collab.live ? cloud.collab.key : null;
@@ -362,20 +394,23 @@ export function SessionView({
           className={cn("flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2", cloud && "@container/session-header")}
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
-          {!sidebarOpen && (
+          {!sidebarOpen && !compact && (
             <WithTooltip label="Show sidebar" shortcut="app.toggleSidebar">
               <Button variant="ghost" size="icon-sm" aria-label="Show sidebar" onClick={onToggleSidebar}>
                 <PanelLeft />
               </Button>
             </WithTooltip>
           )}
-          {/* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */}
+          {compact ? (
+            <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
+          ) : (
+          /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
             {!(cloud && cloud.projectName === session.title) && (
               <>
-                <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : project?.name} data-testid="session-project">
-                  {cloud ? cloud.projectName : (project?.name ?? "project")}
+                <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : quick ? "A quick chat: it has no project" : project?.name} data-testid="session-project">
+                  {cloud ? cloud.projectName : quick ? sessionProjectName(session, project) : (project?.name ?? "project")}
                 </span>
                 <span className={cn("text-faint", cloud && HEADER_TIGHT)}>/</span>
               </>
@@ -406,6 +441,13 @@ export function SessionView({
                   {session.automation.name} #{session.automation.runNumber}
                 </button>
               </WithTooltip>
+            )}
+            {quick && (
+              // Where a quick chat runs: it has no project to say so.
+              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd} data-testid="session-quick-place">
+                <FolderOpen className="size-3 shrink-0" />
+                <span className="truncate">{quickChatPlace(session)}</span>
+              </span>
             )}
             {workspaceLabel && (
               <span
@@ -448,8 +490,9 @@ export function SessionView({
               </span>
             )}
           </div>
+          )}
 
-          <div className="ml-auto flex max-w-[70%] shrink-0 items-center gap-0.5">
+          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && "max-w-[70%]")}>
             {/* Keyed by session: a menu left open never carries over to another session. */}
             {!cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
             {activeTab && local && (
@@ -491,18 +534,22 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Toggle panel"
-                onClick={() => setPrefs({ panelOpen: !prefs.panelOpen })}
-              >
-                <PanelRight />
-              </Button>
-            </WithTooltip>
+            {!compact && (
+              <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Toggle panel"
+                  onClick={() => setPrefs({ panelOpen: !prefs.panelOpen })}
+                >
+                  <PanelRight />
+                </Button>
+              </WithTooltip>
+            )}
+            {chrome?.trailing}
           </div>
         </header>
+        {chrome?.tabStrip && !cloud && <SessionTabStrip session={session} selected={selected} />}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
@@ -623,19 +670,20 @@ export function SessionView({
         </section>
       </div>
 
-      {prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
-      {prefs.panelOpen && !cloud &&
+      {!compact && prefs.panelOpen && cloud && <CloudPanelHost session={session} cloud={cloud} tab={activeTab} />}
+      {!compact && prefs.panelOpen && !cloud &&
         (activeTab ? (
           <PanelHost session={session} tab={activeTab} />
         ) : (
           <RightPanel
             cwd={session.cwd}
-            isGit={project?.kind !== "folder"}
+            isGit={isGit}
+            gitNote={quick && !isGit ? NO_REPOSITORY : undefined}
             branch={session.branch ?? null}
             workingTree
             sessionId={session.id}
             statusKey={statusKey}
-            rootName={project?.name ?? "project"}
+            rootName={quick ? quickChatPlace(session) : (project?.name ?? "project")}
             settleSessionId={workspace ? session.id : undefined}
             workspace={workspace}
           />

@@ -44,14 +44,18 @@ struct Pane {
     cwd: String,
 }
 
-/// A direct line for one pane's raw output, beside the `pty_data` event: the
+/// A direct line for one pane's raw output, beside the `pty_data` event: a
 /// desktop window attaches one per terminal it shows, so its bytes cross as
 /// bytes, to that terminal only. Returns `false` once nobody is receiving.
 pub type Tap = Box<dyn Fn(&[u8]) -> bool + Send>;
 
-#[derive(Default)]
+/// One window's view of a pane. A pane has at most one per window: the main
+/// window and the floating one can show the same terminal at once, and each
+/// is sent, counted and held back for on its own.
 struct Tapped {
-    tap: Option<Tap>,
+    tap: Tap,
+    /// The window this view is in. A later view from the same window replaces it.
+    window: String,
     /// Which attachment this is. A view names its own when it reports or
     /// detaches, so the word of a view that has since been replaced (its
     /// detach arriving late, a report still on its way) cannot touch the one
@@ -78,7 +82,24 @@ impl Tapped {
         self.sent.saturating_sub(self.drawn).saturating_sub(self.forgiven) as usize
     }
 }
-type TapSlot = Arc<(Mutex<Tapped>, std::sync::Condvar)>;
+
+/// Every window's view of one pane.
+#[derive(Default)]
+struct Views(Vec<Tapped>);
+
+impl Views {
+    /// A view that is being waited for is too far behind to be sent more.
+    fn held(&self) -> bool {
+        self.0.iter().any(|view| !view.stalled && view.unacked() > FLOW_HIGH)
+    }
+
+    /// Add a view, in place of the one its window had.
+    fn put(&mut self, view: Tapped) {
+        self.0.retain(|other| other.window != view.window);
+        self.0.push(view);
+    }
+}
+type TapSlot = Arc<(Mutex<Views>, std::sync::Condvar)>;
 
 /// A pane this far ahead of its view is not read until the view catches up.
 /// xterm.js throws output away past 50 MB of backlog; this keeps it near none,
@@ -100,6 +121,32 @@ pub struct Terminals {
     taps: Mutex<HashMap<String, TapSlot>>,
     /// Output sent to the webview since launch, for `terminalx status`.
     emitted: Arc<Emitted>,
+    /// What the reader calls each shell tab ("Terminal 2", or a name they
+    /// gave it). Kept here so every window lists the same shells under the
+    /// same names; a window's own memory would be known to that window only.
+    titles: Mutex<HashMap<String, String>>,
+}
+
+/// A shell tab of a session: a pane the reader opened, as every window lists it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellPane {
+    pub id: String,
+    pub session_id: String,
+    pub title: Option<String>,
+    pub cwd: String,
+    pub exited: bool,
+}
+
+/// The session a shell pane belongs to: shells are named `<session>:<n>`. An
+/// agent tab's own pane (`tab:<id>`) is not a shell tab.
+pub fn is_shell_id(id: &str) -> bool {
+    shell_session(id).is_some()
+}
+
+fn shell_session(id: &str) -> Option<&str> {
+    let (session, _) = id.split_once(':')?;
+    (session != "tab" && !session.is_empty()).then_some(session)
 }
 
 #[derive(Default)]
@@ -110,7 +157,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default() }
+        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -177,19 +224,23 @@ pub(crate) fn shell() -> String {
 
 /// Hold the pane's output back while its view is more than `FLOW_HIGH` behind.
 fn wait_for_view(slot: &TapSlot, exited: &AtomicBool) {
-    let (tapped, acked) = &**slot;
-    let mut tapped = tapped.lock().unwrap();
+    let (views, acked) = &**slot;
+    let mut views = views.lock().unwrap();
     let deadline = Instant::now() + FLOW_STALL;
     // A program that has exited cannot be slowed any more: its last output
     // goes out at once, so its exit is not reported ahead of it.
-    while tapped.tap.is_some() && !tapped.stalled && tapped.unacked() > FLOW_HIGH && !exited.load(Ordering::Relaxed) {
+    while views.held() && !exited.load(Ordering::Relaxed) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            tapped.stalled = true;
-            tapped.forgiven = tapped.sent.saturating_sub(tapped.drawn);
+            // Only the views that are behind: one window that stopped drawing
+            // (hidden, frozen) must not cost the other its flow control.
+            for view in views.0.iter_mut().filter(|view| !view.stalled && view.unacked() > FLOW_HIGH) {
+                view.stalled = true;
+                view.forgiven = view.sent.saturating_sub(view.drawn);
+            }
             break;
         }
-        tapped = acked.wait_timeout(tapped, left).unwrap().0;
+        views = acked.wait_timeout(views, left).unwrap().0;
     }
 }
 
@@ -309,13 +360,15 @@ impl Terminals {
                         // Held across both, so a view attaching now gets these
                         // bytes exactly once: in the scrollback it is handed,
                         // or from its tap.
-                        let mut tapped = tap.0.lock().unwrap();
+                        let mut views = tap.0.lock().unwrap();
                         append_scrollback(&scrollback, acc);
-                        match tapped.tap.as_ref().map(|send| send(acc)) {
-                            Some(true) => tapped.sent += acc.len() as u64,
-                            Some(false) => *tapped = Tapped::default(),
-                            None => {}
-                        }
+                        views.0.retain_mut(|view| {
+                            let received = (view.tap)(acc);
+                            if received {
+                                view.sent += acc.len() as u64;
+                            }
+                            received
+                        });
                     }
                     emitted.events.fetch_add(1, Ordering::Relaxed);
                     emitted.bytes.fetch_add(acc.len() as u64, Ordering::Relaxed);
@@ -398,13 +451,14 @@ impl Terminals {
     /// Make `slot`, which the pane's emitter holds, the one views attach to.
     /// It normally is already. If a view detached and attached again between
     /// the emitter taking the slot and the pane being listed, the map holds
-    /// another one: its view moves over to the emitter's.
+    /// another one: its views move over to the emitter's.
     fn keep_slot(&self, id: &str, slot: &TapSlot) {
         let mut taps = self.taps.lock().unwrap();
         if let Some(other) = taps.get(id).filter(|other| !Arc::ptr_eq(other, slot)).cloned() {
-            let view = std::mem::take(&mut *other.0.lock().unwrap());
-            if view.tap.is_some() {
-                *slot.0.lock().unwrap() = view;
+            let moved = std::mem::take(&mut *other.0.lock().unwrap());
+            let mut views = slot.0.lock().unwrap();
+            for view in moved.0 {
+                views.put(view);
             }
         }
         taps.insert(id.to_string(), slot.clone());
@@ -413,7 +467,7 @@ impl Terminals {
     /// Forget the pane's slot once nothing needs it: no pane, and no view.
     fn drop_slot_if_unused(&self, id: &str) {
         let mut taps = self.taps.lock().unwrap();
-        let unused = taps.get(id).is_some_and(|slot| slot.0.lock().unwrap().tap.is_none()) && !self.panes.lock().unwrap().contains_key(id);
+        let unused = taps.get(id).is_some_and(|slot| slot.0.lock().unwrap().0.is_empty()) && !self.panes.lock().unwrap().contains_key(id);
         if unused {
             taps.remove(id);
         }
@@ -421,10 +475,11 @@ impl Terminals {
 
     /// Send pane `id`'s output to `tap` from here on, starting with what the
     /// pane has printed so far (its bounded scrollback), with nothing lost or
-    /// repeated in between. It replaces an earlier tap for the same pane.
-    pub fn attach(&self, id: &str, token: &str, tap: Tap) {
+    /// repeated in between. It replaces an earlier tap `window` had for the
+    /// same pane; another window's view of it is left as it is.
+    pub fn attach(&self, window: &str, id: &str, token: &str, tap: Tap) {
         let slot = self.tap_slot(id);
-        let mut tapped = slot.0.lock().unwrap();
+        let mut views = slot.0.lock().unwrap();
         let mut sent = 0;
         if let Some(printed) = self.read_output(id).filter(|bytes| !bytes.is_empty()) {
             // A full scrollback was cut at an arbitrary byte, perhaps inside
@@ -436,17 +491,20 @@ impl Terminals {
             }
             sent = printed.len() - start;
         }
-        *tapped = Tapped { tap: Some(tap), token: token.to_string(), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false };
+        views.put(Tapped { tap, window: window.to_string(), token: token.to_string(), sent: sent as u64, drawn: 0, forgiven: 0, stalled: false });
         slot.1.notify_all();
-        drop(tapped);
+        drop(views);
         // The pane was closed, or closed and opened again, while this was
         // attaching: the view belongs in the slot that is listed now.
         let mut taps = self.taps.lock().unwrap();
         match taps.get(id).cloned() {
             Some(listed) if Arc::ptr_eq(&listed, &slot) => {}
             Some(listed) => {
-                let view = std::mem::take(&mut *slot.0.lock().unwrap());
-                *listed.0.lock().unwrap() = view;
+                let moved = std::mem::take(&mut *slot.0.lock().unwrap());
+                let mut views = listed.0.lock().unwrap();
+                for view in moved.0 {
+                    views.put(view);
+                }
             }
             None => {
                 taps.insert(id.to_string(), slot);
@@ -458,10 +516,8 @@ impl Terminals {
     /// was sent since it attached: a running total.
     pub fn ack(&self, id: &str, token: &str, drawn: u64) {
         let Some(slot) = self.taps.lock().unwrap().get(id).cloned() else { return };
-        let mut tapped = slot.0.lock().unwrap();
-        if tapped.tap.is_none() || tapped.token != token {
-            return;
-        }
+        let mut views = slot.0.lock().unwrap();
+        let Some(tapped) = views.0.iter_mut().find(|view| view.token == token) else { return };
         tapped.drawn = tapped.drawn.max(drawn.min(tapped.sent));
         // What was written off is owed again only as far as it is still missing.
         tapped.forgiven = tapped.forgiven.min(tapped.sent - tapped.drawn);
@@ -469,13 +525,14 @@ impl Terminals {
         slot.1.notify_all();
     }
 
-    /// Every view is gone at once: the window was loaded afresh, and its old
-    /// page's views will never draw or answer again. The panes keep their
-    /// slots, so the new page's views attach to the ones being sent through.
-    pub fn detach_all(&self) {
+    /// Every view `window` had is gone at once: it was loaded afresh, and its
+    /// old page's views will never draw or answer again. The panes keep their
+    /// slots, so the new page's views attach to the ones being sent through,
+    /// and another window's views go on as they were.
+    pub fn detach_window(&self, window: &str) {
         let ids: Vec<String> = self.taps.lock().unwrap().keys().cloned().collect();
         for id in ids {
-            self.reset_slot(&id, None);
+            self.drop_views(&id, |view| view.window == window);
         }
     }
 
@@ -483,17 +540,18 @@ impl Terminals {
     /// if there is one, keeps its slot for the next view. A view that has
     /// already been replaced detaches nothing.
     pub fn detach(&self, id: &str, token: &str) {
-        self.reset_slot(id, Some(token));
+        self.drop_views(id, |view| view.token == token);
     }
 
-    fn reset_slot(&self, id: &str, token: Option<&str>) {
+    fn drop_views(&self, id: &str, gone: impl Fn(&Tapped) -> bool) {
         let Some(slot) = self.taps.lock().unwrap().get(id).cloned() else { return };
         {
-            let mut tapped = slot.0.lock().unwrap();
-            if token.is_some_and(|token| tapped.token != token) {
+            let mut views = slot.0.lock().unwrap();
+            let before = views.0.len();
+            views.0.retain(|view| !gone(view));
+            if views.0.len() == before {
                 return;
             }
-            *tapped = Tapped::default();
             slot.1.notify_all();
         }
         self.drop_slot_if_unused(id);
@@ -618,6 +676,34 @@ impl Terminals {
         log::warn!("{} process(es) did not exit within {timeout:?}", pids.len());
     }
 
+    /// Name a shell tab, for every window that lists it.
+    pub fn set_title(&self, id: &str, title: &str) {
+        if self.panes.lock().unwrap().contains_key(id) {
+            self.titles.lock().unwrap().insert(id.to_string(), title.to_string());
+        }
+    }
+
+    /// One shell tab, if `id` is one that exists.
+    pub fn shell(&self, id: &str) -> Option<ShellPane> {
+        let session_id = shell_session(id)?.to_string();
+        let (cwd, exited) = {
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id)?;
+            let alive = *pane.alive.lock().unwrap();
+            (pane.cwd.clone(), !alive)
+        };
+        let title = self.titles.lock().unwrap().get(id).cloned();
+        Some(ShellPane { id: id.to_string(), session_id, title, cwd, exited })
+    }
+
+    /// Every session's shell tabs, oldest first: what a window that was not
+    /// there when they were opened needs in order to list them.
+    pub fn shells(&self) -> Vec<ShellPane> {
+        let mut ids: Vec<String> = self.panes.lock().unwrap().keys().filter(|id| shell_session(id).is_some()).cloned().collect();
+        ids.sort();
+        ids.iter().filter_map(|id| self.shell(id)).collect()
+    }
+
     /// The panes a session owns: each tab's CLI and the shells opened for it.
     pub fn session_pane_ids(&self, session_id: &str, tab_ids: &[String]) -> Vec<String> {
         let prefix = format!("{session_id}:");
@@ -683,7 +769,7 @@ impl Terminals {
         let taps: Vec<TapSlot> = self.taps.lock().unwrap().values().cloned().collect();
         let (views, unacked_bytes) = taps.iter().fold((0, 0), |(views, bytes), slot| {
             let tapped = slot.0.lock().unwrap();
-            (views + usize::from(tapped.tap.is_some()), bytes + tapped.unacked())
+            (views + tapped.0.len(), bytes + tapped.0.iter().map(Tapped::unacked).sum::<usize>())
         });
         let panes = self.panes.lock().unwrap();
         TerminalStats {
@@ -698,6 +784,11 @@ impl Terminals {
     }
 
     fn changed(&self) {
+        // A name outlives its pane no longer than this.
+        {
+            let panes = self.panes.lock().unwrap();
+            self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id));
+        }
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
         }
@@ -776,13 +867,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Attached before the pane exists: a view can mount before its spawn lands.
         let (early, early_output) = collector();
-        terminals.attach("pane", "view", early);
+        terminals.attach("main", "pane", "view", early);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three; exec sleep 600'");
         assert!(read_until(&early_output, "one-").ends_with("one-"));
 
         // A second view takes over: it starts with the scrollback, then follows.
         let (late, late_output) = collector();
-        terminals.attach("pane", "view", late);
+        terminals.attach("main", "pane", "view", late);
         let seen = read_until(&late_output, "three");
         assert!(seen.contains("one-two-three"), "{seen:?}");
         assert_eq!(seen.matches("one-").count(), 1, "{seen:?}");
@@ -797,25 +888,58 @@ mod tests {
     }
 
     #[test]
+    fn two_windows_each_get_a_panes_output_and_one_leaving_does_not_cut_the_other_off() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        pane(&terminals, &sink, &dir, "pane", "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three; exec sleep 600'");
+        let (main, main_output) = collector();
+        terminals.attach("main", "pane", "main-view", main);
+        // The floating window shows the same terminal: a second view, not a replacement.
+        let (floating, floating_output) = collector();
+        terminals.attach("floating", "pane", "floating-view", floating);
+        assert_eq!(terminals.stats().views, 2);
+        for output in [&main_output, &floating_output] {
+            let seen = read_until(output, "two-");
+            assert_eq!(seen.matches("one-").count(), 1, "{seen:?}");
+        }
+
+        // One window's report or detach is its own: the other's token names nothing of it.
+        terminals.ack("pane", "floating-view", 4);
+        assert_eq!(terminals.tap_slot("pane").0.lock().unwrap().0.iter().find(|view| view.window == "main").unwrap().drawn, 0);
+
+        // The floating window is loaded afresh: only its views go.
+        terminals.detach_window("floating");
+        assert_eq!(terminals.stats().views, 1);
+        let seen = read_until(&main_output, "three");
+        assert_eq!(seen.matches("three").count(), 1, "{seen:?}");
+        assert!(floating_output.try_recv().is_err(), "a detached window was still sent output");
+
+        terminals.detach("pane", "main-view");
+        assert_eq!(terminals.stats().views, 0);
+        terminals.kill_all();
+    }
+
+    #[test]
     fn a_view_that_detaches_and_attaches_again_still_gets_the_panes_later_output() {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let (first, first_output) = collector();
-        terminals.attach("pane", "view", first);
+        terminals.attach("main", "pane", "view", first);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf one-; sleep 2; printf two-; sleep 2; printf three-; sleep 2; printf four; exec sleep 600'");
         read_until(&first_output, "one-");
 
         // The instance is disposed and made again (a tab's terminal dropped and shown again).
         terminals.detach("pane", "view");
         let (second, second_output) = collector();
-        terminals.attach("pane", "view", second);
+        terminals.attach("main", "pane", "view", second);
         assert!(read_until(&second_output, "two-").contains("one-two-"));
 
         // The page is reloaded: every view goes at once, and the new page's attach.
-        terminals.detach_all();
+        terminals.detach_window("main");
         let (third, third_output) = collector();
-        terminals.attach("pane", "view", third);
+        terminals.attach("main", "pane", "view", third);
         let seen = read_until(&third_output, "four");
         assert!(seen.contains("one-two-three-four"), "{seen:?}");
         assert!(second_output.try_recv().is_err());
@@ -828,7 +952,7 @@ mod tests {
         let terminals = Terminals::new();
         let dir = tempfile::tempdir().unwrap();
         let (view, output) = collector();
-        terminals.attach("pane", "view", view);
+        terminals.attach("main", "pane", "view", view);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf first; exec sleep 600'");
         read_until(&output, "first");
         terminals.kill_and_wait("pane", Duration::from_secs(5));
@@ -848,10 +972,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tap, output) = collector();
         drop(output);
-        terminals.attach("pane", "view", tap);
+        terminals.attach("main", "pane", "view", tap);
         pane(&terminals, &sink, &dir, "pane", "sh -c 'printf hello; exec sleep 600'");
         let deadline = Instant::now() + Duration::from_secs(60);
-        while terminals.tap_slot("pane").0.lock().unwrap().tap.is_some() {
+        while !terminals.tap_slot("pane").0.lock().unwrap().0.is_empty() {
             assert!(Instant::now() < deadline, "a dead tap is still attached");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -872,7 +996,7 @@ mod tests {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         let received = Arc::new(AtomicU64::new(0));
         let count = received.clone();
-        terminals.attach("pane", "view", Box::new(move |bytes| {
+        terminals.attach("main", "pane", "view", Box::new(move |bytes| {
             count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             true
         }));
@@ -957,7 +1081,7 @@ mod tests {
         // A second view of the same pane takes over (the first was disposed, its detach is still on its way).
         let second = Arc::new(AtomicU64::new(0));
         let count = second.clone();
-        terminals.attach("pane", "second", Box::new(move |bytes| {
+        terminals.attach("main", "pane", "second", Box::new(move |bytes| {
             count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             true
         }));
@@ -1025,7 +1149,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let received = Arc::new(AtomicU64::new(0));
         let (count, seen) = (received.clone(), events.clone());
-        terminals.attach("pane", "view", Box::new(move |bytes| {
+        terminals.attach("main", "pane", "view", Box::new(move |bytes| {
             let before = count.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             if before == 0 {
                 seen.lock().unwrap().push(("first output", Instant::now()));
@@ -1070,6 +1194,35 @@ mod tests {
     }
 
     #[test]
+    fn shell_tabs_are_listed_with_their_names_for_any_window_and_agent_panes_are_not() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["session-a:1", "session-a:2", "session-b:1", "tab:agent"] {
+            pane(&terminals, &sink, &dir, id, "cat");
+        }
+        terminals.set_title("session-a:2", "dev server");
+        terminals.set_title("tab:agent", "ignored");
+        terminals.set_title("session-z:9", "no such pane");
+
+        let shells = terminals.shells();
+        assert_eq!(shells.iter().map(|shell| (shell.id.as_str(), shell.session_id.as_str(), shell.title.as_deref())).collect::<Vec<_>>(), vec![
+            ("session-a:1", "session-a", None),
+            ("session-a:2", "session-a", Some("dev server")),
+            ("session-b:1", "session-b", None),
+        ]);
+        assert!(shells.iter().all(|shell| !shell.exited && shell.cwd == dir.path().to_str().unwrap()));
+        assert!(terminals.shell("tab:agent").is_none());
+
+        // A closed shell is no longer listed, and its name goes with it.
+        terminals.kill("session-a:2");
+        assert!(terminals.shell("session-a:2").is_none());
+        assert_eq!(terminals.shells().len(), 2);
+        assert!(!terminals.titles.lock().unwrap().contains_key("session-a:2"));
+        terminals.kill_all();
+    }
+
+    #[test]
     fn bulk_close_releases_unused_transport_slots() {
         let terminals = Terminals::new();
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
@@ -1078,7 +1231,7 @@ mod tests {
             pane(&terminals, &sink, &dir, id, "cat");
         }
         let (tap, _output) = collector();
-        terminals.attach("viewed", "view", tap);
+        terminals.attach("main", "viewed", "view", tap);
         terminals.kill_all_and_wait(&["unseen".into(), "viewed".into()], Duration::from_secs(3));
         let slots = terminals.taps.lock().unwrap();
         assert!(!slots.contains_key("unseen"));

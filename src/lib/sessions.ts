@@ -6,6 +6,8 @@ import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
+import { isFloatingWindow } from "@/lib/appWindow";
+import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
   Workspace, HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
@@ -131,6 +133,10 @@ export async function bootSessions() {
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));
     await listen<string>("session_deleted", (e) => removeSessions([e.payload]));
     await listen<string>("workspaces_changed", (e) => void refreshWorkspaces(e.payload));
+    // Another window added, removed or edited a project.
+    await listen("projects_changed", () => void refreshProjects());
+    // The floating window hands a session over ("Open in main window").
+    if (!isFloatingWindow()) await listen<OpenTarget>("open_session", (e) => openTarget(e.payload));
   } catch {
     /* outside a webview */
   }
@@ -164,6 +170,8 @@ export function upsertSession(s: SessionEntry) {
   set({ sessions });
   // After the list changed, so no view of a closed tab is left to ask for its terminal again.
   if (closed.length) queueMicrotask(() => dropTabTerminals(closed));
+  // A quick chat has no project, so there are no workspaces to catch up on.
+  if (s.kind === "quick") return;
   // A session that just cut its own worktree is ahead of the cached workspace
   // list, and the sidebar files an unknown cwd under "missing". Every creation
   // path lands here, so the catch-up belongs here rather than in each caller.
@@ -204,8 +212,25 @@ function focusProject(path: string | null, patch: Partial<State> = {}) {
 export function selectSession(id: string | null) {
   const selected = id ? state.sessions.find((session) => session.id === id) : null;
   const patch: Partial<State> = { selectedSessionId: id, view: "new", newSessionPreset: null, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null };
-  if (selected) focusProject(selected.projectPath, patch);
+  // A quick chat has no project to focus: the one in focus stays as it is.
+  if (selected && selected.kind !== "quick") focusProject(selected.projectPath, patch);
   else set(patch);
+}
+
+/** Show a session another window asked for, on the tab it named. */
+export function openTarget(target: OpenTarget) {
+  if (!state.sessions.some((session) => session.id === target.sessionId)) return;
+  selectSession(target.sessionId);
+  if (target.tabId) setSelectedAgent(target.sessionId, target.tabId);
+}
+
+async function refreshProjects() {
+  try {
+    const projects = await api.listProjects();
+    set({ projects: projects.projects });
+  } catch {
+    /* keep what is listed; the next change tries again */
+  }
 }
 
 /**
@@ -458,6 +483,29 @@ export async function renameSession(id: string, title: string) {
 export async function deleteSession(id: string) {
   await api.deleteSession(id);
   removeSessions([id]);
+}
+
+/** Start a quick chat: a session with no project. The caller selects it and sends the first prompt. */
+export async function createQuickChat(req: NewQuickChat) {
+  const session = await api.createQuickChat(req);
+  upsertSession(session);
+  return session;
+}
+
+/** Run a quick chat in another folder (`null`: its scratch directory again). The folder does not become a project. */
+export async function setQuickChatCwd(id: string, cwd: string | null) {
+  const session = await api.setQuickChatCwd(id, cwd);
+  upsertSession(session);
+  return session;
+}
+
+/** Turn a quick chat into an ordinary session of a project, keeping its history. */
+export async function moveQuickChatToProject(id: string, projectPath: string) {
+  const session = await api.moveQuickChatToProject(id, projectPath);
+  // The project may be new to this window; the event that says so can land after the session does.
+  await refreshProjects();
+  upsertSession(session);
+  return session;
 }
 
 /** Keep the worktree on disk but run the session in the project itself from now on. */

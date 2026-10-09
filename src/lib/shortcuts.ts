@@ -52,6 +52,8 @@ const ACTIONS = [
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"] },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"] },
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"] },
+  // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
+  { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"] },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },

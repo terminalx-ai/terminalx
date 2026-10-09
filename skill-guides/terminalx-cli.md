@@ -50,7 +50,7 @@ When automation passes ids between commands, copy the full ids from JSON output.
 ```text
 terminalx status --json
 terminalx projects list --json
-terminalx sessions list [--project <project>] --json
+terminalx sessions list [--project <project> | --quick] --json
 terminalx sessions show <session> --json
 terminalx tabs list <session> --json
 ```
@@ -95,9 +95,50 @@ terminalx sessions create --project <project> --agent codex --prompt "Fix the ti
 terminalx sessions rename <session> --title "#203 ready for review" --json
 ```
 
-Creation returns `sessionId`, `tabId`, the final `title`, `worktreeName`, `branch`, and `path`,
-alongside the full `session` and prompt delivery `outcome`. Renaming a session changes its
-title without changing its worktree name.
+Creation returns `sessionId`, `tabId`, the final `title`, `kind`, `worktreeName`, `branch`, and
+`path`, alongside the full `session` and prompt delivery `outcome`. Renaming a session changes
+its title without changing its worktree name.
+
+### Start a quick chat (no project)
+
+```text
+terminalx sessions create --quick \
+  --agent <claude|codex> \
+  --prompt <text> \
+  [--title <text>] [--cwd <directory>] \
+  [--model <id>] [--effort <level>] [--mode <mode>] \
+  --json
+```
+
+A quick chat is a session with no project. Use it for a question or a one-off task that
+belongs to no attached project; do not attach a folder as a project just to ask something.
+It runs in a scratch directory of its own under the TerminalX home, with no worktree and no
+branch, and the returned `path` is that directory. `--cwd` runs it in an existing directory
+instead; that directory is used as it is and is not added as a project.
+
+`--project`, `--name`, `--worktree` and `--on-main` do not apply to `--quick` and are refused.
+Without `--title`, the first line of the prompt is the title. The returned `kind` is `quick`.
+
+`sessions list` includes quick chats, each with `"kind": "quick"`; a session of a project has
+no `kind`. `--quick` lists only them. `--project` never matches one, even when its `--cwd` is
+inside that project. `sessions show`, `sessions rename`, `tabs list`, `send`, `read` and
+`wait` take a quick chat's id like any other session's.
+
+Deleting a quick chat in the app deletes its scratch directory and what is in it. Anything a
+reader should keep belongs somewhere else.
+
+### The floating chat window
+
+```text
+terminalx floating show [--session <session>] --json
+terminalx floating hide --json
+terminalx floating toggle --json
+```
+
+The floating window is the desktop app's compact chat window. `show` brings it up and focuses
+it, on `<session>` when one is named; `hide` puts it away without stopping anything it shows;
+`toggle` hides it when it is up and focused and shows it otherwise. These need the desktop
+app: a headless runtime answers `unsupported`.
 
 ### Send, read, and wait
 

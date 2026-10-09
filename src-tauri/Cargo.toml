@@ -23,6 +23,7 @@ desktop = [
     "dep:tauri-plugin-process",
     "dep:tauri-plugin-shell",
     "dep:tauri-plugin-window-state",
+    "dep:tauri-plugin-global-shortcut",
     "dep:tauri-plugin-notification",
     "dep:tauri-plugin-updater",
     "dep:cpal",
@@ -107,6 +108,9 @@ url = "2"
 # Already in the tree through `url`: Unicode normalisation, for names that are one file on this disk.
 icu_normalizer = "2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# Held below 2.4: that release needs Tauri 2.12, and the Rust crate must stay on
+# the same minor as @tauri-apps/api (2.11) or `tauri build` refuses the mismatch.
+tauri-plugin-global-shortcut = { version = "~2.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

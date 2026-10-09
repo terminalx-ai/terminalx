@@ -131,6 +131,19 @@ media?.addEventListener("change", () => {
 
 if (typeof document !== "undefined") apply();
 
+// Another window of the app changed the theme or the mode: take it here too,
+// so the floating window never sits in one palette beside the main one in another.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if ((e.key !== THEME_KEY && e.key !== MODE_KEY) || e.storageArea !== localStorage) return;
+    const theme = coerceTheme(readStorage(THEME_KEY));
+    const mode = coerceMode(readStorage(MODE_KEY));
+    if (theme === state.theme && mode === state.mode) return;
+    state = { theme, mode, resolvedMode: resolveMode(theme, mode) };
+    emit();
+  });
+}
+
 export function useTheme(): ThemeState {
   return useSyncExternalStore(
     (cb) => {

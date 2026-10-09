@@ -2,6 +2,7 @@ import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "@/lib/api";
 import { openWorkspaceDelete } from "@/lib/dialogs";
 import { deleteSession } from "@/lib/sessions";
+import { inScratch, isQuickChat } from "@/lib/quickChats";
 import type { SessionEntry } from "@/types/session";
 
 const SESSION_ONLY = "Delete session";
@@ -26,7 +27,16 @@ export async function confirmDeleteSession(session: SessionEntry) {
     workspace = await api.soleWorkspaceOf(session.id).catch(() => null);
   }
   const base = `Delete "${session.title}"? Its transcript and attachments are removed.`;
-  if (!workspace) {
+  if (isQuickChat(session)) {
+    // A quick chat's scratch folder goes with it. Files in it are named
+    // before they are deleted; an empty one needs no mention.
+    const scratch = await api.quickChatScratch(session.id).catch(() => null);
+    const count = scratch?.files ?? 0;
+    const files = count > 0 ? `\n\nIts scratch folder holds ${count}${scratch?.more ? " or more" : ""} file${count === 1 && !scratch?.more ? "" : "s"}, which ${count === 1 && !scratch?.more ? "is" : "are"} deleted with it:\n${scratch!.path}` : "";
+    const elsewhere = inScratch(session) ? "" : `\n\nThe folder it runs in (${session.cwd}) is yours and is not touched.`;
+    const yes = await ask(`${base}${files}${elsewhere}`, { title: "Delete quick chat", kind: "warning", okLabel: count > 0 ? "Delete chat and files" : "Delete", cancelLabel: "Cancel" }).catch(() => false);
+    if (!yes) return;
+  } else if (!workspace) {
     const stays = session.worktreeName && !session.worktreeRemoved ? ` Its workspace ${session.worktreeName} stays, with the other sessions in it.` : "";
     const yes = await ask(`${base}${stays}`, { title: "Delete session", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }).catch(() => false);
     if (!yes) return;

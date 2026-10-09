@@ -195,4 +195,33 @@ describe("the sidebar's session filter (local)", () => {
       });
     }
   });
+
+  it("lists a quick chat in its own section, and opening it focuses no project", async () => {
+    const scratch = "/home/.raccoon/quick/quick-1";
+    const quick = { ...session("quick-1", scratch, "What is a monad?", "idle"), kind: "quick" } as SessionEntry;
+    act(() => sessions.upsertSession(quick));
+    try {
+      mount();
+      const section = screen.getByTestId("quick-chats-section");
+      expect(within(section).getByText("What is a monad?")).toBeTruthy();
+      // It is under no project.
+      expect(projectNames()).toEqual(["Api", "Quiet", "Web"]);
+      const focused = sessions.getSessionStore().selectedProject;
+      mocks.invoke.mockClear();
+
+      act(() => sessions.selectSession("quick-1"));
+      await act(async () => void (await Promise.resolve()));
+      expect(sessions.getSessionStore().selectedSessionId).toBe("quick-1");
+      // The project in focus stays where it was; the scratch folder is never treated as one.
+      expect(sessions.getSessionStore().selectedProject).toBe(focused);
+      expect(mocks.invoke.mock.calls.filter(([command, args]) => command === "list_workspaces" && (args as { projectPath?: string }).projectPath === scratch)).toEqual([]);
+
+      // A filter that it does not match hides it like any session, unless it is the one on screen.
+      act(() => sessions.selectSession(null));
+      await choose("Needs you");
+      expect(screen.queryByTestId("quick-chats-section")).toBeNull();
+    } finally {
+      act(() => sessions.removeSessions(["quick-1"]));
+    }
+  });
 });

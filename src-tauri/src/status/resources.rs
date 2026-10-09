@@ -211,6 +211,15 @@ fn host_sample() -> HostSample {
     }
 }
 
+/// The project a session's processes are listed under. A quick chat has
+/// none; its path is a scratch directory named for the session.
+fn project_name_of(session: &index::SessionEntry, project_names: &HashMap<String, String>) -> String {
+    if session.is_quick() {
+        return "Quick chats".into();
+    }
+    project_names.get(&session.project_path).cloned().unwrap_or_else(|| projects::project_name(&session.project_path))
+}
+
 fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: &HashMap<String, String>, aggregate: Option<Aggregate>) -> ProcSample {
     if let Some(tab_id) = pane.id.strip_prefix("tab:") {
         if let Some((session, tab)) = sessions.iter().find_map(|session| session.tab(tab_id).map(|tab| (session, tab))) {
@@ -221,7 +230,7 @@ fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: 
                 session_id: Some(session.id.clone()),
                 session_title: Some(session.title.clone()),
                 project_path: Some(session.project_path.clone()),
-                project_name: project_names.get(&session.project_path).cloned().or_else(|| Some(projects::project_name(&session.project_path))),
+                project_name: Some(project_name_of(session, project_names)),
                 cwd: pane.cwd.clone(),
                 kind: "agent".into(),
                 harness: Some(tab.harness.clone()),
@@ -265,9 +274,7 @@ fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: 
         session_id: session.map(|session| session.id.clone()),
         session_title: session.map(|session| session.title.clone()),
         project_path: session.map(|session| session.project_path.clone()),
-        project_name: session.map(|session| {
-            project_names.get(&session.project_path).cloned().unwrap_or_else(|| projects::project_name(&session.project_path))
-        }),
+        project_name: session.map(|session| project_name_of(session, project_names)),
         cwd: pane.cwd.clone(),
         kind: "shell".into(),
         harness: None,
@@ -465,6 +472,7 @@ mod tests {
         };
         let session = index::SessionEntry {
             id: "s1".into(), project_path: "/work".into(), cwd: "/work".into(), worktree_name: None,
+            kind: crate::store::index::SessionKind::Project,
             branch: None, base_ref: None, worktree_base: None, worktree_removed: false, removed_workspace: None, issue: None, automation: None,
             title: "Safe session".into(),
             created: String::new(), modified: String::new(), archived: false, pinned: false, tabs: vec![tab],

@@ -1,5 +1,32 @@
 # TerminalX changelog
 
+## Unreleased
+
+### Floating chat window and quick chats
+
+- A floating chat window: a small TerminalX window for asking an agent
+  something, or opening a terminal, without attaching or choosing a project.
+  It opens from any app with a system-wide shortcut (⌥⇧Space by default,
+  changeable or off in Settings → Shortcuts), from the tray icon, from the
+  main window and with `terminalx floating show`. It stays on top when
+  pinned, remembers its size and position, and hides on Escape. Hiding it
+  stops nothing. (#395)
+- Quick chats: sessions with no project. Each runs in a scratch folder of its
+  own, with no worktree or branch, and has everything a project session has:
+  chat and terminal view, new terminals and agent tabs, attachments,
+  dictation, permissions, and Continue in New Session. They are listed under
+  Quick chats in the sidebar, in the Agent Dashboard and in the command
+  palette. (#395)
+- Point a quick chat at any folder without making it a project, or move it
+  into a project with its history. Idle quick chats are deleted after 30 days
+  by default (Settings → General). (#395)
+- `terminalx sessions create --quick` starts a quick chat, and
+  `sessions list --quick` lists them. (#395)
+- A session open in both windows stays the same in both: rename, pin, archive
+  and tab changes, terminals and their names, permission and question cards.
+  Only one window sends a desktop notification. (#395)
+- Sessions can be renamed from their menu in the sidebar. (#395)
+
 ## 0.2.8
 
 Cloud workspaces gain a full composer, port previews, a local file mirror and

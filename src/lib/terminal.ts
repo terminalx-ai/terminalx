@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import { pty } from "@/lib/api";
+import { pty, type ShellPane } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
 
@@ -14,6 +14,11 @@ import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
  * when the xterm is made (`TerminalView`). A pane that no view has shown yet
  * costs this window nothing: the backend keeps its bounded scrollback and
  * hands it over at attach, so switching to it never loses the tail.
+ *
+ * The shell tabs themselves are the backend's: it lists them for a window
+ * that loads later and announces each one opened, renamed or closed, so the
+ * main window and the floating one show the same tabs for a session. Which
+ * tab a window has selected stays that window's own.
  */
 export interface TerminalPane {
   id: string;
@@ -209,12 +214,36 @@ export function subscribeTerminals(): Promise<void> {
   return (subscribed ??= register());
 }
 
+/** List a shell tab another window opened, or one that was open before this page loaded. */
+function adoptShell(shell: ShellPane) {
+  const known = state.panes.find((pane) => pane.id === shell.id);
+  if (known) {
+    // Its name may have changed in the other window.
+    if (shell.title && known.title !== shell.title) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title: shell.title! } : pane)) });
+    return;
+  }
+  const pane: TerminalPane = {
+    id: shell.id,
+    sessionId: shell.sessionId,
+    title: shell.title ?? `Terminal ${nextTerminalNumber(shell.sessionId)}`,
+    created: new Date().toISOString(),
+    exited: shell.exited,
+    exitCode: null,
+  };
+  // Listed, not selected: a tab opened in the other window must not take this window's view.
+  set({ panes: [...state.panes, pane], active: state.active[shell.sessionId] ? state.active : { ...state.active, [shell.sessionId]: shell.id } });
+}
+
 async function register() {
   try {
     await listen<{ id: string; code: number | null }>("pty_exit", (e) => {
       const { id, code } = e.payload;
       set({ panes: state.panes.map((p) => (p.id === id ? { ...p, exited: true, exitCode: code } : p)) });
     });
+    await listen<ShellPane>("pty_opened", (e) => adoptShell(e.payload));
+    await listen<ShellPane>("pty_renamed", (e) => adoptShell(e.payload));
+    // Closed in another window: its process is already gone, so only this window's tab and xterm are left to drop.
+    await listen<string>("pty_closed", (e) => forgetPane(e.payload));
   } catch {
     /* outside a webview */
   }
@@ -226,16 +255,48 @@ async function register() {
   } catch {
     /* outside a webview */
   }
+  // The shells that were open before this page: the floating window opened
+  // after the main one, or either of them loaded afresh. Not waited for here:
+  // attaching a terminal must never hang on this list.
+  shellsListed = Promise.resolve()
+    .then(() => pty.shells())
+    .then((shells) => {
+      for (const shell of shells ?? []) adoptShell(shell);
+    })
+    .catch(() => {
+      /* outside a webview, or a backend that does not list them */
+    });
+}
+
+/** Settles once the shells that were already open are listed, or after a moment if the backend does not answer. */
+let shellsListed: Promise<void> = Promise.resolve();
+const SHELL_LIST_WAIT_MS = 1500;
+function shellsKnown(): Promise<void> {
+  return Promise.race([shellsListed, new Promise<void>((resolve) => setTimeout(resolve, SHELL_LIST_WAIT_MS))]);
+}
+
+/** The number a session's next shell tab takes: one past the highest "Terminal N" it has in any window. */
+function nextTerminalNumber(sessionId: string): number {
+  const named = state.panes
+    .filter((pane) => pane.sessionId === sessionId && !pane.hidden)
+    .map((pane) => Number(/^Terminal (\d+)$/.exec(pane.title)?.[1] ?? 0));
+  return Math.max(terminalNumbers.get(sessionId) ?? 0, ...named) + 1;
 }
 
 let counter = 0;
+/**
+ * This page's own mark in the ids it makes. Two windows open shells for the
+ * same session, each counting from one: without it, two opened in the same
+ * millisecond would be given one id, and the second would be taken for the first.
+ */
+const windowMark = Math.random().toString(36).slice(2, 6);
 const terminalNumbers = new Map<string, number>();
 export async function openTerminal(sessionId: string, cwd: string, cols = 100, rows = 24, opts: OpenTerminalOptions = {}): Promise<TerminalPane> {
   await subscribeTerminals();
   counter++;
-  const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}`;
+  const id = opts.id ?? `${sessionId}:${Date.now().toString(36)}${counter}${windowMark}`;
   if (state.panes.some((p) => p.id === id)) await closeTerminal(id);
-  const number = (terminalNumbers.get(sessionId) ?? 0) + 1;
+  const number = nextTerminalNumber(sessionId);
   if (!opts.hidden && !opts.title) terminalNumbers.set(sessionId, number);
   const pane: TerminalPane = {
     id,
@@ -252,7 +313,8 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
     selected: opts.hidden ? state.selected : { ...state.selected, [sessionId]: { kind: "terminal", id } },
   });
   try {
-    await pty.spawn(id, cwd, cols, rows, opts.command);
+    // A shell tab is named for every window; an agent tab's own pane is not a tab.
+    await pty.spawn(id, cwd, cols, rows, opts.command, opts.hidden ? undefined : pane.title);
   } catch (e) {
     const rest = state.panes.filter((p) => p.id !== id);
     const fallback = rest.filter((p) => p.sessionId === sessionId && !p.hidden).at(-1);
@@ -272,9 +334,15 @@ export async function openTerminal(sessionId: string, cwd: string, cols = 100, r
 }
 
 export async function closeTerminal(id: string) {
+  if (!state.panes.some((p) => p.id === id)) return;
+  await pty.kill(id).catch(() => {});
+  forgetPane(id);
+}
+
+/** Drop a pane from this window: its tab, its selection and its xterm. Its process is not touched. */
+function forgetPane(id: string) {
   const pane = state.panes.find((p) => p.id === id);
   if (!pane) return;
-  await pty.kill(id).catch(() => {});
   if (pane.hidden) {
     set({ panes: state.panes.filter((p) => p.id !== id) });
     disposeInstance(id);
@@ -417,7 +485,17 @@ export function activateLatestTerminal(sessionId: string, cwd: string): Promise<
   }
   const pending = terminalActivations.get(sessionId);
   if (pending) return pending;
-  const request = openTerminal(sessionId, cwd)
+  // A shell another window opened for this session is listed once this window
+  // has subscribed; opening a second one beside it would be a surprise.
+  const request = subscribeTerminals()
+    .then(shellsKnown)
+    .then(() => {
+      const listed = state.panes.filter((p) => p.sessionId === sessionId && !p.hidden);
+      const existing = listed[listed.length - 1];
+      if (!existing) return openTerminal(sessionId, cwd);
+      setActiveTerminal(sessionId, existing.id);
+      return existing;
+    })
     .finally(() => terminalActivations.delete(sessionId));
   terminalActivations.set(sessionId, request);
   return request;
@@ -425,6 +503,8 @@ export function activateLatestTerminal(sessionId: string, cwd: string): Promise<
 
 export function renameTerminal(id: string, title: string) {
   set({ panes: state.panes.map((p) => (p.id === id ? { ...p, title } : p)) });
+  // For the other window too.
+  void pty.rename(id, title).catch(() => {});
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

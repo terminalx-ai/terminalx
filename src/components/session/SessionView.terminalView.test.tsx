@@ -228,6 +228,107 @@ describe("the chat / terminal switch on a local agent tab", () => {
   });
 });
 
+describe("a quick chat in the floating window's compact chrome", () => {
+  const scratch = "/Users/me/.raccoon/quick/quick-1";
+  const quick = (): SessionEntry => ({
+    id: "quick-1",
+    kind: "quick",
+    projectPath: scratch,
+    cwd: scratch,
+    title: "What is a monad?",
+    created: "",
+    modified: "",
+    archived: false,
+    pinned: false,
+    worktreeRemoved: false,
+    tabs: [{ id: "qt-1", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "2026-10-01T00:00:00.000Z", modified: "" }],
+    activeTab: "qt-1",
+  });
+  const compact = { compact: true, tabStrip: true, leading: <span data-testid="switcher">What is a monad?</span>, trailing: <button type="button">Open in main window</button> };
+  const spawned = () => guard.calls.filter((call) => call.command === "pty_spawn").map((call) => call.args as { id: string; cwd: string; title: string | null });
+
+  beforeEach(() => {
+    guard.strict = false;
+    guard.local = () => null;
+  });
+
+  it("is the same session view with less around it: no sidebar toggle, no panel, the window's own controls in the header", async () => {
+    const session = quick();
+    upsertSession(session);
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    // What a compact window has no room for.
+    expect(screen.queryByRole("button", { name: "Show sidebar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
+    expect(screen.queryByTestId("session-breadcrumb")).toBeNull();
+    // What the window puts there instead.
+    expect(screen.getByTestId("switcher")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open in main window" })).toBeTruthy();
+    // And everything a session can do in the main window.
+    expect(screen.getByRole("button", { name: "New tab" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue in New Session…" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Show terminal view" })).toBeTruthy();
+    // No git was asked about a scratch folder.
+    expect(guard.calls.map((call) => call.command)).not.toContain("work_status");
+  });
+
+  it("switches the agent tab between chat and terminal view", async () => {
+    const session = quick();
+    upsertSession(session);
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    fireEvent.click(await screen.findByRole("button", { name: "Show terminal view" }));
+    expect(await screen.findByRole("button", { name: "Back to chat" })).toBeTruthy();
+    expect(screen.getByTestId("xterm").textContent).toBe("tab:qt-1");
+    expect(guard.calls.map((call) => call.command)).toContain("ensure_tab_started");
+    fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+    expect(await screen.findByRole("button", { name: "Show terminal view" })).toBeTruthy();
+  });
+
+  it("opens plain terminals beside the agent tab, in the chat's own folder, and lists every tab in a strip", async () => {
+    const session = quick();
+    upsertSession(session);
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    // One tab: nothing to switch between, so no strip.
+    expect(screen.queryByTestId("session-tab-strip")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    const strip = await screen.findByTestId("session-tab-strip");
+    await waitFor(() => expect(spawned()).toHaveLength(1));
+    // In the session's working directory: the scratch folder, not the home directory or a repository.
+    expect(spawned()[0]).toMatchObject({ cwd: scratch, title: "Terminal 1" });
+    expect(spawned()[0].id.startsWith("quick-1:")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    await waitFor(() => expect(spawned()).toHaveLength(2));
+    const tabs = () => [...strip.querySelectorAll('[role="tab"]')];
+    await waitFor(() => expect(tabs().map((tab) => tab.textContent)).toEqual(["claude", "Terminal 1", "Terminal 2"]));
+    // The newest terminal is on screen; the agent tab is one click away and still there.
+    expect(tabs().map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "false", "true"]);
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(tabs()[0].getAttribute("aria-selected")).toBe("true"));
+    expect(guard.calls.find((call) => call.command === "set_active_tab")?.args).toEqual({ sessionId: "quick-1", tabId: "qt-1" });
+
+    // Closing one terminal leaves the other and the agent.
+    fireEvent.click(screen.getByRole("button", { name: "Close Terminal 1" }));
+    await waitFor(() => expect(tabs().map((tab) => tab.textContent)).toEqual(["claude", "Terminal 2"]));
+    expect(guard.calls.filter((call) => call.command === "pty_kill")).toHaveLength(1);
+  });
+
+  it("in the main window, is named a quick chat and says where it runs instead of showing a project or a branch", async () => {
+    const session = { ...quick(), cwd: "/Users/me/notes" };
+    guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });
+    upsertSession(session);
+    render(wrap(<SessionView session={session} sidebarOpen onToggleSidebar={() => undefined} />));
+    expect(screen.getByTestId("session-project").textContent).toBe("Quick chat");
+    expect(screen.getByTestId("session-quick-place").textContent).toBe("notes");
+    expect(screen.queryByTestId("session-branch")).toBeNull();
+    // The main window's own chrome is untouched.
+    expect(screen.getByRole("button", { name: "Toggle panel" })).toBeTruthy();
+    expect(screen.queryByTestId("session-tab-strip")).toBeNull();
+  });
+});
+
 describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
   it("shows the agent's live terminal, types into it over the workspace connection, and comes back to the same turn", async () => {
     await open();

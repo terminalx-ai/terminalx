@@ -20,6 +20,7 @@ import {
 import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { SessionEntry } from "@/types/session";
+import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 
@@ -42,6 +43,9 @@ function openCard(session: CardSession) {
  * and the page never scrolls sideways: under 760px of room — narrower than
  * three readable cards — they stack and the whole area scrolls instead.
  */
+/** The dashboard filter that stands for every quick chat: no project path can be this. */
+const QUICK_CHATS_FILTER = "quick:";
+
 export function AgentDashboard() {
   const store = useSessionStore();
   const [query, setQuery] = useState("");
@@ -63,13 +67,22 @@ export function AgentDashboard() {
     return names;
   }, [cloudLive]);
 
+  // Quick chats have no project. They are named, searched and filtered as one group, under a key no path can be.
+  const quickPaths = useMemo(() => new Set(store.sessions.filter(isQuickChat).map((s) => s.projectPath)), [store.sessions]);
+  const hasQuickChats = localLive.some(isQuickChat);
   const projectName = useCallback(
-    (path: string) => cloudProjects.get(path) ?? store.projects.find((p) => p.path === path)?.name ?? path.replace(/\/+$/, "").split("/").pop() ?? path,
-    [store.projects, cloudProjects],
+    (path: string) => (quickPaths.has(path) ? QUICK_CHATS_LABEL : (cloudProjects.get(path) ?? store.projects.find((p) => p.path === path)?.name ?? path.replace(/\/+$/, "").split("/").pop() ?? path)),
+    [store.projects, cloudProjects, quickPaths],
+  );
+  // The filter holds project paths; choosing "Quick chats" stands for every quick chat's own path.
+  const pathFilters = useMemo(
+    // The key itself stays in the list: with no quick chat left it still matches nothing, rather than turning the filter off.
+    () => (filters.projects.includes(QUICK_CHATS_FILTER) ? { ...filters, projects: [...filters.projects, ...quickPaths] } : filters),
+    [filters, quickPaths],
   );
   const buckets = useMemo(
-    () => bucketSessions(sessions, { query, filters, projectName }),
-    [sessions, query, filters, projectName],
+    () => bucketSessions(sessions, { query, filters: pathFilters, projectName }),
+    [sessions, query, pathFilters, projectName],
   );
   // Only the done column is capped; the other two are meant to be read whole.
   const shown: Record<ColumnId, CardSession[]> = useMemo(
@@ -180,6 +193,15 @@ export function AgentDashboard() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="max-h-(--radix-dropdown-menu-content-available-height) w-56 overflow-y-auto scrollbar-thin">
               <DropdownMenuLabel>Project</DropdownMenuLabel>
+              {hasQuickChats && (
+                <DropdownMenuCheckboxItem
+                  checked={filters.projects.includes(QUICK_CHATS_FILTER)}
+                  onSelect={(e) => e.preventDefault()}
+                  onCheckedChange={() => setFilters((f) => ({ ...f, projects: toggleFilter(f.projects, QUICK_CHATS_FILTER) }))}
+                >
+                  <span className="truncate">{QUICK_CHATS_LABEL}</span>
+                </DropdownMenuCheckboxItem>
+              )}
               {store.projects.map((p) => (
                 <DropdownMenuCheckboxItem
                   key={p.path}

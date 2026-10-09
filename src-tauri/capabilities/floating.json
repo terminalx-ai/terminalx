@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "floating",
+  "description": "Capabilities for the floating chat window: what a session view needs, and no more. It cannot update or restart the app, and it sends no desktop notifications and keeps no dock badge: the main window does both.",
+  "windows": [
+    "floating"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-theme",
+    "core:window:allow-minimize",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-focus",
+    "core:webview:allow-set-webview-zoom",
+    "opener:default",
+    "dialog:default",
+    "shell:allow-open",
+    "core:webview:default",
+    "core:window:default",
+    "core:event:default"
+  ]
+}

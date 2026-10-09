@@ -232,6 +232,16 @@ Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.
 
+### Quick chats
+
+Quick chats (sessions with no project, see
+[FLOATING-WINDOW.md](FLOATING-WINDOW.md)) are visible to paired devices. Each
+host-published session summary carries `kind` (`project` or `quick`). A quick
+chat's `project` is the fixed group name `Quick chats`, and its `worktree` is
+`scratch` or the name of the folder it runs in, so the phone shows one group
+rather than one per scratch directory. A phone cannot create one: it reads
+and steers existing sessions only, as before.
+
 ## Terminal, steering, and permissions
 
 **Contract:** `docs/reference/remote-wire-compatibility.md` § “Rule 2 — a

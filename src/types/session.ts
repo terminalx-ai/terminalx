@@ -35,8 +35,21 @@ export interface RemovedWorkspace {
   branch?: string | null;
 }
 
+/**
+ * What a session belongs to. `project`, or absent as every session stored
+ * before quick chats is, is a session of a project the reader attached.
+ * `quick` is a quick chat: it has no project.
+ */
+export type SessionKind = "project" | "quick";
+
 export interface SessionEntry {
   id: string;
+  kind?: SessionKind;
+  /**
+   * The session's project. A quick chat has none: this is then its scratch
+   * directory under the TerminalX home, which is in no project list. Ask
+   * `isQuickChat` (`@/lib/quickChats`) before treating it as a project.
+   */
   projectPath: string;
   cwd: string;
   worktreeName?: string | null;

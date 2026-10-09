@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { suspendHotkeys, useHotkey } from "@/lib/hotkeys";
+import { SystemShortcutSection } from "./FloatingWindowSettings";
 import {
   HOLD_CODES,
   SHORTCUT_ACTIONS,
@@ -71,6 +72,7 @@ export function ShortcutsTab() {
           </Button>
         )}
       </div>
+      <SystemShortcutSection />
       {SHORTCUT_GROUPS.map((group) => (
         <section key={group} aria-label={`${group} shortcuts`}>
           <div className="mb-1 text-xs font-medium uppercase tracking-wide text-faint">{group}</div>

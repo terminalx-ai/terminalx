@@ -394,6 +394,16 @@ impl ControlService {
                     .map_err(ControlError::internal)?)
             }
             "sessions.create" => self.sessions_create(params),
+            // The floating window is the desktop app's; the request is handed
+            // to it as an event, so this service needs no window of its own.
+            "floating.show" | "floating.hide" | "floating.toggle" => {
+                if !self.has_webview() {
+                    return Err(ControlError::new("unsupported", "The floating chat window needs the TerminalX desktop app; this runtime has no window.", None));
+                }
+                let action = command.trim_start_matches("floating.");
+                self.sink.emit(crate::session_ops::FLOATING_REQUEST_EVENT, &json!({ "action": action, "session": optional_string(&params, "session") }));
+                Ok(json!({ "requested": action }))
+            }
             "sessions.rename" => {
                 let session = resolve_session(&required_string(&params, "session")?)?;
                 let title = params.get("title").and_then(Value::as_str)
@@ -464,9 +474,16 @@ impl ControlService {
 
     fn sessions_list(&self, params: Value) -> Result<Value, ControlError> {
         let mut sessions = index::load().map_err(ControlError::internal)?;
+        let quick = params.get("quick").and_then(Value::as_bool).unwrap_or(false);
         if let Some(selector) = optional_string(&params, "project") {
+            if quick {
+                return Err(ControlError::invalid("--quick and --project are mutually exclusive: a quick chat has no project."));
+            }
             let project = resolve_project(&selector)?;
-            sessions.retain(|s| s.project_path == project.path);
+            sessions.retain(|s| s.project() == Some(project.path.as_str()));
+        }
+        if quick {
+            sessions.retain(SessionEntry::is_quick);
         }
         Ok(json!({"sessions": sessions}))
     }
@@ -475,13 +492,22 @@ impl ControlService {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Params {
-            project: String,
+            /// Absent for a quick chat, which has none.
+            #[serde(default)]
+            project: Option<String>,
+            /// A quick chat: no project, a scratch directory of its own.
+            #[serde(default)]
+            quick: bool,
+            /// A folder for a quick chat to run in instead of its scratch directory.
+            #[serde(default)]
+            cwd: Option<String>,
             agent: String,
             prompt: String,
             #[serde(default)]
             title: Option<String>,
             #[serde(default)]
             name: Option<String>,
+            #[serde(default)]
             use_worktree: bool,
             #[serde(default)]
             on_main: bool,
@@ -499,9 +525,21 @@ impl ControlService {
         if p.prompt.trim().is_empty() {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }
-        validate_control_session_target(p.use_worktree, p.on_main)?;
-        if p.name.is_some() && p.on_main {
-            return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
+        if p.quick {
+            if p.project.is_some() || p.name.is_some() || p.use_worktree || p.on_main {
+                return Err(ControlError::invalid("A quick chat has no project, so --project, --name, --worktree and --on-main do not apply to it."));
+            }
+        } else {
+            if p.project.is_none() {
+                return Err(ControlError::invalid("Missing --project. Use --quick for a chat with no project."));
+            }
+            if p.cwd.is_some() {
+                return Err(ControlError::invalid("--cwd is for a quick chat; a project session runs in its project or a worktree of it."));
+            }
+            validate_control_session_target(p.use_worktree, p.on_main)?;
+            if p.name.is_some() && p.on_main {
+                return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
+            }
         }
         let available = crate::harness::offered()
             .into_iter()
@@ -524,29 +562,35 @@ impl ControlService {
                 )));
             }
         }
-        let project = resolve_project(&p.project)?;
-        let entry = crate::session_ops::create_named_session_blocking(
-            &*self.sink,
-            NewSession {
-                project_path: project.path,
-                title: p.title,
-                use_worktree: p.use_worktree,
-                on_main: p.on_main,
-                base_ref: None,
-                worktree_name: None,
-                issue: None,
-                automation: None,
-                cwd: None,
-                tab: Some(NewTab {
-                    harness: p.agent,
-                    model: p.model,
-                    effort: p.effort,
-                    permission_mode: p.mode,
-                }),
-            },
-            p.name.as_deref(),
-        )
-        .map_err(workspace_error)?;
+        let first_tab = NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
+        let entry = match p.project.as_deref() {
+            None => {
+                // The title a quick chat started from the window gets: the prompt's first line.
+                let title = p.title.or_else(|| p.prompt.trim().lines().next().map(|line| line.chars().take(60).collect()));
+                let quick = crate::session_ops::NewQuickChat { title, cwd: p.cwd, tab: Some(first_tab) };
+                crate::session_ops::create_quick_chat_blocking(&*self.sink, quick).map_err(ControlError::invalid)?
+            }
+            Some(selector) => {
+                let project = resolve_project(selector)?;
+                crate::session_ops::create_named_session_blocking(
+                    &*self.sink,
+                    NewSession {
+                        project_path: project.path,
+                        title: p.title,
+                        use_worktree: p.use_worktree,
+                        on_main: p.on_main,
+                        base_ref: None,
+                        worktree_name: None,
+                        issue: None,
+                        automation: None,
+                        cwd: None,
+                        tab: Some(first_tab),
+                    },
+                    p.name.as_deref(),
+                )
+                .map_err(workspace_error)?
+            }
+        };
         let tab = entry
             .tabs
             .first()
@@ -556,7 +600,7 @@ impl ControlService {
             .manager
             .send(&entry.id, &tab.id, p.prompt, Vec::new())
             .map_err(ControlError::internal)?;
-        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title,
+        Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
             "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
             "session": entry, "outcome": outcome}))
     }
@@ -978,6 +1022,81 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 mod tests {
     use super::*;
 
+    fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let endpoint = crate::hooks::prepare_control().unwrap();
+        let manager = SessionManager::new(
+            sink.clone(), Arc::new(crate::sink::NoObserver),
+            Arc::new(crate::harness::host::Host::new()), Arc::new(crate::pty::Terminals::new()),
+            Arc::new(Default::default()), Arc::new(Default::default()), endpoint.clone(),
+        );
+        (ControlService::headless(sink.clone(), manager, endpoint, "test".into()), sink)
+    }
+
+    #[test]
+    fn quick_chats_are_listed_with_their_kind_and_never_under_a_project() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let ordinary = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        // Pointed at the project's own folder: still not one of the project's sessions.
+        let quick = crate::session_ops::create_quick_chat_entry(crate::session_ops::NewQuickChat {
+            title: Some("Quick question".into()), cwd: Some(project.path.clone()), tab: None,
+        }).unwrap();
+        let (service, _sink) = headless_service();
+
+        let all = service.execute("sessions.list", json!({}), "r1").unwrap();
+        let listed = all["sessions"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().find(|s| s["id"] == ordinary.id.as_str()).unwrap().get("kind").is_none(), "an ordinary session reads as it always did");
+        assert_eq!(listed.iter().find(|s| s["id"] == quick.id.as_str()).unwrap()["kind"], "quick");
+
+        let only_quick = service.execute("sessions.list", json!({"quick": true}), "r2").unwrap();
+        assert_eq!(only_quick["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), vec![quick.id.as_str()]);
+        let of_project = service.execute("sessions.list", json!({"project": project.path}), "r3").unwrap();
+        assert_eq!(of_project["sessions"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), vec![ordinary.id.as_str()]);
+        assert_eq!(service.execute("sessions.list", json!({"project": project.path, "quick": true}), "r4").unwrap_err().code, "invalid_arguments");
+        // A quick chat is shown and renamed like any session.
+        assert_eq!(service.execute("sessions.show", json!({"session": quick.id}), "r5").unwrap()["kind"], "quick");
+        assert_eq!(service.execute("sessions.rename", json!({"session": quick.id, "title": "Renamed"}), "r6").unwrap()["session"]["title"], "Renamed");
+    }
+
+    #[test]
+    fn a_session_request_says_whether_it_is_a_quick_chat_or_names_its_project() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let refused = |params: Value| service.execute("sessions.create", params, "r").unwrap_err();
+        // Neither: the caller is told about --quick rather than left guessing.
+        let error = refused(json!({"agent": "claude", "prompt": "hi", "useWorktree": true}));
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(error.message.contains("--quick"), "{}", error.message);
+        // Both, or a quick chat with what only a project session has.
+        for params in [
+            json!({"quick": true, "project": "api", "agent": "claude", "prompt": "hi"}),
+            json!({"quick": true, "name": "fix", "agent": "claude", "prompt": "hi"}),
+            json!({"quick": true, "useWorktree": true, "agent": "claude", "prompt": "hi"}),
+            json!({"quick": true, "onMain": true, "agent": "claude", "prompt": "hi"}),
+        ] {
+            assert_eq!(refused(params).code, "invalid_arguments");
+        }
+        assert_eq!(refused(json!({"project": "api", "cwd": "/tmp", "agent": "claude", "prompt": "hi", "useWorktree": true})).code, "invalid_arguments");
+        assert!(index::load().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(crate::store::quick::root().unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_floating_window_is_the_desktop_apps_and_a_headless_runtime_says_so() {
+        let _home = crate::store::temp_home();
+        let (service, sink) = headless_service();
+        let mut events = sink.subscribe();
+        for command in ["floating.show", "floating.hide", "floating.toggle"] {
+            assert_eq!(service.execute(command, json!({}), "r").unwrap_err().code, "unsupported");
+        }
+        assert!(events.try_recv().is_err(), "nothing was asked of a window that does not exist");
+    }
+
     #[test]
     fn rename_commands_update_persisted_sessions_and_publish_changes() {
         let _home = crate::store::temp_home();
@@ -1046,6 +1165,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let session = SessionEntry {
             id: "zero-tab-session".into(),
+            kind: crate::store::index::SessionKind::Project,
             project_path: "/repo".into(),
             cwd: "/repo".into(),
             worktree_name: None,
