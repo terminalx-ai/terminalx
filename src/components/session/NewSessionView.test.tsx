@@ -49,6 +49,7 @@ vi.mock("@/lib/sessions", () => ({
   selectProject: vi.fn(),
   selectProjectInSidebar: vi.fn(),
   selectSession,
+  startSessionIn: vi.fn(),
   upsertSession: vi.fn(),
 }));
 
@@ -154,7 +155,8 @@ describe("folder projects", () => {
     fireEvent.keyDown(screen.getByRole("button", { name: /raccoon/ }), { key: "ArrowDown" });
     fireEvent.click(await screen.findByRole("menuitem", { name: /Add a project/ }));
     await waitFor(() => expect(sessions.addProject).toHaveBeenCalledWith("/tmp/empty-folder"));
-    expect(sessions.selectProjectInSidebar).toHaveBeenCalledWith("/tmp/empty-folder");
+    // The new project's own new-session view, as from the start screen.
+    await waitFor(() => expect(sessions.startSessionIn).toHaveBeenCalledWith("/tmp/empty-folder", null));
   });
 
   it("keeps the worktree switch and name preview for Git projects", async () => {

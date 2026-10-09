@@ -1171,6 +1171,50 @@ pub fn select_project(path: String) -> CmdResult<()> {
     projects::set_last_selected(&path).map_err(err)
 }
 
+/// The event a running local clone reports its progress on.
+pub const PROJECT_CLONE_PROGRESS_EVENT: &str = "project_clone_progress";
+
+type StartResult<T> = Result<T, crate::project_start::Failure>;
+
+fn start_failure(error: impl std::fmt::Display) -> crate::project_start::Failure {
+    crate::project_start::Failure { code: crate::project_start::FAILED, message: error.to_string() }
+}
+
+/// The reader's GitHub repositories through `gh`, or why there is no list.
+#[tauri::command]
+pub async fn github_repositories() -> CmdResult<crate::project_start::GithubRepositories> {
+    tauri::async_runtime::spawn_blocking(crate::project_start::github_repositories).await.map_err(err)
+}
+
+/// Clone a repository under `parent`. Resolves when the clone is whole (or
+/// was already there); `id` names it for progress events and for canceling.
+#[tauri::command]
+pub async fn project_clone(app: AppHandle, id: String, source: String, parent: String) -> StartResult<crate::project_start::CloneOutcome> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::project_start::clone_repository(&id, &source, &parent, move |progress| {
+            let _ = app.emit(PROJECT_CLONE_PROGRESS_EVENT, &progress);
+        })
+    })
+    .await
+    .map_err(start_failure)?
+}
+
+#[tauri::command]
+pub fn project_clone_cancel(id: String) {
+    crate::project_start::cancel_clone(&id);
+}
+
+#[tauri::command]
+pub fn project_start_defaults(parent: Option<String>) -> crate::project_start::StartDefaults {
+    crate::project_start::defaults(parent.as_deref())
+}
+
+/// Quick start: a new empty Git repository at `parent/name`, returned as a path to add.
+#[tauri::command]
+pub async fn project_create(parent: String, name: String) -> StartResult<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::project_start::create_project(&parent, &name)).await.map_err(start_failure)?
+}
+
 // ------------------------------------------------------------------ sessions
 
 #[tauri::command]

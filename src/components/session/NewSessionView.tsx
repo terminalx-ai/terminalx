@@ -20,13 +20,14 @@ import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
-import { addProject, clearNewSessionPreset, createQuickChat, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { clearNewSessionPreset, createQuickChat, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { PERMISSION_MODES } from "@/lib/models";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { chooseMode } from "@/lib/dialogs";
+import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
 import { cn } from "@/lib/cn";
@@ -137,12 +138,7 @@ export function NewSessionView({
 
   const pickProject = async () => {
     try {
-      const dir = await openDialog({ directory: true, multiple: false, title: "Choose a project" });
-      if (typeof dir === "string") {
-        const p = await addProject(dir);
-        setPrefs({ lastProject: p.path });
-        selectProjectInSidebar(p.path);
-      }
+      await openLocalProject();
     } catch (e) {
       setError(errorMessage(e));
     }
