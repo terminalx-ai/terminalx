@@ -575,8 +575,9 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 ///
 /// `fetch` is for the dialog that is about to delete the workspace, which
 /// asks for it. Everything else that reads the disposition (the pull request
-/// panel and the chat do so every 30 seconds) stays off the network and gets
-/// no clean-and-merged verdict at all. A folder that is not on disk gets a
+/// panel and the chat do so every 30 seconds) does not fetch and gets no
+/// clean-and-merged verdict at all; it still asks GitHub for the branch's
+/// pull request. A folder that is not on disk gets a
 /// verdict too ("cannot be checked"), so the dialog can ask about it rather
 /// than wave it through.
 pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {

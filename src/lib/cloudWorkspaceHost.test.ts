@@ -17,6 +17,7 @@ const sessionKey = "cloud:org-1:ws-1:s1";
 const client = {
   workspaceDisposition: vi.fn(async () => ({ exists: true })),
   removeSessionWorkspace: vi.fn(async () => ({ deleted: ["s1", "s9"], keptBranch: "raccoon/kept", rescuedBranch: null })),
+  listSessions: vi.fn(async () => [{ id: "s1" }, { id: "s9" }]),
 };
 const host = () => cloudWorkspaceHost({ orgId: "org-1", workspaceId: "ws-1", workspaceKey: "cloud:org-1:ws-1", sessionId: "s1", sessionKey, client: client as unknown as WorkspaceRpcClient });
 
@@ -53,6 +54,19 @@ describe("cloudWorkspaceHost", () => {
     await expect(host().remove({ keepSessions: false, deleteBranch: false, confirmedDigest: null, expectedSessions: ["s1"] })).rejects.toThrow("second confirmation");
     expect(mocks.forgetCloudSessions).not.toHaveBeenCalled();
     expect(mocks.selectSession).not.toHaveBeenCalled();
+  });
+
+  it("takes a lost answer for a removal when the runtime no longer lists the session", async () => {
+    client.removeSessionWorkspace.mockRejectedValueOnce(new Error("timed out"));
+    client.listSessions.mockResolvedValueOnce([{ id: "s9" }]);
+    await host().remove({ keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] });
+    expect(mocks.forgetCloudSessions).toHaveBeenCalledWith({ orgId: "org-1", workspaceId: "ws-1" }, ["s1"]);
+    expect(mocks.selectSession).toHaveBeenCalledWith(null);
+
+    // The list could not be read either: nothing is assumed.
+    client.removeSessionWorkspace.mockRejectedValueOnce(new Error("timed out"));
+    client.listSessions.mockRejectedValueOnce(new Error("offline"));
+    await expect(host().remove({ keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1"] })).rejects.toThrow("timed out");
   });
 
   it("knows a turn is running in any session of the worktree from the workspace's live list", () => {

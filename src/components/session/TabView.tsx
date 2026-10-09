@@ -147,10 +147,10 @@ export function TabView({
   const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
 
   // Once the worktree's pull request has merged, the chat offers to delete
-  // it. Read while the tab is shown and no turn runs in this session, so a
+  // it. Read while the chat is shown and no turn runs in this session, so a
   // merge made elsewhere appears without a new turn.
   const sessionLive = session.tabs.some((t) => turnLive(t.status));
-  const disposition = useWorkspaceDisposition(workspace?.host, active && !sessionLive);
+  const disposition = useWorkspaceDisposition(workspace?.host, active && !terminalMode && !sessionLive);
   const offerDelete = !!workspace && offersWorkspaceDelete(disposition, sessionLive || workspace.host.turnRunning(disposition?.sessionIds ?? []));
   // Only ever the standard removal dialog: it checks again, names the sessions that go, and asks.
   const deleteWorkspace = offerDelete ? () => openWorkspaceDelete(workspace.projectPath, workspace.path, workspace.name, workspace.host) : undefined;

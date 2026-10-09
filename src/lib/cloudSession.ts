@@ -530,8 +530,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
 
   // Files: through the runtime's fs/1, read-only unless this attachment manages it.
   // The runtime names the worktree; the session entry below never does (its `cwd` is a display root).
-  const worktreeName = runtimeSession?.worktreeName ?? null;
-  const worktreePath = runtimeSession?.cwd ?? "";
+  // Only this session's: after a switch the last one read may still be the previous session's.
+  const ownSession = runtimeSession?.id === runtimeSessionId ? runtimeSession : null;
+  const worktreeName = ownSession?.worktreeName ?? null;
+  const worktreePath = ownSession?.cwd ?? "";
   const removesWorktrees = manage && !!client?.hasCapability("workspace/1");
   const removableWorkspace = useMemo<RemovableWorkspace | undefined>(
     () =>

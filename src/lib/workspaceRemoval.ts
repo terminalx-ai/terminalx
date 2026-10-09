@@ -72,9 +72,13 @@ export function localRemovableWorkspace(session: SessionEntry): RemovableWorkspa
 /** How often the chat reads a worktree again, as the PR panel does for an open pull request. */
 const RECHECK_MS = 30_000;
 
+/** A pull request that will not change state again: nothing is left to wait for. */
+const settled = (disposition: WorkspaceDisposition) => disposition.pr?.state === "MERGED" || disposition.pr?.state === "CLOSED";
+
 /**
  * The quick read of a workspace, kept current while `watching`: read at
- * once, every 30 seconds, and when the window comes back. That is how a pull
+ * once, when the window comes back, and every 30 seconds until its pull
+ * request is merged or closed (each read asks GitHub). That is how a pull
  * request merged elsewhere is noticed without a new turn.
  *
  * Nothing is kept from before `watching`: what was true before an agent's
@@ -96,11 +100,15 @@ export function useWorkspaceDisposition(host: WorkspaceHost | undefined, watchin
       if (!current || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
       current
         .disposition()
-        .then((disposition) => !cancelled && setChecked({ key, disposition }))
+        .then((disposition) => {
+          if (cancelled) return;
+          setChecked({ key, disposition });
+          if (settled(disposition)) window.clearInterval(timer);
+        })
         .catch(() => !cancelled && setChecked(null));
     };
-    read();
     const timer = window.setInterval(read, RECHECK_MS);
+    read();
     document.addEventListener("visibilitychange", read);
     return () => {
       cancelled = true;

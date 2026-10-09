@@ -203,9 +203,14 @@ describe("the chat's Delete workspace action", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(deleteButton()).not.toBeNull();
 
-    // And goes again if the worktree stops being clean.
+    // Merged is final: GitHub is not asked again on a timer, only when the window comes back.
+    const reads = workspace.host.disposition.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(workspace.host.disposition.mock.calls.length).toBe(reads);
+
+    // And it goes again if the worktree is no longer clean by then.
     now = { ...merged, uncommitted: 1 };
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await Promise.resolve(); });
     expect(deleteButton()).toBeNull();
   });
 
