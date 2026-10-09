@@ -40,6 +40,11 @@ export function createUsagePolling(refresh: () => void | Promise<void>) {
       interval = next;
       arm();
     },
+    /** Count the interval from now: a refresh the timer did not make just settled. */
+    restart() {
+      last = Date.now();
+      arm();
+    },
     dispose() {
       disposed = true;
       window.clearTimeout(timer);

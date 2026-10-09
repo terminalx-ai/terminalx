@@ -78,7 +78,9 @@ export function bootStatus(): Promise<void> {
       const [settings, usage, resources] = await Promise.all([statusBar.settings(), statusBar.usage(), statusBar.resourceOverview()]);
       set({ settings, usage, resources, ready: true });
       installFocusRefresh();
-      void refreshUsage();
+      // The backend stamps this first read when it runs, not when the module
+      // loaded; time the first tick from it or that tick can land too early.
+      void refreshUsage().finally(() => polling.restart());
       void refreshResourceSample();
     } catch {
       set({ ready: true });
@@ -117,6 +119,8 @@ export function refreshUsage(manual = false): Promise<void> {
 }
 
 export async function resetCodexUsage(): Promise<void> {
+  // A tick may be reading Codex right now; the backend refuses a reset over it.
+  await usageFlight;
   set({ usageRefreshing: true });
   try {
     set({ usage: await statusBar.resetCodex() });

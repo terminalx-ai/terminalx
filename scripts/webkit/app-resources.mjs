@@ -49,7 +49,7 @@ function setup({ theme, mode }) {
     channel?.onmessage(new TextEncoder().encode("\x1b[H" + lines.join("\r\n")).buffer);
   };
   Object.assign(answers, {
-    status_bar_settings: { visible: true, usage: false, resources: true, percent: "used", usageMode: "detailed" },
+    status_bar_settings: { visible: true, usage: false, resources: true, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 },
     status_usage_snapshot: { windows: [] },
     status_resource_overview: { agentCount: 2, orphanCount: 0, rssBytes: sample.totalRssBytes, pressure: 0.2 },
     status_resource_sample: () => { refreshes++; return sample; },

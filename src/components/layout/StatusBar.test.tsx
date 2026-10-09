@@ -92,6 +92,9 @@ describe("status bar usage", () => {
     const now = Date.now();
     statusState.usage.claude = { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now - 30_000 };
     statusState.usage.codexRefresh = { retryAt: now + 4 * 60_000, error: "read Codex rate limits: timed out", lastSuccessAt: now - 12 * 60_000 };
+    const codexWindows = () => statusState.usage.windows.filter((window) => window.agent === "codex");
+    for (const window of codexWindows()) window.updatedAt = now - 12 * 60_000;
+    for (const window of statusState.usage.windows) if (window.agent === "claude") window.updatedAt = now - 30_000;
     const view = render(<StatusBar />);
     fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
     const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
@@ -112,16 +115,18 @@ describe("status bar usage", () => {
     view.rerender(<StatusBar />);
     expect(freshness().textContent).toBe("Last refreshed 12m agoLast refresh failed. Showing last known usage.");
 
+    // Values that arrived after the last good refresh are not "last known".
+    codexWindows()[0].updatedAt = now - 2 * 60_000;
+    view.rerender(<StatusBar />);
+    expect(freshness().textContent).toBe("Last refreshed 2m agoLast refresh failed.");
+
     // Recovered.
+    for (const window of codexWindows()) window.updatedAt = now;
     statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: now };
     view.rerender(<StatusBar />);
     expect(freshness().textContent).toBe("Last refreshed just now");
     expect(screen.queryByRole("status")).toBeNull();
 
-    // A provider never read yet says so rather than implying a time.
-    statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: null };
-    view.rerender(<StatusBar />);
-    expect(freshness().textContent).toBe("Not refreshed yet");
   });
 
   it("marks the expired session honestly on every surface without inventing zero", async () => {

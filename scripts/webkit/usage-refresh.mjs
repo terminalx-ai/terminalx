@@ -21,7 +21,7 @@ function setup() {
   const fixture = { refreshes: [], patches: [], used: 12, failing: false, revision: 0, lastSuccess: null, retryAt: null };
   const snapshot = () => {
     const now = Date.now();
-    const window_ = (agent, key, label, usedPercent, minutes, reset) => ({ agent, key, label, usedPercent, resetsAt: now + reset, windowMinutes: minutes, updatedAt: fixture.lastSuccess ?? now, stale: false });
+    const window_ = (agent, key, label, usedPercent, minutes, reset) => ({ agent, key, label, usedPercent, resetsAt: now + reset, windowMinutes: minutes, updatedAt: (agent === "codex" ? fixture.codexSuccess : fixture.lastSuccess) ?? now, stale: false });
     return {
       revision: ++fixture.revision,
       claudeAccount: "synthetic",

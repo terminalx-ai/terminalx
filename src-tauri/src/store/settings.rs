@@ -98,9 +98,11 @@ fn usage_refresh_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> s
 }
 
 impl StatusBarSettings {
-    /// The automatic refresh cadence, or `None` when the timer is off.
+    /// The automatic refresh cadence, or `None` when the timer is off or
+    /// nothing shows usage; returning to the app must not fetch at that
+    /// cadence for an indicator that is hidden.
     pub fn usage_refresh_ms(&self) -> Option<i64> {
-        (self.usage_refresh_minutes > 0).then(|| i64::from(self.usage_refresh_minutes) * 60_000)
+        (self.visible && self.usage && self.usage_refresh_minutes > 0).then(|| i64::from(self.usage_refresh_minutes) * 60_000)
     }
 }
 
@@ -197,7 +199,10 @@ mod tests {
         let older = read(r#"{"statusBar":{"visible":false}}"#);
         assert!(!older.visible);
         assert_eq!(older.usage_refresh_minutes, 1);
-        assert_eq!(older.usage_refresh_ms(), Some(60_000));
+        // Chosen, but with the bar hidden there is nothing to keep fresh.
+        assert_eq!(older.usage_refresh_ms(), None);
+        assert_eq!(read(r#"{"statusBar":{"usage":false}}"#).usage_refresh_ms(), None);
+        assert_eq!(read("{}").usage_refresh_ms(), Some(60_000));
 
         for minutes in USAGE_REFRESH_MINUTES {
             let chosen = read(&format!(r#"{{"statusBar":{{"usageRefreshMinutes":{minutes}}}}}"#));

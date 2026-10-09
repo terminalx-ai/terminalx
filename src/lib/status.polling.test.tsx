@@ -72,7 +72,7 @@ it("refreshes usage on one timer at the chosen interval, through slow requests, 
   await advance(1);
   expect(calls()).toBe(7);
 
-  // Hidden (or asleep) windows do not poll, and coming back is one catch-up
+  // Hidden windows do not poll, and coming back is one catch-up
   // however many ticks were missed and however many events announce it.
   hidden.mockReturnValue(true);
   await advance(30 * MINUTE);

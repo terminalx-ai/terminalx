@@ -80,8 +80,9 @@ backend is the arbiter: `status_usage_refresh` reads the interval per request an
 reuses the last answer until one interval (less five seconds of slack) has
 passed, with one request in flight per provider. Focus, visibility, `online`,
 manual Refresh and reset-boundary revalidation are unchanged and share the same
-gate. Usage refreshes need the window visible, not focused; nothing polls while
-the usage indicator is hidden.
+gate. Usage refreshes need the window visible, not focused. While the usage
+indicator is hidden the timer stops and the fifteen-minute floor applies, as it
+does with the timer Off. The first tick is timed from the boot refresh.
 
 The interval is a normal cadence only. Failure backoff and Retry-After still
 gate every request, manual ones included, and an account change starts its own

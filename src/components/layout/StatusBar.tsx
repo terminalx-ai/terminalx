@@ -531,10 +531,12 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
   // Claude's notice also explains an empty popover; Codex's only matters beside its windows.
   const notices = usageError
-    ? [usageError]
+    ? [{ key: "app", text: usageError }]
     : AGENTS.filter((agent) => agent === "claude" || groups.some((group) => group.agent === agent))
-      .map((agent) => refreshNotice(agent, providerRefresh(usage, agent), now))
-      .filter((notice): notice is string => !!notice);
+      .flatMap((agent) => {
+        const text = refreshNotice(agent, providerRefresh(usage, agent), now);
+        return text ? [{ key: agent, text }] : [];
+      });
 
   const closeAnd = (action?: () => void) => {
     setOpen(false);
@@ -659,7 +661,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
           </div>
           {notices.length ? (
             <div role="status" className="mb-2 flex flex-col gap-0.5 text-[10.5px] text-muted-foreground">
-              {notices.map((notice) => <div key={notice} className="break-words">{notice}</div>)}
+              {notices.map((notice) => <div key={notice.key} className="break-words">{notice.text}</div>)}
             </div>
           ) : null}
           <Segmented
@@ -820,6 +822,12 @@ function AgentUsageDetail({
 }) {
   const resetCredits = agent === "codex" ? codex?.resetCredits : undefined;
   const credits = agent === "codex" ? codex?.credits : undefined;
+  // Claude's windows also arrive live after each turn, apart from its refreshes:
+  // the newest of either is when this usage was last current, and a failed
+  // refresh under newer live values has not left them behind.
+  const newest = Math.max(...windows.map((window) => window.updatedAt));
+  const refreshedAt = Math.max(refresh?.lastSuccessAt ?? 0, newest);
+  const lastKnown = newest > (refresh?.lastSuccessAt ?? 0) ? "" : " Showing last known usage.";
   return (
     <aside data-usage-detail={agent} className="absolute bottom-0 left-[calc(100%+6px)] w-[300px] rounded-xl bg-(--surface-card) p-3 text-popover-foreground shadow-surface hairline max-[760px]:static max-[760px]:mt-2 max-[760px]:w-full">
       <div className="flex items-center gap-2">
@@ -846,14 +854,14 @@ function AgentUsageDetail({
         })}
       </div>
       <div data-usage-freshness className="mt-3 border-t border-hairline pt-2.5 text-[10.5px] text-muted-foreground">
-        <div>{refresh?.lastSuccessAt != null ? `Last refreshed ${formatAgo(refresh.lastSuccessAt, now)}` : "Not refreshed yet"}</div>
+        <div>{refreshedAt > 0 ? `Last refreshed ${formatAgo(refreshedAt, now)}` : "Not refreshed yet"}</div>
         {refreshPaused(refresh, now) || refresh?.error || refreshFailed ? (
           <div className="mt-1 flex items-start gap-1 text-warning">
             <TriangleAlert className="mt-px size-3 shrink-0" aria-hidden />
             <span>
               {refreshPaused(refresh, now)
-                ? `Refresh paused; retry in ${formatResetCountdown(refresh.retryAt, now, "")}. Showing last known usage.`
-                : "Last refresh failed. Showing last known usage."}
+                ? `Refresh paused; retry in ${formatResetCountdown(refresh.retryAt, now, "")}.${lastKnown}`
+                : `Last refresh failed.${lastKnown}`}
             </span>
           </div>
         ) : null}
