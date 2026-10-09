@@ -17,6 +17,8 @@ import {
 } from "@/lib/projectStart";
 import { relativeTime } from "@/lib/time";
 
+/** Never taller than the window: in a short one the dialog scrolls, so its title and buttons stay reachable. */
+const FIT = "max-h-[calc(100dvh-2rem)] overflow-y-auto scrollbar-thin";
 const FIELD = "h-8 w-full rounded-md bg-well px-2 text-[13px] outline-none placeholder:text-faint focus:ring-2 focus:ring-ring/40";
 
 /** Mounted once (AppShell): the dialogs behind "Open GitHub project" and "Quick start". */
@@ -60,12 +62,22 @@ function useProjectsDir(): [string | null, (dir: string) => void] {
 }
 
 function Destination({ label, dir, target, disabled, onChange }: { label: string; dir: string | null; target: string | null; disabled?: boolean; onChange: (dir: string) => void }) {
+  const parent = dir?.replace(/\/+$/, "") ?? null;
+  const path = parent === null ? null : target ? `${parent}/${target}` : dir;
   return (
     <div>
       <div className="mb-1 text-xs text-muted-foreground">{label}</div>
       <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1 truncate rounded-md bg-well px-2 py-1.5 font-mono text-xs" title={dir ?? undefined} data-testid="start-destination">
-          {dir ? (target ? `${dir.replace(/\/+$/, "")}/${target}` : dir) : "…"}
+        {/* The folder gives way first: the name the project gets stays in view at the end of a long path. */}
+        <div className="flex min-w-0 flex-1 rounded-md bg-well px-2 py-1.5 font-mono text-xs" title={path ?? undefined} data-testid="start-destination">
+          {dir ? (
+            <>
+              <span className="min-w-0 truncate">{target ? `${parent}/` : dir}</span>
+              {target && <span className="max-w-[60%] shrink-0 truncate">{target}</span>}
+            </>
+          ) : (
+            "…"
+          )}
         </div>
         <Button
           size="sm"
@@ -181,7 +193,7 @@ function GithubProjectDialog() {
 
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[36rem]" data-testid="start-github-dialog">
+      <DialogContent width="max-w-[36rem]" className={FIT} data-testid="start-github-dialog">
         <DialogHeader>
           <DialogTitle>Open GitHub project</DialogTitle>
           <DialogDescription>Clone a repository to this computer and open it as a project.</DialogDescription>
@@ -204,7 +216,7 @@ function GithubProjectDialog() {
                 disabled={busy}
                 className={FIELD}
               />
-              <div role="listbox" aria-label="Your repositories" className="mt-1.5 max-h-52 overflow-y-auto rounded-md bg-well p-1 scrollbar-thin">
+              <div role="listbox" aria-label="Your repositories" className="mt-1.5 max-h-[clamp(4rem,calc(100dvh-28rem),11rem)] overflow-y-auto rounded-md bg-well p-1 scrollbar-thin">
                 {shown.map((repository) => {
                   const selected = !pasted.trim() && picked === repository.nameWithOwner;
                   return (
@@ -396,7 +408,7 @@ function QuickStartDialog() {
 
   return (
     <Dialog open onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[30rem]" data-testid="start-quick-dialog">
+      <DialogContent width="max-w-[30rem]" className={FIT} data-testid="start-quick-dialog">
         <DialogHeader>
           <DialogTitle>Quick start</DialogTitle>
           <DialogDescription>Create a new empty project: a folder with a Git repository in it, ready for an agent to build in.</DialogDescription>
