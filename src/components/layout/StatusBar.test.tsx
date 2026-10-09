@@ -6,7 +6,7 @@ const { openStats, resetCodexUsage, statusState } = vi.hoisted(() => ({
   openStats: vi.fn(),
   resetCodexUsage: vi.fn(async () => {}),
   statusState: {
-    settings: { visible: true, usage: true, resources: false, percent: "used" as "used" | "remaining", usageMode: "detailed" as "detailed" | "compact" },
+    settings: { visible: true, usage: true, resources: false, percent: "used" as "used" | "remaining", usageMode: "detailed" as "detailed" | "compact", usageRefreshMinutes: 1 },
     usage: { windows: [] } as UsageSnapshot,
     usageRefreshing: false,
     resources: { agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null },
@@ -86,6 +86,42 @@ describe("status bar usage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
     expect(screen.getByRole("status").textContent).toContain("Claude refresh paused; retry in 1m");
     expect(screen.getByRole("button", { name: "Refresh usage" })).toBeTruthy();
+  });
+
+  it("tells last known usage from current in the details: last refresh, pause and failure", () => {
+    const now = Date.now();
+    statusState.usage.claude = { retryAt: null, revalidateAt: null, error: null, lastSuccessAt: now - 30_000 };
+    statusState.usage.codexRefresh = { retryAt: now + 4 * 60_000, error: "read Codex rate limits: timed out", lastSuccessAt: now - 12 * 60_000 };
+    const view = render(<StatusBar />);
+    fireEvent.click(screen.getByRole("button", { name: /Claude 5h/ }));
+    const popover = document.querySelector("[data-usage-popover]") as HTMLElement;
+    // Only the provider that is failing is called out beside Refresh.
+    expect(screen.getByRole("status").textContent).toBe("Codex refresh paused; retry in 4m. read Codex rate limits: timed out");
+
+    fireEvent.click(within(popover).getByRole("button", { name: /^Claude, / }));
+    const freshness = () => document.querySelector("[data-usage-freshness]") as HTMLElement;
+    expect(freshness().textContent).toBe("Last refreshed just now");
+
+    fireEvent.click(within(popover).getByRole("button", { name: /^Codex, / }));
+    expect(freshness().textContent).toBe("Last refreshed 12m agoRefresh paused; retry in 4m. Showing last known usage.");
+    // The values themselves stay; nothing is blanked or zeroed by a failure.
+    expect(document.querySelector('[data-usage-detail="codex"]')!.textContent).toContain("52% used");
+
+    // Backoff over but the last attempt still failed.
+    statusState.usage.codexRefresh = { retryAt: null, error: "read Codex rate limits: timed out", lastSuccessAt: now - 12 * 60_000 };
+    view.rerender(<StatusBar />);
+    expect(freshness().textContent).toBe("Last refreshed 12m agoLast refresh failed. Showing last known usage.");
+
+    // Recovered.
+    statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: now };
+    view.rerender(<StatusBar />);
+    expect(freshness().textContent).toBe("Last refreshed just now");
+    expect(screen.queryByRole("status")).toBeNull();
+
+    // A provider never read yet says so rather than implying a time.
+    statusState.usage.codexRefresh = { retryAt: null, error: null, lastSuccessAt: null };
+    view.rerender(<StatusBar />);
+    expect(freshness().textContent).toBe("Not refreshed yet");
   });
 
   it("marks the expired session honestly on every surface without inventing zero", async () => {

@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("@/lib/api", () => ({
   statusBar: {
-    settings: async () => ({ visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed" }),
+    settings: async () => ({ visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 0 }),
     usage: mocks.usage,
     refreshUsage: mocks.refresh,
     resourceOverview: async () => ({ agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null }),

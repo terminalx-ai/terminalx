@@ -64,6 +64,32 @@ generation. Unknown or mismatched attribution is not merged. A custom
 account's default Keychain entry. Missing attribution/credentials yields visible
 refresh feedback; it does not trigger authentication changes.
 
+## Automatic refresh (#407)
+
+Settings → Appearance → **Usage auto-refresh interval** offers Off, 1, 2, 5 and
+15 minutes, one minute by default, stored as `statusBar.usageRefreshMinutes`. A
+value outside that list reads as the default. The "ordinary 15-minute polling"
+above is now this interval; fifteen minutes remains the floor for focus and
+visibility refreshes when the timer is Off.
+
+The frontend keeps one timer (`createUsagePolling`). It arms the next tick only
+when the previous refresh settles, so a slow request is never overlapped and a
+wake from sleep produces one late tick, not a replay. Changing the setting
+re-arms that timer from the last tick. Each window has its own timer; the
+backend is the arbiter: `status_usage_refresh` reads the interval per request and
+reuses the last answer until one interval (less five seconds of slack) has
+passed, with one request in flight per provider. Focus, visibility, `online`,
+manual Refresh and reset-boundary revalidation are unchanged and share the same
+gate. Usage refreshes need the window visible, not focused; nothing polls while
+the usage indicator is hidden.
+
+The interval is a normal cadence only. Failure backoff and Retry-After still
+gate every request, manual ones included, and an account change starts its own
+cadence. A failure keeps the last windows. Snapshots carry `lastSuccessAt` for
+Claude and a `codexRefresh` block (`retryAt`, `error`, `lastSuccessAt`); the
+agent detail panel shows "Last refreshed …" and, while paused or failed, that
+the values are last known.
+
 ## Validation and remaining live check
 
 Automated coverage includes controlled-clock rollover, changed/identical samples,

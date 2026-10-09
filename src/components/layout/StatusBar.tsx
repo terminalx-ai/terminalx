@@ -24,7 +24,7 @@ import {
 import { selectSession, setActiveTab, useSessionStore } from "@/lib/sessions";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { useResourceSampling } from "@/lib/statusPolling";
-import { errorMessage, statusBar, type ProcSample, type StatusBarSettings, type UsageWindow } from "@/lib/api";
+import { errorMessage, statusBar, type ProcSample, type StatusBarSettings, type UsageSnapshot, type UsageWindow } from "@/lib/api";
 
 const COMPACT_AT = 900;
 const ICON_ONLY_AT = 500;
@@ -458,14 +458,36 @@ function detailWindowLabel(window: UsageWindow): string {
   return window.label;
 }
 
-function formatUpdatedAgo(updatedAt: number, now: number): string {
-  const elapsed = Math.max(0, now - updatedAt);
-  if (elapsed < 60_000) return "Updated just now";
+function formatAgo(at: number, now: number): string {
+  const elapsed = Math.max(0, now - at);
+  if (elapsed < 60_000) return "just now";
   const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 60) return `Updated ${minutes}m ago`;
+  if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `Updated ${hours}h ago`;
-  return `Updated ${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function formatUpdatedAgo(updatedAt: number, now: number): string {
+  return `Updated ${formatAgo(updatedAt, now)}`;
+}
+
+/** How one provider's own refreshes are going, apart from what its windows last said. */
+type ProviderRefresh = { retryAt: number | null; error: string | null; lastSuccessAt?: number | null };
+
+function providerRefresh(usage: UsageSnapshot, agent: UsageAgent): ProviderRefresh | undefined {
+  return agent === "claude" ? usage.claude : usage.codexRefresh;
+}
+
+function refreshPaused(refresh: ProviderRefresh | undefined, now: number): refresh is ProviderRefresh & { retryAt: number } {
+  return refresh?.retryAt != null && refresh.retryAt > now;
+}
+
+function refreshNotice(agent: UsageAgent, refresh: ProviderRefresh | undefined, now: number): string | null {
+  if (!refresh) return null;
+  return refreshPaused(refresh, now)
+    ? `${agentName(agent)} refresh paused; retry in ${formatResetCountdown(refresh.retryAt, now, "")}. ${refresh.error ?? ""}`
+    : refresh.error;
 }
 
 function formatCreditBalance(balance: string): string {
@@ -494,7 +516,7 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
     .filter((window) => hasUsageData(window) && !isCodexSubLimit(window))
     .sort((a, b) => b.usedPercent - a.usedPercent);
   const compactMode = settings.usageMode === "compact";
-  const now = useCountdownNow([...windows.map((window) => window.resetsAt), usage.claude?.retryAt ?? null]);
+  const now = useCountdownNow([...windows.map((window) => window.resetsAt), usage.claude?.retryAt ?? null, usage.codexRefresh?.retryAt ?? null]);
   if (!settings.usage || (!providerProbePending && !available.has("claude") && !available.has("codex"))) return null;
 
   const groups = AGENTS.flatMap((agent) => {
@@ -507,6 +529,12 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
     )).join("; ")
     : "Usage unavailable";
   const detailGroup = groups.find(({ agent }) => agent === detailAgent) ?? null;
+  // Claude's notice also explains an empty popover; Codex's only matters beside its windows.
+  const notices = usageError
+    ? [usageError]
+    : AGENTS.filter((agent) => agent === "claude" || groups.some((group) => group.agent === agent))
+      .map((agent) => refreshNotice(agent, providerRefresh(usage, agent), now))
+      .filter((notice): notice is string => !!notice);
 
   const closeAnd = (action?: () => void) => {
     setOpen(false);
@@ -629,11 +657,9 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
               <RefreshCw className={cn("size-3.5", usageRefreshing && "animate-spin")} />
             </button>
           </div>
-          {usageError || usage.claude?.error || (usage.claude?.retryAt != null && usage.claude.retryAt > now) ? (
-            <div role="status" className="mb-2 text-[10.5px] text-muted-foreground">
-              {usageError ?? (usage.claude?.retryAt != null && usage.claude.retryAt > now
-                ? `Claude refresh paused; retry in ${formatResetCountdown(usage.claude.retryAt, now, "")}. ${usage.claude.error ?? ""}`
-                : usage.claude?.error)}
+          {notices.length ? (
+            <div role="status" className="mb-2 flex flex-col gap-0.5 text-[10.5px] text-muted-foreground">
+              {notices.map((notice) => <div key={notice} className="break-words">{notice}</div>)}
             </div>
           ) : null}
           <Segmented
@@ -734,6 +760,8 @@ function UsageCluster({ tier, onOpenAgentSettings, onOpenUsageDetails }: UsageCl
               now={now}
               percent={settings.percent}
               codex={usage.codex}
+              refresh={providerRefresh(usage, detailGroup.agent)}
+              refreshFailed={usageError != null}
               resetError={resetError}
               onReset={() => {
                 setResetError(null);
@@ -772,6 +800,8 @@ function AgentUsageDetail({
   now,
   percent,
   codex,
+  refresh,
+  refreshFailed,
   resetError,
   onReset,
   onOpenAgentSettings,
@@ -781,6 +811,9 @@ function AgentUsageDetail({
   now: number;
   percent: StatusBarSettings["percent"];
   codex: ReturnType<typeof useStatus>["usage"]["codex"];
+  refresh: ProviderRefresh | undefined;
+  /** The refresh never reached the app's own backend, so no provider answered. */
+  refreshFailed: boolean;
   resetError: string | null;
   onReset: () => void;
   onOpenAgentSettings: () => void;
@@ -811,6 +844,19 @@ function AgentUsageDetail({
             </div>
           );
         })}
+      </div>
+      <div data-usage-freshness className="mt-3 border-t border-hairline pt-2.5 text-[10.5px] text-muted-foreground">
+        <div>{refresh?.lastSuccessAt != null ? `Last refreshed ${formatAgo(refresh.lastSuccessAt, now)}` : "Not refreshed yet"}</div>
+        {refreshPaused(refresh, now) || refresh?.error || refreshFailed ? (
+          <div className="mt-1 flex items-start gap-1 text-warning">
+            <TriangleAlert className="mt-px size-3 shrink-0" aria-hidden />
+            <span>
+              {refreshPaused(refresh, now)
+                ? `Refresh paused; retry in ${formatResetCountdown(refresh.retryAt, now, "")}. Showing last known usage.`
+                : "Last refresh failed. Showing last known usage."}
+            </span>
+          </div>
+        ) : null}
       </div>
       {credits ? (
         <div className="mt-3 border-t border-hairline pt-2.5 text-[11px] text-muted-foreground">
