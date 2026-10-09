@@ -57,6 +57,8 @@ import { openFile } from "@/lib/editors";
 import { runShortcut, useHotkey } from "@/lib/hotkeys";
 import { issuePrompt, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
 import { getPrefs } from "@/lib/prefs";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { visiblePaletteSessions } from "@/lib/organizationSessions";
 import {
   openWorkspace,
   refreshWorkspaces,
@@ -552,9 +554,10 @@ export function CommandPalette({
 
   // Cloud sessions of every live organization sit among the sessions (PRO-23 CS-19).
   const cloudSessions = useCloudDashboard();
+  const { visibleIds } = useOrganizationVisibility();
   const paletteIndex = useMemo(
-    () => withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(cloudSessions, store.harnesses)),
-    [store.paletteIndex, cloudSessions, store.harnesses],
+    () => withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
+    [store.paletteIndex, cloudSessions, store.harnesses, visibleIds, deferredQuery],
   );
 
   const groups = useMemo<PaletteGroup[]>(() => {
