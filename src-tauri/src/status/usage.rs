@@ -3,6 +3,9 @@
 //! Claude's status-line payload is the live source after a turn. A read-only
 //! OAuth usage request fills model-scoped windows that payload omits. Codex is
 //! one read-only question to a short-lived app-server. Nothing is persisted.
+//!
+//! The status bar asks again at the user's automatic interval; the gates here
+//! decide whether an ask becomes a provider request.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -16,7 +19,12 @@ mod claude_oauth;
 
 pub const EVENT: &str = "status_usage";
 const STATUSLINE_THROTTLE_MS: i64 = 15_000;
+/// How recent an answer ordinary (focus, visibility) refreshes reuse when the
+/// automatic timer is off. With it on, the configured interval takes over.
 const BACKGROUND_REFRESH_MS: i64 = 15 * 60_000;
+/// A tick counts as due this far ahead of the interval, so a timer that fires
+/// a moment early against the previous request's start is not skipped whole.
+const REFRESH_SLACK_MS: i64 = 5_000;
 const MANUAL_REFRESH_MS: i64 = 5 * 60_000;
 const STALE_MS: i64 = 30 * 60_000;
 const MAX_BACKOFF_MS: i64 = 15 * 60_000;
@@ -67,6 +75,7 @@ pub struct CodexUsage {
 pub struct UsageSnapshot {
     pub revision: u64,
     pub claude: ClaudeRefresh,
+    pub codex_refresh: CodexRefresh,
     pub claude_account: Option<String>,
     pub windows: Vec<UsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +88,15 @@ pub struct ClaudeRefresh {
     pub retry_at: Option<i64>,
     pub revalidate_at: Option<i64>,
     pub error: Option<String>,
+    pub last_success_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRefresh {
+    pub retry_at: Option<i64>,
+    pub error: Option<String>,
+    pub last_success_at: Option<i64>,
 }
 
 #[derive(Default)]
@@ -291,11 +309,19 @@ fn claude_revalidate_at(inner: &Inner) -> Option<i64> {
     }).min()
 }
 
-fn begin_claude_refresh(inner: &mut Inner, now: i64, manual: bool) -> bool {
+/// How long an ordinary refresh keeps reusing the last answer. `cadence` is
+/// the configured automatic interval; the status-bar timer and this floor move
+/// together, so each tick is allowed to reach the provider.
+fn background_floor(cadence: Option<i64>) -> i64 {
+    cadence.unwrap_or(BACKGROUND_REFRESH_MS).saturating_sub(REFRESH_SLACK_MS).max(0)
+}
+
+fn begin_claude_refresh(inner: &mut Inner, now: i64, manual: bool, cadence: Option<i64>) -> bool {
     let reset_due = claude_revalidate_at(inner).is_some_and(|at| at <= now);
+    let floor = background_floor(cadence);
     let poll = &mut inner.claude;
     if poll.in_flight || poll.retry_at.is_some_and(|at| now < at)
-        || (!manual && !reset_due && poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < BACKGROUND_REFRESH_MS)) {
+        || (!manual && !reset_due && poll.last_attempt.is_some_and(|at| now.saturating_sub(at) < floor)) {
         return false;
     }
     poll.in_flight = true;
@@ -391,6 +417,48 @@ fn read_codex() -> Result<Value> {
         serde_json::json!({}),
     )
     .context("read Codex rate limits")
+}
+
+/// The timer and the popover's button each have their own debounce; a manual
+/// refresh is never held back longer than a timer tick would be. An in-flight
+/// request and the failure backoff gate both.
+fn begin_codex_refresh(inner: &mut Inner, now: i64, manual: bool, cadence: Option<i64>) -> bool {
+    let floor = background_floor(cadence);
+    let poll = &mut inner.codex;
+    let recent = |at: Option<i64>, within: i64| at.is_some_and(|at| now.saturating_sub(at) < within);
+    if poll.in_flight || inner.codex_reset_in_flight
+        || poll.retry_at.is_some_and(|at| now < at)
+        || (recent(poll.last_success, floor) && !(manual && !recent(poll.last_manual, MANUAL_REFRESH_MS)))
+    {
+        return false;
+    }
+    poll.in_flight = true;
+    if manual {
+        poll.last_manual = Some(now);
+    }
+    true
+}
+
+fn finish_codex_refresh(inner: &mut Inner, answer: Result<Value>, now: i64) -> Result<()> {
+    inner.codex.in_flight = false;
+    match answer {
+        Ok(result) => {
+            apply_codex(inner, &result, now);
+            inner.codex.last_success = Some(now);
+            inner.codex.retry_at = None;
+            inner.codex.error = None;
+            inner.codex.failures = 0;
+            Ok(())
+        }
+        Err(error) => {
+            inner.codex.failures = inner.codex.failures.saturating_add(1);
+            let shift = inner.codex.failures.saturating_sub(1).min(5);
+            let backoff = (30_000_i64.saturating_mul(1_i64 << shift)).min(MAX_BACKOFF_MS);
+            inner.codex.retry_at = Some(now.saturating_add(backoff));
+            inner.codex.error = Some(format!("{error:#}"));
+            Err(error)
+        }
+    }
 }
 
 fn apply_codex(inner: &mut Inner, result: &Value, updated_at: i64) {
@@ -526,19 +594,26 @@ impl UsageStore {
                 retry_at: inner.claude.retry_at.filter(|at| *at > now),
                 revalidate_at: claude_revalidate_at(&inner),
                 error: inner.claude.error.clone(),
+                last_success_at: inner.claude.last_success,
+            },
+            codex_refresh: CodexRefresh {
+                retry_at: inner.codex.retry_at.filter(|at| *at > now),
+                error: inner.codex.error.clone(),
+                last_success_at: inner.codex.last_success,
             },
         }
     }
 
     /// Manual and reset-boundary refreshes bypass the ordinary poll debounce,
-    /// while failures and Retry-After still gate every request.
-    pub fn refresh_claude(&self, manual: bool) -> Result<()> {
+    /// while failures and Retry-After still gate every request. `cadence` is
+    /// the automatic refresh interval, `None` when that timer is off.
+    pub fn refresh_claude(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
         let now = now_ms();
         let account = claude_account_identity();
         let generation = {
             let mut inner = self.inner.lock().unwrap();
             select_claude_account(&mut inner, account.clone());
-            if !begin_claude_refresh(&mut inner, now, manual) { return Ok(()); }
+            if !begin_claude_refresh(&mut inner, now, manual, cadence) { return Ok(()); }
             inner.claude_generation
         };
         let answer = account.as_ref().context("Claude account attribution is unavailable; check the system Claude login")
@@ -550,48 +625,18 @@ impl UsageStore {
         finish_claude_refresh(&mut inner, generation, answer, now, now_ms())
     }
 
-    /// Refresh through the local Codex app-server. Ordinary calls are cached
-    /// for fifteen minutes; the popover's button has its own five-minute
-    /// debounce. Failures back off from 30 seconds to fifteen minutes while
-    /// leaving the last snapshot intact.
-    pub fn refresh_codex(&self, manual: bool) -> Result<()> {
+    /// Refresh through the local Codex app-server. Ordinary calls reuse the
+    /// last answer for the automatic interval (fifteen minutes with the timer
+    /// off); the popover's button has its own five-minute debounce. Failures
+    /// back off from 30 seconds to fifteen minutes while leaving the last
+    /// snapshot intact.
+    pub fn refresh_codex(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
         let now = now_ms();
-        {
-            let mut inner = self.inner.lock().unwrap();
-            let poll = &mut inner.codex;
-            if poll.in_flight
-                || poll.retry_at.is_some_and(|at| now < at)
-                || (!manual && poll.last_success.is_some_and(|at| now.saturating_sub(at) < BACKGROUND_REFRESH_MS))
-                || (manual && poll.last_manual.is_some_and(|at| now.saturating_sub(at) < MANUAL_REFRESH_MS))
-            {
-                return Ok(());
-            }
-            poll.in_flight = true;
-            if manual {
-                poll.last_manual = Some(now);
-            }
+        if !begin_codex_refresh(&mut self.inner.lock().unwrap(), now, manual, cadence) {
+            return Ok(());
         }
-
         let answer = read_codex();
-
-        let mut inner = self.inner.lock().unwrap();
-        inner.codex.in_flight = false;
-        match answer {
-            Ok(result) => {
-                apply_codex(&mut inner, &result, now);
-                inner.codex.last_success = Some(now);
-                inner.codex.retry_at = None;
-                inner.codex.failures = 0;
-                Ok(())
-            }
-            Err(error) => {
-                inner.codex.failures = inner.codex.failures.saturating_add(1);
-                let shift = inner.codex.failures.saturating_sub(1).min(5);
-                let backoff = (30_000_i64.saturating_mul(1_i64 << shift)).min(MAX_BACKOFF_MS);
-                inner.codex.retry_at = Some(now.saturating_add(backoff));
-                Err(error)
-            }
-        }
+        finish_codex_refresh(&mut self.inner.lock().unwrap(), answer, now)
     }
 
     /// Redeem the next available Codex reset credit through the same local
@@ -640,6 +685,7 @@ impl UsageStore {
                     apply_codex(&mut inner, &result, now_ms());
                     inner.codex.last_success = Some(now_ms());
                     inner.codex.retry_at = None;
+                    inner.codex.error = None;
                     inner.codex.failures = 0;
                 } else {
                     // The consume succeeded, so do not offer the same opaque
@@ -729,7 +775,7 @@ mod tests {
             "seven_day": {"used_percentage": 45, "resets_at": 500},
             "fable_weekly": {"used_percentage": 72, "resets_at": 600}
         }}), 9_000);
-        assert!(begin_claude_refresh(&mut inner, 10_000, false));
+        assert!(begin_claude_refresh(&mut inner, 10_000, false, None));
         apply_claude_live(&mut inner, &session_sample(1, 200), 11_000);
         let old = parse_claude(&session_sample(100, 10), 10_000);
         finish_claude_refresh(&mut inner, 0, Ok(old), 10_000, 12_000).unwrap();
@@ -749,36 +795,196 @@ mod tests {
         let mut inner = Inner::default();
         apply_claude_live(&mut inner, &session_sample(100, 10), 9_000);
         inner.claude.last_attempt = Some(9_500);
-        assert!(!begin_claude_refresh(&mut inner, 9_999, false));
-        assert!(begin_claude_refresh(&mut inner, 10_000, false));
-        assert!(!begin_claude_refresh(&mut inner, 10_000, true));
+        assert!(!begin_claude_refresh(&mut inner, 9_999, false, None));
+        assert!(begin_claude_refresh(&mut inner, 10_000, false, None));
+        assert!(!begin_claude_refresh(&mut inner, 10_000, true, None));
         let old = parse_claude(&session_sample(100, 10), 10_000);
         finish_claude_refresh(&mut inner, 0, Ok(old), 10_000, 11_000).unwrap();
         assert_eq!(inner.windows[&("claude".into(), "five_hour".into())].updated_at, 9_000);
         assert_eq!(claude_revalidate_at(&inner), Some(70_000));
-        assert!(!begin_claude_refresh(&mut inner, 69_999, false));
-        assert!(begin_claude_refresh(&mut inner, 70_000, false));
+        assert!(!begin_claude_refresh(&mut inner, 69_999, false, None));
+        assert!(begin_claude_refresh(&mut inner, 70_000, false, None));
         finish_claude_refresh(&mut inner, 0, Ok(vec![]), 70_000, 71_000).unwrap();
         assert_eq!(claude_revalidate_at(&inner), None);
-        assert!(!begin_claude_refresh(&mut inner, 72_000, false));
-        assert!(begin_claude_refresh(&mut inner, 70_000 + BACKGROUND_REFRESH_MS, false));
+        assert!(!begin_claude_refresh(&mut inner, 72_000, false, None));
+        assert!(begin_claude_refresh(&mut inner, 70_000 + BACKGROUND_REFRESH_MS, false, None));
     }
 
     #[test]
     fn manual_refresh_bypasses_polling_but_respects_retry_after() {
         let mut inner = Inner::default();
         inner.claude.last_attempt = Some(1000);
-        assert!(!begin_claude_refresh(&mut inner, 2000, false));
-        assert!(begin_claude_refresh(&mut inner, 2000, true));
+        assert!(!begin_claude_refresh(&mut inner, 2000, false, None));
+        assert!(begin_claude_refresh(&mut inner, 2000, true, None));
         let error = claude_oauth::RetryAfter(180_000).into();
         assert!(finish_claude_refresh(&mut inner, 0, Err(error), 2000, 3000).is_err());
         assert_eq!(inner.claude.retry_at, Some(180_000));
         assert!(inner.claude.error.is_some());
-        assert!(!begin_claude_refresh(&mut inner, 4000, true));
+        assert!(!begin_claude_refresh(&mut inner, 4000, true, None));
         apply_claude_live(&mut inner, &session_sample(100, 10), 9_000);
         assert_eq!(claude_revalidate_at(&inner), Some(180_000));
-        assert!(!begin_claude_refresh(&mut inner, 10_000, false));
-        assert!(begin_claude_refresh(&mut inner, 180_000, false));
+        assert!(!begin_claude_refresh(&mut inner, 10_000, false, None));
+        assert!(begin_claude_refresh(&mut inner, 180_000, false, None));
+    }
+
+    const MINUTE: i64 = 60_000;
+
+    fn codex_sample(used: u32) -> Value {
+        json!({"rateLimits": {"primary": {"usedPercent": used, "windowDurationMins": 300, "resetsAt": 1_788_757_220}}})
+    }
+
+    /// The frontend timer re-arms when a refresh settles, so its next tick
+    /// lands one interval after that; the provider request it asks for must
+    /// then be allowed, not swallowed by a longer backend throttle.
+    #[test]
+    fn a_provider_refresh_is_eligible_at_the_configured_cadence() {
+        for (cadence, interval) in [(Some(MINUTE), MINUTE), (Some(2 * MINUTE), 2 * MINUTE), (Some(5 * MINUTE), 5 * MINUTE), (Some(15 * MINUTE), 15 * MINUTE), (None, BACKGROUND_REFRESH_MS)] {
+            let mut inner = Inner::default();
+            let mut now = 1_000;
+            for _ in 0..3 {
+                assert!(begin_claude_refresh(&mut inner, now, false, cadence), "Claude at {cadence:?}");
+                assert!(begin_codex_refresh(&mut inner, now, false, cadence), "Codex at {cadence:?}");
+                let settled = now + 400;
+                finish_claude_refresh(&mut inner, 0, Ok(vec![]), now, settled).unwrap();
+                finish_codex_refresh(&mut inner, Ok(codex_sample(10)), now).unwrap();
+                // Focus or a second window asking again mid-interval reuses the answer.
+                assert!(!begin_claude_refresh(&mut inner, settled + interval / 2, false, cadence));
+                assert!(!begin_codex_refresh(&mut inner, settled + interval / 2, false, cadence));
+                now = settled + interval;
+            }
+        }
+        // The default minute is a real fetch, where the timer-off floor still declines.
+        let mut inner = Inner::default();
+        assert!(begin_claude_refresh(&mut inner, 0, false, Some(MINUTE)));
+        finish_claude_refresh(&mut inner, 0, Ok(vec![]), 0, 0).unwrap();
+        assert!(!begin_claude_refresh(&mut inner, MINUTE, false, None));
+        assert!(begin_claude_refresh(&mut inner, MINUTE, false, Some(MINUTE)));
+    }
+
+    #[test]
+    fn a_slow_request_is_never_overlapped_and_the_next_tick_follows_it() {
+        let mut inner = Inner::default();
+        assert!(begin_claude_refresh(&mut inner, 0, false, Some(MINUTE)));
+        assert!(begin_codex_refresh(&mut inner, 0, false, Some(MINUTE)));
+        for (at, manual) in [(MINUTE, false), (3 * MINUTE, false), (3 * MINUTE, true)] {
+            assert!(!begin_claude_refresh(&mut inner, at, manual, Some(MINUTE)));
+            assert!(!begin_codex_refresh(&mut inner, at, manual, Some(MINUTE)));
+        }
+        finish_claude_refresh(&mut inner, 0, Ok(vec![]), 0, 4 * MINUTE).unwrap();
+        finish_codex_refresh(&mut inner, Ok(codex_sample(10)), 0).unwrap();
+        assert!(begin_claude_refresh(&mut inner, 4 * MINUTE, false, Some(MINUTE)));
+        assert!(begin_codex_refresh(&mut inner, 4 * MINUTE, false, Some(MINUTE)));
+    }
+
+    #[test]
+    fn backoff_outranks_the_interval_and_a_failure_keeps_the_last_known_usage() {
+        let store = UsageStore::default();
+        let cadence = Some(MINUTE);
+        store.ingest_claude_at(&session_sample(40, 9_000), 1_000);
+        {
+            let mut inner = store.inner.lock().unwrap();
+            assert!(begin_claude_refresh(&mut inner, 1_000, false, cadence));
+            finish_claude_refresh(&mut inner, 0, Ok(parse_claude(&session_sample(41, 9_000), 1_000)), 1_000, 1_200).unwrap();
+            // First failure: one minute. The tick that lands inside it is refused,
+            // manual included; the first tick after expiry goes out.
+            assert!(begin_claude_refresh(&mut inner, MINUTE + 1_200, false, cadence));
+            assert!(finish_claude_refresh(&mut inner, 0, Err(anyhow::anyhow!("offline")), MINUTE + 1_200, MINUTE + 2_000).is_err());
+            assert_eq!(inner.claude.retry_at, Some(2 * MINUTE + 2_000));
+            assert!(!begin_claude_refresh(&mut inner, 2 * MINUTE + 1_999, false, cadence));
+            assert!(!begin_claude_refresh(&mut inner, 2 * MINUTE + 1_999, true, cadence));
+        }
+        let failed = store.snapshot_at(&HashSet::new(), MINUTE + 3_000);
+        assert_eq!(failed.windows[0].used_percent, 41.0);
+        assert_eq!(failed.claude.last_success_at, Some(1_000));
+        assert_eq!(failed.claude.retry_at, Some(2 * MINUTE + 2_000));
+        assert!(failed.claude.error.as_deref().is_some_and(|error| error.contains("offline")));
+        {
+            let mut inner = store.inner.lock().unwrap();
+            assert!(begin_claude_refresh(&mut inner, 2 * MINUTE + 2_000, false, cadence));
+            // A second failure doubles the pause; a provider Retry-After extends it further.
+            let limited = claude_oauth::RetryAfter(20 * MINUTE).into();
+            assert!(finish_claude_refresh(&mut inner, 0, Err(limited), 2 * MINUTE + 2_000, 2 * MINUTE + 3_000).is_err());
+            for tick in 3..20 {
+                assert!(!begin_claude_refresh(&mut inner, tick * MINUTE, false, cadence));
+            }
+            assert!(begin_claude_refresh(&mut inner, 20 * MINUTE, false, cadence));
+            finish_claude_refresh(&mut inner, 0, Ok(parse_claude(&session_sample(55, 9_000), 20 * MINUTE)), 20 * MINUTE, 20 * MINUTE + 300).unwrap();
+        }
+        let recovered = store.snapshot_at(&HashSet::new(), 20 * MINUTE + 300);
+        assert_eq!(recovered.windows[0].used_percent, 55.0);
+        assert_eq!(recovered.claude.last_success_at, Some(20 * MINUTE));
+        assert_eq!((recovered.claude.retry_at, recovered.claude.error), (None, None));
+        // Recovered, so the ordinary cadence resumes.
+        let mut inner = store.inner.lock().unwrap();
+        assert!(begin_claude_refresh(&mut inner, 21 * MINUTE + 300, false, cadence));
+    }
+
+    #[test]
+    fn codex_failures_back_off_keep_the_snapshot_and_recover() {
+        let store = UsageStore::default();
+        let cadence = Some(MINUTE);
+        let running = HashSet::from(["codex".to_string()]);
+        {
+            let mut inner = store.inner.lock().unwrap();
+            assert!(begin_codex_refresh(&mut inner, 0, false, cadence));
+            finish_codex_refresh(&mut inner, Ok(codex_sample(17)), 0).unwrap();
+            assert!(begin_codex_refresh(&mut inner, MINUTE, false, cadence));
+            assert!(finish_codex_refresh(&mut inner, Err(anyhow::anyhow!("codex is not signed in")), MINUTE).is_err());
+            // Thirty seconds, then a minute: the second pause swallows a tick.
+            assert!(!begin_codex_refresh(&mut inner, MINUTE + 29_999, true, cadence));
+            assert!(begin_codex_refresh(&mut inner, 2 * MINUTE, false, cadence));
+            assert!(finish_codex_refresh(&mut inner, Err(anyhow::anyhow!("codex is not signed in")), 2 * MINUTE).is_err());
+            assert!(!begin_codex_refresh(&mut inner, 3 * MINUTE - 1, false, cadence));
+        }
+        let failed = store.snapshot_at(&running, 2 * MINUTE + 1);
+        assert_eq!(failed.windows[0].used_percent, 17.0);
+        assert_eq!(failed.codex_refresh.last_success_at, Some(0));
+        assert_eq!(failed.codex_refresh.retry_at, Some(3 * MINUTE));
+        assert!(failed.codex_refresh.error.as_deref().is_some_and(|error| error.contains("not signed in")));
+        {
+            let mut inner = store.inner.lock().unwrap();
+            assert!(begin_codex_refresh(&mut inner, 3 * MINUTE, false, cadence));
+            finish_codex_refresh(&mut inner, Ok(codex_sample(19)), 3 * MINUTE).unwrap();
+        }
+        let recovered = store.snapshot_at(&running, 3 * MINUTE);
+        assert_eq!(recovered.windows[0].used_percent, 19.0);
+        assert_eq!(recovered.codex_refresh, CodexRefresh { retry_at: None, error: None, last_success_at: Some(3 * MINUTE) });
+    }
+
+    #[test]
+    fn the_codex_button_keeps_its_debounce_but_never_waits_longer_than_the_timer() {
+        let mut inner = Inner::default();
+        assert!(begin_codex_refresh(&mut inner, 0, true, None));
+        finish_codex_refresh(&mut inner, Ok(codex_sample(10)), 0).unwrap();
+        // Timer off: a second press inside five minutes is still debounced.
+        assert!(!begin_codex_refresh(&mut inner, 2 * MINUTE, true, None));
+        // Timer on: by then a tick would fetch, so the button does too.
+        assert!(!begin_codex_refresh(&mut inner, 30_000, true, Some(MINUTE)));
+        assert!(begin_codex_refresh(&mut inner, 2 * MINUTE, true, Some(MINUTE)));
+        finish_codex_refresh(&mut inner, Ok(codex_sample(10)), 2 * MINUTE).unwrap();
+        // A press bypasses the timer's floor once its own debounce has passed.
+        assert!(begin_codex_refresh(&mut inner, 7 * MINUTE + 1, true, None));
+        finish_codex_refresh(&mut inner, Ok(codex_sample(10)), 7 * MINUTE + 1).unwrap();
+        // A redemption in progress is not read over.
+        inner.codex_reset_in_flight = true;
+        assert!(!begin_codex_refresh(&mut inner, 30 * MINUTE, false, Some(MINUTE)));
+    }
+
+    #[test]
+    fn a_new_account_starts_its_own_cadence_and_freshness() {
+        let store = UsageStore::default();
+        {
+            let mut inner = store.inner.lock().unwrap();
+            select_claude_account(&mut inner, Some("account-a".into()));
+            assert!(begin_claude_refresh(&mut inner, 0, false, Some(MINUTE)));
+            let generation = inner.claude_generation;
+            finish_claude_refresh(&mut inner, generation, Err(anyhow::anyhow!("offline")), 0, 100).unwrap_err();
+            select_claude_account(&mut inner, Some("account-b".into()));
+            // Neither A's backoff nor A's recent attempt holds B's first read.
+            assert!(begin_claude_refresh(&mut inner, 200, false, Some(MINUTE)));
+        }
+        let snapshot = store.snapshot_at(&HashSet::new(), 300);
+        assert_eq!(snapshot.claude, ClaudeRefresh::default());
     }
 
     #[test]
@@ -789,7 +995,7 @@ mod tests {
         ingest_attributed_claude(&mut inner, Some("account-a".into()), Some("account-a"), &a, 1000);
         assert_eq!(inner.windows.len(), 1);
         let generation = inner.claude_generation;
-        assert!(begin_claude_refresh(&mut inner, 1000, false));
+        assert!(begin_claude_refresh(&mut inner, 1000, false, None));
         // The old tab's next hook observes the selected account B, but it was
         // launched for A; its windows must not be reassigned to B.
         ingest_attributed_claude(&mut inner, Some("account-b".into()), Some("account-a"), &a, 2000);

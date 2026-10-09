@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { BYPASS_MODE } from "./models";
 import { getPrefs } from "./prefs";
+import type { WorkspaceHost } from "./workspaceRemoval";
 
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
 /**
@@ -14,6 +15,8 @@ export interface WorkspaceRemoveRequest {
   mode: "delete" | "settle";
   /** Settling was started from this session; "Move session to project" applies to it. */
   sessionId?: string;
+  /** Where the workspace is read and removed; this computer when absent. A cloud worktree is only ever deleted, not settled. */
+  host?: WorkspaceHost;
 }
 
 interface State {
@@ -55,8 +58,8 @@ export function openSettle(session: { id: string; projectPath: string; cwd: stri
   openWorkspaceRemove({ projectPath: session.projectPath, path: session.cwd, name: session.worktreeName ?? session.cwd, mode: "settle", sessionId: session.id });
 }
 
-export function openWorkspaceDelete(projectPath: string, path: string, name: string) {
-  openWorkspaceRemove({ projectPath, path, name, mode: "delete" });
+export function openWorkspaceDelete(projectPath: string, path: string, name: string, host?: WorkspaceHost) {
+  openWorkspaceRemove({ projectPath, path, name, mode: "delete", host });
 }
 
 export function closeWorkspaceRemove() {

@@ -734,3 +734,119 @@ impl Drop for Rig {
         self.manager.terminals.kill(&self.pane);
     }
 }
+
+/// A command that failed, as each CLI records it: the call and its result.
+fn failed_command(kind: CliKind, id: &str) -> String {
+    match kind {
+        CliKind::Claude => format!(
+            "{}\n{}\n",
+            json!({ "type": "assistant", "uuid": format!("a-{id}"), "isSidechain": false, "message": { "id": format!("m-{id}"), "role": "assistant", "content": [{ "type": "tool_use", "id": id, "name": "Bash", "input": { "command": "cargo test" } }] } }),
+            json!({ "type": "user", "uuid": format!("u-{id}"), "isSidechain": false, "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": id, "is_error": true, "content": "test result: FAILED" }] } }),
+        ),
+        CliKind::Codex => format!(
+            "{}\n",
+            json!({ "type": "event_msg", "payload": { "type": "item_completed", "item": { "type": "CommandExecution", "id": id, "command": "cargo test", "cwd": "/w/demo", "status": "completed", "exit_code": 1, "aggregated_output": "test result: FAILED" } } }),
+        ),
+    }
+}
+
+/// The agent says something, as each CLI records it.
+fn agent_text(kind: CliKind, id: &str) -> String {
+    match kind {
+        CliKind::Claude => format!("{}\n", json!({ "type": "assistant", "uuid": format!("a-{id}"), "isSidechain": false, "message": { "id": format!("m-{id}"), "role": "assistant", "content": [{ "type": "text", "text": "Trying another way." }] } })),
+        CliKind::Codex => format!("{}\n", json!({ "type": "event_msg", "payload": { "type": "item_completed", "item": { "type": "AgentMessage", "id": id, "content": [{ "type": "text", "text": "Trying another way." }] } } })),
+    }
+}
+
+impl Rig {
+    /// A tab on either CLI with a turn open and the agent working.
+    fn working(kind: CliKind) -> Self {
+        let rig = Self::of(kind, "");
+        match kind {
+            CliKind::Claude => rig.start_turn(),
+            CliKind::Codex => rig.append(&format!(
+                "{}\n{}\n",
+                json!({ "type": "event_msg", "payload": { "type": "task_started", "turn_id": "turn-1" } }),
+                json!({ "type": "event_msg", "payload": { "type": "item_completed", "item": { "type": "UserMessage", "id": "user-1", "content": [{ "type": "text", "text": "run the tests" }] } } }),
+            )),
+        }
+        assert!(rig.turn_open());
+        assert_eq!(rig.status(), TabStatus::InProgress);
+        rig
+    }
+
+    /// The failed tool results in the log, and every recovery ever raised.
+    fn failed_tools_and_recoveries(&self) -> (usize, Vec<RecoveryKind>) {
+        let events = self.events();
+        let failed = events.iter().filter(|e| matches!(&e.payload, Payload::ToolCallCompleted { result, .. } if result.is_error)).count();
+        let raised = events.iter().filter_map(|e| match &e.payload { Payload::Recovery { kind } => *kind, _ => None }).collect();
+        (failed, raised)
+    }
+}
+
+/// A command that exits non-zero in a running turn is the agent's to read,
+/// not the reader's: the tab stays "Working" through the failure, through the
+/// thinking after it, and through the work that follows (#400).
+#[test]
+fn a_failed_command_in_a_running_turn_does_not_ask_for_attention() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::working(kind);
+        for id in ["call-1", "call-2", "call-3"] {
+            rig.append(&failed_command(kind, id));
+            assert_eq!(rig.status(), TabStatus::InProgress, "{kind:?}: still working after a failed command");
+            assert_eq!(rig.recovery(), None);
+            rig.append(&agent_text(kind, &format!("text-{id}")));
+            assert_eq!(rig.status(), TabStatus::InProgress);
+        }
+        let (failed, raised) = rig.failed_tools_and_recoveries();
+        assert_eq!(failed, 3, "{kind:?}: each failure is still a failed row in the transcript");
+        assert_eq!(raised, vec![], "{kind:?}: and none of them was ever a banner");
+        assert_eq!(rig.banner(), None);
+    }
+}
+
+/// The last thing a turn did was a command that failed, and then the turn
+/// ended normally: it is completed, not in need of attention.
+#[test]
+fn a_turn_whose_last_tool_failed_and_then_completes_is_completed() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::working(kind);
+        rig.append(&failed_command(kind, "call-1"));
+        rig.hook("Stop", json!({ "last_assistant_message": "The tests fail; see above." }));
+        assert!(!rig.turn_open());
+        assert_eq!(rig.status(), TabStatus::Completed, "{kind:?}");
+        assert_eq!(rig.recovery(), None);
+        assert_eq!(rig.failed_tools_and_recoveries(), (1, vec![]));
+    }
+}
+
+/// A turn that ends in an error is the reader's to look at, failed tools
+/// before it or not.
+#[test]
+fn a_turn_that_ends_in_an_error_asks_for_attention() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::working(kind);
+        rig.append(&failed_command(kind, "call-1"));
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Error, final_text: Some("the agent crashed".into()), usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+        }
+        assert!(!rig.turn_open());
+        assert_eq!(rig.status(), TabStatus::Waiting, "{kind:?}");
+        assert_eq!(rig.recovery(), Some(RecoveryKind::Failed));
+        assert_eq!(rig.banner(), Some(RecoveryKind::Failed));
+    }
+}
+
+/// Asking still waits, and a failed command while it waits changes nothing.
+#[test]
+fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
+    let rig = Rig::working(CliKind::Claude);
+    rig.append(&failed_command(CliKind::Claude, "call-1"));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested { request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
+    }
+    assert_eq!(rig.status(), TabStatus::Waiting);
+    assert_eq!(rig.recovery(), None);
+}

@@ -569,6 +569,29 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
     index::load().map(|sessions| sessions_within(sessions, path)).map_err(err)
 }
 
+/// What deleting a workspace would cost: the git state of its tree plus the
+/// sessions (and transcripts) that would go with it. The one read behind the
+/// desktop's `workspace_disposition` and the runtime's `workspace.disposition`.
+///
+/// `fetch` is for the dialog that is about to delete the workspace, which
+/// asks for it. Everything else that reads the disposition (the pull request
+/// panel and the chat do so every 30 seconds) does not fetch and gets no
+/// clean-and-merged verdict at all; it still asks GitHub for the branch's
+/// pull request. A folder that is not on disk gets a
+/// verdict too ("cannot be checked"), so the dialog can ask about it rather
+/// than wave it through.
+pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {
+    let mut disposition = crate::workspaces::disposition(project, path);
+    if fetch && !disposition.is_main {
+        disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));
+    }
+    let sessions = sessions_in_workspace(path)?;
+    disposition.sessions = sessions.len();
+    disposition.session_ids = sessions.iter().map(|session| session.id.clone()).collect();
+    disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
+    Ok(disposition)
+}
+
 /// The sessions among `sessions` that run in the checkout at `path`.
 pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<SessionEntry> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

@@ -12,7 +12,7 @@ use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
 pub(crate) use crate::session_ops::create_session_blocking;
-use crate::session_ops::{available_worktree_name, rename_workspace_entries, sessions_in_workspace};
+use crate::session_ops::{available_worktree_name, rename_workspace_entries};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -1990,6 +1990,7 @@ pub struct StatusBarPatch {
     pub resources: Option<bool>,
     pub percent: Option<crate::store::settings::StatusPercent>,
     pub usage_mode: Option<crate::store::settings::StatusUsageMode>,
+    pub usage_refresh_minutes: Option<u32>,
 }
 
 #[tauri::command]
@@ -2015,6 +2016,12 @@ pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResu
     if let Some(value) = patch.usage_mode {
         settings.status_bar.usage_mode = value;
     }
+    if let Some(value) = patch.usage_refresh_minutes {
+        if !crate::store::settings::USAGE_REFRESH_MINUTES.contains(&value) {
+            return Err(format!("Usage cannot refresh every {value} minutes."));
+        }
+        settings.status_bar.usage_refresh_minutes = value;
+    }
     store::settings::save(&settings).map_err(err)?;
     crate::status::set_menu_checked(&app, settings.status_bar.visible);
     let _ = app.emit(crate::status::SETTINGS_EVENT, &settings.status_bar);
@@ -2031,17 +2038,19 @@ pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, ma
     let status = state.status.clone();
     let manager = state.manager().ok_or("not ready")?;
     let manual = manual.unwrap_or(false);
+    // Read per request, so a changed interval governs the very next refresh.
+    let cadence = store::settings::load().status_bar.usage_refresh_ms();
     let publishing_app = app.clone();
     let publishing_manager = manager.clone();
     let failures = tauri::async_runtime::spawn_blocking(move || {
         let mut failures = Vec::new();
-        if let Err(error) = status.usage.refresh_claude(manual) {
+        if let Err(error) = status.usage.refresh_claude(manual, cadence) {
             failures.push(format!("Claude usage refresh: {error:#}"));
         }
         // Publish Claude as soon as its source settles; starting Codex's
         // app-server must not hold a confirmed Claude rollover off-screen.
         let _ = publishing_app.emit(crate::status::usage::EVENT, publishing_manager.usage_snapshot());
-        if let Err(error) = status.usage.refresh_codex(manual) {
+        if let Err(error) = status.usage.refresh_codex(manual, cadence) {
             failures.push(format!("Codex usage refresh: {error:#}"));
         }
         failures
@@ -3331,23 +3340,7 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
 /// many sessions (and transcripts) would go with it.
 #[tauri::command]
 pub async fn workspace_disposition(project_path: String, path: String, fetch: Option<bool>) -> CmdResult<crate::workspaces::WorkspaceDisposition> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut disposition = crate::workspaces::disposition(Path::new(&project_path), Path::new(&path));
-        // The fetch is for the dialog that is about to delete the workspace,
-        // which asks for it. Everything else that reads the disposition (the
-        // pull request panel does so every 30 seconds) stays off the network
-        // and gets no clean-and-merged verdict at all.
-        // A folder that is not on disk gets a verdict too ("cannot be
-        // checked"), so the dialog can ask about it rather than wave it through.
-        if fetch == Some(true) && !disposition.is_main {
-            disposition.landed = Some(crate::landed::check(Path::new(&project_path), Path::new(&path), crate::landed::Fetch::Fresh));
-        }
-        let sessions = sessions_in_workspace(Path::new(&path))?;
-        disposition.sessions = sessions.len();
-        disposition.session_ids = sessions.iter().map(|session| session.id.clone()).collect();
-        disposition.session_titles = sessions.into_iter().map(|session| session.title).collect();
-        Ok(disposition)
-    })
+    tauri::async_runtime::spawn_blocking(move || crate::session_ops::workspace_disposition(Path::new(&project_path), Path::new(&path), fetch == Some(true)))
     .await
     .map_err(err)?
 }

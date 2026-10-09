@@ -280,7 +280,12 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         "assistant" => decode_assistant(&v, out),
         "system" if v["subtype"] == "api_error" => {
             let message = v["error"]["message"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Provider request failed");
-            out.push(Payload::Error { message: message.into(), fatal: false });
+            // The CLI writes one of these per failed attempt and keeps
+            // retrying; only the last attempt is the request failing.
+            match (v["retryAttempt"].as_u64(), v["maxRetries"].as_u64()) {
+                (Some(attempt), Some(max_retries)) => out.push(Payload::ApiRetry { attempt: attempt as u32, max_retries: max_retries as u32, reason: Some(message.into()) }),
+                _ => out.push(Payload::Error { message: message.into(), fatal: false }),
+            }
         }
         "system" if v["subtype"] == "compact_boundary" => {
             let meta = &v["compactMetadata"];

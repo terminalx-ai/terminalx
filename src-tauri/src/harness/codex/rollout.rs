@@ -92,6 +92,14 @@ fn plain_path(v: &Value) -> Option<String> {
 /// `skip` is the tail's list of records already logged under another id; it
 /// is a Claude fork's problem and Codex has no equivalent, since a Codex
 /// conversation is only ever appended to.
+/// The "2/5" of a reconnect notice: the attempt and how many there are.
+fn retry_count(message: &str) -> Option<(u32, u32)> {
+    message.split(|c: char| !c.is_ascii_digit() && c != '/').find_map(|word| {
+        let (attempt, max) = word.split_once('/')?;
+        Some((attempt.parse().ok()?, max.parse().ok()?))
+    })
+}
+
 pub fn decode_line(line: &str, skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) {
     decode_marked(line, skip, out);
 }
@@ -151,7 +159,12 @@ fn decode_event(p: &Value, out: &mut Vec<Payload>) {
         "context_compacted" => out.push(Payload::ContextCompacted { pre_tokens: None, post_tokens: None }),
         "stream_error" | "error" => {
             let message = p["message"].as_str().or_else(|| p["error"]["message"].as_str()).unwrap_or("Codex reported an error");
-            out.push(Payload::Error { message: message.to_string(), fatal: false });
+            // A `stream_error` is Codex reconnecting, "Reconnecting... 2/5":
+            // a failure only once the attempts are spent.
+            match p["type"].as_str().filter(|kind| *kind == "stream_error").and_then(|_| retry_count(message)) {
+                Some((attempt, max_retries)) => out.push(Payload::ApiRetry { attempt, max_retries, reason: Some(message.to_string()) }),
+                None => out.push(Payload::Error { message: message.to_string(), fatal: false }),
+            }
         }
         "item_completed" => decode_item(&p["item"], out),
         _ => {}

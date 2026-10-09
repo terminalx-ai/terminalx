@@ -46,6 +46,7 @@ import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/compo
 import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
 import { SessionTabStrip } from "./SessionTabStrip";
+import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -309,6 +310,8 @@ export function SessionView({
   const store = useSessionStore();
   const backend = cloud?.backend ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
+  const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
   const terminals = useTerminals();
   const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden) : [];
@@ -579,6 +582,7 @@ export function SessionView({
                     active={selected?.kind === "agent" && t.id === selected.id}
                     backend={cloud ? backend : undefined}
                     gitSource={cloud?.gitSource}
+                    workspace={cloud ? cloud.removableWorkspace : localWorkspace}
                   />
                 </div>
               ))}

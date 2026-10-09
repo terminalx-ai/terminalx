@@ -80,11 +80,42 @@ pub struct StatusBarSettings {
     pub resources: bool,
     pub percent: StatusPercent,
     pub usage_mode: StatusUsageMode,
+    /// Minutes between automatic provider usage refreshes; 0 turns the timer
+    /// off and leaves focus, manual and reset-boundary refreshes in place.
+    #[serde(deserialize_with = "usage_refresh_minutes")]
+    pub usage_refresh_minutes: u32,
+}
+
+/// The intervals the settings control offers; 0 is "off".
+pub const USAGE_REFRESH_MINUTES: [u32; 5] = [0, 1, 2, 5, 15];
+const DEFAULT_USAGE_REFRESH_MINUTES: u32 = 1;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// polling a provider at a cadence nobody chose.
+fn usage_refresh_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let minutes = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(minutes.filter(|value| USAGE_REFRESH_MINUTES.contains(value)).unwrap_or(DEFAULT_USAGE_REFRESH_MINUTES))
+}
+
+impl StatusBarSettings {
+    /// The automatic refresh cadence, or `None` when the timer is off or
+    /// nothing shows usage; returning to the app must not fetch at that
+    /// cadence for an indicator that is hidden.
+    pub fn usage_refresh_ms(&self) -> Option<i64> {
+        (self.visible && self.usage && self.usage_refresh_minutes > 0).then(|| i64::from(self.usage_refresh_minutes) * 60_000)
+    }
 }
 
 impl Default for StatusBarSettings {
     fn default() -> Self {
-        Self { visible: true, usage: true, resources: true, percent: StatusPercent::Used, usage_mode: StatusUsageMode::Detailed }
+        Self {
+            visible: true,
+            usage: true,
+            resources: true,
+            percent: StatusPercent::Used,
+            usage_mode: StatusUsageMode::Detailed,
+            usage_refresh_minutes: DEFAULT_USAGE_REFRESH_MINUTES,
+        }
     }
 }
 
@@ -159,5 +190,32 @@ mod tests {
         assert_eq!(settings.status_bar, StatusBarSettings::default());
         assert!(settings.status_bar.visible);
         assert_eq!(settings.status_bar.percent, StatusPercent::Used);
+    }
+
+    #[test]
+    fn usage_refresh_defaults_to_a_minute_and_keeps_only_offered_intervals() {
+        let read = |raw: &str| serde_json::from_str::<Settings>(raw).unwrap().status_bar;
+        // A settings file written before the interval existed.
+        let older = read(r#"{"statusBar":{"visible":false}}"#);
+        assert!(!older.visible);
+        assert_eq!(older.usage_refresh_minutes, 1);
+        // Chosen, but with the bar hidden there is nothing to keep fresh.
+        assert_eq!(older.usage_refresh_ms(), None);
+        assert_eq!(read(r#"{"statusBar":{"usage":false}}"#).usage_refresh_ms(), None);
+        assert_eq!(read("{}").usage_refresh_ms(), Some(60_000));
+
+        for minutes in USAGE_REFRESH_MINUTES {
+            let chosen = read(&format!(r#"{{"statusBar":{{"usageRefreshMinutes":{minutes}}}}}"#));
+            assert_eq!(chosen.usage_refresh_minutes, minutes);
+            let written = serde_json::to_value(&Settings { status_bar: chosen.clone(), ..Settings::default() }).unwrap();
+            assert_eq!(serde_json::from_value::<Settings>(written).unwrap().status_bar, chosen);
+        }
+        assert_eq!(read(r#"{"statusBar":{"usageRefreshMinutes":0}}"#).usage_refresh_ms(), None);
+        assert_eq!(read(r#"{"statusBar":{"usageRefreshMinutes":5}}"#).usage_refresh_ms(), Some(300_000));
+
+        for invalid in ["3", "-1", "0.5", "\"1\"", "null", "99999999999"] {
+            let damaged = read(&format!(r#"{{"statusBar":{{"usageRefreshMinutes":{invalid}}}}}"#));
+            assert_eq!(damaged.usage_refresh_minutes, 1, "{invalid}");
+        }
     }
 }

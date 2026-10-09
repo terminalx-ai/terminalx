@@ -188,6 +188,13 @@ class FakeRuntime implements WorkspaceTransport {
         this.cache.set(key!, result);
         return ok(result);
       }
+      case "workspace.disposition":
+        return ok({ disposition: { exists: true, isMain: false, landed: params.fetch ? { safe: true } : null } });
+      case "workspace.remove": {
+        const result = { deleted: params.expectedSessions, keptBranch: null, rescuedBranch: null };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
     }
@@ -572,6 +579,30 @@ describe("workspace RPC client", () => {
         expect(method).toMatchObject({ authority: "Manage", idempotent: true });
         expect(MUTATING_METHODS.has(name), name).toBe(true);
       }
+    });
+
+    it("workspace/1: a session's worktree is read and removed by its session id, the removal is one idempotent request, and an older runtime is never asked", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.workspaceDisposition("s1")).toMatchObject({ exists: true, landed: null });
+      expect(await client.workspaceDisposition("s1", { fetch: true })).toMatchObject({ landed: { safe: true } });
+      const removed = await client.removeSessionWorkspace("s1", { deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s2"] });
+      expect(removed.deleted).toEqual(["s1", "s2"]);
+      const sent = runtime.sent.find((frame) => frame.method === "workspace.remove")!.params as Record<string, unknown>;
+      expect(sent).toMatchObject({ sessionId: "s1", deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s2"] });
+      expect(typeof sent.clientRequestId).toBe("string");
+      expect(MUTATING_METHODS.has("workspace.remove")).toBe(true);
+      client.close();
+
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(SESSION_1);
+      expect(before.hasCapability("workspace/1")).toBe(false);
+      await expect(before.workspaceDisposition("s1")).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.removeSessionWorkspace("s1", { deleteBranch: false, confirmedDigest: null, expectedSessions: ["s1"] })).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(old.sent.some((frame) => frame.method.startsWith("workspace."))).toBe(false);
+      before.close();
     });
 
     it("cleanup/1: the runtime is asked about its own worktrees, a removal is one idempotent request, and an older runtime is never asked", async () => {

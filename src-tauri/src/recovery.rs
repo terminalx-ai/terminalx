@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// `Tool` is no longer raised (#400): a failed tool is a row in the transcript,
+/// not a state of the session. It stays for the logs that recorded it and for
+/// the text a failed tool's result is replaced with.
 pub enum RecoveryKind { Capacity, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, Failed }
 
 impl RecoveryKind {
@@ -56,7 +59,8 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
     let mut open = false;
     for event in events.iter().filter(|event| event.subagent.is_none()) {
         match &event.payload {
-            Payload::Recovery { kind } => recovery = *kind,
+            // Older logs raised one for every failed tool, mid-turn (#400).
+            Payload::Recovery { kind } => recovery = kind.filter(|kind| *kind != RecoveryKind::Tool),
             Payload::UserMessage { queued: false, .. } => { open = true; recovery = None; }
             Payload::TurnCompleted { .. } => open = false,
             Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; }
@@ -67,11 +71,13 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
     recovery.or(open.then_some(RecoveryKind::Disconnected))
 }
 
+/// What ends a turn or stops the agent getting any further. A tool or command
+/// that failed is neither: the agent reads the result and carries on, and a
+/// turn that ends badly says so itself.
 pub fn failure(payload: &Payload) -> Option<RecoveryKind> {
     match payload {
         Payload::Error { message, .. } => Some(RecoveryKind::classify(message)),
         Payload::TurnCompleted { status: TurnStatus::Error, final_text, .. } => Some(RecoveryKind::classify(final_text.as_deref().unwrap_or(""))),
-        Payload::ToolCallCompleted { result, .. } if result.is_error => Some(RecoveryKind::Tool),
         // Some providers emit rate-limit warnings while requests still succeed.
         Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => Some(RecoveryKind::Capacity),
         Payload::ApiRetry { attempt, max_retries, reason } if attempt >= max_retries => Some(RecoveryKind::classify(reason.as_deref().unwrap_or(""))),
@@ -185,15 +191,20 @@ mod lifecycle_tests {
         assert_eq!(from_history(&events), None);
     }
     #[test]
+    fn a_tool_failure_an_older_log_recorded_is_not_restored() {
+        let events = vec![event(Payload::Recovery { kind: Some(RecoveryKind::Tool) })];
+        assert_eq!(from_history(&events), None);
+    }
+    #[test]
     fn expired_permission_has_recovery_instead_of_working() {
         let events = vec![event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true })];
         assert_eq!(from_history(&events), Some(RecoveryKind::PermissionExpired));
     }
     #[test]
-    fn completed_tool_is_not_a_failure_and_failed_details_are_protected() {
+    fn a_tool_is_never_a_session_failure_and_failed_details_are_protected() {
         assert_eq!(failure(&Payload::ToolCallCompleted { call_id: "done".into(), result: ToolResult::default() }), None);
         let mut failed = Payload::ToolCallCompleted { call_id: "failed".into(), result: ToolResult { text: "TOKEN=secret /Users/private".into(), is_error: true, structured: Some(serde_json::json!({"request": "secret"})), ..Default::default() } };
-        assert_eq!(failure(&failed), Some(RecoveryKind::Tool));
+        assert_eq!(failure(&failed), None);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.jsonl");
         diagnose(&path, &failed);
@@ -206,6 +217,30 @@ mod lifecycle_tests {
         let public = serde_json::to_string(&failed).unwrap();
         assert!(!public.contains("secret"));
         assert!(!public.contains("/Users"));
+    }
+    #[test]
+    fn a_turn_that_ends_in_an_error_is_a_failure_and_one_that_ends_well_is_not() {
+        let end = |status, final_text: Option<&str>| Payload::TurnCompleted { status, final_text: final_text.map(Into::into), usage: None, duration_ms: None, head: None, auth_failed: false };
+        assert_eq!(failure(&end(TurnStatus::Ok, None)), None);
+        assert_eq!(failure(&end(TurnStatus::Aborted, None)), None);
+        assert_eq!(failure(&end(TurnStatus::Error, Some("exited"))), Some(RecoveryKind::Failed));
+        assert_eq!(failure(&end(TurnStatus::Error, Some("connection closed"))), Some(RecoveryKind::Disconnected));
+    }
+    #[test]
+    fn a_retry_with_attempts_left_is_not_a_failure() {
+        assert_eq!(failure(&Payload::ApiRetry { attempt: 2, max_retries: 10, reason: Some("overloaded".into()) }), None);
+        let mut payloads = Vec::new();
+        crate::harness::claude::transcript::decode_line(r#"{"type":"system","subtype":"api_error","error":{"message":"Overloaded"},"retryInMs":1000,"retryAttempt":2,"maxRetries":10}"#, &Default::default(), &mut payloads);
+        crate::harness::codex::rollout::decode_line(r#"{"type":"event_msg","payload":{"type":"stream_error","message":"Reconnecting... 2/5"}}"#, &Default::default(), &mut payloads);
+        assert_eq!(payloads.len(), 2);
+        assert!(payloads.iter().all(|payload| failure(payload).is_none()), "{payloads:?}");
+        // The last attempt, and an error with no attempts to count, still are.
+        payloads.clear();
+        crate::harness::claude::transcript::decode_line(r#"{"type":"system","subtype":"api_error","error":{"message":"Overloaded"},"retryAttempt":10,"maxRetries":10}"#, &Default::default(), &mut payloads);
+        crate::harness::claude::transcript::decode_line(r#"{"type":"system","subtype":"api_error","error":{"message":"Overloaded"}}"#, &Default::default(), &mut payloads);
+        crate::harness::codex::rollout::decode_line(r#"{"type":"event_msg","payload":{"type":"stream_error","message":"Reconnecting... 5/5"}}"#, &Default::default(), &mut payloads);
+        crate::harness::codex::rollout::decode_line(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected before completion"}}"#, &Default::default(), &mut payloads);
+        assert_eq!(payloads.iter().map(failure).collect::<Vec<_>>(), vec![Some(RecoveryKind::Capacity), Some(RecoveryKind::Capacity), Some(RecoveryKind::Failed), Some(RecoveryKind::Disconnected)]);
     }
     #[test]
     fn warning_limits_are_not_terminal_but_rejected_requests_are() {

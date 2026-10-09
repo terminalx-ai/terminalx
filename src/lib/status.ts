@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { createUsageRevalidation } from "./statusPolling";
+import { createUsagePolling, createUsageRevalidation } from "./statusPolling";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -21,7 +21,7 @@ interface StatusState {
   ready: boolean;
 }
 
-const defaults: StatusBarSettings = { visible: true, usage: true, resources: true, percent: "used", usageMode: "detailed" };
+const defaults: StatusBarSettings = { visible: true, usage: true, resources: true, percent: "used", usageMode: "detailed", usageRefreshMinutes: 1 };
 let state: StatusState = {
   settings: defaults,
   usage: { windows: [] },
@@ -39,6 +39,14 @@ const revalidation = createUsageRevalidation(async () => {
   await refreshUsage();
 });
 
+// The backend reuses an answer for this same interval, so the two move together.
+const polling = createUsagePolling(() => refreshUsage());
+
+/** Nothing shows usage while its indicator is hidden, so nothing polls for it. */
+function usagePollInterval(settings: StatusBarSettings): number | null {
+  return settings.visible && settings.usage && settings.usageRefreshMinutes > 0 ? settings.usageRefreshMinutes * 60_000 : null;
+}
+
 function set(patch: Partial<StatusState>) {
   if (patch.usage && (patch.usage.revision ?? 0) < (state.usage.revision ?? 0)) {
     patch = { ...patch, usage: state.usage };
@@ -46,6 +54,7 @@ function set(patch: Partial<StatusState>) {
   state = { ...state, ...patch };
   for (const listener of listeners) listener();
   if (patch.usage) revalidation.update(state.usage.claudeAccount, state.usage.claude?.revalidateAt);
+  if (patch.settings) polling.update(usagePollInterval(state.settings));
 }
 
 export function useStatus(): StatusState {
@@ -69,7 +78,9 @@ export function bootStatus(): Promise<void> {
       const [settings, usage, resources] = await Promise.all([statusBar.settings(), statusBar.usage(), statusBar.resourceOverview()]);
       set({ settings, usage, resources, ready: true });
       installFocusRefresh();
-      void refreshUsage();
+      // The backend stamps this first read when it runs, not when the module
+      // loaded; time the first tick from it or that tick can land too early.
+      void refreshUsage().finally(() => polling.restart());
       void refreshResourceSample();
     } catch {
       set({ ready: true });
@@ -78,11 +89,13 @@ export function bootStatus(): Promise<void> {
 }
 
 let usageFlight: Promise<void> | null = null;
-async function windowCanPoll(): Promise<boolean> {
-  if (typeof document !== "undefined" && (document.hidden || !document.hasFocus())) return false;
+/** Process sampling is for the window being looked at. Usage keeps up in any
+ * window on screen: agents spend it while another app has focus. */
+async function windowCanPoll(needsFocus = true): Promise<boolean> {
+  if (typeof document !== "undefined" && (document.hidden || (needsFocus && !document.hasFocus()))) return false;
   try {
     const current = getCurrentWindow();
-    return (await current.isFocused()) && !(await current.isMinimized());
+    return (!needsFocus || (await current.isFocused())) && !(await current.isMinimized());
   } catch {
     return true;
   }
@@ -91,7 +104,7 @@ async function windowCanPoll(): Promise<boolean> {
 export function refreshUsage(manual = false): Promise<void> {
   if (usageFlight) return manual ? usageFlight.then(() => refreshUsage(true)) : usageFlight;
   return (usageFlight = (async () => {
-    if (!(await windowCanPoll())) return;
+    if (!(await windowCanPoll(false))) return;
     set({ usageRefreshing: true, usageError: null });
     try {
       set({ usage: await statusBar.refreshUsage(manual) });
@@ -106,6 +119,8 @@ export function refreshUsage(manual = false): Promise<void> {
 }
 
 export async function resetCodexUsage(): Promise<void> {
+  // A tick may be reading Codex right now; the backend refuses a reset over it.
+  await usageFlight;
   set({ usageRefreshing: true });
   try {
     set({ usage: await statusBar.resetCodex() });
@@ -169,12 +184,8 @@ function installFocusRefresh() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) onFocus();
   });
-  const schedule = () => {
-    window.setTimeout(() => {
-      void refreshUsage().finally(schedule);
-    }, 15 * 60_000);
-  };
-  schedule();
+  // Back on the network: one catch-up, which provider backoff may still decline.
+  window.addEventListener("online", () => void refreshUsage());
 }
 
 export async function setStatusSettings(patch: Partial<StatusBarSettings>) {

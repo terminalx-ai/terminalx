@@ -85,6 +85,27 @@ describe("WorkspaceRemoveDialog", () => {
     expect(removeButton().disabled).toBe(false);
   });
 
+  it("reads and removes a cloud worktree on the host that owns it, with the same check and the sessions named (#411)", async () => {
+    const host = {
+      key: "cloud:org-1:ws-1|s1",
+      disposition: vi.fn(async () => workspace(dirty)),
+      remove: vi.fn(async () => ({ keptBranch: null, rescuedBranch: null })),
+      turnRunning: () => false,
+    };
+    mocks.ask.mockResolvedValue(true);
+    render(<WorkspaceRemoveDialog />);
+    act(() => openWorkspaceDelete("cloud:org-1:ws-1", "/home/user/app/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox", host));
+    await screen.findByText("Removing it now needs a second confirmation.");
+    expect(host.disposition).toHaveBeenCalledWith({ fetch: true });
+    expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
+
+    fireEvent.click(removeButton());
+    await waitFor(() => expect(host.remove).toHaveBeenCalledWith({ keepSessions: false, deleteBranch: false, confirmedDigest: "dirty-digest", expectedSessions: ["s1", "s9"] }));
+    // Nothing of it is read or removed on this computer.
+    expect(mocks.workspaceDisposition).not.toHaveBeenCalled();
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
+  });
+
   it("deletes a clean, merged workspace with one confirmation, naming the sessions that go", async () => {
     mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
     render(<WorkspaceRemoveDialog />);

@@ -15,7 +15,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
-import { api, errorMessage, gh, issues, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
@@ -354,6 +354,20 @@ function AppearanceTab() {
               { value: "used", label: "Used" },
               { value: "remaining", label: "Remaining" },
             ]}
+          />
+        }
+      />
+      <SettingRow
+        label="Usage auto-refresh interval"
+        description="How often usage is fetched again while the app is on screen. Off still refreshes when you return to the app or press Refresh."
+        disabled={!status.settings.visible || !status.settings.usage}
+        control={
+          <Segmented
+            aria-label="Usage auto-refresh interval"
+            disabled={!status.settings.visible || !status.settings.usage}
+            value={String(status.settings.usageRefreshMinutes)}
+            onChange={(minutes) => void setStatusSettings({ usageRefreshMinutes: Number(minutes) })}
+            options={USAGE_REFRESH_MINUTES.map((minutes) => ({ value: String(minutes), label: minutes === 0 ? "Off" : `${minutes} min` }))}
           />
         }
       />
