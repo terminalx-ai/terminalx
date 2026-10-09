@@ -235,7 +235,7 @@ function signedIn() {
   return status;
 }
 
-/** The live organizations, or the one named (by id or name). */
+/** CLI lists and explicit lookup include every live organization: sidebar visibility is a desktop display preference. */
 function organizations(named: string | null) {
   const status = signedIn();
   const live = new Set(liveCloudOrgIds(status));

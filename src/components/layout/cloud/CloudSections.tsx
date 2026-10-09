@@ -5,6 +5,7 @@ import {
   BookOpen,
   Cloud,
   Ellipsis,
+  EyeOff,
   Folder,
   FolderGit2,
   Pencil,
@@ -38,10 +39,7 @@ import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialo
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
 import { refreshAccount, useAccount } from "@/lib/account";
 import {
-  cloudOrganizations,
-  defaultOrgId,
   dismissCloudNotice,
-  liveCloudOrgIds,
   placeCloudProjects,
   refreshCloudWorkspaces,
   useCloudCatalog,
@@ -55,6 +53,7 @@ import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import { workspaceUsage } from "@/lib/runningLimit";
+import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import {
   bootCloudSessions,
   closeCloudSessionTab,
@@ -105,18 +104,10 @@ export { useRowMenu };
  * Organizations with a section, default first then by name, and which of them
  * are live; none while signed out or with no cloud-enabled organization.
  */
-export function useCloudSections(): { orgs: OrganizationSummary[]; defaultOrg: string | null; live: ReadonlySet<string> } {
-  const { status } = useAccount();
-  return useMemo(() => {
-    const orgs = cloudOrganizations(status);
-    const defaultOrg = defaultOrgId(status);
-    const sorted = [...orgs].sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
-    return { orgs: sorted, defaultOrg, live: new Set(liveCloudOrgIds(status)) };
-  }, [status]);
-}
+export const useCloudSections = useOrganizationVisibility;
 
 export function sectionName(org: OrganizationSummary): string {
-  return org.isPersonal ? "Personal" : org.name;
+  return organizationName(org);
 }
 
 /** Whether a section is collapsed, remembered per section in prefs; `byDefault` when never toggled. */
@@ -129,14 +120,16 @@ export function useSectionCollapsed(key: string, byDefault = false): [boolean, (
 
 type AddDialog = { orgId: string; orgName: string; kind: "repository" | "blank" };
 
-export function CloudSections({ onOpenAccount }: { onOpenAccount?: () => void }) {
-  const { orgs, defaultOrg, live } = useCloudSections();
+export function CloudSections({ onOpenAccount, onOpenOrganizations }: { onOpenAccount?: () => void; onOpenOrganizations?: () => void }) {
+  const { all, orgs, hidden, defaultOrg, live, selectedOrganization, temporaryOrganization } = useCloudSections();
+  const catalog = useCloudCatalog();
+  const hiddenRunning = hidden.reduce((count, org) => count + organizationRunningCount(org.id, catalog), 0);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [adding, setAdding] = useState<AddDialog | null>(null);
   useEffect(() => bootCloudSessions(), []);
   // A local mirror (PRO-25) follows connections other surfaces open; it opens none.
   useEffect(() => bootCloudMirrors(), []);
-  if (!orgs.length) return null;
+  if (!all.length) return null;
   return (
     <>
       <PurgeNotices />
@@ -146,12 +139,26 @@ export function CloudSections({ onOpenAccount }: { onOpenAccount?: () => void })
           org={org}
           isDefault={org.id === defaultOrg}
           live={live.has(org.id)}
+          temporary={org.id === temporaryOrganization}
+          organizations={all}
+          selectedOrganization={selectedOrganization}
           // Live sections are spaced like Local; organizations that are not live sit close together as compact lines under one gap.
           spaced={index === 0 || live.has(org.id) || live.has(orgs[index - 1].id)}
           onLifecycle={setDialog}
           onAdd={(kind) => setAdding({ orgId: org.id, orgName: sectionName(org), kind })}
         />
       ))}
+      {hidden.length > 0 && (
+        <div role="treeitem" aria-label={`${hidden.length} organization${hidden.length === 1 ? "" : "s"} hidden${hiddenRunning ? `, ${hiddenRunning} running workspaces` : ""}`} className="mt-2" data-testid="hidden-organizations">
+          <div data-tree-row>
+            <button type="button" onClick={onOpenOrganizations} className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[11px] text-faint outline-none hover:bg-selected/40 hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
+              <EyeOff className="size-3" aria-hidden />
+              {hidden.length} organization{hidden.length === 1 ? "" : "s"} hidden
+              {hiddenRunning > 0 && <span aria-label={`${hiddenRunning} running workspaces in hidden organizations`} title={`${hiddenRunning} workspaces keep running and costing money`} className="ml-auto flex items-center gap-1 text-warning"><span className="size-1.5 rounded-full bg-warning" aria-hidden />{hiddenRunning} running</span>}
+            </button>
+          </div>
+        </div>
+      )}
       {dialog && <WorkspaceLifecycleDialog request={dialog} onClose={() => setDialog(null)} />}
       {adding?.kind === "repository" && (
         <AddRepositoryDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} onOpenSettings={onOpenAccount} />
@@ -190,6 +197,9 @@ function OrgSection({
   org,
   isDefault,
   live,
+  temporary,
+  organizations,
+  selectedOrganization,
   spaced,
   onLifecycle,
   onAdd,
@@ -198,18 +208,26 @@ function OrgSection({
   isDefault: boolean;
   /** Its projects and sessions show and work (CS-18: every cloud-enabled organization; before it, the default one). */
   live: boolean;
+  temporary: boolean;
+  organizations: OrganizationSummary[];
+  selectedOrganization: string | null;
   spaced: boolean;
   onLifecycle: (dialog: Dialog) => void;
   onAdd: (kind: AddDialog["kind"]) => void;
 }) {
   const catalog = useCloudCatalog();
+  const prefs = usePrefs();
+  const store = useSessionStore();
   const { status } = useAccount();
-  // A live section starts expanded; one that is not live is a compact line. The collapse is remembered per organization.
-  const [collapsed, toggle] = useSectionCollapsed(orgSectionKey(org.id), !live);
+  const cached = catalog.orgs[org.id];
+  const placed = useMemo(() => placeCloudProjects(cached ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, { pinned: prefs.cloudPinned[org.id], added: prefs.cloudProjects[org.id], blank: prefs.cloudBlankProjects[org.id] }), [cached, org.id, catalog.createMemory, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects]);
+  // Empty sections spend no empty-state line until expanded deliberately.
+  const [collapsedPref, toggle] = useSectionCollapsed(orgSectionKey(org.id), !live || (!placed.projects.length && !placed.archived.length));
+  const collapsed = temporary ? false : collapsedPref;
   const [switchError, setSwitchError] = useState<string | null>(null);
   const menu = useRowMenu();
   const addMenu = useRowMenu();
-  const cached = catalog.orgs[org.id];
+  const pickerMenu = useRowMenu();
   const name = sectionName(org);
   const offline = live && !!cached?.error && cached.fetchedAt !== null;
   // Creating a workspace is the API's owner-or-admin action, the same rule as
@@ -247,7 +265,7 @@ function OrgSection({
       data-testid="cloud-org-section"
       data-org={org.id}
     >
-      <div data-tree-row className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1 hover:bg-selected/40")} data-testid="cloud-org-header" title={live ? undefined : HINT}>
+      <div data-tree-row onContextMenu={(event) => { event.preventDefault(); menu.setOpen(true); }} onKeyDown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); event.stopPropagation(); menu.setOpen(true); } }} className={cn(actionRow, "relative flex h-7 min-w-0 items-center gap-1 rounded-md pr-1 hover:bg-selected/40")} data-testid="cloud-org-header" title={temporary ? "Shown while selected; your sidebar preference is unchanged" : live ? undefined : HINT}>
         {live ? (
           <>
             <TreeToggle expanded={!collapsed} label={`${name} organization`} onToggle={toggle} />
@@ -266,6 +284,26 @@ function OrgSection({
             {name}
           </span>
         )}
+        {prefs.organizationDisplay === "one" && (
+          <DropdownMenu {...pickerMenu.root}>
+            <DropdownMenuTrigger asChild {...pickerMenu.trigger}>
+              <Button variant="ghost" size="icon-xs" aria-label="Choose organization in sidebar"><ArrowLeftRight /></Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>Organization in sidebar</DropdownMenuLabel>
+              {organizations.map((choice) => <DropdownMenuItem key={choice.id} role="menuitemradio" aria-checked={choice.id === selectedOrganization} onSelect={() => {
+                setPrefs({ selectedOrganization: choice.id });
+                // Switching the section also leaves a temporarily revealed session, using only UI state.
+                const selected = store.selectedSessionId ? parseCloudWorkspaceKey(store.selectedSessionId) : null;
+                if (selected && selected.orgId !== choice.id) selectSession(null);
+                setTimeout(() => {
+                  const section = [...document.querySelectorAll<HTMLElement>('[data-testid="cloud-org-section"]')].find((element) => element.dataset.org === choice.id);
+                  section?.querySelector<HTMLButtonElement>('button[aria-label="Choose organization in sidebar"]')?.focus();
+                }, 0);
+              }}>{sectionName(choice)}</DropdownMenuItem>)}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <span className={cn("shrink-0", yieldsToRowActions)} data-testid="cloud-org-role">
           <RowChip>{org.role}</RowChip>
         </span>
@@ -275,7 +313,7 @@ function OrgSection({
             {usage.label}
           </InfoChip>
         )}
-        <RowActions persistent className={menu.open || addMenu.open ? "not-sr-only" : undefined}>
+        <RowActions persistent className={menu.open || addMenu.open || pickerMenu.open ? "not-sr-only" : undefined}>
           {!live && (
             <WithTooltip label="Make this the default organization to show its cloud sessions">
               <Button variant="ghost" size="xs" className="h-5 px-1.5 text-[10px]" onClick={() => void switchOrg()} data-testid="cloud-org-switch">
@@ -329,6 +367,12 @@ function OrgSection({
                   <ArrowLeftRight /> Switch to show cloud sessions
                 </DropdownMenuItem>
               )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={prefs.organizationDisplay === "one"} title={prefs.organizationDisplay === "one" ? "Hide organizations in All organizations mode" : undefined} onSelect={() => void setOrganizationHidden(org.id, true).then((hidden) => {
+                if (hidden) setTimeout(() => document.querySelector<HTMLButtonElement>('[data-testid="hidden-organizations"] button')?.focus(), 0);
+              })}>
+                <EyeOff /> Hide organization
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </RowActions>

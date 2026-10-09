@@ -7,14 +7,15 @@ import { useCloudDashboard } from "@/lib/cloudDashboard";
 import { isArchived } from "@/lib/cloudLifecycle";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { cloudProjectKey, cloudWorkspaceKey } from "@/types/target";
 
 /**
  * The sidebar's session filter (PRO-23): everything, only sessions with an
  * answer nobody has read yet, or only sessions waiting for a person. It
  * covers local and cloud sessions alike and uses the Agent Dashboard's own
- * rules (`sessionColumn`, `isUnread`), so the sidebar, the dashboard's
- * columns and the totals beside "Agent Dashboard" never disagree.
+ * rules (`sessionColumn`, `isUnread`). Filter counts cover visible sidebar
+ * organizations; the dashboard's Needs you total deliberately includes hidden ones.
  *
  * Cloud sessions are read from the same projection as the dashboard: the
  * catalog and this desktop's caches. Filtering never attaches to, resumes or
@@ -100,13 +101,14 @@ export function useSidebarFilter(): SidebarFilterState {
   const { status } = useAccount();
   const filter: SidebarFilter = (usePrefs().sidebarFilters[filterOwner(status)] as SidebarFilter | undefined) ?? "all";
   const selected = store.selectedSessionId;
+  const { visibleIds } = useOrganizationVisibility();
   return useMemo(() => {
     if (filter === "all") return { ...EVERYTHING, count: 0 };
     const sessions = new Set<string>();
     const projects = new Set<string>();
     const workspaces = new Set<string>();
     let count = 0;
-    for (const session of [...store.sessions, ...cloud] as DashboardSession[]) {
+    for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId))] as DashboardSession[]) {
       const passes = sessionPassesFilter(filter, session);
       if (passes) count++;
       if (!passes && session.id !== selected) continue;
@@ -114,7 +116,7 @@ export function useSidebarFilter(): SidebarFilterState {
       projects.add(session.projectPath);
     }
     if (filter === "needs") {
-      for (const { workspaceKey, projectKey } of workspacesNeedingYou(catalog, liveCloudOrgIds(status))) {
+      for (const { workspaceKey, projectKey } of workspacesNeedingYou(catalog, liveCloudOrgIds(status).filter((id) => visibleIds.has(id)))) {
         workspaces.add(workspaceKey);
         projects.add(projectKey);
       }
@@ -128,5 +130,5 @@ export function useSidebarFilter(): SidebarFilterState {
       count,
       empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty ?? "",
     };
-  }, [filter, selected, store.sessions, cloud, catalog, status]);
+  }, [filter, selected, store.sessions, cloud, catalog, status, visibleIds]);
 }

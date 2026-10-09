@@ -59,6 +59,8 @@ const terminal = await import("@/lib/terminal");
 const connections = await import("@/lib/cloudConnections");
 const { resetCloudAgents } = await import("@/lib/cloudAgents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
+const prefs = await import("@/lib/prefs");
+const { CloudSections } = await import("@/components/layout/cloud/CloudSections");
 
 const ORG = "org-a";
 const OTHER = "org-b";
@@ -115,6 +117,7 @@ Element.prototype.scrollIntoView ??= function () {};
 Element.prototype.scrollTo ??= function () {} as typeof Element.prototype.scrollTo;
 
 beforeEach(async () => {
+  prefs.setPrefs({ hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null });
   mocks.status = {
     state: "signed-in",
     identity: { name: "A", email: "a@example.com", organization: "Acme", organizationId: ORG },
@@ -155,6 +158,39 @@ afterEach(() => {
 });
 
 describe("a waiting cloud tab", () => {
+  it("notifies and badges a hidden organization's question, and reveals its section when the notice opens", async () => {
+    prefs.setPrefs({ hiddenOrganizations: [OTHER] });
+    window.dispatchEvent(new Event("focus"));
+    render(<TooltipProvider><CloudSections /><Toasts /></TooltipProvider>);
+    expect(screen.queryByRole("treeitem", { name: "Beta organization" })).toBeNull();
+    await poll(OTHER, [item("ws-b", OTHER, { repositories: [betaSite], runtimeActivity: pending(1) })]);
+    await settle();
+    expect(mocks.badge).toHaveBeenLastCalledWith(1);
+    const toast = await screen.findByRole("status");
+    expect(toast.textContent).toContain("Claude needs attention");
+    fireEvent.click(toast);
+    expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`);
+    expect(screen.getByRole("treeitem", { name: "Beta organization" }).getAttribute("aria-expanded")).toBe("true");
+    expect(prefs.getPrefs().hiddenOrganizations).toEqual([OTHER]);
+    act(() => sessions.selectSession(null));
+    expect(screen.queryByRole("treeitem", { name: "Beta organization" })).toBeNull();
+    expectNoWake();
+  });
+
+  it("keeps a failure in a non-selected organization in Needs you, notifications, and the dock badge", async () => {
+    prefs.setPrefs({ organizationDisplay: "one", selectedOrganization: ORG });
+    window.dispatchEvent(new Event("blur"));
+    await poll(OTHER, [item("failed-ws", OTHER, { repositories: [betaSite], state: "attention-required" })]);
+    act(() => catalog.cacheCloudSessions(OTHER, "failed-ws", [session("failed-s", "Recover deployment", "idle")] as never, ["session/2"]));
+    await settle();
+    expect(mocks.sendNotification).toHaveBeenCalledWith(expect.objectContaining({ title: "TerminalX — Claude hit a problem" }));
+    expect(mocks.badge).toHaveBeenLastCalledWith(1);
+    render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+    expect(within(screen.getByRole("region", { name: "Needs you" })).getByTestId("cloud-agent-card").textContent).toContain("Recover deployment");
+    expect(within(screen.getByRole("region", { name: "Needs you" })).getByText("Workspace needs recovery")).toBeTruthy();
+    expectNoWake();
+  });
+
   it("shows in Needs you, counts in the dock badge, raises one notice across polls, and its notice opens the tab without waking", async () => {
     window.dispatchEvent(new Event("blur"));
     // The list now says ws-1 waits on an approval; polled three times.
@@ -182,6 +218,19 @@ describe("a waiting cloud tab", () => {
 });
 
 describe("the Agent Dashboard", () => {
+  it("always includes hidden Needs you; Working and Done follow visibility, with search finding hidden sessions", async () => {
+    prefs.setPrefs({ hiddenOrganizations: [ORG, OTHER] });
+    await poll(ORG, acmeWorkspaces(1));
+    render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+    await settle();
+    expect(within(screen.getByRole("region", { name: "Needs you" })).getAllByTestId("cloud-agent-card")).toHaveLength(1);
+    expect(within(screen.getByRole("region", { name: "Working" })).queryAllByTestId("cloud-agent-card")).toHaveLength(0);
+    expect(within(screen.getByRole("region", { name: "Done" })).queryAllByTestId("cloud-agent-card")).toHaveLength(0);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search sessions" }), { target: { value: "Landing page copy" } });
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Done" })).getByTestId("cloud-agent-card").textContent).toContain("Landing page copy"));
+    expectNoWake();
+  });
+
   it("puts cloud sessions in Needs you, Working and Done like local ones, never a stopped one in Working, and opens a card without waking", async () => {
     await poll(ORG, acmeWorkspaces(1));
     render(
@@ -212,6 +261,18 @@ describe("the command palette", () => {
         <CommandPalette open onOpenChange={() => undefined} onOpenSettings={() => undefined} onCreated={() => undefined} />
       </TooltipProvider>,
     );
+
+  it("omits hidden sessions from recents while search can still find and open them", async () => {
+    prefs.setPrefs({ hiddenOrganizations: [OTHER] });
+    openPalette();
+    await screen.findByRole("option", { name: /Fix login redirect/ });
+    expect(screen.queryByRole("option", { name: /Landing page copy/ })).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText(/Search sessions/), { target: { value: "Landing page copy" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Landing page copy/ }));
+    await waitFor(() => expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`));
+    expect(prefs.getPrefs().hiddenOrganizations).toEqual([OTHER]);
+    expectNoWake();
+  });
 
   it.each([
     ["title", "login redirect", "Fix login redirect"],
