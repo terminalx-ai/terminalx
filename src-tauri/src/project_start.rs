@@ -70,9 +70,8 @@ pub struct GithubRepository {
 /// The reader's repositories, or why there is no list. Without a list the
 /// URL field still clones with the reader's own Git credentials.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(tag = "status", rename_all = "kebab-case")]
+#[serde(tag = "status", rename_all = "kebab-case", rename_all_fields = "camelCase")]
 pub enum GithubRepositories {
-    #[serde(rename_all = "camelCase")]
     Ready { repositories: Vec<GithubRepository>, truncated: bool },
     /// `gh` is not installed.
     Missing,
@@ -529,6 +528,17 @@ mod tests {
         assert_eq!(parse_progress("fatal: repository 'x' not found"), None);
         assert_eq!(parse_progress("Cloning into 'widgets'..."), None);
         assert_eq!(parse_progress("remote: Repository not found."), None);
+    }
+
+    #[test]
+    fn the_repository_list_is_sent_in_the_shape_the_dialog_reads() {
+        let ready = GithubRepositories::Ready { repositories: vec![GithubRepository { name_with_owner: "a/b".into(), description: None, is_private: true, pushed_at: None }], truncated: true };
+        assert_eq!(
+            serde_json::to_value(&ready).unwrap(),
+            serde_json::json!({ "status": "ready", "truncated": true, "repositories": [{ "nameWithOwner": "a/b", "description": null, "isPrivate": true, "pushedAt": null }] })
+        );
+        assert_eq!(serde_json::to_value(GithubRepositories::SignedOut).unwrap(), serde_json::json!({ "status": "signed-out" }));
+        assert_eq!(serde_json::to_value(GithubRepositories::Failed { message: "x".into() }).unwrap(), serde_json::json!({ "status": "failed", "message": "x" }));
     }
 
     #[test]
