@@ -196,6 +196,16 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
                     freed += remove_dir_counted(&side);
                 }
             }
+            // A forked quick chat was given a copy of its parent's transcript
+            // in its own scratch folder's Claude folder, so its CLI could
+            // reopen the parent from there. The folder is that one session's,
+            // so the copy is its own to remove; the parent's original is in
+            // the parent's folder and is not touched.
+            if crate::store::quick::is_scratch(&session.id, dir) {
+                for parent in session.tabs.iter().filter(|tab| tab.harness == "claude").filter_map(|tab| tab.fork_from.as_deref()).filter(|id| conversation_id(id).is_some()) {
+                    freed += remove_file_counted(&folder.join(format!("{parent}.jsonl")));
+                }
+            }
             // The folder goes only when nothing is left in it: `remove_dir`
             // refuses one that still holds anything.
             if !kept_folders.contains(&folder_key(dir)) && (removed_managed_worktree(session, dir) || removed_scratch(session, dir)) && std::fs::remove_dir(&folder).is_ok() {

@@ -140,6 +140,10 @@ pub struct ShellPane {
 
 /// The session a shell pane belongs to: shells are named `<session>:<n>`. An
 /// agent tab's own pane (`tab:<id>`) is not a shell tab.
+pub fn is_shell_id(id: &str) -> bool {
+    shell_session(id).is_some()
+}
+
 fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
     (session != "tab" && !session.is_empty()).then_some(session)

@@ -41,6 +41,23 @@ fn stop_sessions_and_wait(state: &tauri::State<'_, crate::AppState>, sessions: &
     state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
 }
 
+/// Stop a session's agents and wait for them to exit, leaving its shells
+/// alone. For a session that changes directory and goes on: its agents must
+/// let go of their conversations before they start again elsewhere, but a
+/// shell the reader opened (a dev server, say) is theirs, and is not ended
+/// for a change they made to where the agents run.
+fn stop_agents_and_wait(state: &tauri::State<'_, crate::AppState>, session: &SessionEntry) {
+    let panes: Vec<String> = session
+        .tabs
+        .iter()
+        .map(|tab| {
+            state.host.kill(&format!("{}/{}", session.id, tab.id));
+            crate::session::SessionManager::pane_id(&tab.id)
+        })
+        .collect();
+    state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
+}
+
 fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
     state.host.kill(&format!("{session_id}/{tab_id}"));
     state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
@@ -1377,7 +1394,7 @@ pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::NewQuick
 pub async fn set_quick_chat_cwd(app: AppHandle, session_id: String, cwd: Option<String>) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+        let stop = |session: &SessionEntry| stop_agents_and_wait(&state, session);
         crate::session_ops::set_quick_chat_cwd(&app, &session_id, cwd.as_deref(), &stop)
     })
     .await
@@ -1389,7 +1406,7 @@ pub async fn set_quick_chat_cwd(app: AppHandle, session_id: String, cwd: Option<
 pub async fn move_quick_chat_to_project(app: AppHandle, session_id: String, project_path: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+        let stop = |session: &SessionEntry| stop_agents_and_wait(&state, session);
         let moved = crate::session_ops::move_quick_chat_to_project(&app, &session_id, &project_path, &stop)?;
         // The project may have been added by this: every window lists it.
         let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
@@ -2231,7 +2248,9 @@ pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> Vec<String> {
 
 #[tauri::command]
 pub fn pty_kill(app: AppHandle, state: State<'_, AppState>, id: String) {
-    let shell = state.terminals.shell(&id).is_some();
+    // By its name, not by whether it is still running: a shell whose process
+    // has already gone is still a tab in the other window, to be dropped there.
+    let shell = crate::pty::is_shell_id(&id);
     state.terminals.kill(&id);
     // Closed for everyone: the other window drops its tab for it too.
     if shell {

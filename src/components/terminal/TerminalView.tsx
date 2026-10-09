@@ -219,6 +219,23 @@ export function TerminalView({
     if (visible) return onAppResume(recover);
   }, [id, visible]);
 
+  // A pane has one size and can be on screen in two windows (the main one and
+  // the floating one), each with a grid of its own. xterm reports a size only
+  // when its own grid changes, so a window that comes back to a pane the other
+  // one resized would draw a program laid out for the wrong width. The window
+  // being looked at says its size again: when the view is shown, and when the
+  // window takes the focus.
+  useEffect(() => {
+    if (!shown || create) return;
+    const assert = () => {
+      const inst = peekInstance(id);
+      if (inst && inst.el.isConnected) void pty.resize(id, inst.term.cols, inst.term.rows).catch(() => {});
+    };
+    assert();
+    window.addEventListener("focus", assert);
+    return () => window.removeEventListener("focus", assert);
+  }, [id, shown, create]);
+
   useEffect(() => {
     const el = host.current;
     if (!el) return;

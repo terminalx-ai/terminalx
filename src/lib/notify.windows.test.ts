@@ -65,7 +65,24 @@ beforeEach(() => {
   });
 });
 
+/**
+ * Each window opened here is a fresh copy of the modules, and each copy
+ * listens on the one test `window`. A copy left listening after its test
+ * would answer the next test's focus and storage events as a window that
+ * does not exist any more, so every listener a test adds is taken off again.
+ */
+const added: [string, EventListenerOrEventListenerObject][] = [];
+const realAdd = window.addEventListener.bind(window);
+beforeEach(() => {
+  window.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
+    added.push([type, listener]);
+    realAdd(type, listener, options);
+  }) as typeof window.addEventListener;
+});
+
 afterEach(() => {
+  for (const [type, listener] of added.splice(0)) window.removeEventListener(type, listener);
+  window.addEventListener = realAdd;
   vi.restoreAllMocks();
 });
 
@@ -116,7 +133,7 @@ describe("attention across two windows", () => {
   it("brings the floating window back on the session a banner was about", async () => {
     const main = await openWindow("main", false);
     // The floating window shows this chat, and is hidden.
-    main.floating.resetFloating({ visible: true, sessionId: "chat-1" });
+    elsewhere("floating", { focused: false, sessionId: "chat-1" });
     main.notify.noteStatusChange(chat, { ...tab, status: "waiting" }, "in_progress", "waiting");
     await settle();
     expect(mocks.sendNotification).toHaveBeenCalledTimes(1);
@@ -147,13 +164,37 @@ describe("attention across two windows", () => {
 
   it("does not raise the floating window again when the reader already came back through it", async () => {
     const main = await openWindow("main", false);
-    main.floating.resetFloating({ visible: true, sessionId: "chat-1" });
+    elsewhere("floating", { focused: false, sessionId: "chat-1" });
     main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
     await settle();
     // They press the shortcut: the floating window takes the focus and shows the chat.
     elsewhere("floating", { focused: true, sessionId: "chat-1" });
     // Later they click the main window.
     elsewhere("floating", { focused: false, sessionId: "chat-1" });
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
+  });
+
+  it("does not raise the floating window over a main window that already shows the session", async () => {
+    const main = await openWindow("main", false);
+    // "Open in main window": the floating window still has the chat selected, and is hidden.
+    elsewhere("floating", { focused: false, sessionId: "chat-1" });
+    main.sessions.selectSession("chat-1");
+    main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
+    await settle();
+    expect(mocks.sendNotification).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());
+  });
+
+  it("does not raise a floating window that only showed the session in an earlier run", async () => {
+    // Remembered from last week; no floating window has been opened in this run.
+    localStorage.setItem("raccoon.floating.session", "chat-1");
+    const main = await openWindow("main", false);
+    main.notify.noteStatusChange(chat, tab, "in_progress", "completed");
+    await settle();
     window.dispatchEvent(new Event("focus"));
     await settle();
     expect(mocks.invoke).not.toHaveBeenCalledWith("floating_show", expect.anything());

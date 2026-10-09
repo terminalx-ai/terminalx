@@ -204,9 +204,7 @@ pub fn run() {
                 .with_handler(|app, shortcut, event| {
                     // On the press only: the release of the same keys is not a second toggle.
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed && floating::is_toggle_shortcut(app, shortcut) {
-                        if let Err(error) = floating::toggle(app) {
-                            log::warn!("toggle the floating window: {error}");
-                        }
+                        floating::later(app, "toggle", floating::toggle);
                     }
                 })
                 .build(),

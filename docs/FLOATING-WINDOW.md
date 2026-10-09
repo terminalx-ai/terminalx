@@ -78,7 +78,9 @@ inside a repository (dotfiles kept in git).
 
 "Set working directory…" points a quick chat at any folder. The folder is
 used as it is and is **not** registered as a project. The chat's agents are
-stopped and start again there; "Use scratch folder" goes back.
+stopped and start again there; "Use scratch folder" goes back. Shell tabs are
+left running where they are: a dev server the reader started is not ended
+because the agents moved.
 
 ### Move to project
 
@@ -201,6 +203,11 @@ to make that hold:
 - **Preferences and theme.** Local storage, shared by both pages; each
   follows the other's `storage` events.
 
+A pane has one size but can be on screen in both windows, each with a grid
+of its own. The window being looked at says its size again when it shows the
+pane and when it takes the focus, so a program is laid out for the window
+the reader is in.
+
 **What stays per window**, on purpose: which session is on screen, which tab
 of it is selected, chat versus terminal view for a tab, and unsent composer
 text.
@@ -212,7 +219,8 @@ session it shows; the rule is:
 - the window with the focus plays the tone and shows the in-app notice;
 - when neither has it, the main window alone sends the banner;
 - a banner about the session the floating window shows brings the floating
-  window back, on that session and tab, when the reader returns to the app.
+  window back, on that session and tab, when the reader returns to the app,
+  unless the main window they return to already shows that session.
   A banner about one of the main window's sessions does not move the main
   window, which is how it behaved before.
 

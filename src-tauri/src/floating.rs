@@ -346,6 +346,23 @@ pub fn toggle(app: &AppHandle) -> tauri::Result<()> {
     }
 }
 
+/// Run a show or a toggle off the calling thread. The window is built the
+/// first time it is shown, and on Windows a webview must not be built from
+/// inside a synchronous command or an event handler (the tray, a shortcut, a
+/// listener): WebView2 deadlocks there. Every such entry point goes through
+/// this; nothing is lost elsewhere by doing the same.
+pub fn later(app: &AppHandle, what: &'static str, action: impl FnOnce(&AppHandle) -> tauri::Result<()> + Send + 'static) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new().name("floating-window".into()).spawn(move || {
+        if let Err(error) = action(&app) {
+            log::warn!("{what} the floating window: {error}");
+        }
+    });
+    if let Err(error) = spawned {
+        log::warn!("{what} the floating window: {error}");
+    }
+}
+
 /// The session a just-loaded page should open on, once.
 pub fn take_pending(app: &AppHandle) -> Option<OpenTarget> {
     app.state::<Floating>().pending.lock().unwrap().take()
@@ -372,15 +389,13 @@ fn install_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::tray::TrayIconBuilder;
     let quick = MenuItem::with_id(app, "tray-quick-chat", "Quick Chat", true, None::<&str>)?;
     let main = MenuItem::with_id(app, "tray-main-window", "Open TerminalX", true, None::<&str>)?;
-    let quit = PredefinedMenuItem::quit(app, Some("Quit TerminalX"))?;
+    // An item of our own: the predefined Quit is not available on every platform.
+    let quit = MenuItem::with_id(app, "tray-quit", "Quit TerminalX", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quick, &main, &PredefinedMenuItem::separator(app)?, &quit])?;
     let mut tray = TrayIconBuilder::with_id("terminalx").tooltip("TerminalX").menu(&menu).show_menu_on_left_click(true).on_menu_event(|app, event| match event.id().as_ref() {
-        "tray-quick-chat" => {
-            if let Err(error) = show(app, None) {
-                log::warn!("show the floating window: {error}");
-            }
-        }
+        "tray-quick-chat" => later(app, "show", |app| show(app, None)),
         "tray-main-window" => crate::account::focus_main_window(app),
+        "tray-quit" => app.exit(0),
         _ => {}
     });
     if let Some(icon) = app.default_window_icon() {
@@ -409,16 +424,13 @@ pub fn install(app: &AppHandle) {
                 session: Option<String>,
             }
             let Ok(request) = serde_json::from_str::<Request>(payload) else { return };
-            let result = match request.action.as_str() {
-                "show" => show(&handle, request.session.map(|session_id| OpenTarget { session_id, tab_id: None })),
-                "hide" => {
-                    hide(&handle);
-                    Ok(())
+            match request.action.as_str() {
+                "show" => {
+                    let target = request.session.map(|session_id| OpenTarget { session_id, tab_id: None });
+                    later(&handle, "show", move |app| show(app, target));
                 }
-                _ => toggle(&handle),
-            };
-            if let Err(error) = result {
-                log::warn!("floating window request: {error}");
+                "hide" => hide(&handle),
+                _ => later(&handle, "toggle", toggle),
             }
         }),
     );
@@ -436,8 +448,10 @@ pub fn set_floating_settings(app: AppHandle, patch: FloatingPatch) -> Result<Flo
     update(&app, patch)
 }
 
+/// Async, so the window is never built on the thread a synchronous command
+/// runs on (see [`later`]).
 #[tauri::command]
-pub fn floating_show(app: AppHandle, session_id: Option<String>, tab_id: Option<String>) -> Result<(), String> {
+pub async fn floating_show(app: AppHandle, session_id: Option<String>, tab_id: Option<String>) -> Result<(), String> {
     show(&app, session_id.map(|session_id| OpenTarget { session_id, tab_id })).map_err(|error| error.to_string())
 }
 

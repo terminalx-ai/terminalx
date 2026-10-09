@@ -91,7 +91,13 @@ export function bootFloating(onOpen?: (target: OpenTarget) => void): Promise<voi
       await listen<FloatingStatus>("floating_status", (event) => set({ status: event.payload }));
       if (isFloatingWindow()) {
         await listen<boolean>("floating_visible", (event) => set({ visible: event.payload }));
-        if (onOpen) await listen<OpenTarget>("floating_open", (event) => onOpen(event.payload));
+        if (onOpen) {
+          await listen<OpenTarget>("floating_open", (event) => {
+            // Heard by a page that is up: it must not be opened again by a later reload.
+            void floatingWindow.takePending().catch(() => {});
+            onOpen(event.payload);
+          });
+        }
       }
       set({ status: await floatingWindow.status() });
       if (isFloatingWindow()) {

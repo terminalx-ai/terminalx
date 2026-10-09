@@ -85,11 +85,14 @@ interface Presence {
 const presenceKey = (win: AppWindow) => `raccoon.presence.${win}`;
 const otherWindow = (): AppWindow => (appWindow() === "main" ? "floating" : "main");
 
+/** This window has the reader: the focus, and (for the floating one) it is on screen. A hidden floating window shows nothing to anyone, whatever its page thinks. */
+function looking(): boolean {
+  return focused && (appWindow() === "main" || getFloating().visible);
+}
+
 function publishPresence() {
   try {
-    // A hidden floating window shows nothing to anyone, whatever its page thinks.
-    const looking = focused && (appWindow() === "main" || getFloating().visible);
-    const presence: Presence = { focused: looking, sessionId: getSessions().selectedSessionId };
+    const presence: Presence = { focused: looking(), sessionId: getSessions().selectedSessionId };
     localStorage.setItem(presenceKey(appWindow()), JSON.stringify(presence));
   } catch {
     /* storage unavailable: each window then speaks for itself, as one window always did */
@@ -114,15 +117,20 @@ function presenceElsewhere(): Presence | null {
 let raised: { sessionId: string; tabId: string } | null = null;
 
 function onReturn() {
-  const wasAway = !focused && !presenceElsewhere()?.focused;
+  const wasAway = !looking() && !presenceElsewhere()?.focused;
   focused = true;
   publishPresence();
   const target = raised;
   raised = null;
   if (!wasAway || !target || appWindow() !== "main") return;
-  // Only a session the floating window has: the main window's own sessions
-  // are where the reader left them, and are not navigated for them.
-  if (getFloating().sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
+  // The reader came back to the main window and it already shows the session
+  // (they sent it here with "Open in main window"): there is nothing to bring up.
+  if (getSessions().selectedSessionId === target.sessionId) return;
+  // Only a session the floating window has in this run of the app: what it
+  // says about itself now, not what it showed some other day. The main
+  // window's own sessions are where the reader left them, and are not
+  // navigated for them.
+  if (presenceElsewhere()?.sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
 }
 
 if (typeof window !== "undefined") {
@@ -139,7 +147,7 @@ if (typeof window !== "undefined") {
 
 /** Whether a banner is this window's to send: nobody is looking, and this is the main window. */
 function sendsBanner(): boolean {
-  return !focused && !presenceElsewhere()?.focused && appWindow() === "main";
+  return !looking() && !presenceElsewhere()?.focused && appWindow() === "main";
 }
 
 // ---- sounds, synthesised so there is nothing to ship
@@ -203,8 +211,8 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
   const { title, body } = summarise(session, tab, kind);
-  const onScreen = focused && getSessions().selectedSessionId === session.id;
-  if (!focused) {
+  const onScreen = looking() && getSessions().selectedSessionId === session.id;
+  if (!looking()) {
     // The other window has the reader, or this is not the window that sends banners.
     if (!sendsBanner()) return;
     raised = { sessionId: session.id, tabId: tab.id };

@@ -390,8 +390,15 @@ fn quick_chat(session_id: &str) -> Result<SessionEntry> {
 fn carry_conversations(entry: &SessionEntry, to: &str) {
     let Some(projects) = crate::agent_data::claude_projects_root() else { return };
     for tab in entry.tabs.iter().filter(|tab| tab.harness == "claude") {
-        let Some(id) = tab.provider_session_id.as_deref() else { continue };
-        if let Err(error) = crate::harness::claude::transcript::rehome_in(&projects, &entry.cwd, to, id, false) {
+        // A fork that has not started yet has no conversation of its own: its
+        // CLI will reopen the parent's from the new directory, so a copy of
+        // that goes along. The parent's own stays where the parent uses it.
+        let (id, keep_source) = match (tab.provider_session_id.as_deref(), tab.fork_from.as_deref()) {
+            (Some(own), _) => (own, false),
+            (None, Some(parent)) => (parent, true),
+            (None, None) => continue,
+        };
+        if let Err(error) = crate::harness::claude::transcript::rehome_in(&projects, &entry.cwd, to, id, keep_source) {
             log::warn!("carry the conversation of tab {} to its new directory: {error}", tab.id);
         }
     }
@@ -495,6 +502,11 @@ pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn
 /// when the index cannot be read: without it there is no telling whose they are.
 pub(crate) fn remove_orphan_scratch(older_than: std::time::Duration) -> usize {
     let Ok(sessions) = index::load() else { return 0 };
+    // No sessions at all is also what a missing or unreadable-as-empty index
+    // looks like. Every directory would then be an orphan; none is removed.
+    if sessions.is_empty() {
+        return 0;
+    }
     let known: std::collections::HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
     let old = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age >= older_than);
     store::quick::orphans(&known).into_iter().filter(|path| old(path)).filter(|path| std::fs::remove_dir_all(path).is_ok()).count()
@@ -1386,6 +1398,47 @@ mod tests {
         assert!(project.path().exists(), "the project is the reader's, not the session's");
     }
 
+    const PARENT: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// A forked quick chat before its first send: its tab names the parent
+    /// conversation, and a copy of the parent's transcript sits in the fork's
+    /// own Claude folder for the CLI to reopen.
+    fn unstarted_fork() -> (SessionEntry, PathBuf) {
+        let chat = quick_chat(None);
+        index::update_tab(&chat.id, &chat.tabs[0].id, |tab| {
+            tab.fork_from = Some(PARENT.into());
+            Ok(())
+        })
+        .unwrap();
+        let folder = crate::agent_data::claude_projects_root().unwrap().join(crate::harness::claude::transcript::encoded_cwd(&chat.cwd));
+        std::fs::create_dir_all(&folder).unwrap();
+        let copy = folder.join(format!("{PARENT}.jsonl"));
+        std::fs::write(&copy, "{\"type\":\"user\"}\n").unwrap();
+        (index::get(&chat.id).unwrap(), copy)
+    }
+
+    #[test]
+    fn a_fork_that_has_not_started_takes_its_parents_conversation_along_when_it_moves() {
+        let _home = crate::store::temp_home();
+        let (fork, copy) = unstarted_fork();
+        let folder = tempfile::tempdir().unwrap();
+        let moved = set_quick_chat_cwd(&sink(), &fork.id, Some(folder.path().to_str().unwrap()), &|_| {}).unwrap();
+        let projects_root = crate::agent_data::claude_projects_root().unwrap();
+        // Where the CLI will look when it reopens the parent from the new directory...
+        assert!(crate::harness::claude::transcript::transcript_in(&projects_root, &moved.cwd, PARENT).exists());
+        // ...and still where it was: a fork never takes its parent's away.
+        assert!(copy.exists());
+    }
+
+    #[test]
+    fn deleting_a_forked_quick_chat_removes_the_copy_of_its_parents_transcript() {
+        let _home = crate::store::temp_home();
+        let (fork, copy) = unstarted_fork();
+        delete_session_blocking(&sink(), &fork.id, &|_| {}).unwrap();
+        assert!(!copy.exists(), "the copy made for the fork outlived it");
+        assert!(!copy.parent().unwrap().exists(), "and so did its folder");
+    }
+
     fn aged(session: &SessionEntry, days: i64) {
         let then = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         index::update(|sessions| {
@@ -1445,6 +1498,10 @@ mod tests {
         let _home = crate::store::temp_home();
         let chat = quick_chat(None);
         let lost = store::quick::create("left-by-a-crash").unwrap();
+        // With no session at all there is no telling a lost index from an empty one.
+        index::save(&[]).unwrap();
+        assert_eq!(remove_orphan_scratch(std::time::Duration::ZERO), 0);
+        index::save(std::slice::from_ref(&chat)).unwrap();
         // Just made: it may be a session whose index entry is a moment away.
         assert_eq!(remove_orphan_scratch(std::time::Duration::from_secs(3600)), 0);
         assert!(Path::new(&lost).is_dir());
