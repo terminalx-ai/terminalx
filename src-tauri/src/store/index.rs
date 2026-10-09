@@ -123,10 +123,51 @@ pub struct RemovedWorkspace {
     pub branch: Option<String>,
 }
 
+/// What a session belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    /// A session of a project the reader attached.
+    #[default]
+    Project,
+    /// A quick chat: it has no project. It runs in a scratch directory of its
+    /// own under the TerminalX home, or in a folder the reader pointed it at,
+    /// and has no worktree, branch or base.
+    Quick,
+}
+
+impl SessionKind {
+    fn is_project(&self) -> bool {
+        *self == Self::Project
+    }
+}
+
+/// A kind this build does not know is read as an ordinary session rather than
+/// failing the whole index: one entry a newer build wrote must not cost the
+/// reader every session they have.
+impl<'de> Deserialize<'de> for SessionKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let kind: Option<String> = Option::deserialize(d)?;
+        Ok(match kind.as_deref() {
+            Some("quick") => Self::Quick,
+            _ => Self::Project,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
     pub id: String,
+    /// Left out of the file for an ordinary session, so its entry is written
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "SessionKind::is_project")]
+    pub kind: SessionKind,
+    /// The project the session belongs to. A quick chat has none: this is
+    /// then its scratch directory (see `store::quick`), which is a real,
+    /// plain folder, so a build that knows nothing of quick chats reads the
+    /// entry as a session in a folder it has no project for. Code that means
+    /// "the reader's project" asks [`SessionEntry::project`] instead.
     pub project_path: String,
     /// Where agents run. The worktree for a worktree session, else the project.
     pub cwd: String,
@@ -164,6 +205,13 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
+    pub fn is_quick(&self) -> bool {
+        self.kind == SessionKind::Quick
+    }
+    /// The project this session belongs to; `None` for a quick chat.
+    pub fn project(&self) -> Option<&str> {
+        (!self.is_quick()).then_some(self.project_path.as_str())
+    }
     pub fn tab(&self, tab_id: &str) -> Option<&TabEntry> {
         self.tabs.iter().find(|t| t.id == tab_id)
     }
@@ -261,7 +309,9 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
     session.cwd = session.project_path.clone();
     session.worktree_name = None;
     session.worktree_removed = true;
-    session.branch = project_branch;
+    // A quick chat that was pointed at the workspace goes back to its scratch
+    // directory, which is on no branch: the project's is not its own.
+    session.branch = if session.is_quick() { None } else { project_branch };
     session.base_ref = None;
     for tab in &mut session.tabs {
         tab.status = TabStatus::Idle;
@@ -275,6 +325,7 @@ mod tests {
     fn entry(id: &str) -> SessionEntry {
         SessionEntry {
             id: id.into(),
+            kind: SessionKind::Project,
             project_path: "/p".into(),
             cwd: "/p".into(),
             worktree_name: None,
@@ -332,6 +383,85 @@ mod tests {
         assert_eq!(requested_mode(Some(" ".into())), None);
         assert_eq!(requested_mode(None), None);
         assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
+    }
+
+    #[test]
+    fn a_quick_chat_is_stored_with_its_kind_and_an_ordinary_session_is_written_as_before() {
+        let _home = crate::store::temp_home();
+        let mut quick = entry("quick");
+        quick.kind = SessionKind::Quick;
+        quick.project_path = "/home/.raccoon/quick/quick".into();
+        quick.cwd = quick.project_path.clone();
+        save(&[entry("ordinary"), quick.clone()]).unwrap();
+
+        let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
+        // An ordinary entry gains no field, so nothing changes for it on disk.
+        assert!(stored["sessions"][0].get("kind").is_none());
+        assert_eq!(stored["sessions"][1]["kind"], "quick");
+        // The path an older build requires is still there, and is a real one.
+        assert_eq!(stored["sessions"][1]["projectPath"], "/home/.raccoon/quick/quick");
+
+        let loaded = load().unwrap();
+        assert_eq!(loaded[0].kind, SessionKind::Project);
+        assert_eq!(loaded[0].project(), Some("/p"));
+        assert_eq!(loaded[1], quick);
+        assert!(loaded[1].is_quick());
+        assert_eq!(loaded[1].project(), None);
+    }
+
+    /// What a build from before quick chats does with the index: it has no
+    /// `kind` field, requires `projectPath`, and keeps what it does not know.
+    #[test]
+    fn an_older_build_reads_a_quick_chat_as_a_session_and_keeps_its_kind() {
+        #[derive(Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct OldEntry {
+            id: String,
+            project_path: String,
+            cwd: String,
+            title: String,
+            #[serde(flatten, default)]
+            unknown: BTreeMap<String, serde_json::Value>,
+        }
+        #[derive(Serialize, Deserialize)]
+        struct OldIndex {
+            sessions: Vec<OldEntry>,
+        }
+        let _home = crate::store::temp_home();
+        let mut quick = entry("quick");
+        quick.kind = SessionKind::Quick;
+        save(&[quick.clone()]).unwrap();
+
+        let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        let old: OldIndex = serde_json::from_str(&text).expect("an older build must still parse the index");
+        assert_eq!(old.sessions[0].project_path, "/p");
+        assert_eq!(old.sessions[0].unknown["kind"], "quick");
+
+        // It rewrites the index (a rename, say): the session is still a quick chat afterwards.
+        std::fs::write(file_path().unwrap(), serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(load().unwrap()[0].kind, SessionKind::Quick);
+    }
+
+    #[test]
+    fn a_kind_this_build_does_not_know_does_not_cost_the_whole_index() {
+        let _home = crate::store::temp_home();
+        let raw = r#"{"sessions":[{"id":"a","kind":"hologram","projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"},{"id":"b","kind":null,"projectPath":"/p","cwd":"/p","title":"t","created":"x","modified":"y"}]}"#;
+        std::fs::write(file_path().unwrap(), raw).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().all(|session| session.kind == SessionKind::Project));
+    }
+
+    #[test]
+    fn a_quick_chat_whose_borrowed_workspace_is_removed_goes_back_to_no_branch() {
+        let mut session = entry("quick");
+        session.kind = SessionKind::Quick;
+        session.project_path = "/home/.raccoon/quick/quick".into();
+        session.cwd = "/p/.raccoon/worktrees/feature-one".into();
+        session.branch = Some("raccoon/feature-one".into());
+        mark_workspace_removed(&mut session, Some("main".into()));
+        assert_eq!(session.cwd, "/home/.raccoon/quick/quick");
+        assert_eq!(session.branch, None);
     }
 
     #[test]

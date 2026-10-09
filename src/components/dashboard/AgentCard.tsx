@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
+import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { archiveSession, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import { workspaceName, type ColumnId } from "@/lib/dashboard";
+import { isQuickChat, quickChatPlace, sessionProjectName } from "@/lib/quickChats";
 import type { CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { Project, SessionEntry } from "@/types/session";
 
@@ -40,6 +41,7 @@ export function AgentCard({
   onFocus: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const quick = isQuickChat(session);
   const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
   const stoppable = session.tabs.filter((t) => t.status === "in_progress" || t.status === "waiting");
 
@@ -107,10 +109,18 @@ export function AgentCard({
         </div>
 
         <div className="flex min-w-0 flex-wrap items-center gap-1">
-          <span className="flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            <GitBranch className="size-2.5 shrink-0" />
-            <span className="truncate font-mono">{workspaceName(session)}</span>
-          </span>
+          {quick ? (
+            // No branch or worktree to name: where it runs instead.
+            <span className="flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground" title={session.cwd}>
+              <FolderOpen className="size-2.5 shrink-0" />
+              <span className="truncate">{quickChatPlace(session)}</span>
+            </span>
+          ) : (
+            <span className="flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <GitBranch className="size-2.5 shrink-0" />
+              <span className="truncate font-mono">{workspaceName(session)}</span>
+            </span>
+          )}
           {session.issue && (
             <button
               type="button"
@@ -135,8 +145,8 @@ export function AgentCard({
         )}
 
         <div className="flex min-w-0 items-center gap-1.5 pt-0.5 text-[11px] text-faint">
-          {project ? <ProjectGlyph project={project} size={12} /> : <FolderOpen className="size-3" />}
-          <span className="min-w-0 truncate">{project?.name ?? session.projectPath.split("/").pop()}</span>
+          {project ? <ProjectGlyph project={project} size={12} /> : quick ? <MessageCircle className="size-3" /> : <FolderOpen className="size-3" />}
+          <span className="min-w-0 truncate">{sessionProjectName(session, project)}</span>
           {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
         </div>
       </div>

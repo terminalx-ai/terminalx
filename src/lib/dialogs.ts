@@ -19,9 +19,13 @@ export interface WorkspaceRemoveRequest {
 interface State {
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
+  /** The session being renamed. */
+  renameSession: string | null;
+  /** The quick chat being moved into a project. */
+  moveToProject: string | null;
 }
 
-let state: State = { workspaceRemove: null, bypass: null };
+let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -77,4 +81,22 @@ export function chooseMode(harness: string, mode: string, apply: (mode: string) 
 
 export function closeBypass() {
   set({ bypass: null });
+}
+
+/** Rename a session: one dialog, in whichever window asked. */
+export function openRenameSession(sessionId: string) {
+  set({ renameSession: sessionId });
+}
+
+export function closeRenameSession() {
+  set({ renameSession: null });
+}
+
+/** Move a quick chat into a project. */
+export function openMoveToProject(sessionId: string) {
+  set({ moveToProject: sessionId });
+}
+
+export function closeMoveToProject() {
+  set({ moveToProject: null });
 }

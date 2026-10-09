@@ -137,7 +137,7 @@ interface ResolvedWorkItem {
 
 function shortcutIcon(shortcut: ShortcutAction): LucideIcon {
   const label = shortcut.label.toLowerCase();
-  if (label.includes("session") || label === "send") return MessageSquare;
+  if (label.includes("session") || label === "send" || label.includes("chat")) return MessageSquare;
   if (label.includes("issue")) return CircleDot;
   if (label.includes("dashboard")) return LayoutGrid;
   if (label.includes("usage")) return BarChart3;
@@ -503,9 +503,13 @@ export function CommandPalette({
 
   const openFileHit = useCallback(
     async (hit: FileHit) => {
-      if (!fileRoot || !activeProject) return;
+      if (!fileRoot) return;
       let session = selectedSession;
-      if (!session || cleanPath(session.cwd) !== cleanPath(fileRoot)) session = await openWorkspace(activeProject.path, fileRoot);
+      if (!session || cleanPath(session.cwd) !== cleanPath(fileRoot)) {
+        // A quick chat has no project to open a workspace in; its own folder is the session on screen, handled above.
+        if (!activeProject) return;
+        session = await openWorkspace(activeProject.path, fileRoot);
+      }
       openFile(session.id, fileRoot, hit.path);
     },
     [activeProject, fileRoot, selectedSession],

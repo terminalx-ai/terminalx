@@ -254,6 +254,7 @@ mod tests {
         std::fs::create_dir_all(ws.join("src/deep")).unwrap();
         let entry = crate::store::index::SessionEntry {
             id: "s1".into(),
+            kind: crate::store::index::SessionKind::Project,
             project_path: tmp.path().to_string_lossy().into_owned(),
             cwd: ws.to_string_lossy().into_owned(),
             worktree_name: Some("ws".into()),

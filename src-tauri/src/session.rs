@@ -1580,6 +1580,11 @@ impl SessionManager {
             }
         }
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+        // A quick chat's scratch directory is ours to keep there: one removed
+        // by hand is made again rather than failing the launch.
+        if entry.is_quick() && crate::store::quick::is_scratch(&entry.id, &entry.cwd) {
+            crate::store::quick::create(&entry.id).context("make the quick chat's scratch directory")?;
+        }
 
         let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
         let mut env = vec![

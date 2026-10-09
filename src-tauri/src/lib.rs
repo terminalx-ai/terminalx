@@ -69,6 +69,8 @@ mod transcription;
 mod events;
 mod files;
 #[cfg(feature = "desktop")]
+mod floating;
+#[cfg(feature = "desktop")]
 mod media;
 mod media_types;
 mod git;
@@ -197,6 +199,19 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    // On the press only: the release of the same keys is not a second toggle.
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed && floating::is_toggle_shortcut(app, shortcut) {
+                        if let Err(error) = floating::toggle(app) {
+                            log::warn!("toggle the floating window: {error}");
+                        }
+                    }
+                })
+                .build(),
+        )
+        .manage(floating::Floating::default())
         .manage(state)
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
@@ -288,6 +303,8 @@ pub fn run() {
             browser.attach(app.handle().clone());
             browser.sweep_orphans();
             browser.start_keepalive();
+            floating::install(app.handle());
+            commands::start_quick_chat_retention(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -406,6 +423,17 @@ pub fn run() {
             commands::app_activity_summary,
             commands::stats_usage_refresh,
             commands::create_session,
+            commands::create_quick_chat,
+            commands::set_quick_chat_cwd,
+            commands::move_quick_chat_to_project,
+            commands::quick_chat_scratch,
+            floating::floating_status,
+            floating::set_floating_settings,
+            floating::floating_show,
+            floating::floating_hide,
+            floating::floating_visible,
+            floating::floating_take_pending,
+            floating::floating_open_in_main,
             commands::add_tab,
             commands::remove_tab,
             commands::rename_session,
@@ -481,6 +509,8 @@ pub fn run() {
             star_nag::star_nag_dismiss,
             star_nag::star_nag_act,
             commands::pty_spawn,
+            commands::pty_shells,
+            commands::pty_rename,
             commands::pty_write,
             commands::pty_attach,
             commands::pty_detach,
@@ -567,12 +597,27 @@ pub fn run() {
             if let tauri::WindowEvent::DragDrop(drag) = event {
                 drag_text::on_drag_drop(drag);
             }
+            // The floating window is a view, not the app: closing it puts it
+            // away, and what it showed carries on.
+            if window.label() == floating::LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    floating::hide(window.app_handle());
+                }
+                return;
+            }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.pairing.stop();
                     if window.label() == "main" {
                         if let Err(error) = store::activity::shutdown() {
                             log::error!("flush activity on window teardown: {error:#}");
+                        }
+                        // The app goes with its main window, as it always
+                        // has: a hidden floating window must not keep it
+                        // running with every agent stopped.
+                        if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) {
+                            let _ = floating.destroy();
                         }
                     }
                     state.host.kill_all();

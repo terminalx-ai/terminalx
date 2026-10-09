@@ -139,6 +139,12 @@ fn removed_managed_worktree(session: &SessionEntry, dir: &str) -> bool {
     gone && std::fs::symlink_metadata(&session.project_path).is_ok()
 }
 
+/// A quick chat's scratch directory that has been removed with it. It was
+/// made for that one session, so nothing else had a use for its Claude folder.
+fn removed_scratch(session: &SessionEntry, dir: &str) -> bool {
+    crate::store::quick::is_scratch(&session.id, dir) && matches!(std::fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub(crate) fn remove_file_counted(path: &Path) -> u64 {
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => {
@@ -192,7 +198,7 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
             }
             // The folder goes only when nothing is left in it: `remove_dir`
             // refuses one that still holds anything.
-            if !kept_folders.contains(&folder_key(dir)) && removed_managed_worktree(session, dir) && std::fs::remove_dir(&folder).is_ok() {
+            if !kept_folders.contains(&folder_key(dir)) && (removed_managed_worktree(session, dir) || removed_scratch(session, dir)) && std::fs::remove_dir(&folder).is_ok() {
                 log::debug!("removed the empty Claude folder {}", folder.display());
             }
         }
@@ -277,6 +283,7 @@ mod tests {
     fn session(project: &Path, cwd: &Path, tabs: Vec<TabEntry>) -> SessionEntry {
         SessionEntry {
             id: uuid::Uuid::now_v7().to_string(),
+            kind: crate::store::index::SessionKind::Project,
             project_path: project.to_string_lossy().into_owned(),
             cwd: cwd.to_string_lossy().into_owned(),
             worktree_name: cwd.file_name().map(|name| name.to_string_lossy().into_owned()),

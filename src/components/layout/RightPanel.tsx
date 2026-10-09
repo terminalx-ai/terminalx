@@ -33,6 +33,7 @@ const TABS: { id: PanelTab; label: string; shortcut: ShortcutId }[] = [
 export function RightPanel({
   cwd,
   isGit = true,
+  gitNote,
   branch,
   baseRef,
   events = [],
@@ -53,6 +54,8 @@ export function RightPanel({
 }: {
   cwd: string;
   isGit?: boolean;
+  /** Why there is no Changes, Repo or PR, shown above Files when `isGit` is false and the reason is worth saying. */
+  gitNote?: string;
   /** Undefined asks the panel to resolve the checkout branch itself. */
   branch?: string | null;
   baseRef?: string | null;
@@ -180,6 +183,11 @@ export function RightPanel({
             ))}
           </select>
         </div>
+      )}
+      {!isGit && gitNote && (
+        <p className="shrink-0 border-b border-hairline px-3 py-1.5 text-[11px] text-muted-foreground" role="note" data-testid="panel-no-repository">
+          {gitNote}
+        </p>
       )}
       {readOnlyReason && (
         <p className="shrink-0 border-b border-hairline px-3 py-1.5 text-[11px] text-muted-foreground" data-testid="panel-read-only">

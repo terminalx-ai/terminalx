@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2 } from "lucide-react";
+import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2, MessageCircle } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -20,7 +20,7 @@ import { AttachButton, AttachmentThumbs, DropHint, useImageAttachments } from "@
 import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
-import { addProject, clearNewSessionPreset, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { addProject, clearNewSessionPreset, createQuickChat, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { PERMISSION_MODES } from "@/lib/models";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
@@ -43,15 +43,26 @@ import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspac
  * Where a session is born. The box sits at the bottom, where the composer
  * will be once the session exists, so the first prompt and every follow-up
  * are typed in the same place; the raccoon keeps the empty space above.
+ *
+ * With `quick` it starts a quick chat instead: no project is chosen or
+ * needed, so the project picker and the worktree options are not offered, and
+ * the session runs in a scratch folder of its own unless the reader picks a
+ * folder. `compact` is the same form in a small window.
  */
 export function NewSessionView({
   onCreated,
   useWorktree: controlledUseWorktree,
   onUseWorktreeChange,
+  quick = false,
+  compact = false,
 }: {
   onCreated?: (sessionId: string, tabId: string, firstPrompt: string, images: ImageInput[]) => void;
   useWorktree?: boolean;
   onUseWorktreeChange?: (value: boolean) => void;
+  /** Start a quick chat: a session with no project. */
+  quick?: boolean;
+  /** Laid out for a narrow window. */
+  compact?: boolean;
 }) {
   const store = useSessionStore();
   const prefs = usePrefs();
@@ -65,8 +76,12 @@ export function NewSessionView({
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
-  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud.
-  const cloud = useCloudDraft();
+  // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A quick chat is local.
+  const cloudDraft = useCloudDraft();
+  const cloud = quick ? null : cloudDraft;
+  /** A folder the quick chat runs in instead of its scratch folder; it does not become a project. */
+  const [quickCwd, setQuickCwd] = useState<string | null>(null);
+  const folderMenu = useRowMenu();
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
@@ -78,8 +93,9 @@ export function NewSessionView({
   // The rail is what the reader last pointed at, so it beats the project they
   // happened to start a session in some other day; a preset beats both.
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject;
-  const project = store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null;
-  const isGit = cloud ? true : project?.kind !== "folder";
+  const project = quick ? null : (store.projects.find((p) => p.path === wanted) ?? store.projects[0] ?? null);
+  // A quick chat cuts no worktree, whatever the folder it is pointed at.
+  const isGit = quick ? false : cloud ? true : project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
   const cloudPlan = cloud?.project && cloud.mayStart ? planCloudStart(cloud.project) : null;
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
@@ -145,8 +161,10 @@ export function NewSessionView({
     () =>
       cloud
         ? !!cloud.project && !!harness && text.trim().length > 0 && !hasImages && !busy && !confirm && cloud.project.selected && cloud.mayStart === true
-        : !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
-    [cloud, project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy, confirm],
+        : quick
+          ? !!harness && available && (text.trim().length > 0 || hasImages) && !busy
+          : !!project && !!harness && available && (text.trim().length > 0 || hasImages) && (!useWorktree || !!preset?.cwd || !!workspaceName) && !busy,
+    [cloud, quick, project, harness, available, text, hasImages, useWorktree, preset?.cwd, workspaceName, busy, confirm],
   );
 
   const cloudRequest = (): CloudSessionRequest => ({
@@ -216,7 +234,39 @@ export function NewSessionView({
     }
   };
 
+  const pickQuickFolder = async () => {
+    try {
+      const dir = await openDialog({ directory: true, multiple: false, title: "Choose a folder for this chat" });
+      if (typeof dir === "string") setQuickCwd(dir);
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+
+  /** Start a quick chat: no project, no worktree; the first prompt is sent as for any session. */
+  const createQuick = async () => {
+    if (!harness || !canSend) return;
+    if (dictation.dictating) await stopDictation();
+    setBusy(true);
+    setError(null);
+    try {
+      const title = text.trim().split("\n")[0].slice(0, 60);
+      const images = attach.images;
+      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode } });
+      setText("");
+      attach.clear();
+      setQuickCwd(null);
+      selectSession(s.id);
+      onCreated?.(s.id, s.tabs[0].id, text, images);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const create = async () => {
+    if (quick) return createQuick();
     if (cloud) return createCloud();
     if (!project || !harness || !canSend) return;
     if (dictation.dictating) await stopDictation();
@@ -251,12 +301,14 @@ export function NewSessionView({
   const pill = "gap-1.5";
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-end px-6">
+    <div className="flex h-full min-h-0 flex-col" data-quick-start={quick ? "" : undefined}>
+      <div className={cn("flex min-h-0 flex-1 flex-col items-center justify-end", compact ? "px-3" : "px-6")}>
         <div className="w-full max-w-3xl">
-          <div className="mb-2 flex items-baseline gap-3 px-1">
-            <h1 className="text-xl font-semibold tracking-tight">What are we working on?</h1>
-            {cloud ? (
+          <div className={cn("mb-2 flex gap-x-3 px-1", compact ? "flex-col" : "items-baseline")}>
+            <h1 className={cn("font-semibold tracking-tight", compact ? "text-base" : "text-xl")}>{quick ? "Ask anything" : "What are we working on?"}</h1>
+            {quick ? (
+              <span className="truncate text-sm text-muted-foreground">No project needed</span>
+            ) : cloud ? (
               <span className="flex min-w-0 items-center gap-2 truncate text-sm text-muted-foreground">
                 in <span className="truncate text-foreground">{cloud.project?.fullName ?? "a cloud project"}</span>
               </span>
@@ -272,13 +324,40 @@ export function NewSessionView({
               </span>
             )}
           </div>
-          <RaccoonScene className="mb-2" />
+          {/* The scene needs room a small window does not have. */}
+          {!compact && <RaccoonScene className="mb-2" />}
         </div>
       </div>
 
-      <div className="shrink-0 px-6 pb-4">
+      <div className={cn("shrink-0", compact ? "px-3 pb-3" : "px-6 pb-4")}>
         <div className="mx-auto w-full max-w-3xl">
           <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {quick ? (
+              <DropdownMenu {...folderMenu.root}>
+                <DropdownMenuTrigger asChild {...folderMenu.trigger}>
+                  <Button variant="secondary" size="sm" className={cn(pill, "min-w-0 max-w-full")} title={quickCwd ?? "A scratch folder made for this chat"} aria-label="Working directory">
+                    {quickCwd ? <FolderOpen /> : <MessageCircle />}
+                    <span className="truncate">{quickCwd ? (quickCwd.replace(/\/+$/, "").split("/").pop() || quickCwd) : "Scratch folder"}</span>
+                    <ChevronDown className="text-faint" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="max-w-[18rem]">
+                  <DropdownMenuLabel>Runs in</DropdownMenuLabel>
+                  <DropdownMenuItem onSelect={() => setQuickCwd(null)}>
+                    <MessageCircle />
+                    <span>Scratch folder</span>
+                    <span className="ml-auto pl-3 text-[11px] text-faint">default</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => void pickQuickFolder()}>
+                    <FolderOpen />
+                    <span>Choose folder…</span>
+                  </DropdownMenuItem>
+                  <div role="note" className="px-2 pb-1 pt-1 text-[11px] leading-snug text-muted-foreground">
+                    A folder you choose is used as it is. It is not added as a project.
+                  </div>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
             <DropdownMenu {...projectMenu.root}>
               <DropdownMenuTrigger asChild {...projectMenu.trigger}>
                 <Button variant="secondary" size="sm" className={pill}>
@@ -334,6 +413,7 @@ export function NewSessionView({
                 <DropdownMenuItem onSelect={pickProject}>Add a project…</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            )}
 
             <SessionAgentControls selection={agentSelection} />
 
@@ -357,7 +437,7 @@ export function NewSessionView({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {cloud ? (
+            {quick ? null : cloud ? (
               <>
                 <span className="ml-1 flex items-center gap-1 rounded-full border border-hairline px-2 py-0.5 text-xs text-muted-foreground" data-testid="cloud-runs-in" title="The agent, its terminals and its files run on a cloud workspace of the organization, not on this computer.">
                   <Cloud className="size-3.5" /> Runs in: <span className="text-foreground">{cloud.orgName} cloud</span>
@@ -442,9 +522,11 @@ export function NewSessionView({
                   insertNewLine(e.currentTarget);
                 }
               }}
-              rows={3}
+              rows={compact ? 2 : 3}
               placeholder={
-                cloud
+                quick
+                  ? "Ask a question or describe a task."
+                  : cloud
                   ? "Describe the task. It runs in the cloud."
                   : !project
                   ? "Add a project to get started."
@@ -464,7 +546,8 @@ export function NewSessionView({
                   <span className="text-warning">
                     {harness.name} isn't installed. <code className="font-mono">{harness.installHint}</code>
                   </span>
-                ) : (
+                ) : compact ? null : (
+                  // A narrow window has no room for the key hints beside the buttons; they wrapped under them.
                   <>
                     {sendKeys && (
                       <>

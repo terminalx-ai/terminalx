@@ -63,6 +63,45 @@ pub fn locate_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
         .unwrap_or(derived)
 }
 
+/// Put a conversation's transcript where the CLI will look for it when it is
+/// resumed in `to`.
+///
+/// `--resume <id>` reads the folder named for the directory it is run in.
+/// That is the same folder for a renamed checkout or another worktree of the
+/// repository, but not when a session moves to an unrelated directory: a
+/// quick chat pointed at a folder, or moved into a project. `keep_source`
+/// leaves the original where it was, for a fork, whose parent goes on being
+/// used from there.
+///
+/// Returns whether anything was put there. A conversation with no file yet,
+/// or one that is already in `to`'s folder, needs nothing.
+pub fn rehome_in(projects: &Path, from: &str, to: &str, session_id: &str, keep_source: bool) -> std::io::Result<bool> {
+    let source = locate_in(projects, from, session_id);
+    let target = transcript_in(projects, to, session_id);
+    let is_file = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file());
+    if source == target || !is_file(&source) || std::fs::symlink_metadata(&target).is_ok() {
+        return Ok(false);
+    }
+    let folder = target.parent().expect("a transcript is in a folder");
+    std::fs::create_dir_all(folder)?;
+    // What the CLI keeps beside a transcript (subagent logs, tool results) is
+    // in a directory named for the conversation.
+    let side = source.with_extension("");
+    let side_target = target.with_extension("");
+    if keep_source {
+        std::fs::copy(&source, &target)?;
+    } else if std::fs::rename(&source, &target).is_err() {
+        // Another volume: copy, then let go of the original.
+        std::fs::copy(&source, &target)?;
+        let _ = std::fs::remove_file(&source);
+    }
+    if !keep_source && std::fs::symlink_metadata(&side).is_ok_and(|meta| meta.is_dir()) && std::fs::symlink_metadata(&side_target).is_err() {
+        // Best effort: the conversation resumes without it.
+        let _ = std::fs::rename(&side, &side_target);
+    }
+    Ok(true)
+}
+
 /// Where the CLI keeps every project's transcripts: `projects` under
 /// `CLAUDE_CONFIG_DIR` when that is set, else under `~/.claude`. Reading a
 /// transcript and deleting one both go through here, so they cannot disagree
@@ -595,6 +634,46 @@ mod tests {
         for id in ["../other", "a/b", "", ".."] {
             assert_eq!(locate_in(home, now, id), transcript_in(home, now, id));
         }
+    }
+
+    #[test]
+    fn a_transcript_follows_its_conversation_to_an_unrelated_directory() {
+        let config = tempfile::tempdir().unwrap();
+        let home = &config.path().join("projects");
+        let (scratch, project) = ("/Users/dev/.raccoon/quick/0198", "/Users/dev/code/api");
+        // Nothing written yet: nothing to carry.
+        assert!(!rehome_in(home, scratch, project, "abc", false).unwrap());
+
+        let began = transcript_in(home, scratch, "abc");
+        std::fs::create_dir_all(began.with_extension("")).unwrap();
+        std::fs::write(&began, "{\"type\":\"user\"}\n").unwrap();
+        std::fs::write(began.with_extension("").join("subagent.jsonl"), "{}\n").unwrap();
+
+        // A fork leaves its parent where the parent is still used from.
+        assert!(rehome_in(home, scratch, "/Users/dev/.raccoon/quick/0199", "abc", true).unwrap());
+        assert!(began.exists());
+        assert_eq!(std::fs::read_to_string(transcript_in(home, "/Users/dev/.raccoon/quick/0199", "abc")).unwrap(), "{\"type\":\"user\"}\n");
+        std::fs::remove_file(transcript_in(home, "/Users/dev/.raccoon/quick/0199", "abc")).unwrap();
+
+        // A move takes the file, and what the CLI kept beside it, along.
+        assert!(rehome_in(home, scratch, project, "abc", false).unwrap());
+        let moved = transcript_in(home, project, "abc");
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{\"type\":\"user\"}\n");
+        assert!(moved.with_extension("").join("subagent.jsonl").exists());
+        assert!(!began.exists());
+        assert_eq!(locate_in(home, project, "abc"), moved);
+
+        // Already where it is wanted, or asked for under a name that is a path: nothing happens.
+        assert!(!rehome_in(home, scratch, project, "abc", false).unwrap());
+        assert!(!rehome_in(home, project, project, "abc", false).unwrap());
+        assert!(!rehome_in(home, project, scratch, "../abc", false).unwrap());
+        assert!(moved.exists());
+
+        // What is already in the destination is never overwritten.
+        std::fs::create_dir_all(began.parent().unwrap()).unwrap();
+        std::fs::write(&began, "other\n").unwrap();
+        assert!(!rehome_in(home, project, scratch, "abc", false).unwrap());
+        assert_eq!(std::fs::read_to_string(&began).unwrap(), "other\n");
     }
 
     /// The CLI wraps a large paste in a tag of its own. The reader pasted

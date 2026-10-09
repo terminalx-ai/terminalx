@@ -31,6 +31,31 @@ pub struct Settings {
     /// Bottom-chrome visibility and presentation. Unlike ordinary webview
     /// preferences this also drives the native View menu, so it lives here.
     pub status_bar: StatusBarSettings,
+    /// The floating chat window. The system-wide shortcut is registered, and
+    /// the window made, by the Rust side, so these live here.
+    pub floating: FloatingSettings,
+}
+
+/// The longest an idle quick chat may be set to be kept, short of for ever.
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FloatingSettings {
+    /// The system-wide shortcut that shows and hides the window, written as
+    /// the app writes bindings (`alt+shift+space`). `None` is turned off.
+    pub shortcut: Option<String>,
+    /// The window stays above other apps' windows.
+    pub always_on_top: bool,
+    /// How many days a quick chat nobody touches is kept before it and its
+    /// scratch directory are deleted; 0 keeps them until deleted by hand.
+    pub retention_days: u32,
+}
+
+impl Default for FloatingSettings {
+    fn default() -> Self {
+        Self { shortcut: Some("alt+shift+space".into()), always_on_top: true, retention_days: 30 }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +101,7 @@ impl Default for Settings {
             transcription_input_device: None,
             transcription_mute: false,
             status_bar: StatusBarSettings::default(),
+            floating: FloatingSettings::default(),
         }
     }
 }
@@ -108,6 +134,24 @@ pub fn save(s: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_floating_window_defaults_on_and_a_shortcut_turned_off_stays_off() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.floating, FloatingSettings::default());
+        assert_eq!(settings.floating.shortcut.as_deref(), Some("alt+shift+space"));
+        assert!(settings.floating.always_on_top);
+        assert_eq!(settings.floating.retention_days, 30);
+
+        // Turned off is written as null, and null is not "use the default".
+        let off: Settings = serde_json::from_str(r#"{"floating":{"shortcut":null,"retentionDays":0}}"#).unwrap();
+        assert_eq!(off.floating.shortcut, None);
+        assert_eq!(off.floating.retention_days, 0);
+        assert!(off.floating.always_on_top);
+        let written = serde_json::to_value(&off).unwrap();
+        assert!(written["floating"]["shortcut"].is_null());
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().floating, off.floating);
+    }
 
     #[test]
     fn status_bar_defaults_on_and_used() {

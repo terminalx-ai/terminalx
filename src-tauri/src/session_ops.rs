@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::sink::EventSink;
-use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, TabEntry, TabStatus};
+use crate::store::index::{self, AutomationRef, IssueRef, SessionEntry, SessionKind, TabEntry, TabStatus};
 use crate::store::projects;
 use crate::{git, names, store};
 
@@ -38,6 +38,9 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 
 pub(crate) const WORKSPACES_CHANGED_EVENT: &str = "workspaces_changed";
 pub(crate) const SESSION_DELETED_EVENT: &str = "session_deleted";
+/// A request to show, hide or toggle the desktop app's floating chat window,
+/// from the command line. The desktop app listens; nothing else does.
+pub(crate) const FLOATING_REQUEST_EVENT: &str = "floating_window_request";
 
 /// Tell the frontend a workspace is gone: its sessions were removed outright,
 /// so each goes out as a deletion rather than an update.
@@ -203,6 +206,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
 
     let mut entry = SessionEntry {
         id: id.clone(),
+        kind: SessionKind::Project,
         project_path: project.clone(),
         cwd: project.clone(),
         worktree_name: None,
@@ -259,6 +263,241 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
     })
     .map_err(err)?;
     Ok(entry)
+}
+
+/// A quick chat to create: a session with no project, and so no worktree,
+/// branch or base.
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewQuickChat {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// A folder to run in instead of the scratch directory. It is used as it
+    /// is: it does not become a project.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The first agent conversation. Omitted for a quick chat that starts as
+    /// a terminal.
+    #[serde(default)]
+    pub tab: Option<NewTab>,
+}
+
+pub(crate) const QUICK_CHAT_TITLE: &str = "Quick chat";
+
+/// A folder a quick chat is asked to run in: it must exist, and must not be
+/// a read-only mirror of a cloud workspace.
+fn quick_chat_folder(path: &str) -> Result<String> {
+    let folder = projects::canonical_directory(path).map_err(err)?;
+    projects::refuse_mirror(&folder).map_err(err)?;
+    Ok(folder)
+}
+
+/// Create a quick chat and tell listeners. Like any session, its index entry
+/// is written before an agent is started in it.
+pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
+    let entry = create_quick_chat_entry(req)?;
+    sink.emit("session_created", &entry);
+    Ok(entry)
+}
+
+pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry> {
+    let id = uuid::Uuid::now_v7().to_string();
+    let scratch = store::quick::create(&id).map_err(err)?;
+    let created = (|| {
+        let chosen = req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).map(quick_chat_folder).transpose()?;
+        let first_tab = req.tab.as_ref().map(new_tab_entry);
+        let now = index::now();
+        let entry = SessionEntry {
+            id: id.clone(),
+            kind: SessionKind::Quick,
+            project_path: scratch.clone(),
+            // The scratch directory is on no branch even when the TerminalX
+            // home happens to sit inside a repository (dotfiles kept in git).
+            branch: chosen.as_deref().and_then(|cwd| git::current_branch(Path::new(cwd))),
+            cwd: chosen.unwrap_or_else(|| scratch.clone()),
+            worktree_name: None,
+            base_ref: None,
+            worktree_base: None,
+            worktree_removed: false,
+            removed_workspace: None,
+            issue: None,
+            automation: None,
+            title: req.title.clone().filter(|title| !title.trim().is_empty()).unwrap_or_else(|| QUICK_CHAT_TITLE.into()),
+            created: now.clone(),
+            modified: now,
+            archived: false,
+            pinned: false,
+            active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
+            tabs: first_tab.into_iter().collect(),
+            unknown: BTreeMap::new(),
+        };
+        index::update(|sessions| {
+            sessions.push(entry.clone());
+            Ok(())
+        })
+        .map_err(err)?;
+        Ok(entry)
+    })();
+    // No session came of it: its directory is not left behind.
+    if created.is_err() {
+        let _ = store::quick::remove(&id);
+    }
+    created
+}
+
+/// What a quick chat's scratch directory holds, for the confirmation shown
+/// before it is deleted.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickChatScratch {
+    pub path: String,
+    /// Files in it, counted no further than [`SCRATCH_COUNT_LIMIT`].
+    pub files: usize,
+    /// The count stopped at the limit: there are at least this many.
+    pub more: bool,
+    /// The session runs there now, rather than in a folder it was pointed at.
+    pub in_use: bool,
+}
+
+pub(crate) const SCRATCH_COUNT_LIMIT: usize = 1000;
+
+pub(crate) fn quick_chat_scratch(session_id: &str) -> Result<QuickChatScratch> {
+    let entry = index::get(session_id).map_err(err)?;
+    let path = store::quick::dir(&entry.id).map_err(err)?;
+    let files = store::quick::file_count(&entry.id, SCRATCH_COUNT_LIMIT);
+    Ok(QuickChatScratch {
+        path: path.to_string_lossy().into_owned(),
+        files,
+        more: files >= SCRATCH_COUNT_LIMIT,
+        in_use: entry.is_quick() && store::quick::is_scratch(&entry.id, &entry.cwd),
+    })
+}
+
+fn quick_chat(session_id: &str) -> Result<SessionEntry> {
+    let entry = index::get(session_id).map_err(err)?;
+    if !entry.is_quick() {
+        return Err("This session belongs to a project. Only a quick chat can be pointed at another folder or moved into a project.".into());
+    }
+    Ok(entry)
+}
+
+/// The agents key what they keep on the directory a conversation runs in.
+/// Before a session's tabs start again somewhere unrelated, put what can be
+/// carried where the CLI will look, so the same conversation resumes. Claude
+/// Code files a transcript under its directory's name; Codex finds a rollout
+/// by id wherever it runs. A tab whose conversation cannot be carried still
+/// has its history here, and can be continued with a handoff.
+fn carry_conversations(entry: &SessionEntry, to: &str) {
+    let Some(projects) = crate::agent_data::claude_projects_root() else { return };
+    for tab in entry.tabs.iter().filter(|tab| tab.harness == "claude") {
+        let Some(id) = tab.provider_session_id.as_deref() else { continue };
+        if let Err(error) = crate::harness::claude::transcript::rehome_in(&projects, &entry.cwd, to, id, false) {
+            log::warn!("carry the conversation of tab {} to its new directory: {error}", tab.id);
+        }
+    }
+}
+
+/// Run a quick chat in `cwd` from now on, or in its scratch directory again
+/// when `cwd` is `None`. The folder is used as it is and is not registered as
+/// a project. `stop` ends what the session's tabs run: they start again, in
+/// the new directory, the next time they are opened.
+pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
+    let entry = quick_chat(session_id)?;
+    let target = match cwd.filter(|cwd| !cwd.trim().is_empty()) {
+        Some(cwd) => quick_chat_folder(cwd)?,
+        None => store::quick::create(&entry.id).map_err(err)?,
+    };
+    if target == entry.cwd {
+        return Ok(entry);
+    }
+    let scratch = store::quick::is_scratch(&entry.id, &target);
+    stop(&entry);
+    carry_conversations(&entry, &target);
+    let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
+    let updated = index::update_session(session_id, |session| {
+        session.cwd = target.clone();
+        session.branch = branch.clone();
+        session.worktree_name = None;
+        session.worktree_removed = false;
+        session.removed_workspace = None;
+        session.base_ref = None;
+        session.worktree_base = None;
+        for tab in &mut session.tabs {
+            tab.status = TabStatus::Idle;
+        }
+        Ok(session.clone())
+    })
+    .map_err(err)?;
+    sink.emit("session_updated", &updated);
+    Ok(updated)
+}
+
+/// Turn a quick chat into an ordinary session of `project_path`, keeping its
+/// tabs and their history. The project is added if the reader has not
+/// attached it yet. An empty scratch directory goes; one that holds files is
+/// kept until the session is deleted, since the conversation may refer to
+/// them.
+pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
+    let entry = quick_chat(session_id)?;
+    let project = projects::add(project_path).map_err(err)?.path;
+    projects::refuse_mirror(&project).map_err(err)?;
+    stop(&entry);
+    carry_conversations(&entry, &project);
+    let branch = git::current_branch(Path::new(&project));
+    let updated = index::update_session(session_id, |session| {
+        session.kind = SessionKind::Project;
+        session.project_path = project.clone();
+        session.cwd = project.clone();
+        session.branch = branch.clone();
+        session.worktree_name = None;
+        session.worktree_removed = false;
+        session.removed_workspace = None;
+        session.base_ref = None;
+        session.worktree_base = None;
+        for tab in &mut session.tabs {
+            tab.status = TabStatus::Idle;
+        }
+        Ok(session.clone())
+    })
+    .map_err(err)?;
+    store::quick::remove_if_empty(&entry.id);
+    sink.emit("session_updated", &updated);
+    sink.emit(WORKSPACES_CHANGED_EVENT, &project);
+    Ok(updated)
+}
+
+/// Delete quick chats nobody has touched for `days` days, with their scratch
+/// directories. A pinned or archived one is kept (the reader set it aside on
+/// purpose), and so is one `busy` says is running. `stop` ends what an idle
+/// one still has open. Returns what was deleted.
+pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
+    if days == 0 {
+        return Ok(Vec::new());
+    }
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    let idle = |session: &SessionEntry| {
+        let working = session.tabs.iter().any(|tab| matches!(tab.status, TabStatus::InProgress | TabStatus::Waiting));
+        // A date that cannot be read is not a reason to delete.
+        let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
+        session.is_quick() && !session.pinned && !session.archived && !working && last.is_some_and(|last| last < cutoff)
+    };
+    let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
+    for session in &doomed {
+        stop(session);
+    }
+    remove_session_entries(&doomed)?;
+    notify_sessions_deleted(sink, &doomed);
+    Ok(doomed)
+}
+
+/// Remove scratch directories that belong to no session and were last
+/// touched more than `older_than` ago. Returns how many went. Nothing goes
+/// when the index cannot be read: without it there is no telling whose they are.
+pub(crate) fn remove_orphan_scratch(older_than: std::time::Duration) -> usize {
+    let Ok(sessions) = index::load() else { return 0 };
+    let known: std::collections::HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+    let old = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age >= older_than);
+    store::quick::orphans(&known).into_iter().filter(|path| old(path)).filter(|path| std::fs::remove_dir_all(path).is_ok()).count()
 }
 
 #[derive(Debug, Serialize)]
@@ -549,6 +788,11 @@ pub(crate) fn remove_session_entries(doomed: &[SessionEntry]) -> Result<()> {
         }
         if let Some(dir) = &attachments_dir {
             let _ = std::fs::remove_dir_all(dir.join(&session.id));
+        }
+        // A quick chat's scratch directory is found by the session's id, so
+        // one that was pointed elsewhere or moved into a project is covered.
+        if let Err(error) = store::quick::remove(&session.id) {
+            log::warn!("remove the scratch directory of session {}: {error:#}", session.id);
         }
     }
     // What the agent CLIs kept for these sessions goes with them. Without
@@ -928,6 +1172,285 @@ mod tests {
         git::run(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]).unwrap();
         git::run(dir.path(), &["push", "-q", "-u", "origin", "main"]).unwrap();
         (dir, remote)
+    }
+
+    fn quick_chat(cwd: Option<&Path>) -> SessionEntry {
+        create_quick_chat_entry(NewQuickChat {
+            title: None,
+            cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+            tab: Some(NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+        })
+        .unwrap()
+    }
+
+    fn scratch_root() -> PathBuf {
+        store::quick::root().unwrap().canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_quick_chat_needs_no_project_and_runs_in_a_scratch_directory_of_its_own() {
+        let _home = crate::store::temp_home();
+        assert!(projects::list().unwrap().0.is_empty());
+        let sink = sink();
+        let mut events = sink.subscribe();
+        let first = create_quick_chat_blocking(&sink, NewQuickChat { title: Some("What is a monad?".into()), cwd: None, tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }) }).unwrap();
+        assert_eq!(&*events.try_recv().unwrap().event, "session_created");
+
+        assert_eq!(first.kind, SessionKind::Quick);
+        assert_eq!(first.project(), None, "a quick chat has no project");
+        assert_eq!(first.title, "What is a monad?");
+        // Its directory is its own, under the TerminalX home, and exists.
+        assert_eq!(Path::new(&first.cwd), scratch_root().join(&first.id));
+        assert_eq!(first.project_path, first.cwd);
+        assert!(Path::new(&first.cwd).is_dir());
+        // No worktree, no branch, no base.
+        assert!(first.worktree_name.is_none() && first.branch.is_none() && first.base_ref.is_none() && first.worktree_base.is_none());
+        assert_eq!(first.tabs.len(), 1);
+        assert_eq!(first.active_tab.as_deref(), Some(first.tabs[0].id.as_str()));
+        assert_eq!(index::get(&first.id).unwrap(), first);
+        // Nothing was registered as a project to make it.
+        assert!(projects::list().unwrap().0.is_empty());
+
+        // A second one shares nothing with the first; an untitled one is named.
+        let second = quick_chat(None);
+        assert_ne!(second.cwd, first.cwd);
+        assert_eq!(second.title, QUICK_CHAT_TITLE);
+        // A terminal-only quick chat has no agent tab.
+        let shell_only = create_quick_chat_entry(NewQuickChat::default()).unwrap();
+        assert!(shell_only.tabs.is_empty() && shell_only.active_tab.is_none());
+        assert_eq!(index::load().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_quick_chat_can_start_in_a_folder_that_does_not_become_a_project() {
+        let _home = crate::store::temp_home();
+        let folder = tempfile::tempdir().unwrap();
+        let chat = quick_chat(Some(folder.path()));
+        assert_eq!(Path::new(&chat.cwd), folder.path().canonicalize().unwrap());
+        assert!(chat.is_quick() && chat.branch.is_none());
+        // It still has a scratch directory to go back to, named for it.
+        assert_eq!(Path::new(&chat.project_path), scratch_root().join(&chat.id));
+        assert!(projects::list().unwrap().0.is_empty());
+
+        // A repository is used as it is: on its branch, with no worktree cut.
+        let repository = repo();
+        let in_repo = quick_chat(Some(repository.path()));
+        assert_eq!(in_repo.branch.as_deref(), Some("main"));
+        assert!(in_repo.worktree_name.is_none());
+        assert!(!git::worktree_root(repository.path()).exists());
+        assert!(projects::list().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn a_quick_chat_that_cannot_be_created_leaves_no_session_and_no_directory() {
+        let _home = crate::store::temp_home();
+        let missing = tempfile::tempdir().unwrap().path().join("gone");
+        let error = create_quick_chat_entry(NewQuickChat { title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
+        assert!(error.contains("resolve"), "{error}");
+        assert!(index::load().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn deleting_a_quick_chat_removes_its_scratch_directory_and_what_the_agent_kept_for_it() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let bystander = quick_chat(None);
+        let transcript = claude_transcript(&chat, CONVERSATION);
+        std::fs::write(Path::new(&chat.cwd).join("notes.md"), "kept until deleted").unwrap();
+        assert_eq!(quick_chat_scratch(&chat.id).unwrap(), QuickChatScratch { path: store::quick::dir(&chat.id).unwrap().to_string_lossy().into_owned(), files: 1, more: false, in_use: true });
+
+        let stopped = std::cell::RefCell::new(Vec::new());
+        delete_session_blocking(&sink(), &chat.id, &|s| stopped.borrow_mut().push(s.id.clone())).unwrap();
+        assert_eq!(*stopped.borrow(), vec![chat.id.clone()]);
+        assert!(!Path::new(&chat.cwd).exists(), "the scratch directory goes with its chat");
+        assert!(!transcript.exists());
+        assert!(!transcript.parent().unwrap().exists(), "the agent's folder for a directory that is gone goes too");
+        assert!(index::get(&chat.id).is_err());
+        // Another quick chat's directory is not touched.
+        assert!(Path::new(&bystander.cwd).is_dir());
+        assert_eq!(index::load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_quick_chat_can_be_pointed_at_a_folder_and_back_and_its_conversation_follows() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let began = claude_transcript(&chat, CONVERSATION);
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().canonicalize().unwrap();
+        let stopped = std::cell::Cell::new(0);
+        let stop = |_: &SessionEntry| stopped.set(stopped.get() + 1);
+        let sink = sink();
+        let mut events = sink.subscribe();
+
+        let moved = set_quick_chat_cwd(&sink, &chat.id, Some(folder.path().to_str().unwrap()), &stop).unwrap();
+        assert_eq!(stopped.get(), 1, "its agents are stopped before they are started elsewhere");
+        assert_eq!(Path::new(&moved.cwd), target);
+        assert!(moved.is_quick(), "pointing it at a folder does not give it a project");
+        assert_eq!(moved.project_path, chat.project_path);
+        assert_eq!(&*events.try_recv().unwrap().event, "session_updated");
+        assert!(projects::list().unwrap().0.is_empty(), "the folder is not registered as a project");
+        // The conversation is where the CLI will look when it resumes in the folder.
+        let projects_root = crate::agent_data::claude_projects_root().unwrap();
+        let carried = crate::harness::claude::transcript::transcript_in(&projects_root, &moved.cwd, CONVERSATION);
+        assert!(carried.exists() && !began.exists());
+        assert_eq!(moved.tabs[0].provider_session_id.as_deref(), Some(CONVERSATION));
+        assert!(!quick_chat_scratch(&chat.id).unwrap().in_use);
+
+        // The same folder again changes nothing, and stops nothing.
+        set_quick_chat_cwd(&sink, &chat.id, Some(folder.path().to_str().unwrap()), &stop).unwrap();
+        assert_eq!(stopped.get(), 1);
+
+        // Back to the scratch directory, made again if it was removed by hand.
+        std::fs::remove_dir_all(&chat.cwd).unwrap();
+        let back = set_quick_chat_cwd(&sink, &chat.id, None, &stop).unwrap();
+        assert_eq!(back.cwd, chat.cwd);
+        assert!(Path::new(&back.cwd).is_dir() && back.branch.is_none());
+        assert!(began.exists(), "and the conversation came back with it");
+
+        // A folder that is not there is refused, and nothing changes.
+        assert!(set_quick_chat_cwd(&sink, &chat.id, Some("/no/such/folder"), &stop).is_err());
+        assert_eq!(index::get(&chat.id).unwrap().cwd, chat.cwd);
+        assert_eq!(stopped.get(), 2);
+    }
+
+    #[test]
+    fn only_a_quick_chat_can_be_pointed_elsewhere_or_moved() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let session = session_in(dir.path(), &dir.path().to_string_lossy(), "Project session");
+        let elsewhere = tempfile::tempdir().unwrap();
+        for error in [
+            set_quick_chat_cwd(&sink(), &session.id, Some(elsewhere.path().to_str().unwrap()), &|_| panic!("nothing is stopped")).unwrap_err(),
+            move_quick_chat_to_project(&sink(), &session.id, elsewhere.path().to_str().unwrap(), &|_| panic!("nothing is stopped")).unwrap_err(),
+        ] {
+            assert!(error.contains("belongs to a project"), "{error}");
+        }
+        assert_eq!(index::get(&session.id).unwrap(), session);
+    }
+
+    #[test]
+    fn moving_a_quick_chat_into_a_project_keeps_its_tabs_and_history() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let began = claude_transcript(&chat, CONVERSATION);
+        let log = store::log_path(&chat.id, &chat.tabs[0].id).unwrap();
+        std::fs::write(&log, "{\"transcript\":true}\n").unwrap();
+        let project = repo();
+        let sink = sink();
+        let mut events = sink.subscribe();
+        let stopped = std::cell::Cell::new(0);
+
+        let moved = move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| stopped.set(stopped.get() + 1)).unwrap();
+        let project_path = project.path().canonicalize().unwrap();
+        assert_eq!(stopped.get(), 1);
+        assert_eq!(moved.kind, SessionKind::Project);
+        assert_eq!(moved.project(), Some(project_path.to_str().unwrap()));
+        assert_eq!(Path::new(&moved.cwd), project_path);
+        assert_eq!(moved.branch.as_deref(), Some("main"));
+        assert!(moved.worktree_name.is_none());
+        // The same session, the same tabs, the same conversation and the same saved transcript.
+        assert_eq!(moved.id, chat.id);
+        assert_eq!(moved.title, chat.title);
+        assert_eq!(moved.tabs.iter().map(|tab| &tab.id).collect::<Vec<_>>(), chat.tabs.iter().map(|tab| &tab.id).collect::<Vec<_>>());
+        assert_eq!(moved.tabs[0].provider_session_id.as_deref(), Some(CONVERSATION));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "{\"transcript\":true}\n");
+        let projects_root = crate::agent_data::claude_projects_root().unwrap();
+        assert!(crate::harness::claude::transcript::transcript_in(&projects_root, &moved.cwd, CONVERSATION).exists() && !began.exists());
+        assert_eq!(index::get(&chat.id).unwrap(), moved);
+        // The project was added for it, and listeners heard about both.
+        assert_eq!(projects::list().unwrap().0.iter().map(|p| p.path.clone()).collect::<Vec<_>>(), vec![moved.project_path.clone()]);
+        assert_eq!(&*events.try_recv().unwrap().event, "session_updated");
+        assert_eq!(&*events.try_recv().unwrap().event, WORKSPACES_CHANGED_EVENT);
+        // An empty scratch directory is not left behind.
+        assert!(!Path::new(&chat.cwd).exists());
+        // It is an ordinary session of the project from here on.
+        assert_eq!(taken_worktree_names(&project_path).unwrap(), Vec::<String>::new());
+        assert!(move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| {}).is_err());
+    }
+
+    #[test]
+    fn a_moved_quick_chat_keeps_the_files_it_made_until_it_is_deleted() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let made = Path::new(&chat.cwd).join("draft.md");
+        std::fs::write(&made, "the agent wrote this").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
+        assert!(made.exists(), "the conversation may refer to it");
+        assert_eq!(quick_chat_scratch(&moved.id).unwrap().files, 1);
+        assert!(!quick_chat_scratch(&moved.id).unwrap().in_use);
+        delete_session_blocking(&sink(), &moved.id, &|_| {}).unwrap();
+        assert!(!made.exists() && !Path::new(&chat.cwd).exists());
+        assert!(project.path().exists(), "the project is the reader's, not the session's");
+    }
+
+    fn aged(session: &SessionEntry, days: i64) {
+        let then = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        index::update(|sessions| {
+            sessions.iter_mut().find(|s| s.id == session.id).unwrap().modified = then.clone();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn idle_quick_chats_are_removed_after_the_retention_and_nothing_else_is() {
+        let _home = crate::store::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let old = quick_chat(None);
+        let recent = quick_chat(None);
+        let pinned = quick_chat(None);
+        let working = quick_chat(None);
+        let in_use = quick_chat(None);
+        let ordinary = session_in(project.path(), &project.path().to_string_lossy(), "Old project session");
+        for session in [&old, &pinned, &working, &in_use, &ordinary] {
+            aged(session, 45);
+        }
+        aged(&recent, 3);
+        index::update(|sessions| {
+            sessions.iter_mut().find(|s| s.id == pinned.id).unwrap().pinned = true;
+            sessions.iter_mut().find(|s| s.id == working.id).unwrap().tabs[0].status = TabStatus::Waiting;
+            Ok(())
+        })
+        .unwrap();
+        let busy = |session: &SessionEntry| session.id == in_use.id;
+        let stopped = std::cell::RefCell::new(Vec::new());
+        let stop = |session: &SessionEntry| stopped.borrow_mut().push(session.id.clone());
+        let sink = sink();
+        let mut events = sink.subscribe();
+
+        // Kept for ever: nothing goes, however old.
+        assert!(sweep_idle_quick_chats(&sink, 0, &busy, &stop).unwrap().is_empty());
+        assert_eq!(index::load().unwrap().len(), 6);
+
+        let removed = sweep_idle_quick_chats(&sink, 30, &busy, &stop).unwrap();
+        assert_eq!(removed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec![old.id.as_str()]);
+        assert_eq!(*stopped.borrow(), vec![old.id.clone()]);
+        assert!(!Path::new(&old.cwd).exists());
+        assert_eq!(&*events.try_recv().unwrap().event, SESSION_DELETED_EVENT);
+        let mut kept: Vec<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        kept.sort();
+        let mut expected = vec![recent.id.clone(), pinned.id.clone(), working.id.clone(), in_use.id.clone(), ordinary.id.clone()];
+        expected.sort();
+        assert_eq!(kept, expected);
+        for session in [&recent, &pinned, &working, &in_use] {
+            assert!(Path::new(&session.cwd).is_dir());
+        }
+    }
+
+    #[test]
+    fn scratch_directories_no_session_uses_are_removed_once_they_are_old() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let lost = store::quick::create("left-by-a-crash").unwrap();
+        // Just made: it may be a session whose index entry is a moment away.
+        assert_eq!(remove_orphan_scratch(std::time::Duration::from_secs(3600)), 0);
+        assert!(Path::new(&lost).is_dir());
+        assert_eq!(remove_orphan_scratch(std::time::Duration::ZERO), 1);
+        assert!(!Path::new(&lost).exists());
+        assert!(Path::new(&chat.cwd).is_dir(), "a directory a session uses is never an orphan");
     }
 
     #[test]

@@ -24,6 +24,7 @@ import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
+import { QuickChatSettings } from "./FloatingWindowSettings";
 
 const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
@@ -215,6 +216,7 @@ function GeneralTab() {
         description="Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout."
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />
+      <QuickChatSettings />
     </div>
   );
 }

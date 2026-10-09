@@ -1132,14 +1132,21 @@ pub fn list_projects() -> CmdResult<ProjectsResponse> {
     Ok(ProjectsResponse { projects, last_selected })
 }
 
+/// The project list changed: a window that did not make the change reads it again.
+pub(crate) const PROJECTS_CHANGED_EVENT: &str = "projects_changed";
+
 #[tauri::command]
-pub fn add_project(path: String) -> CmdResult<Project> {
-    projects::add(&path).map_err(err)
+pub fn add_project(app: AppHandle, path: String) -> CmdResult<Project> {
+    let project = projects::add(&path).map_err(err)?;
+    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+    Ok(project)
 }
 
 #[tauri::command]
-pub fn remove_project(path: String) -> CmdResult<()> {
-    projects::remove(&path).map_err(err)
+pub fn remove_project(app: AppHandle, path: String) -> CmdResult<()> {
+    projects::remove(&path).map_err(err)?;
+    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1284,9 +1291,20 @@ pub async fn create_session(app: AppHandle, req: NewSession) -> CmdResult<Sessio
         .map_err(err)?
 }
 
+/// Tell every window what a session is now. The window that made a change
+/// updates its own copy from the reply; another window showing the same
+/// session (the floating one beside the main one) only learns of it here.
+fn announce_session(app: &AppHandle, session_id: &str) {
+    if let Ok(session) = index::get(session_id) {
+        let _ = app.emit("session_updated", &session);
+    }
+}
+
 #[tauri::command]
-pub fn add_tab(session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
-    crate::session_ops::add_tab_entry(&session_id, &tab)
+pub fn add_tab(app: AppHandle, session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
+    let tab = crate::session_ops::add_tab_entry(&session_id, &tab)?;
+    announce_session(&app, &session_id);
+    Ok(tab)
 }
 
 #[tauri::command]
@@ -1304,36 +1322,122 @@ pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResu
     if let Ok(p) = store::log_path(&session_id, &tab_id) {
         let _ = std::fs::remove_file(p);
     }
+    announce_session(&app, &session_id);
+    Ok(())
+}
+
+fn patch_session(app: &AppHandle, session_id: &str, patch: crate::session_ops::SessionPatch) -> CmdResult<()> {
+    let session = crate::session_ops::update_session_meta(session_id, &patch)?;
+    let _ = app.emit("session_updated", &session);
     Ok(())
 }
 
 #[tauri::command]
-pub fn rename_session(session_id: String, title: String) -> CmdResult<()> {
-    let patch = crate::session_ops::SessionPatch { title: Some(title), ..Default::default() };
-    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
+pub fn rename_session(app: AppHandle, session_id: String, title: String) -> CmdResult<()> {
+    patch_session(&app, &session_id, crate::session_ops::SessionPatch { title: Some(title), ..Default::default() })
 }
 
 #[tauri::command]
-pub fn set_session_archived(session_id: String, archived: bool) -> CmdResult<()> {
-    let patch = crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() };
-    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
+pub fn set_session_archived(app: AppHandle, session_id: String, archived: bool) -> CmdResult<()> {
+    patch_session(&app, &session_id, crate::session_ops::SessionPatch { archived: Some(archived), ..Default::default() })
 }
 
 #[tauri::command]
-pub fn set_session_pinned(session_id: String, pinned: bool) -> CmdResult<()> {
-    let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
-    crate::session_ops::update_session_meta(&session_id, &patch).map(|_| ())
+pub fn set_session_pinned(app: AppHandle, session_id: String, pinned: bool) -> CmdResult<()> {
+    patch_session(&app, &session_id, crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() })
 }
 
 #[tauri::command]
-pub fn set_active_tab(session_id: String, tab_id: String) -> CmdResult<()> {
-    index::update_session(&session_id, |s| {
+pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
+    let session = index::update_session(&session_id, |s| {
         if s.tab(&tab_id).is_some() {
             s.active_tab = Some(tab_id);
         }
-        Ok(())
+        Ok(s.clone())
     })
-    .map_err(err)
+    .map_err(err)?;
+    let _ = app.emit("session_updated", &session);
+    Ok(())
+}
+
+// ---------------------------------------------------------------- quick chats
+
+/// Create a quick chat: a session with no project, in a scratch directory of
+/// its own (or in `req.cwd`, which does not become a project).
+#[tauri::command]
+pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::NewQuickChat) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || crate::session_ops::create_quick_chat_blocking(&app, req))
+        .await
+        .map_err(err)?
+}
+
+/// Run a quick chat in another folder, or in its scratch directory again when
+/// `cwd` is `None`. Its agents are stopped and start again there.
+#[tauri::command]
+pub async fn set_quick_chat_cwd(app: AppHandle, session_id: String, cwd: Option<String>) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+        crate::session_ops::set_quick_chat_cwd(&app, &session_id, cwd.as_deref(), &stop)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Turn a quick chat into an ordinary session of a project, with its history.
+#[tauri::command]
+pub async fn move_quick_chat_to_project(app: AppHandle, session_id: String, project_path: String) -> CmdResult<SessionEntry> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+        let moved = crate::session_ops::move_quick_chat_to_project(&app, &session_id, &project_path, &stop)?;
+        // The project may have been added by this: every window lists it.
+        let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+        Ok(moved)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// How often idle quick chats are looked for.
+const RETENTION_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+/// A scratch directory with no session is left alone this long: one being
+/// made right now is a moment ahead of its index entry.
+const ORPHAN_SCRATCH_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Apply the retention setting now, and again every few hours while the app runs.
+pub fn start_quick_chat_retention(app: AppHandle) {
+    let spawned = std::thread::Builder::new().name("quick-chat-retention".into()).spawn(move || loop {
+        sweep_quick_chats(&app);
+        std::thread::sleep(RETENTION_SWEEP_EVERY);
+    });
+    if let Err(error) = spawned {
+        log::warn!("quick chat retention is off for this run: {error}");
+    }
+}
+
+fn sweep_quick_chats(app: &AppHandle) {
+    let days = store::settings::load().floating.retention_days;
+    let state = app.state::<crate::AppState>();
+    // A shell the reader left running in it is a use of it, whatever its date.
+    let shells = state.terminals.shells();
+    let busy = |session: &SessionEntry| shells.iter().any(|shell| shell.session_id == session.id && !shell.exited);
+    let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+    match crate::session_ops::sweep_idle_quick_chats(app, days, &busy, &stop) {
+        Ok(removed) if !removed.is_empty() => log::info!("removed {} quick chat(s) idle for more than {days} day(s)", removed.len()),
+        Ok(_) => {}
+        Err(error) => log::warn!("quick chat retention: {error}"),
+    }
+    let orphans = crate::session_ops::remove_orphan_scratch(ORPHAN_SCRATCH_AGE);
+    if orphans > 0 {
+        log::info!("removed {orphans} scratch director(ies) no session uses");
+    }
+}
+
+/// What a session's scratch directory holds, for the delete confirmation.
+#[tauri::command]
+pub async fn quick_chat_scratch(session_id: String) -> CmdResult<crate::session_ops::QuickChatScratch> {
+    tauri::async_runtime::spawn_blocking(move || crate::session_ops::quick_chat_scratch(&session_id)).await.map_err(err)?
 }
 
 /// The sessions a workspace removal deleted or moved, and what became of
@@ -1483,10 +1587,25 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
         // Claude can fork a conversation; Codex starts a new thread over the copied log.
         new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
         new_tab.provider_session_id = None;
+        // A quick chat's fork is a quick chat with a scratch directory of its
+        // own: sharing the parent's would have either one's deletion take the
+        // other's files. What the parent had there is copied, since the
+        // conversation refers to it.
+        let scratch = if src.is_quick() { Some(store::quick::create(&id).map_err(err)?) } else { None };
+        let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
+        if let (Some(scratch), true) = (&scratch, in_scratch) {
+            let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
+            // The fork's CLI reopens the parent conversation from the new
+            // directory, and Claude Code looks for it under that directory's name.
+            if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
+                let _ = crate::harness::claude::transcript::rehome_in(&projects, &src.cwd, scratch, parent, true);
+            }
+        }
         let mut entry = SessionEntry {
             id: id.clone(),
-            project_path: src.project_path.clone(),
-            cwd: src.cwd.clone(),
+            kind: src.kind,
+            project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
+            cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
             worktree_name: None,
             branch: src.branch.clone(),
             base_ref: None,
@@ -2026,10 +2145,38 @@ pub fn gh_available() -> bool {
 
 // ------------------------------------------------------------------ terminals
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>) -> CmdResult<()> {
+pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>, title: Option<String>) -> CmdResult<()> {
     let spec = crate::pty::PaneSpec { cwd: &cwd, cols: cols.max(2), rows: rows.max(1), command: command.as_deref(), env: &[] };
-    state.terminals.spawn(std::sync::Arc::new(app), &id, spec).map_err(err)
+    state.terminals.spawn(std::sync::Arc::new(app.clone()), &id, spec).map_err(err)?;
+    if let Some(title) = title.as_deref().filter(|title| !title.trim().is_empty()) {
+        state.terminals.set_title(&id, title);
+    }
+    // A shell tab is every window's to list, not only the one that opened it.
+    if let Some(shell) = state.terminals.shell(&id) {
+        let _ = app.emit(PTY_OPENED_EVENT, &shell);
+    }
+    Ok(())
+}
+
+pub(crate) const PTY_OPENED_EVENT: &str = "pty_opened";
+pub(crate) const PTY_CLOSED_EVENT: &str = "pty_closed";
+pub(crate) const PTY_RENAMED_EVENT: &str = "pty_renamed";
+
+/// The shell tabs that are open, in every session: a window loaded after
+/// they were opened (the floating one, a reload) lists them from this.
+#[tauri::command]
+pub fn pty_shells(state: State<'_, AppState>) -> Vec<crate::pty::ShellPane> {
+    state.terminals.shells()
+}
+
+#[tauri::command]
+pub fn pty_rename(app: AppHandle, state: State<'_, AppState>, id: String, title: String) {
+    state.terminals.set_title(&id, &title);
+    if let Some(shell) = state.terminals.shell(&id) {
+        let _ = app.emit(PTY_RENAMED_EVENT, &shell);
+    }
 }
 
 #[tauri::command]
@@ -2047,8 +2194,8 @@ pub async fn pty_write(state: State<'_, AppState>, id: String, data: String) -> 
 /// scrollback so far first. No base64, no JSON, and no other listener hears it.
 /// `token` names this attachment in the acknowledgements and the detach that follow.
 #[tauri::command]
-pub fn pty_attach(state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) {
-    state.terminals.attach(&id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok()));
+pub fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) {
+    state.terminals.attach(window.label(), &id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok()));
 }
 
 /// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
@@ -2058,9 +2205,10 @@ pub fn pty_ack(state: State<'_, AppState>, id: String, token: String, drawn: u64
 }
 
 /// A freshly loaded window: whatever its previous page was shown is gone.
+/// Only this window's views: another window goes on showing its terminals.
 #[tauri::command]
-pub fn pty_detach_all(state: State<'_, AppState>) {
-    state.terminals.detach_all();
+pub fn pty_detach_all(window: tauri::WebviewWindow, state: State<'_, AppState>) {
+    state.terminals.detach_window(window.label());
 }
 
 #[tauri::command]
@@ -2082,8 +2230,13 @@ pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn pty_kill(state: State<'_, AppState>, id: String) {
+pub fn pty_kill(app: AppHandle, state: State<'_, AppState>, id: String) {
+    let shell = state.terminals.shell(&id).is_some();
     state.terminals.kill(&id);
+    // Closed for everyone: the other window drops its tab for it too.
+    if shell {
+        let _ = app.emit(PTY_CLOSED_EVENT, &id);
+    }
 }
 
 /// The webview's answer to a `terminal_perf_request` event.
@@ -2580,7 +2733,7 @@ mod command_tests {
     fn folder_sessions_and_workspaces_survive_reload_without_git() {
         let _home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let project = super::add_project(dir.path().to_string_lossy().into_owned()).unwrap();
+        let project = crate::store::projects::add(&dir.path().to_string_lossy()).unwrap();
         assert_eq!(project.kind, crate::store::projects::ProjectKind::Folder);
         let workspaces = crate::workspaces::list(dir.path()).unwrap();
         assert_eq!(workspaces.len(), 1);
@@ -2599,7 +2752,7 @@ mod command_tests {
             assert_eq!(crate::store::index::get(&session.id).unwrap().cwd, project.path);
         }
         assert_eq!(super::list_projects().unwrap().projects, vec![project.clone()]);
-        assert_eq!(super::add_project(format!("{}/", project.path)).unwrap().path, project.path);
+        assert_eq!(crate::store::projects::add(&format!("{}/", project.path)).unwrap().path, project.path);
         assert_eq!(super::list_projects().unwrap().projects.len(), 1);
         assert!(!dir.path().join(".git").exists());
         assert!(!dir.path().join(".raccoon").exists());
@@ -2613,7 +2766,7 @@ mod command_tests {
         let file = dir.path().join("file");
         std::fs::write(&file, "hello").unwrap();
         for target in [&file, &dir.path().join("missing")] {
-            assert!(super::add_project(target.to_string_lossy().into_owned()).is_err());
+            assert!(crate::store::projects::add(&target.to_string_lossy()).is_err());
             assert!(crate::workspaces::list(target).is_err());
             for override_cwd in [false, true] {
                 let req = serde_json::from_value(serde_json::json!({
@@ -2882,6 +3035,7 @@ mod command_tests {
         });
         let removed = crate::store::index::SessionEntry {
             id: "removed-session".into(),
+            kind: crate::store::index::SessionKind::Project,
             project_path: "/repo".into(),
             cwd: "/repo/.raccoon/worktrees/gone".into(),
             worktree_name: Some("gone".into()),
@@ -2927,8 +3081,10 @@ mod command_tests {
 // ------------------------------------------------------------------ projects & workspaces
 
 #[tauri::command]
-pub fn update_project(path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
-    projects::update(&path, patch).map_err(err)
+pub fn update_project(app: AppHandle, path: String, patch: projects::ProjectPatch) -> CmdResult<Project> {
+    let project = projects::update(&path, patch).map_err(err)?;
+    let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
+    Ok(project)
 }
 
 /// Copy a chosen image into the store so the project keeps it even if the

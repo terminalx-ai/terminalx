@@ -128,7 +128,9 @@ export function buildPaletteIndex(
     .filter((session) => !session.archived)
     .map((session): PaletteSessionItem => {
       const project = projectByPath.get(session.projectPath);
-      const projectName = project?.name ?? session.projectPath.split("/").pop() ?? session.projectPath;
+      // A quick chat has no project; its path ends in its own id, which names nothing.
+      const quick = session.kind === "quick";
+      const projectName = quick ? "Quick chat" : (project?.name ?? session.projectPath.split("/").pop() ?? session.projectPath);
       const removedWorkspace = session.worktreeRemoved ? session.removedWorkspace : null;
       const workspace = session.worktreeRemoved ? undefined : workspaceByPath.get(cleanPath(session.cwd));
       const branch = session.worktreeRemoved ? (removedWorkspace?.branch ?? null) : (session.branch ?? workspace?.branch ?? null);
@@ -141,7 +143,9 @@ export function buildPaletteIndex(
       const agentLabel = agents.length ? agents.join(", ") : "Workspace";
       const location = session.worktreeRemoved
         ? workspaceName(session)
-        : (branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd);
+        : quick && cleanPath(session.cwd) === cleanPath(session.projectPath)
+          ? "Scratch folder"
+          : (branch ?? workspace?.name ?? session.cwd.split("/").pop() ?? session.cwd);
       const secondary = `${projectName} · ${location}${session.worktreeRemoved ? " (removed)" : ""} · ${agentLabel}`;
       return {
         id: `session:${session.id}`,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, MessageCircle, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -32,6 +32,10 @@ import { TITLEBAR_INSET } from "./AppShell";
 import { useAutomationStore } from "@/lib/automations";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
 import { ProjectNavigation } from "./SidebarTree";
+import { QuickChatsSection } from "./QuickChatsSection";
+import { showFloatingWindow, useFloating } from "@/lib/floating";
+import { bindingText } from "@/lib/shortcuts";
+import { isQuickChat } from "@/lib/quickChats";
 import { navigateTree } from "./treeKeyboard";
 import { refreshAccountRoles } from "@/lib/accountRoles";
 import { refreshCloudCatalog } from "@/lib/cloudCatalog";
@@ -63,6 +67,9 @@ export function ProjectRail({
   onSearch: () => void;
 }) {
   const store = useSessionStore();
+  // The floating window's system-wide shortcut, when it has one that is registered.
+  const floating = useFloating().status;
+  const quickChatKeys = floating?.shortcut && !floating.shortcutError ? bindingText(floating.shortcut) : null;
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
@@ -89,7 +96,9 @@ export function ProjectRail({
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
-  const focus = store.selectedProject ?? selectedSession?.projectPath ?? store.lastProject ?? store.projects[0]?.path ?? null;
+  // A quick chat has no project: opening one leaves the project in focus where it was, and never focuses its scratch folder.
+  const sessionProject = selectedSession && !isQuickChat(selectedSession) ? selectedSession.projectPath : null;
+  const focus = store.selectedProject ?? sessionProject ?? store.lastProject ?? store.projects[0]?.path ?? null;
 
   useEffect(() => {
     if (!store.selectedProject && focus) selectProjectInSidebar(focus);
@@ -291,6 +300,13 @@ export function ProjectRail({
             <Keys shortcut="app.skills" />
           </Button>
         </WithTooltip>
+        <WithTooltip label={quickChatKeys ? `Open the floating chat window (${quickChatKeys} from any app)` : "Open the floating chat window: a chat or terminal with no project"}>
+          <Button variant="ghost" className="justify-start gap-2 px-2" onClick={() => void showFloatingWindow()} data-testid="open-floating-window">
+            <MessageCircle />
+            <span className="truncate">Quick Chat</span>
+            {quickChatKeys && <span className="ml-auto shrink-0 text-[10px] text-faint">{quickChatKeys}</span>}
+          </Button>
+        </WithTooltip>
       </div>
 
       {!sectioned && (
@@ -337,6 +353,7 @@ export function ProjectRail({
         ) : (
           localRows
         )}
+        <QuickChatsSection />
         {sectioned && <CloudSections onOpenAccount={onOpenAccount} />}
         <DevelopmentSection />
       </div>

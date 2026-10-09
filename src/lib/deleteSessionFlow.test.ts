@@ -6,6 +6,7 @@ const message = vi.fn();
 const deleteSession = vi.fn();
 const soleWorkspaceOf = vi.fn();
 const openWorkspaceDelete = vi.fn();
+const quickChatScratch = vi.fn();
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   ask: (...args: unknown[]) => ask(...args),
@@ -14,7 +15,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@/lib/sessions", () => ({ deleteSession: (...args: unknown[]) => deleteSession(...args) }));
 vi.mock("@/lib/dialogs", () => ({ openWorkspaceDelete: (...args: unknown[]) => openWorkspaceDelete(...args) }));
 vi.mock("@/lib/api", () => ({
-  api: { soleWorkspaceOf: (...args: unknown[]) => soleWorkspaceOf(...args) },
+  api: { soleWorkspaceOf: (...args: unknown[]) => soleWorkspaceOf(...args), quickChatScratch: (...args: unknown[]) => quickChatScratch(...args) },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -26,7 +27,8 @@ const atRoot = { id: "s2", title: "At the root", projectPath: "/p", cwd: "/p", w
 
 describe("confirmDeleteSession", () => {
   beforeEach(() => {
-    for (const mock of [ask, message, deleteSession, soleWorkspaceOf, openWorkspaceDelete]) mock.mockReset();
+    for (const mock of [ask, message, deleteSession, soleWorkspaceOf, openWorkspaceDelete, quickChatScratch]) mock.mockReset();
+    quickChatScratch.mockResolvedValue({ path: "/home/.raccoon/quick/q1", files: 0, more: false, inUse: true });
     deleteSession.mockResolvedValue(undefined);
     message.mockResolvedValue(undefined);
     soleWorkspaceOf.mockResolvedValue(null);
@@ -98,4 +100,47 @@ describe("confirmDeleteSession", () => {
     await confirmDeleteSession(atRoot);
     expect(message.mock.calls[0][0]).toContain("index is locked");
   });
+
+  describe("a quick chat", () => {
+    const scratch = "/home/.raccoon/quick/q1";
+    const quick = { id: "q1", kind: "quick", title: "What is a monad?", projectPath: scratch, cwd: scratch, worktreeName: null, worktreeRemoved: false } as SessionEntry;
+
+    it("is deleted after one plain confirmation when its scratch folder is empty", async () => {
+      ask.mockResolvedValue(true);
+      await confirmDeleteSession(quick);
+      expect(quickChatScratch).toHaveBeenCalledWith("q1");
+      expect(soleWorkspaceOf).not.toHaveBeenCalled();
+      const [text, options] = ask.mock.calls[0];
+      expect(text).toBe('Delete "What is a monad?"? Its transcript and attachments are removed.');
+      expect(options).toMatchObject({ title: "Delete quick chat", okLabel: "Delete" });
+      expect(deleteSession).toHaveBeenCalledWith("q1");
+    });
+
+    it("names the files in its scratch folder before they are deleted with it", async () => {
+      quickChatScratch.mockResolvedValue({ path: scratch, files: 3, more: false, inUse: true });
+      ask.mockResolvedValue(false);
+      await confirmDeleteSession(quick);
+      const [text, options] = ask.mock.calls[0];
+      expect(text).toContain("Its scratch folder holds 3 files, which are deleted with it:");
+      expect(text).toContain(scratch);
+      expect(options.okLabel).toBe("Delete chat and files");
+      // Declined: nothing goes.
+      expect(deleteSession).not.toHaveBeenCalled();
+
+      quickChatScratch.mockResolvedValue({ path: scratch, files: 1, more: false, inUse: true });
+      await confirmDeleteSession(quick);
+      expect(ask.mock.calls[1][0]).toContain("holds 1 file, which is deleted with it");
+      quickChatScratch.mockResolvedValue({ path: scratch, files: 1000, more: true, inUse: true });
+      await confirmDeleteSession(quick);
+      expect(ask.mock.calls[2][0]).toContain("holds 1000 or more files, which are deleted with it");
+    });
+
+    it("says a folder it was pointed at is the reader's and stays", async () => {
+      ask.mockResolvedValue(true);
+      await confirmDeleteSession({ ...quick, cwd: "/Users/me/notes" });
+      expect(ask.mock.calls[0][0]).toContain("The folder it runs in (/Users/me/notes) is yours and is not touched.");
+      expect(deleteSession).toHaveBeenCalledWith("q1");
+    });
+  });
 });
+

@@ -26,6 +26,8 @@ import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
 import { BypassDialog } from "@/components/session/BypassDialog";
+import { SessionDialogs } from "@/components/session/SessionDialogs";
+import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
@@ -87,6 +89,7 @@ export function AppShell() {
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();
+    void bootFloating();
   }, []);
 
   // The first prompt of a new session is sent right after the worktree exists.
@@ -124,6 +127,7 @@ export function AppShell() {
   const showStats = useCallback(() => openStats(), []);
   const showSkills = useCallback(() => openSkills(), []);
   const showAutomations = useCallback(() => openAutomations(), []);
+  const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
 
   useShortcut("app.toggleSidebar", toggleSidebar);
   useShortcut("app.togglePanel", togglePanel);
@@ -134,6 +138,7 @@ export function AppShell() {
   useShortcut("app.stats", showStats);
   useShortcut("app.skills", showSkills);
   useShortcut("app.automations", showAutomations);
+  useShortcut("app.quickChat", showQuickChat);
   useShortcut("app.commandPalette", () => setPaletteOpen(true), { global: true });
 
   const sidebarOpen = prefs.sidebarOpen;
@@ -150,6 +155,7 @@ export function AppShell() {
         <Toasts />
       </div>
       <BypassDialog />
+      <SessionDialogs />
       <CloudShareDialogHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />

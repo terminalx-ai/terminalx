@@ -6,6 +6,8 @@ import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
 import { isUnread, sessionColumn } from "@/lib/dashboard";
 import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subscribeCloudDashboard, type CloudAttention } from "@/lib/cloudDashboard";
 import { isCloudKey } from "@/types/target";
+import { appWindow, type AppWindow } from "@/lib/appWindow";
+import { getFloating, showFloatingWindow, subscribeFloating } from "@/lib/floating";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
 
@@ -15,6 +17,13 @@ import type { AutomationRun } from "@/types/automations";
  * in-app notice when the app is focused but a different session is showing,
  * and only the tone when the session is already on screen. The dock badge
  * counts sessions that want the reader back.
+ *
+ * The app has two windows and one reader. Every window hears every status
+ * change, so each decides for itself and they must not both speak: the window
+ * that has the focus raises the tone and the notice; when neither has it, the
+ * main window alone sends the banner and keeps the dock badge. A banner about
+ * the session the floating window shows brings that window back when the
+ * reader returns to the app.
  */
 export type NoticeKind = "done" | "waiting" | "failed";
 
@@ -62,9 +71,75 @@ export function openNotice(n: Notice) {
 // ---- focus tracking
 
 let focused = typeof document !== "undefined" ? document.hasFocus() : true;
+
+/**
+ * Where the reader is, across windows. Each window writes whether it has the
+ * focus and which session it shows; the other reads it. Local storage is the
+ * one thing both pages share without a round trip, and it is how the
+ * preferences already cross between them.
+ */
+interface Presence {
+  focused: boolean;
+  sessionId: string | null;
+}
+const presenceKey = (win: AppWindow) => `raccoon.presence.${win}`;
+const otherWindow = (): AppWindow => (appWindow() === "main" ? "floating" : "main");
+
+function publishPresence() {
+  try {
+    // A hidden floating window shows nothing to anyone, whatever its page thinks.
+    const looking = focused && (appWindow() === "main" || getFloating().visible);
+    const presence: Presence = { focused: looking, sessionId: getSessions().selectedSessionId };
+    localStorage.setItem(presenceKey(appWindow()), JSON.stringify(presence));
+  } catch {
+    /* storage unavailable: each window then speaks for itself, as one window always did */
+  }
+}
+
+function presenceElsewhere(): Presence | null {
+  try {
+    const raw = localStorage.getItem(presenceKey(otherWindow()));
+    const parsed = raw ? (JSON.parse(raw) as Partial<Presence>) : null;
+    return parsed ? { focused: parsed.focused === true, sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A banner went out while nobody was looking. When the reader comes back to
+ * the app it is for this: the floating window, if that is where the session
+ * is shown, is brought up on it.
+ */
+let raised: { sessionId: string; tabId: string } | null = null;
+
+function onReturn() {
+  const wasAway = !focused && !presenceElsewhere()?.focused;
+  focused = true;
+  publishPresence();
+  const target = raised;
+  raised = null;
+  if (!wasAway || !target || appWindow() !== "main") return;
+  // Only a session the floating window has: the main window's own sessions
+  // are where the reader left them, and are not navigated for them.
+  if (getFloating().sessionId === target.sessionId) void showFloatingWindow(target.sessionId, target.tabId).catch(() => {});
+}
+
 if (typeof window !== "undefined") {
-  window.addEventListener("focus", () => (focused = true));
-  window.addEventListener("blur", () => (focused = false));
+  window.addEventListener("focus", onReturn);
+  window.addEventListener("blur", () => {
+    focused = false;
+    publishPresence();
+  });
+  // The reader came back through the other window: what was raised has been answered there.
+  window.addEventListener("storage", (event) => {
+    if (event.key === presenceKey(otherWindow()) && event.storageArea === localStorage && presenceElsewhere()?.focused) raised = null;
+  });
+}
+
+/** Whether a banner is this window's to send: nobody is looking, and this is the main window. */
+function sendsBanner(): boolean {
+  return !focused && !presenceElsewhere()?.focused && appWindow() === "main";
 }
 
 // ---- sounds, synthesised so there is nothing to ship
@@ -130,6 +205,9 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   const { title, body } = summarise(session, tab, kind);
   const onScreen = focused && getSessions().selectedSessionId === session.id;
   if (!focused) {
+    // The other window has the reader, or this is not the window that sends banners.
+    if (!sendsBanner()) return;
+    raised = { sessionId: session.id, tabId: tab.id };
     void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
   }
@@ -146,7 +224,7 @@ export function noteAutomationFailure(name: string, run: AutomationRun) {
   const title = `${name} failed`;
   const body = run.error ?? `Run ${run.runNumber} did not finish.`;
   if (!focused) {
-    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
   }
   playSound("failed");
@@ -180,7 +258,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   const where = `${session.title} · ${session.orgName} cloud`;
   const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : `${where}. Open the session to review the conversation.`;
   if (!focused) {
-    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    if (sendsBanner()) void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
   }
   playSound(kind);
@@ -200,6 +278,9 @@ function onCloudSessions() {
 
 let lastBadge = -1;
 function refreshBadge() {
+  // One badge for the app, kept by the main window: two windows counting
+  // would only race each other to write the same number.
+  if (appWindow() !== "main") return;
   const local = getSessions().sessions.filter((s) => !s.archived && ["waiting", "completed"].includes(sessionStatus(s))).length;
   // Cloud sessions that want the reader back: waiting, or finished and unread.
   const cloud = getCloudDashboard().filter((s) => !s.archived && s.tabs.length > 0 && (sessionColumn(s) === "needs" || isUnread(s))).length;
@@ -219,6 +300,25 @@ let started = false;
 export function startNotifications() {
   if (started) return;
   started = true;
+  // The session on screen is part of where the reader is.
+  let shown = getSessions().selectedSessionId;
+  publishPresence();
+  subscribeSessions(() => {
+    const now = getSessions().selectedSessionId;
+    if (now === shown) return;
+    shown = now;
+    publishPresence();
+  });
+  subscribeFloating(publishPresence);
+  // Cloud sessions and the badge are the main window's: the floating window shows neither.
+  if (appWindow() !== "main") return;
+  // The floating window is made by this run of the app. What an earlier run
+  // left written for it is not a window that has the reader now.
+  try {
+    localStorage.removeItem(presenceKey("floating"));
+  } catch {
+    /* storage unavailable */
+  }
   subscribeSessions(refreshBadge);
   subscribeCloudDashboard(() => {
     onCloudSessions();

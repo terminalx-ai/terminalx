@@ -3,7 +3,7 @@ import type { ImageInput } from "@/lib/api";
 import { applyEvent, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
-import { useSessionStore } from "@/lib/sessions";
+import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
@@ -66,7 +66,7 @@ export function TabView({
 }) {
   const backend = given ?? localSessionBackend(session.id);
   const local = backend.caps.local;
-  const isGit = useSessionStore().projects.find((p) => p.path === session.projectPath)?.kind !== "folder";
+  const isGit = useSessionIsGit(session);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
   const [error, setError] = useState<string | null>(null);
