@@ -8,7 +8,7 @@
 //! the app picks a [`ComputerProvider`] for the platform and speaks to it
 //! directly.
 //!
-//! On macOS the provider is a signed helper app, "TerminalX Computer Use.app",
+//! On macOS the provider is a signed helper app, "TerminalX Computer Use Helper.app",
 //! which owns the Accessibility and Screen Recording grants. Because the
 //! grants belong to that bundle rather than to whichever process asks, a
 //! plain agent shell can drive desktop apps without holding any permission
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Wire name of the helper app bundle inside `Contents/Resources`.
-pub const HELPER_APP_NAME: &str = "TerminalX Computer Use.app";
+pub const HELPER_APP_NAME: &str = "TerminalX Computer Use Helper.app";
 /// Executable inside the helper bundle.
 pub const HELPER_EXECUTABLE_NAME: &str = "terminalx-computer-use-macos";
 /// Environment override for the helper location (dev builds, smoke tests).
@@ -254,6 +254,7 @@ pub fn provider_unavailable_message() -> String {
 /// it down on shutdown so no helper outlives the app.
 pub struct ComputerService {
     resource_dir: Mutex<Option<PathBuf>>,
+    app_identifier: Mutex<Option<String>>,
     provider: Mutex<Option<Box<dyn ComputerProvider>>>,
 }
 
@@ -261,6 +262,7 @@ impl ComputerService {
     pub fn new(resource_dir: Option<PathBuf>) -> Self {
         Self {
             resource_dir: Mutex::new(resource_dir),
+            app_identifier: Mutex::new(None),
             provider: Mutex::new(None),
         }
     }
@@ -268,8 +270,16 @@ impl ComputerService {
     /// Tauri only knows `Contents/Resources` once the app is running. This
     /// is also the app-start hook, so stale socket directories from a
     /// previous crash are swept here.
-    pub fn set_resource_dir(&self, dir: PathBuf) {
+    pub fn set_resource_dir(&self, dir: PathBuf, app_identifier: &str) {
         *self.resource_dir.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir);
+        *self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_identifier.to_owned());
+        // Older helpers must lose their permissions before the current one
+        // is started or probed (PRO-90). Off the main thread: it runs tccutil.
+        let helper = self.helper_app_path();
+        let identifier = app_identifier.to_owned();
+        std::thread::spawn(move || {
+            permissions::legacy_cleanup(Some(&identifier), helper.as_deref());
+        });
         #[cfg(unix)]
         {
             let removed = macos_native::sweep_stale_socket_dirs();
@@ -344,7 +354,16 @@ impl ComputerService {
             ));
         };
         let outcome = match method {
-            "capabilities" => provider.capabilities(),
+            "capabilities" => provider.capabilities().map(|mut capabilities| {
+                // A helper without its permissions answers the handshake all
+                // the same; say so here instead of at the first action.
+                if cfg!(target_os = "macos") {
+                    if let Ok(status) = permissions::status(self.helper_app_path().as_deref()) {
+                        permissions::attach_to_capabilities(&mut capabilities, &status);
+                    }
+                }
+                capabilities
+            }),
             "listApps" => provider.list_apps(),
             "listWindows" => provider.list_windows(params),
             "getAppState" => provider
@@ -392,6 +411,16 @@ impl ComputerService {
         let Some(executable) = helper_executable_in(&app) else {
             return Ok(None);
         };
+        // A helper from before PRO-90 trusts whoever starts it. Never run one,
+        // wherever the override or a stale build points.
+        if cfg!(target_os = "macos") && permissions::read_bundle_id(&app).is_ok_and(|id| permissions::is_legacy_helper(&id)) {
+            return Err(ComputerError::new(
+                "provider_incompatible",
+                format!("{} is a computer-use helper from an older TerminalX, which this app does not use", app.display()),
+            ));
+        }
+        let identifier = self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        permissions::legacy_cleanup(identifier.as_deref(), Some(&app));
         Ok(Some(Box::new(macos_native::MacosNativeProvider::new(executable))))
     }
 }

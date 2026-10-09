@@ -31,6 +31,7 @@ import { BypassDialog } from "@/components/session/BypassDialog";
 import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
+import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
@@ -161,6 +162,7 @@ export function AppShell() {
       <CloudShareDialogHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <WorktreeCleanupDialog />
       <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (

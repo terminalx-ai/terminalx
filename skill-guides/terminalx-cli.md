@@ -237,10 +237,14 @@ Do not try to work around any of this, and do not answer it for them: ask the pe
 
 What the confirmation is and is not: it stops mistakes, and an agent that only uses this app.
 TerminalX's computer use never operates TerminalX's own windows (`own_app_protected`), and on
-macOS its helper serves only the app itself: an agent that talks to the helper directly, or
-starts its own copy, is refused. It does not stop a hostile program that drives the screen
-without the helper: the system's own scripting, or any program when TerminalX itself has been
-granted Accessibility. The app cannot prevent that from inside. The person's switch and their
+macOS this version's helper serves only the app itself: an agent that talks to it directly, or
+starts its own copy of it, is refused. It does not stop a hostile program that drives the
+screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
+serves whoever starts it for as long as it has Accessibility in System Settings (the app tries
+to remove that permission each time it starts and warns when it could not; the row can be put
+back before the next start); the system's own
+scripting; or any program when TerminalX itself has been granted Accessibility. The app cannot
+prevent the last two from inside. The person's switch and their
 answer are the control, not a security boundary against software already running as them.
 
 `send` to a workspace the app is not connected to reads the workspace list again first. If the

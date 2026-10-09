@@ -189,7 +189,7 @@ to `src-tauri/target/release/bundle/`:
 | --- | --- |
 | `macos/TerminalX.app` | The app, ad-hoc signed (`signingIdentity: "-"`) |
 | `macos/TerminalX.app/Contents/MacOS/terminalx` | A tiny launcher for the app's built-in CLI command family |
-| `macos/TerminalX.app/Contents/Resources/TerminalX Computer Use.app` | The signed computer-use helper that owns the Accessibility and Screen Recording grants |
+| `macos/TerminalX.app/Contents/Resources/TerminalX Computer Use Helper.app` | The signed computer-use helper that owns the Accessibility and Screen Recording grants |
 | `dmg/TerminalX_<version>_aarch64.dmg` | Disk image for distribution |
 | `macos/TerminalX.app.tar.gz` | Updater artifact |
 | `macos/TerminalX.app.tar.gz.sig` | Its signature, made with the private key |

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the macOS computer-use helper ("TerminalX Computer Use.app") from
+// Builds the macOS computer-use helper ("TerminalX Computer Use Helper.app") from
 // native/computer-use-macos and signs it.
 //
 // The helper is its own app bundle on purpose: macOS keys Accessibility and
@@ -7,8 +7,15 @@
 // once to the helper lets the TerminalX app, the terminalx CLI, and any agent
 // shell use computer use without holding those permissions themselves.
 //
-//   node scripts/build-computer-macos.mjs          release identity (com.terminalx.next.computer-use)
-//   node scripts/build-computer-macos.mjs --dev    dev identity (com.terminalx.next.dev.computer-use)
+//   node scripts/build-computer-macos.mjs          release identity (com.terminalx.next.computer-use.v2)
+//   node scripts/build-computer-macos.mjs --dev    dev identity (com.terminalx.next.dev.computer-use.v2)
+//
+// The ids end in .v2 on purpose (PRO-90). Helpers released under the old ids
+// trust whoever starts them, and macOS keys a permission to the signing
+// identity, not the version: a new id is what makes the permission people gave
+// the old helper not apply to this one, and lets the app take the old one away
+// (LEGACY_HELPER_BUNDLE_IDS in src-tauri/src/computer/permissions.rs). Never
+// build a helper under an old id.
 //
 // Environment:
 //   TERMINALX_COMPUTER_MACOS_UNIVERSAL=1      build arm64 + x86_64 and lipo them
@@ -18,6 +25,7 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { helperBundleId, legacyHelperBundleIds } from './computer-macos-identity.mjs'
 
 const repoRoot = path.resolve(import.meta.dirname, '..')
 const packagePath = path.join(repoRoot, 'native', 'computer-use-macos')
@@ -25,16 +33,14 @@ const dev = process.argv.includes('--dev')
 const outputDirName = dev ? 'release-dev' : 'release'
 const outputDir = path.join(packagePath, '.build', outputDirName)
 const binaryPath = path.join(outputDir, 'terminalx-computer-use-macos')
-export const appName = 'TerminalX Computer Use.app'
+export const appName = 'TerminalX Computer Use Helper.app'
 const appPath = path.join(outputDir, appName)
 const appExecutablePath = path.join(appPath, 'Contents', 'MacOS', 'terminalx-computer-use-macos')
 const appIconPath = path.join(appPath, 'Contents', 'Resources', 'AppIcon.icns')
 const iconSource = path.join(repoRoot, 'src-tauri', dev ? 'icons-dev' : 'icons', 'icon.icns')
 const entitlementsPath = path.join(repoRoot, 'src-tauri', 'Entitlements.computer-use.plist')
-const bundleId =
-  process.env.TERMINALX_COMPUTER_MACOS_BUNDLE_ID ??
-  (dev ? 'com.terminalx.next.dev.computer-use' : 'com.terminalx.next.computer-use')
-const displayName = dev ? 'TerminalX Dev Computer Use' : 'TerminalX Computer Use'
+const bundleId = helperBundleId({ dev, override: process.env.TERMINALX_COMPUTER_MACOS_BUNDLE_ID })
+const displayName = dev ? 'TerminalX Dev Computer Use Helper' : 'TerminalX Computer Use Helper'
 const universal = process.env.TERMINALX_COMPUTER_MACOS_UNIVERSAL === '1'
 
 if (process.platform !== 'darwin') {
@@ -89,6 +95,22 @@ function createHelperApp() {
   writeFileSync(path.join(appPath, 'Contents', 'Info.plist'), infoPlist(), 'utf8')
   run('codesign', codesignArgs(signingIdentity, appPath))
   run('codesign', ['--verify', '--deep', '--strict', appPath])
+  // The bundle is rebuilt from nothing above, so no older helper can be left
+  // inside it; check what was actually assembled all the same.
+  const built = spawnSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Contents', 'Info.plist')], { encoding: 'utf8' })
+  const builtId = built.stdout?.trim()
+  if (built.status !== 0 || builtId !== bundleId || legacyHelperBundleIds.includes(builtId)) {
+    console.error(`build-computer-macos: the assembled helper declares "${builtId}", expected "${bundleId}"`)
+    process.exit(1)
+  }
+  // The signing identifier is what macOS keys a permission to; it must be the
+  // same new id, not only the plist.
+  const signed = spawnSync('codesign', ['-dv', appPath], { encoding: 'utf8' })
+  const signedId = `${signed.stderr}${signed.stdout}`.match(/^Identifier=(.+)$/m)?.[1]?.trim()
+  if (signed.status !== 0 || signedId !== bundleId) {
+    console.error(`build-computer-macos: the helper is signed as "${signedId}", expected "${bundleId}"`)
+    process.exit(1)
+  }
 }
 
 function codesignArgs(identity, targetPath) {

@@ -21,7 +21,33 @@ final class OwnAppProtectionSourceSafetyTests: XCTestCase {
         let refusal = try XCTUnwrap(observe.range(of: "OwnAppProtection.errorCode"))
         let restore = try XCTUnwrap(observe.range(of: "try recoverWindow(app)"))
         XCTAssertLessThan(refusal.lowerBound, restore.lowerBound)
-        XCTAssertTrue(observe.contains("screenshotWithheld: protection != nil"))
+        XCTAssertTrue(observe.contains("protectedTarget: protection != nil"))
+    }
+
+    func testLookingAtAProtectedAppNeverRestoresItsWindow() throws {
+        let observe = try functionBody(named: "observe", in: try agentEntrypointSource())
+        // One decision feeds both the restore here and the recovery inside
+        // buildSnapshot, and it is false for a protected target.
+        XCTAssertTrue(observe.contains("let restoreWindow = params[\"restoreWindow\"]?.bool == true && protection == nil"))
+        XCTAssertTrue(observe.contains("if restoreWindow {\n            try recoverWindow(app)"))
+        XCTAssertTrue(observe.contains("restoreWindow: restoreWindow\n"))
+        XCTAssertEqual(observe.components(separatedBy: "params[\"restoreWindow\"]").count - 1, 1)
+    }
+
+    func testNothingOfAProtectedWindowsTreeIsRead() throws {
+        let source = try agentEntrypointSource()
+        let build = try functionBody(named: "buildSnapshot", in: source)
+        // One render call, and it is the branch for targets that are not protected.
+        XCTAssertTrue(build.contains(
+            """
+                    if protectedTarget {
+            """
+        ))
+        XCTAssertTrue(build.contains("renderer.withhold(reason: OwnAppProtection.treeRefusal)\n        } else {\n            renderer.render(window)\n        }"))
+        XCTAssertEqual(build.components(separatedBy: "renderer.render(").count - 1, 1)
+        XCTAssertTrue(build.contains("if !protectedTarget {\n            enableManualAccessibilityIfNeeded(appElement, app: app)"))
+        // Withholding leaves no element records for an action to use.
+        XCTAssertTrue(source.contains("lines = [\"(\\(reason))\"]\n        records = [:]"))
     }
 
     func testEverySyntheticKeyIsFenced() throws {

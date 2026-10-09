@@ -107,6 +107,7 @@ mod star_nag;
 mod summaries;
 mod terminal_perf;
 mod workspaces;
+mod worktree_cleanup;
 
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
@@ -245,7 +246,7 @@ pub fn run() {
             }
             status::install_menu(app)?;
             if let Ok(resources) = app.path().resource_dir() {
-                computer.set_resource_dir(resources);
+                computer.set_resource_dir(resources, &app.config().identifier);
             }
             // Recover local history before hooks/automations can publish live
             // activity. Provider cache scans are deliberately unrelated.
@@ -552,6 +553,10 @@ pub fn run() {
             commands::workspace_size,
             commands::scan_leftovers,
             commands::remove_leftovers,
+            commands::worktree_cleanup_scan,
+            commands::worktree_cleanup_size,
+            commands::worktree_cleanup_cancel_sizes,
+            commands::worktree_cleanup_remove,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,

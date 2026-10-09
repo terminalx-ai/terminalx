@@ -23,9 +23,11 @@ interface State {
   renameSession: string | null;
   /** The quick chat being moved into a project. */
   moveToProject: string | null;
+  /** The bulk worktree clean-up is open. */
+  worktreeCleanup: boolean;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null };
+let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, worktreeCleanup: false };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -99,4 +101,13 @@ export function openMoveToProject(sessionId: string) {
 
 export function closeMoveToProject() {
   set({ moveToProject: null });
+}
+
+/** The bulk clean-up of worktrees across open projects. Opening it only scans. */
+export function openWorktreeCleanup() {
+  set({ worktreeCleanup: true });
+}
+
+export function closeWorktreeCleanup() {
+  set({ worktreeCleanup: false });
 }

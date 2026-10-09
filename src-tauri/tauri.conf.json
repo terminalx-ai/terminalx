@@ -62,7 +62,7 @@
     ],
     "createUpdaterArtifacts": true,
     "resources": {
-      "../native/computer-use-macos/.build/release/TerminalX Computer Use.app": "TerminalX Computer Use.app"
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": "TerminalX Computer Use Helper.app"
     }
   },
   "plugins": {

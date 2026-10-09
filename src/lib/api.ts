@@ -3,6 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
   type Activation,
+  type CleanupProject,
+  type CleanupRemoveItem,
+  type CleanupResult,
   type WorkspaceConnectionState,
   type WorkspaceTransport,
 } from "@terminalx/portable/workspace";
@@ -381,6 +384,13 @@ export const api = {
   scanLeftovers: () => invoke<Leftover[]>("scan_leftovers"),
   /** Delete the confirmed leftovers; each is checked again first. */
   removeLeftovers: (ids: string[]) => invoke<LeftoverRemoval>("remove_leftovers", { ids }),
+  /** Every worktree of the open local projects with what the clean-up may do with it. Reads only. */
+  worktreeCleanupScan: (projectPaths?: string[]) => invoke<CleanupProject[]>("worktree_cleanup_scan", { projectPaths: projectPaths ?? null }),
+  /** What removing one worktree would free; null when `job` was cancelled. */
+  worktreeCleanupSize: (job: string, projectPath: string, path: string) => invoke<number | null>("worktree_cleanup_size", { job, projectPath, path }),
+  worktreeCleanupCancelSizes: (prefix: string) => invoke<void>("worktree_cleanup_cancel_sizes", { prefix }),
+  /** Remove the confirmed worktrees; each is checked again first. */
+  worktreeCleanupRemove: (items: CleanupRemoveItem[]) => invoke<CleanupResult[]>("worktree_cleanup_remove", { items }),
   workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
   /**
    * What a workspace holds. With `fetch`, the default branch is fetched and
@@ -1187,6 +1197,12 @@ export interface ComputerPermissionStatus {
   platform: string;
   helperAppPath: string | null;
   helperUnavailableReason: string | null;
+  /**
+   * What this launch's removal of older computer-use helpers' permissions
+   * reported (PRO-90); absent until it has run. `removed: false` means macOS
+   * would not clear them and the person has to remove the old entry.
+   */
+  legacyHelper?: { removed: boolean; bundleIds: string[] } | null;
   permissions: ComputerPermissionState[];
 }
 
