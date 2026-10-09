@@ -630,6 +630,8 @@ function CloudAgentPane({
     title: info.title,
     model: info.model,
     effort: info.effort,
+    requestedModel: info.requestedModel,
+    requestedEffort: info.requestedEffort,
     permissionMode: info.permissionMode,
     status: info.status,
     created: info.created,

@@ -138,6 +138,13 @@ pub fn get(refresh: bool) -> Vec<Model> {
     shared().get(refresh)
 }
 
+/// The models as last read, without asking the CLI again: for callers that
+/// must not wait on a child process. The built-in list until a read has
+/// succeeded.
+pub fn known() -> Vec<Model> {
+    shared().reading.lock().unwrap().as_ref().map(|reading| reading.models.clone()).unwrap_or_else(claude_fallback)
+}
+
 /// Cloud entry points accept Claude ids only when this runtime can run them.
 pub fn validate(harness: &str, model: &str) -> Result<()> {
     if harness != "claude" {

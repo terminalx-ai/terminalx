@@ -772,8 +772,9 @@ pub fn run_hook_cli() -> bool {
 }
 
 /// The `statusline` subcommand. Claude sends its ordinary status JSON on
-/// stdin; the app takes only `rate_limits`, and silence keeps the CLI's own
-/// terminal view free of a second status line.
+/// stdin; the app takes `rate_limits` and the model and effort in force
+/// (#404), and silence keeps the CLI's own terminal view free of a second
+/// status line.
 pub fn run_statusline_cli() -> bool {
     if std::env::args().nth(1).as_deref() != Some("statusline") {
         return false;

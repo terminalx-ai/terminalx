@@ -10,8 +10,12 @@ export interface TabEntry {
   id: string;
   harness: string;
   title?: string | null;
+  /** The model the agent is running: what the next prompt runs on. */
   model: string;
   effort?: string | null;
+  /** A model asked for that the agent has not confirmed yet. Drawn as pending, never as current. */
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
   permissionMode: string;
   providerSessionId?: string | null;
   status: TabStatus;

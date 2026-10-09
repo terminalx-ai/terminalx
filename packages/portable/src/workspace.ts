@@ -156,8 +156,12 @@ export interface AgentTabInfo {
   tabId: string;
   title: string | null;
   harness: string;
+  /** What the agent is running. */
   model: string;
   effort: string | null;
+  /** Asked for and not confirmed by the agent yet; absent from a runtime that does not track it. */
+  requestedModel?: string | null;
+  requestedEffort?: string | null;
   permissionMode: string;
   status: AgentTabStatus;
   process: AgentProcessState;

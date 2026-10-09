@@ -121,22 +121,24 @@ export function offeredOn(models: ModelInfo[], here: boolean): ModelInfo[] {
 }
 
 /**
- * The entry for the model a tab is on. A full Claude id the list does not
- * carry (a version pinned earlier, or on another machine) is still what the
- * tab runs, so it gets an entry of its own, named after the id and taking the
- * efforts of its family, rather than being shown as the default. Any other
- * unknown id reads as the default, as it always has.
+ * The entry for the model a tab is on. An id the list does not carry — a
+ * version pinned earlier or on another machine, or one the agent itself
+ * reported after it was changed in the terminal — is still what the tab
+ * runs, so it gets an entry of its own, named after the id, rather than
+ * being shown as the default. It takes the efforts of its family where it
+ * has one (a Claude id), else the default model's. Only a tab with no model
+ * at all reads as the default.
  */
 export function modelForTab(models: ModelInfo[], id: string): ModelInfo | undefined {
   const listed = models.find((m) => m.id === id);
   if (listed) return listed;
   const fallback = models.find((m) => m.isDefault);
-  if (!id.startsWith("claude-")) return fallback;
-  const family = models.find((m) => m.alias && id.includes(`-${m.id}-`)) ?? fallback;
+  if (!id) return fallback;
+  const family = (id.startsWith("claude-") ? models.find((m) => m.alias && id.includes(`-${m.id}-`)) : undefined) ?? fallback;
   return {
     id,
     label: prettyModelId(id),
-    harness: family?.harness ?? "claude",
+    harness: family?.harness ?? (id.startsWith("claude-") ? "claude" : (models[0]?.harness ?? "")),
     efforts: family?.efforts ?? [],
     defaultEffort: family?.defaultEffort ?? null,
     acceptsImages: family?.acceptsImages ?? true,
@@ -229,6 +231,21 @@ export const EFFORT_LABEL: Record<string, string> = {
   max: "Max",
   ultra: "Ultra",
 };
+
+/**
+ * What to say while a model or effort that was asked for is not yet what the
+ * agent is running (#404); `null` when nothing is waiting. The pickers go on
+ * showing what is running, so this is the only place the choice appears until
+ * the agent confirms it. A change made mid-turn waits for the turn: a CLI
+ * holds what is typed at it until then, and Codex is restarted after it.
+ */
+export function pendingSettingsNote(tab: { requestedModel?: string | null; requestedEffort?: string | null }, models: ModelInfo[], busy: boolean): string | null {
+  const model = tab.requestedModel ? (models.find((m) => m.id === tab.requestedModel)?.label ?? prettyModelId(tab.requestedModel)) : null;
+  const effort = tab.requestedEffort ? (EFFORT_LABEL[tab.requestedEffort] ?? tab.requestedEffort) : null;
+  if (!model && !effort) return null;
+  const what = model && effort ? `${model} · ${effort}` : (model ?? `${effort} effort`);
+  return busy ? `Switching to ${what} after this turn` : `Switching to ${what}…`;
+}
 
 // Module state lives here; a hot update would lose it, so edits reload the page.
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
