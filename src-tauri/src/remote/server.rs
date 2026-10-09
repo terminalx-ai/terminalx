@@ -982,6 +982,10 @@ impl WorkspaceRpc {
             "mirror.manifest" => self.mirror.manifest(&self.git, &params),
             "lifecycle.dispositionFacts" => self.disposition_facts(),
             "lifecycle.resources" => Ok(crate::cloud_resources::observe(&self.root)),
+            "cleanup.scan" => self.cleanup_scan(),
+            "cleanup.size" => self.cleanup_size(peer, params),
+            "cleanup.cancel" => self.cleanup_cancel(peer),
+            "cleanup.remove" => self.cleanup_remove(params),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -2107,6 +2111,88 @@ impl WorkspaceRpc {
         }))
     }
 
+    // ---- worktree clean-up ---------------------------------------------------
+
+    /// Run `f` with what the clean-up reads about this workspace: each of its
+    /// repositories is a project, and neither they nor the workspace root are
+    /// ever removable. Only worktrees inside the workspace are its to remove.
+    fn with_cleanup_host<R>(&self, f: impl FnOnce(&crate::worktree_cleanup::Host<'_>) -> R) -> Result<R, RpcError> {
+        let (names, _) = self.git.repositories();
+        let projects: Vec<crate::store::projects::Project> = names
+            .iter()
+            .map(|name| {
+                let dir = if name == "." { self.root.clone() } else { self.root.join(name) };
+                let label = dir.file_name().map(|file| file.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+                serde_json::from_value(json!({ "path": dir, "name": label })).map_err(RpcError::internal)
+            })
+            .collect::<Result<_, _>>()?;
+        let protected = [self.root.clone()];
+        let busy: HashSet<(String, String)> = self
+            .agents
+            .get()
+            .map(|agents| agents.tabs())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|tab| tab.process == "running" || !tab.pending_permissions.is_empty() || matches!(tab.status, index::TabStatus::InProgress | index::TabStatus::Waiting))
+            .map(|tab| (tab.session_id, tab.tab_id))
+            .collect();
+        let running = |session: &str, tab: &str| busy.contains(&(session.to_string(), tab.to_string())) || self.sessions.as_ref().is_some_and(|manager| manager.is_running(session, tab));
+        let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live::observe(&self.terminals, sessions, &running);
+        Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh }))
+    }
+
+    /// `cleanup/1`: every worktree of the workspace's repositories with
+    /// whether it may be removed, and why not. Reads only.
+    fn cleanup_scan(&self) -> Result<Value, RpcError> {
+        let projects = self.with_cleanup_host(|host| crate::worktree_cleanup::scan(host, None))?.map_err(RpcError::internal)?;
+        Ok(json!({ "projects": projects }))
+    }
+
+    /// `cleanup/1`: what removing one worktree would free; `null` when the
+    /// caller cancelled.
+    fn cleanup_size(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let job = format!("peer:{}:{}", peer.id, required_str(&params, "job")?);
+        let (project, path) = (required_str(&params, "projectPath")?, required_str(&params, "path")?);
+        let size = self
+            .with_cleanup_host(|host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &job, project, path))?
+            .map_err(|error| RpcError::invalid(format!("{error:#}")))?;
+        Ok(json!({ "bytes": size }))
+    }
+
+    fn cleanup_cancel(&self, peer: &Peer) -> Result<Value, RpcError> {
+        crate::worktree_cleanup::SizeJobs::global().cancel(&format!("peer:{}:", peer.id));
+        Ok(json!({}))
+    }
+
+    /// `cleanup/1`: remove the named worktrees. Each is inspected again here,
+    /// on the machine that holds it, and left alone unless it is still what
+    /// its token stands for. Nothing running is stopped.
+    fn cleanup_remove(&self, params: Value) -> Result<Value, RpcError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            items: Vec<crate::worktree_cleanup::RemoveItem>,
+        }
+        let p: Params = parse(params)?;
+        let before = index::load().map_err(RpcError::internal)?;
+        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items))?;
+        // What the runtime still holds for sessions that were deleted with
+        // their worktree, as after `session.delete`.
+        let deleted: HashSet<String> = results.iter().flat_map(|done| done.sessions_deleted.iter().cloned()).collect();
+        let tabs: Vec<&String> = before.iter().filter(|session| deleted.contains(&session.id)).flat_map(|session| &session.tabs).map(|tab| &tab.id).collect();
+        if let Some(agents) = self.agents.get() {
+            for tab in &tabs {
+                let _ = agents.follow_ups.clear(tab);
+                agents.checkpoints.remove(tab);
+            }
+            agents.changed(None, false);
+        }
+        if !deleted.is_empty() {
+            self.close_session_ptys(&deleted);
+            self.close_agent_ptys(tabs.into_iter());
+        }
+        Ok(json!({ "results": results }))
+    }
+
     // ---- sessions --------------------------------------------------------
 
     fn manager(&self) -> Result<&SessionManager, RpcError> {
@@ -2855,3 +2941,7 @@ fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> 
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cleanup_tests.rs"]
+mod cleanup_tests;

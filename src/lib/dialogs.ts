@@ -19,9 +19,11 @@ export interface WorkspaceRemoveRequest {
 interface State {
   workspaceRemove: WorkspaceRemoveRequest | null;
   bypass: { harness: string; confirm: () => void } | null;
+  /** The bulk worktree clean-up is open. */
+  worktreeCleanup: boolean;
 }
 
-let state: State = { workspaceRemove: null, bypass: null };
+let state: State = { workspaceRemove: null, bypass: null, worktreeCleanup: false };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -77,4 +79,13 @@ export function chooseMode(harness: string, mode: string, apply: (mode: string) 
 
 export function closeBypass() {
   set({ bypass: null });
+}
+
+/** The bulk clean-up of worktrees across open projects. Opening it only scans. */
+export function openWorktreeCleanup() {
+  set({ worktreeCleanup: true });
+}
+
+export function closeWorktreeCleanup() {
+  set({ worktreeCleanup: false });
 }

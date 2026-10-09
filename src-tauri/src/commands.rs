@@ -2990,6 +2990,64 @@ pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>) -> CmdResult<cra
     .map_err(err)?
 }
 
+/// Run `f` with what the worktree clean-up reads about this machine: the
+/// open projects, and what is running now (asked again at every check).
+fn with_cleanup_host<R>(state: &crate::AppState, f: impl FnOnce(&crate::worktree_cleanup::Host<'_>) -> R) -> CmdResult<R> {
+    let (all, _) = projects::list().map_err(err)?;
+    let (open, archived): (Vec<Project>, Vec<Project>) = all.into_iter().partition(|project| !project.archived);
+    // An archived project is not cleaned, and its folder is not removable either.
+    let protected: Vec<std::path::PathBuf> = archived.iter().map(|project| std::path::PathBuf::from(&project.path)).collect();
+    let manager = state.manager();
+    let running = |session: &str, tab: &str| manager.as_ref().is_some_and(|manager| manager.is_running(session, tab)) || state.host.is_live(&format!("{session}/{tab}"));
+    let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live::observe(&state.terminals, sessions, &running);
+    Ok(f(&crate::worktree_cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh }))
+}
+
+/// Every worktree of the open projects on this machine with whether the
+/// clean-up may remove it, and why not. Reads only.
+#[tauri::command]
+pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<String>>) -> CmdResult<Vec<crate::worktree_cleanup::ProjectScan>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        with_cleanup_host(&state, |host| crate::worktree_cleanup::scan(host, project_paths.as_deref()).map_err(err))?
+    })
+    .await
+    .map_err(err)?
+}
+
+/// What removing one worktree would free. `None` when `job` was cancelled.
+#[tauri::command]
+pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: String, path: String) -> CmdResult<Option<u64>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &format!("local:{job}"), &project_path, &path).map_err(err))?
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Stop the size estimates whose job id starts with `prefix`.
+#[tauri::command]
+pub fn worktree_cleanup_cancel_sizes(prefix: String) {
+    crate::worktree_cleanup::SizeJobs::global().cancel(&format!("local:{prefix}"));
+}
+
+/// Remove the worktrees the person confirmed. Each is checked again on the
+/// spot; one that changed, is in use or is protected is left and reported.
+#[tauri::command]
+pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items))?;
+        for done in results.iter().filter(|done| done.outcome == crate::worktree_cleanup::Outcome::Removed) {
+            state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// What a workspace takes on disk. Asked for one workspace at a time, after
 /// the list is shown, because walking a large checkout takes a while.
 #[tauri::command]

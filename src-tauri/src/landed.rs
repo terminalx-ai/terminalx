@@ -256,7 +256,7 @@ fn stash_list(cwd: &Path) -> Option<String> {
 /// `skip-worktree` (`S`) and `assume-unchanged` (a lower-case letter) in
 /// `git ls-files -v`. A change to one is invisible and would be deleted with
 /// the worktree. `None` when the list cannot be read.
-fn hidden_from_status(cwd: &Path) -> Option<u32> {
+pub(crate) fn hidden_from_status(cwd: &Path) -> Option<u32> {
     let out = git::run(cwd, &["ls-files", "-v"]).ok()?;
     Some(out.lines().filter(|line| line.starts_with('S') || line.chars().next().is_some_and(|flag| flag.is_ascii_lowercase())).count() as u32)
 }
@@ -327,7 +327,7 @@ fn applies_in_more_than_one_place(cwd: &Path, merge_base: &str, rev: &str) -> Op
 
 /// Submodules recorded in the checkout's index (`160000` entries in
 /// `git ls-files -s`). `None` when the index cannot be read.
-fn submodules_in(cwd: &Path) -> Option<u32> {
+pub(crate) fn submodules_in(cwd: &Path) -> Option<u32> {
     let out = git::run(cwd, &["ls-files", "-s"]).ok()?;
     Some(out.lines().filter(|line| line.starts_with("160000 ")).count() as u32)
 }

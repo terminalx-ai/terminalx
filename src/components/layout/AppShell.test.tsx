@@ -111,6 +111,7 @@ vi.mock("@/components/ui/StarReminder", () => ({ StarReminder: () => null }));
 vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
 vi.mock("@/components/session/WorkspaceRemoveDialog", () => ({ WorkspaceRemoveDialog: () => null }));
+vi.mock("@/components/cleanup/WorktreeCleanupDialog", () => ({ WorktreeCleanupDialog: () => null }));
 
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");

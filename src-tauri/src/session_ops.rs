@@ -315,29 +315,30 @@ pub(crate) fn rename_workspace_entries(project_path: &str, path: &str, requested
 }
 
 pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
+    index::load().map(|sessions| sessions_within(sessions, path)).map_err(err)
+}
+
+/// The sessions among `sessions` that run in the checkout at `path`.
+pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<SessionEntry> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    index::load()
-        .map(|sessions| {
-            sessions
-                .into_iter()
-                .filter(|session| {
-                    let cwd = Path::new(&session.cwd);
-                    match std::fs::canonicalize(cwd) {
-                        Ok(cwd) if cwd == target => true,
-                        // A session started in a subdirectory belongs to the
-                        // checkout that directory is part of. Another
-                        // worktree nested below this one (the project's own
-                        // worktree folder is) is its own workspace.
-                        Ok(cwd) if cwd.starts_with(&target) => {
-                            git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| std::fs::canonicalize(top.trim()).ok()).is_some_and(|top| top == target)
-                        }
-                        Ok(_) => false,
-                        Err(_) => cwd == target,
-                    }
-                })
-                .collect()
+    sessions
+        .into_iter()
+        .filter(|session| {
+            let cwd = Path::new(&session.cwd);
+            match std::fs::canonicalize(cwd) {
+                Ok(cwd) if cwd == target => true,
+                // A session started in a subdirectory belongs to the
+                // checkout that directory is part of. Another
+                // worktree nested below this one (the project's own
+                // worktree folder is) is its own workspace.
+                Ok(cwd) if cwd.starts_with(&target) => {
+                    git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| std::fs::canonicalize(top.trim()).ok()).is_some_and(|top| top == target)
+                }
+                Ok(_) => false,
+                Err(_) => cwd == target,
+            }
         })
-        .map_err(err)
+        .collect()
 }
 
 /// The other sessions that would be deleted along with `session_id` when
@@ -511,7 +512,7 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
 
 /// Record that the workspace these sessions ran in is gone: they keep their
 /// conversations and work from the project root from now on.
-fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
+pub(crate) fn mark_workspace_sessions_removed(project: &Path, affected: &[SessionEntry]) -> Result<Vec<SessionEntry>> {
     let affected_ids: std::collections::HashSet<_> = affected.iter().map(|session| session.id.clone()).collect();
     let branch = git::current_branch(project);
     index::update(|sessions| {
