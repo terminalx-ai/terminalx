@@ -6,6 +6,23 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+describe("organization display preferences", () => {
+  it("defaults to All and persists visibility choices across a restart", async () => {
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({ hiddenOrganizations: [], organizationDisplay: "all", selectedOrganization: null });
+    setPrefs({ hiddenOrganizations: ["org-a"], organizationDisplay: "one", selectedOrganization: "org-b" });
+    vi.resetModules();
+    const reloaded = await import("./prefs");
+    expect(reloaded.getPrefs()).toMatchObject({ hiddenOrganizations: ["org-a"], organizationDisplay: "one", selectedOrganization: "org-b" });
+  });
+
+  it("ignores malformed saved visibility values and deduplicates organization ids", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ hiddenOrganizations: ["a", 7, "a"], organizationDisplay: "invalid", selectedOrganization: 4 }));
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({ hiddenOrganizations: ["a"], organizationDisplay: "all", selectedOrganization: null });
+  });
+});
+
 describe("permission mode preferences", () => {
   it("defaults fresh preferences to bypass permissions", async () => {
     const { getPrefs } = await import("./prefs");

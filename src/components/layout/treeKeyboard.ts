@@ -2,6 +2,8 @@ import type { KeyboardEvent } from "react";
 
 /** Arrow movement changes focus; only Enter/Space on a destination opens it. */
 export function navigateTree(event: KeyboardEvent<HTMLElement>) {
+  // Menus and other controls in a header can own an arrow key before it reaches the tree.
+  if (event.defaultPrevented) return;
   const target = event.target as HTMLElement;
   if (target.closest("input, textarea, [role=menu]")) return;
   const tree = event.currentTarget;

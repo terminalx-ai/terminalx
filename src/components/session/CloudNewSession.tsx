@@ -23,6 +23,7 @@ import type { CloudProject } from "@/types/target";
  * every live organization's (all cloud-enabled ones on a server that
  * authorizes by membership, CS-18; else the default one), as their sidebar
  * sections show them, default first. None while signed out.
+ * Sidebar hiding and One organization mode never restrict this picker.
  */
 export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();

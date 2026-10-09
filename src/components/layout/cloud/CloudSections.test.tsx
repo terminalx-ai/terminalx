@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountStatus, CloudWorkspaceListItem } from "@/lib/api";
@@ -65,6 +65,7 @@ const catalog = await import("@/lib/cloudCatalog");
 const sessions = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const { dateTimeText } = await import("@/lib/cloudLifecycle");
+const { useCloudProjectChoices } = await import("@/components/session/CloudNewSession");
 
 const ORG = "org-a";
 const repositories = [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git", primary: true }];
@@ -113,6 +114,7 @@ beforeEach(async () => {
   mocks.api.cloudWorkspaceResume.mockResolvedValue({ workspace: { ...list.workspaces[1].workspace }, operation: { id: "op", state: "running", action: "resume" } });
   mocks.lifecycle.length = 0;
   signIn();
+  prefs.setPrefs({ organizationDisplay: "all", hiddenOrganizations: [], selectedOrganization: null });
   await catalog.ingestCloudList(list, ORG);
   act(() => sessions.selectCloudWorkspace(null));
 });
@@ -122,11 +124,11 @@ afterEach(() => {
   catalog.resetCloudCatalog();
 });
 
-const mount = () =>
+const mount = (onOpenOrganizations?: () => void) =>
   render(
     <TooltipProvider>
       <div role="tree">
-        <CloudSections />
+        <CloudSections onOpenOrganizations={onOpenOrganizations} />
       </div>
     </TooltipProvider>,
   );
@@ -180,7 +182,7 @@ describe("organization sections", () => {
     mouseClick(trigger);
     const menu = await screen.findByRole("menu");
     // An admin of the default organization also gets the full new-workspace form.
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New cloud workspace…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New cloud workspace…", "Hide organization"]);
     // Still open after the whole click sequence.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.getByRole("menu")).toBe(menu);
@@ -494,6 +496,88 @@ describe("every organization live (CS-18)", () => {
   });
 });
 
+describe("organization visibility controls", () => {
+  it.each(["all", "one"] as const)("keeps hidden organizations in the new cloud-session picker in %s mode", (organizationDisplay) => {
+    mocks.status = { ...mocks.status, multiOrg: true };
+    prefs.setPrefs({ hiddenOrganizations: [ORG, "org-b"], organizationDisplay, selectedOrganization: ORG });
+    const { result } = renderHook(() => useCloudProjectChoices());
+    expect(result.current.map((choice) => choice.orgId)).toEqual([ORG, "org-b"]);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("hides from the context menu immediately and links the hidden count to Settings", async () => {
+    const settings = vi.fn();
+    mount(settings);
+    fireEvent.contextMenu(screen.getAllByTestId("cloud-org-header")[1]);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Hide organization" }));
+    expect(screen.getAllByTestId("cloud-org-section").map((section) => section.getAttribute("data-org"))).toEqual([ORG]);
+    expect(prefs.getPrefs().hiddenOrganizations).toEqual(["org-b"]);
+    fireEvent.click(screen.getByRole("button", { name: "1 organization hidden" }));
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(mocks.ask).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("confirms running workspaces, keeps the section after Cancel, and marks running hidden work", async () => {
+    mount();
+    mocks.ask.mockResolvedValue(false);
+    mouseClick(screen.getByRole("button", { name: "Menu for Acme" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Hide organization" }));
+    await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
+    expect(mocks.ask.mock.calls[0][0]).toMatch(/2 running workspaces.*keep running and costing money/);
+    expect(prefs.getPrefs().hiddenOrganizations).toEqual([]);
+    mocks.ask.mockResolvedValue(true);
+    mouseClick(screen.getByRole("button", { name: "Menu for Acme" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Hide organization" }));
+    await waitFor(() => expect(screen.getAllByTestId("cloud-org-section")).toHaveLength(1));
+    expect(screen.getByTestId("hidden-organizations").textContent).toContain("2 running");
+    expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("switches the single section from its header, including a saved hidden organization, without changing the default or waking", async () => {
+    prefs.setPrefs({ organizationDisplay: "one", hiddenOrganizations: ["org-b"] });
+    mount();
+    expect(screen.getAllByTestId("cloud-org-section")).toHaveLength(1);
+    expect(prefs.getPrefs().selectedOrganization).toBe(ORG);
+    mouseClick(screen.getByRole("button", { name: "Choose organization in sidebar" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitemradio", { name: "Beta" }));
+    expect(screen.getAllByTestId("cloud-org-section").map((section) => section.getAttribute("data-org"))).toEqual(["org-b"]);
+    expect(prefs.getPrefs()).toMatchObject({ selectedOrganization: "org-b", hiddenOrganizations: ["org-b"] });
+    expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("reveals and expands a hidden selected session's section only while selected", () => {
+    prefs.setPrefs({ hiddenOrganizations: [ORG], sidebarSections: { "org:org-a": "collapsed" } });
+    mount();
+    expect(screen.getAllByTestId("cloud-org-section")).toHaveLength(1);
+    act(() => sessions.selectCloudSession(`cloud:${ORG}:fix-login:s1`));
+    const acme = screen.getByRole("treeitem", { name: "Acme organization" });
+    expect(acme.getAttribute("aria-expanded")).toBe("true");
+    expect(prefs.getPrefs()).toMatchObject({ hiddenOrganizations: [ORG], sidebarSections: { "org:org-a": "collapsed" } });
+    act(() => sessions.selectSession(null));
+    expect(screen.queryByRole("treeitem", { name: "Acme organization" })).toBeNull();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    act(() => prefs.setPrefs({ sidebarSections: {} }));
+  });
+
+  it("starts empty organizations collapsed, showing their empty state only after deliberate expansion", async () => {
+    prefs.setPrefs({ cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, sidebarSections: {} });
+    await catalog.ingestCloudList({ workspaces: [] }, ORG, Date.now() + 1, Date.now() + 1);
+    mount();
+    expect(screen.getByRole("treeitem", { name: "Acme organization" }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByTestId("cloud-org-empty").closest("[hidden]")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Acme organization" }));
+    expect(screen.getByTestId("cloud-org-empty").textContent).toContain("Add one with +");
+  });
+});
+
 describe("shared workspaces in the sidebar (PRO-30)", () => {
   const shared = {
     workspaces: [
@@ -698,12 +782,14 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
   });
 
   it("tells a member with no cloud projects that none is shared with them, and points only a creator at +", async () => {
+    prefs.setPrefs({ sidebarSections: {}, cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {} });
     const asRole = (role: string | undefined) => {
       mocks.status = { ...mocks.status, organizations: mocks.status.organizations!.map((org) => (org.id === ORG ? ({ ...org, role } as typeof org) : org)) };
     };
     await catalog.ingestCloudList({ workspaces: [] }, ORG, Date.now() + 1, Date.now() + 1);
     asRole("member");
     const view = mount();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Acme organization" }));
     expect(screen.getByTestId("cloud-org-empty").textContent).toBe("No cloud projects shared with you yet.");
     view.unmount();
     asRole("admin");
@@ -798,7 +884,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     asRole(undefined);
     mountWithPage();
     expect(screen.queryByRole("button", { name: "Add project to Acme" })).toBeNull();
-    expect((await entries("Menu for Acme")).map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces"]);
+    expect((await entries("Menu for Acme")).map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "Hide organization"]);
     cleanup();
 
     // An owner or admin keeps all of it.

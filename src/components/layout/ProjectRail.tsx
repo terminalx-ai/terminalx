@@ -42,6 +42,8 @@ import { refreshCloudCatalog } from "@/lib/cloudCatalog";
 import { TreeToggle } from "./SidebarRows";
 import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
+import { visibleDashboardSessions } from "@/lib/organizationSessions";
+import type { SettingsTab } from "@/components/settings/SettingsPage";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -57,7 +59,7 @@ export function ProjectRail({
   onOpenSkills,
   onSearch,
 }: {
-  onOpenSettings: () => void;
+  onOpenSettings: (tab?: SettingsTab) => void;
   onOpenAccount: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
@@ -74,7 +76,7 @@ export function ProjectRail({
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
   const cloud = useCloudSections();
-  const sectioned = cloud.orgs.length > 0;
+  const sectioned = cloud.all.length > 0;
   const [localCollapsedPref, toggleLocal] = useSectionCollapsed("local");
   const localCollapsed = sectioned && localCollapsedPref;
   const automationStore = useAutomationStore();
@@ -92,7 +94,7 @@ export function ProjectRail({
   const archivedCount = store.projects.filter((p) => p.archived).length;
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
   const cloudSessions = useCloudDashboard();
-  const dashboardBuckets = useMemo(() => (cloudSessions.length ? bucketSessions([...store.sessions, ...cloudSessions]) : bucketSessions(store.sessions)), [store.sessions, cloudSessions]);
+  const dashboardBuckets = useMemo(() => bucketSessions([...store.sessions, ...visibleDashboardSessions(cloudSessions, cloud.visibleIds)]), [store.sessions, cloudSessions, cloud.visibleIds]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
   const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
@@ -354,7 +356,7 @@ export function ProjectRail({
           localRows
         )}
         <QuickChatsSection />
-        {sectioned && <CloudSections onOpenAccount={onOpenAccount} />}
+        {sectioned && <CloudSections onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />}
         <DevelopmentSection />
       </div>
 

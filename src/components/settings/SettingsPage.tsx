@@ -25,8 +25,9 @@ import { DevicesTab } from "./DevicesTab";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { QuickChatSettings } from "./FloatingWindowSettings";
+import { OrganizationsTab } from "./OrganizationsTab";
 
-const TABS = ["account", "devices", "general", "appearance", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
+const TABS = ["account", "devices", "general", "appearance", "organizations", "agents", "transcription", "integrations", "storage", "shortcuts", "about"] as const;
 export type SettingsTab = (typeof TABS)[number];
 /** The section Settings opens on when nothing asks for a particular one (PRO-81). */
 export const DEFAULT_SETTINGS_TAB: SettingsTab = "account";
@@ -36,6 +37,7 @@ const TAB_LABEL: Record<Tab, string> = {
   devices: "Devices",
   general: "General",
   appearance: "Appearance",
+  organizations: "Organizations",
   agents: "Agents",
   transcription: "Transcription",
   integrations: "Integrations",
@@ -114,6 +116,7 @@ export function SettingsPage({
             {tab === "devices" && <DevicesTab />}
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
+            {tab === "organizations" && <OrganizationsTab />}
             {tab === "agents" && <AgentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}

@@ -197,7 +197,7 @@ export function CloudAgentCard({
     if (focused) ref.current?.scrollIntoView({ block: "nearest" });
   }, [focused]);
   const state = column === "needs"
-    ? waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
+    ? waiting?.failure ? "Workspace needs recovery" : waiting?.waitingOn ? `Wants to use ${waiting.waitingOn}` : "Waiting for your decision"
     : column === "working" ? "Working" : session.stopped ? "Workspace stopped" : "Finished";
 
   return (

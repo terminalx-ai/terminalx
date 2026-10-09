@@ -21,6 +21,8 @@ import { cn } from "@/lib/cn";
 import { isCloudDashboardSession, openCloudSession, attentionTab, useCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import type { SessionEntry } from "@/types/session";
 import { isQuickChat, QUICK_CHATS_LABEL } from "@/lib/quickChats";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
+import { visibleDashboardSessions } from "@/lib/organizationSessions";
 
 /** A card: a local session, or a cloud one (PRO-23 CS-19) in the same columns. */
 type CardSession = SessionEntry | CloudDashboardSession;
@@ -52,10 +54,12 @@ export function AgentDashboard() {
   const [cursor, setCursor] = useState<{ column: ColumnId; row: number } | null>(null);
 
   const cloud = useCloudDashboard();
-  const sessions = useMemo<CardSession[]>(() => (cloud.length ? [...store.sessions, ...cloud] : store.sessions), [store.sessions, cloud]);
+  const { visibleIds } = useOrganizationVisibility();
+  const visibleCloud = useMemo(() => visibleDashboardSessions(cloud, visibleIds, query), [cloud, visibleIds, query]);
+  const sessions = useMemo<CardSession[]>(() => [...store.sessions, ...visibleCloud], [store.sessions, visibleCloud]);
   const localLive = useMemo(() => store.sessions.filter((s) => !s.archived && s.tabs.length > 0), [store.sessions]);
   const summaries = useSessionSummaries(localLive, store.loaded);
-  const cloudLive = useMemo(() => cloud.filter((s) => !s.archived && s.tabs.length > 0), [cloud]);
+  const cloudLive = useMemo(() => visibleCloud.filter((s) => !s.archived && s.tabs.length > 0), [visibleCloud]);
   // Cloud projects to filter by and name: `cloud:<orgId>:<identity>` → "acme/api · Acme".
   const cloudProjects = useMemo(() => {
     const names = new Map<string, string>();
