@@ -82,6 +82,14 @@ vi.mock("@/components/layout/Sidebar", () => ({
   ),
 }));
 vi.mock("@/components/session/NewSessionView", () => ({ NewSessionView: () => <div data-testid="new-session" /> }));
+vi.mock("@/components/start/StartScreen", () => ({
+  StartScreen: ({ onOpenSettings }: { onOpenSettings: (tab?: string) => void }) => (
+    <div data-testid="start-screen">
+      <button type="button" onClick={() => onOpenSettings("agents")}>Agent settings from start</button>
+    </div>
+  ),
+}));
+vi.mock("@/components/start/ProjectStartDialogs", () => ({ ProjectStartDialogHost: () => null }));
 vi.mock("@/components/issues/IssuesView", () => ({ IssuesView: () => <div data-testid="issues" /> }));
 vi.mock("@/components/dashboard/AgentDashboard", () => ({ AgentDashboard: () => <div data-testid="agents" /> }));
 vi.mock("@/components/automations/AutomationsView", () => ({
@@ -174,6 +182,73 @@ describe("new-session right panel", () => {
     const editor = await screen.findByTestId("editor-split");
     expect(editor.getAttribute("data-session-id")).toBe("checkout:/outside/feature");
     expect(screen.getByTestId("right-panel").getAttribute("data-cwd")).toBe("/outside/feature");
+  });
+});
+
+describe("start screen", () => {
+  it("replaces the bare composer while there are no local projects", () => {
+    sessionStore.projects = [];
+    sessionStore.lastProject = null;
+    sessionStore.selectedProject = null;
+    sessionStore.newSessionPreset = null;
+    render(<AppShell />);
+
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+    expect(screen.queryByTestId("new-session")).toBeNull();
+  });
+
+  it("gives way to the new-session view once a project exists", () => {
+    sessionStore.projects = [];
+    sessionStore.newSessionPreset = null;
+    const { rerender } = render(<AppShell />);
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+
+    sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
+    sessionStore.newSessionPreset = { projectPath: "/repo", cwd: null };
+    rerender(<AppShell />);
+
+    expect(screen.queryByTestId("start-screen")).toBeNull();
+    expect(screen.getByTestId("new-session")).toBeTruthy();
+  });
+
+  it("waits for the projects to be read before offering to add the first one", () => {
+    sessionStore.projects = [];
+    sessionStore.loaded = false;
+    try {
+      render(<AppShell />);
+      expect(screen.queryByTestId("start-screen")).toBeNull();
+    } finally {
+      sessionStore.loaded = true;
+    }
+  });
+
+  it("is not shown over a cloud draft, which needs no local project", () => {
+    sessionStore.projects = [];
+    (sessionStore as { cloudSessionPreset?: unknown }).cloudSessionPreset = { projectKey: "cloud:org:github.com/acme/api" };
+    try {
+      render(<AppShell />);
+      expect(screen.queryByTestId("start-screen")).toBeNull();
+      expect(screen.getByTestId("new-session")).toBeTruthy();
+    } finally {
+      delete (sessionStore as { cloudSessionPreset?: unknown }).cloudSessionPreset;
+    }
+  });
+
+  it("stays out of the other destinations", () => {
+    sessionStore.projects = [];
+    sessionStore.view = "issues";
+    render(<AppShell />);
+
+    expect(screen.queryByTestId("start-screen")).toBeNull();
+    expect(screen.getByTestId("issues")).toBeTruthy();
+  });
+
+  it("opens Agent settings from its no-agent notice", async () => {
+    sessionStore.projects = [];
+    render(<AppShell />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings from start" }));
+    expect((await screen.findByTestId("settings-page")).getAttribute("data-initial-tab")).toBe("agents");
   });
 });
 

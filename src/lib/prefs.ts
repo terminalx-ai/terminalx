@@ -69,6 +69,8 @@ export interface Prefs {
    * every session. One person's choice never carries over to another.
    */
   sidebarFilters: Record<string, "unread" | "needs">;
+  /** The folder the reader last cloned or created a project in; the next one is suggested there. */
+  projectsDir: string | null;
 }
 
 const DEFAULTS: Prefs = {
@@ -104,6 +106,7 @@ const DEFAULTS: Prefs = {
   cloudCollapsed: {},
   shortcuts: {},
   sidebarFilters: {},
+  projectsDir: null,
 };
 
 const KEY = "raccoon.prefs";
