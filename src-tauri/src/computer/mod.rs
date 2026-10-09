@@ -419,9 +419,14 @@ impl ComputerService {
                 format!("{} is a computer-use helper from an older TerminalX, which this app does not use", app.display()),
             ));
         }
+        // Before every helper start, not only at launch: an old helper that
+        // was granted again while the app runs loses the grant here. Provider
+        // calls never run on the main thread.
         let identifier = self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        permissions::legacy_cleanup(identifier.as_deref(), Some(&app));
-        Ok(Some(Box::new(macos_native::MacosNativeProvider::new(executable))))
+        let provider = macos_native::MacosNativeProvider::new(executable).before_each_start(move || {
+            permissions::legacy_cleanup(identifier.as_deref(), Some(&app));
+        });
+        Ok(Some(Box::new(provider)))
     }
 }
 
