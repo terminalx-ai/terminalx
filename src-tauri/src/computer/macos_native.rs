@@ -406,6 +406,9 @@ impl Session {
 
 pub struct MacosNativeProvider {
     executable: PathBuf,
+    /// Run before every helper start, the first and each restart.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    before_start: Option<Box<dyn Fn() + Send>>,
     #[cfg(unix)]
     session: Option<Session>,
 }
@@ -414,9 +417,17 @@ impl MacosNativeProvider {
     pub fn new(executable: PathBuf) -> Self {
         Self {
             executable,
+            before_start: None,
             #[cfg(unix)]
             session: None,
         }
+    }
+
+    /// Something to do before each helper process is started. The app uses
+    /// it to take older helpers' permissions away again (PRO-90).
+    pub fn before_each_start(mut self, hook: impl Fn() + Send + 'static) -> Self {
+        self.before_start = Some(Box::new(hook));
+        self
     }
 
     #[cfg(unix)]
@@ -429,6 +440,9 @@ impl MacosNativeProvider {
 
     #[cfg(unix)]
     fn start(&self) -> Result<Session, ComputerError> {
+        if let Some(hook) = &self.before_start {
+            hook();
+        }
         let mut started = start_session(&self.executable)?;
         match evaluate_handshake(started.handshake()?) {
             Handshake::Compatible(capabilities) => Ok(Session {
@@ -995,6 +1009,20 @@ PY
         provider.shutdown();
         assert!(!socket_dir.exists(), "socket directory must be removed on shutdown");
         assert!(!process_alive(pid), "helper must exit on terminate");
+    }
+
+    #[test]
+    fn the_hook_runs_before_every_helper_start_including_a_restart() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        // A helper that exits at once: every call is a fresh start attempt.
+        let mut provider = MacosNativeProvider::new(PathBuf::from("/usr/bin/true")).before_each_start(move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(provider.capabilities().is_err());
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(provider.list_apps().is_err());
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -149,8 +149,8 @@ it, whatever version of TerminalX is installed. So:
   be told apart in System Settings. The old permission does not apply to it;
   people who granted before grant Accessibility and Screen Recording once
   more;
-- at every launch, off the main thread and before the helper is started, the
-  app runs `tccutil reset Accessibility` and `tccutil reset ScreenCapture` for
+- at every launch and again before every helper start, never on the main
+  thread, the app runs `tccutil reset Accessibility` and `tccutil reset ScreenCapture` for
   the old ids (no administrator password is needed for one's own entries).
   Nothing on disk records that it ran: a record could be forged by an agent
   to switch the removal off, and an old helper can be granted again at any
@@ -161,7 +161,10 @@ it, whatever version of TerminalX is installed. So:
   under `~/Library/Application Support/TerminalX/old-helper-removal`
   (LaunchServices ignores bundles in temporary directories), registers it
   with `lsregister -f`, resets, then unregisters and deletes it whatever
-  happened;
+  happened. Each stub goes in a folder with a random name that is created
+  new; a symlink at the base, the folder or the bundle is refused. A stub
+  left registered by a crash is unregistered and deleted at the next run,
+  once it is more than five minutes old;
 - which ids are cleared depends on the app's own bundle id, not on how it was
   compiled: only `com.terminalx.next` clears the released helper's old id;
   every build clears the old dev id. A Dev or local build therefore never
@@ -175,9 +178,9 @@ it, whatever version of TerminalX is installed. So:
   identifier.
 
 **A helper from 0.2.8 or earlier keeps working for whoever starts it for as
-long as it is granted.** The app removes that grant each time it starts, so
-the exposure is bounded by one launch, not closed: until TerminalX is next
-started, the old row can be put back, by the person or by an agent (for
+long as it is granted.** The app removes that grant each time it starts and
+each time it starts the helper, so the exposure is bounded, not closed: until
+then the old row can be put back, by the person or by an agent (for
 example by opening an old helper's own permission window and getting the
 person to approve it). Only "TerminalX Computer Use Helper" should ever be
 approved. That the stub reset removes a row created by a Developer ID signed
@@ -258,6 +261,32 @@ At runtime the helper is looked up in this order:
 `TERMINALX_COMPUTER_MACOS_HELPER_APP_PATH`, the app's resource directory,
 `Contents/Resources` next to the executable, and (debug builds only)
 `native/computer-use-macos/.build/release-dev` then `…/release`.
+
+## Signed-build checklist (PRO-90)
+
+That the stub reset removes a row created by a Developer ID signed helper
+cannot be checked without one. On the first signed build, on a Mac where
+0.2.8 was granted computer use:
+
+1. Before updating, note the "TerminalX Computer Use" rows under Accessibility
+   and Screen Recording. Save the 0.2.8 helper as a **zip** outside
+   `/Applications`: a loose `.app` keeps the old id resolvable and hides the
+   stub path.
+2. Update in place and start TerminalX.
+3. Read the log: "permissions of older helpers removed", or "macOS would not
+   remove the permissions of older helpers".
+4. Run `tccutil reset Accessibility com.terminalx.next.computer-use` by hand.
+   Exit 64 ("No such bundle identifier") means macOS no longer resolves the
+   old id, so the stub path is what ran at launch.
+5. Confirm both old rows are gone from Accessibility and Screen Recording.
+6. Unzip the saved helper and run it from a shell with `--permission-status`:
+   it must report Accessibility `not-granted`.
+7. Grant both permissions to "TerminalX Computer Use Helper" in Settings →
+   General → Computer use, then run `terminalx computer capabilities`: both
+   `granted`, no `nextStep`, no `warning`. This is also the first end-to-end
+   run of the Developer ID peer requirement.
+8. `terminalx computer get-app-state --app TerminalX` returns no tree, no
+   elements and no screenshot, and does not raise the window.
 
 ## Testing
 
