@@ -402,7 +402,7 @@ export function CommandPalette({
       setFileLoading(true);
       void files
         .search(fileRoot, deferredQuery.trim(), 80)
-        .then((hits) => live && setFileHits(hits))
+        .then((hits) => live && setFileHits(hits ?? []))
         .catch(() => live && setFileHits([]))
         .finally(() => live && setFileLoading(false));
     }, 45);

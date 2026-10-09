@@ -565,6 +565,33 @@ impl Terminals {
         Ok(())
     }
 
+    /// How many bytes written into the pane its program has yet to read.
+    /// `None` where that cannot be asked: no such pane, a pane whose program
+    /// has gone, or a platform whose PTY keeps no such count.
+    ///
+    /// Bytes written into a pane sit in the terminal's input queue until the
+    /// program reads them, so zero means the program has taken everything —
+    /// which a caller typing at a TUI needs to know before its next keystroke.
+    pub fn unread_input(&self, id: &str) -> Option<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+            let tty = self.panes.lock().unwrap().get(id)?.master.tty_name()?;
+            // The count is the program's side's. Opened without becoming this
+            // process's terminal, and never read from.
+            let side = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(tty).ok()?;
+            let mut unread: libc::c_int = 0;
+            // SAFETY: FIONREAD writes one int through the pointer, which outlives the call.
+            let asked = unsafe { libc::ioctl(side.as_raw_fd(), libc::FIONREAD, &mut unread) };
+            (asked == 0).then_some(unread.max(0) as usize)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = id;
+            None
+        }
+    }
+
     /// Desktop input may block on a full PTY. Resolve the writer before
     /// dispatching so queued work cannot write to a replacement process.
     pub async fn write_async(&self, id: &str, data: Vec<u8>) -> Result<()> {

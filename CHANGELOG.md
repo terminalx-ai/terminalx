@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Chat messages that reached the terminal but were not sent
+
+- A message sent from chat is submitted only after the agent CLI has read it.
+  The Enter used to follow the pasted text after a fixed pause; a CLI too busy
+  to look at its input for that long could take both at once and leave the
+  message sitting in its input. (macOS and Linux; Windows keeps the pause.)
+  (#403)
+- A message the agent has not acknowledged within 20 seconds is flagged as
+  "delivery could not be confirmed" instead of showing as working for five
+  minutes, and a follow-up queued behind a turn is flagged if the agent never
+  takes it once that turn ends. The terminal redrawing is no longer taken as
+  proof the message was accepted. Nothing is typed or submitted again on its
+  own: the notice says to press Enter in the terminal if the message is still
+  there. (#403)
+- Each stage of a message's delivery (ready, text written, Enter written,
+  accepted or unconfirmed) is recorded with its timing in the tab's
+  diagnostics file. No message text, paths or commands are recorded. (#403)
+
 ### Model and effort
 
 - The chat's model and effort pickers now always show what the agent is
