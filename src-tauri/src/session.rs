@@ -105,6 +105,7 @@ struct CliLaunch {
 /// How the wait for a pane's CLI to listen ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Readiness {
+    Cancelled,
     /// It said so, or went quiet on something that is not a known dialog.
     Ready,
     /// Neither signal came in time, or the CLI exited.
@@ -214,7 +215,7 @@ fn strip_image_labels(mut text: &str) -> (usize, &str) {
 /// queued command, and either would otherwise be the same message twice.
 fn cli_composer_message(prompt: &PromptText, images: Vec<ImageRef>, baseline: Option<String>, queued: bool, cwd: &str) -> (Payload, ComposerEcho) {
     let echo = ComposerEcho { queued, ..ComposerEcho::new(prompt.agent.clone(), images.len()) };
-    let payload = Payload::UserMessage { text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
+    let payload = Payload::UserMessage { author: prompt.author.clone(), text: prompt.display.clone(), images, baseline, queued, cwd: Some(cwd.to_string()) };
     (payload, echo)
 }
 
@@ -380,6 +381,7 @@ pub fn idle_orphaned_tabs() {
 
 #[derive(Clone)]
 pub struct SessionManager {
+    pub(crate) sharing: Arc<Mutex<crate::local_sharing::Sharing>>,
     sink: Arc<dyn EventSink>,
     observer: Arc<dyn SessionObserver>,
     host: Arc<Host>,
@@ -431,8 +433,17 @@ pub struct SendOutcome {
 }
 
 struct PromptText {
+    shared_connection: Option<crate::local_sharing::WritePermit>,
+    author: Option<crate::local_sharing::Person>,
     agent: String,
     display: String,
+}
+
+#[derive(Default)]
+struct PromptDelivery {
+    ready: Option<Arc<tui::Ready>>,
+    receipt: Option<(u64, DeliveryReceipt)>,
+    shared: Option<(crate::local_sharing::WritePermit, String, String, u64)>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,6 +538,7 @@ impl SessionManager {
         control: crate::hooks::ControlEndpoint,
     ) -> Self {
         let manager = Self {
+            sharing: Arc::new(Mutex::new(crate::local_sharing::Sharing::default())),
             sink,
             observer,
             host,
@@ -992,6 +1004,12 @@ impl SessionManager {
         text: String,
         images: Vec<ImageInput>,
     ) -> Result<SendOutcome> {
+        let mut sharing = self.sharing.lock().unwrap();
+        if let Some(share) = sharing.sessions.get_mut(session_id) {
+            share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
+            self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
+            return self.send_impl(session_id, tab_id, PromptText { agent: text.clone(), display: text, author: Some(share.host.clone()), shared_connection: None }, images, None);
+        }
         self.send_with_display_text(session_id, tab_id, text.clone(), text, images)
     }
 
@@ -999,7 +1017,7 @@ impl SessionManager {
     /// when the provider echoes the prompt or runs its UserPromptSubmit hook.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, text.clone(), text, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         rx.recv_timeout(std::time::Duration::from_secs(90))
             .map_err(|_| anyhow!("The new session opened, but prompt delivery could not be confirmed. Check its terminal before retrying; the prepared prompt is retained."))?
             .map_err(anyhow::Error::msg)?;
@@ -1024,7 +1042,7 @@ impl SessionManager {
         display_text: String,
         images: Vec<ImageInput>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_impl(session_id, tab_id, text, display_text, images, None);
+        let outcome = self.send_impl(session_id, tab_id, PromptText { agent: text, display: display_text, author: None, shared_connection: None }, images, None);
         if let Err(error) = &outcome {
             if let Ok(rt) = self.runtime(session_id, tab_id) {
                 self.apply(&mut rt.lock().unwrap(), Payload::Error { message: format!("{error:#}"), fatal: false }, None);
@@ -1033,14 +1051,15 @@ impl SessionManager {
         outcome.map_err(|error| anyhow!(RecoveryKind::classify(&error.to_string()).message()))
     }
 
+    /// Already admitted under `sharing`: use the same prompt writer as the host.
+    pub(crate) fn send_shared(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
+        self.send_impl(session_id, tab_id, PromptText { agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None)
+    }
+
     fn send_impl(
-        &self, session_id: &str, tab_id: &str, text: String,
-        display_text: String, images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
+        &self, session_id: &str, tab_id: &str, prompt: PromptText,
+        images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
-        let prompt = PromptText {
-            agent: text,
-            display: display_text,
-        };
         let rt_arc = self.runtime(session_id, tab_id)?;
         let entry = index::get(session_id)?;
         let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
@@ -1050,6 +1069,9 @@ impl SessionManager {
 
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
             bail!("Continuation delivery requires an idle Claude Code or Codex destination.");
+        }
+        if prompt.shared_connection.is_some() && rt.turn_open {
+            bail!("The agent started a turn. Queue this prompt or steer the agent.");
         }
         if pty_first(&tab.harness).is_some() {
             return self.send_to_cli(
@@ -1071,7 +1093,7 @@ impl SessionManager {
             rt.queued.push(q);
             let ev = self.publish(
                 &mut rt,
-                Payload::UserMessage {
+                Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
                     images: refs,
                     baseline: None,
@@ -1095,7 +1117,7 @@ impl SessionManager {
         let baseline = git::snapshot_tree(Path::new(&entry.cwd)).ok();
         let events = vec![self.publish(
             &mut rt,
-            Payload::UserMessage {
+            Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
                 images: refs,
                 baseline,
@@ -1385,6 +1407,10 @@ impl SessionManager {
     }
 
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
+        let sharing = self.sharing.lock().unwrap();
+        if mode == "bypassPermissions" && sharing.sessions.contains_key(session_id) {
+            bail!("Stop sharing this session before switching to Bypass.");
+        }
         index::update_tab(session_id, tab_id, |t| {
             t.permission_mode = mode.into();
             Ok(())
@@ -1420,6 +1446,7 @@ impl SessionManager {
         if restart {
             self.restart_for_settings(session_id, tab_id)?;
         }
+        drop(sharing);
         Ok(())
     }
 
@@ -2030,7 +2057,11 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
-        self.type_prompt(rt_arc, &pane, agent, paths, Some(ready), receipt.map(|receipt| (ev.seq, receipt)));
+        self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
+            ready: Some(ready),
+            receipt: receipt.map(|receipt| (ev.seq, receipt)),
+            shared: prompt.shared_connection.map(|connection| (connection, entry.id.clone(), tab.id.clone(), ev.seq)),
+        });
         Ok(SendOutcome { queued, events: vec![ev] })
     }
 
@@ -2065,7 +2096,8 @@ impl SessionManager {
     /// Enter has to be a later write than the body — a carriage return inside
     /// the same one is read as part of the paste and never submits — so this
     /// sleeps, which no caller holding the tab lock could afford to do.
-    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, ready: Option<Arc<tui::Ready>>, receipt: Option<(u64, DeliveryReceipt)>) {
+    fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
+        let PromptDelivery { ready, receipt, shared } = delivery;
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -2075,17 +2107,33 @@ impl SessionManager {
         let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ready) = &ready {
-                let readiness = manager.wait_ready(&pane, ready);
+                let readiness = manager.wait_ready(&pane, ready, shared.as_ref());
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
                 if !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready)) {
+                    return;
+                }
+                if readiness == Readiness::Cancelled {
+                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); }
                     return;
                 }
                 if !manager.prepare_prompt(&mut rt, readiness, receipt.as_ref().map(|(_, receipt)| receipt)) {
                     return;
                 }
             }
+            let mut admitted_to_writer = false;
             let result = (|| -> Result<()> {
+                let mut sharing = shared.as_ref().map(|_| manager.sharing.lock().unwrap());
+                if let (Some((connection, session_id, tab_id, _)), Some(sharing)) = (&shared, &mut sharing) {
+                    let share = sharing.sessions.get_mut(session_id).ok_or_else(|| anyhow!("Sharing ended before prompt delivery."))?;
+                    share.admit_at_writer(connection, tab_id, chrono::Utc::now().timestamp_millis())?;
+                    let current = index::get(session_id)?;
+                    let tab = current.tab(tab_id).ok_or_else(|| anyhow!("Tab closed before prompt delivery."))?;
+                    if tab.permission_mode == "bypassPermissions" || manager.pane_of(session_id, tab_id).is_none_or(|current| current.pane_id != pane) {
+                        bail!("The shared tab changed before prompt delivery.");
+                    }
+                }
+                admitted_to_writer = true;
                 terminals.write(&pane, tui::CLEAR_LINE)?;
                 for path in &attachments {
                     terminals.write(&pane, &tui::attachment_bytes(path))?;
@@ -2114,6 +2162,9 @@ impl SessionManager {
             if let Err(e) = result {
                 log::warn!("[{pane}] write: {e:#}");
                 let mut rt = rt_arc.lock().unwrap();
+                if !admitted_to_writer {
+                    if let Some((_, _, _, seq)) = &shared { manager.cancel_shared_prompt(&mut rt, *seq); return; }
+                }
                 if ready.as_ref().is_some_and(|ready| !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready))) {
                     return;
                 }
@@ -2129,6 +2180,17 @@ impl SessionManager {
         });
         if let (Err(e), Some((_, receipt))) = (spawned, spawn_receipt) {
             let _ = receipt.send(Err(format!("Could not start prompt delivery: {e}")));
+        }
+    }
+
+    fn cancel_shared_prompt(&self, rt: &mut TabRuntime, seq: u64) {
+        let owns_pending = if let Engine::Cli(cli) = &mut rt.engine {
+            cli.echoed.retain(|echo| echo.seq != seq);
+            if cli.awaiting_delivery == Some(seq) { cli.awaiting_delivery = None; true } else { false }
+        } else { false };
+        if owns_pending {
+            self.end_open_turn(rt, TurnStatus::Aborted, None);
+            self.set_status(rt, TabStatus::Idle);
         }
     }
 
@@ -2176,7 +2238,7 @@ impl SessionManager {
     /// A quiet Claude pane that never said it was up is read before it is
     /// trusted: the CLI's first-run screens (onboarding, trust, a custom API
     /// key, the bypass disclaimer) are quiet too, and are `Blocked`.
-    fn wait_ready(&self, pane: &str, ready: &tui::Ready) -> Readiness {
+    fn wait_ready(&self, pane: &str, ready: &tui::Ready, shared: Option<&(crate::local_sharing::WritePermit, String, String, u64)>) -> Readiness {
         let deadline = Instant::now() + tui::READY_TIMEOUT;
         let blocked = || {
             if !ready.announces_start() {
@@ -2185,6 +2247,11 @@ impl SessionManager {
             self.terminals.read_output(pane).and_then(|out| claude::pty::blocking_screen(&out))
         };
         loop {
+            if let Some((permit, session, tab, _)) = shared {
+                if self.sharing.lock().unwrap().sessions.get(session).is_none_or(|share| !share.permit_current(permit, tab, chrono::Utc::now().timestamp_millis())) {
+                    return Readiness::Cancelled;
+                }
+            }
             if ready.settled() {
                 return Readiness::Ready;
             }
@@ -2216,7 +2283,7 @@ impl SessionManager {
     /// message nobody sent.
     fn type_command(&self, p: &mut CliTab, rt_arc: &Arc<Mutex<TabRuntime>>, command: String) {
         p.echoed.push_back(ComposerEcho { command: true, ..ComposerEcho::new(command.clone(), 0) });
-        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), None, None);
+        self.type_prompt(rt_arc, &p.pane_id, command, Vec::new(), PromptDelivery::default());
     }
 
     // ---- inbound from the CLI's hooks
@@ -2801,7 +2868,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -2811,7 +2878,7 @@ mod tests {
             pending.push_back(echo);
             projected.push(composer);
 
-            let rollout = Payload::UserMessage { text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+            let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
             assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0 }));
         }
 
@@ -2851,7 +2918,7 @@ mod tests {
         let mut echo = ComposerEcho::new("continuation prompt".into(), 0);
         echo.receipt = Some(tx);
         let mut pending = std::collections::VecDeque::from([echo]);
-        let message = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        let message = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
         assert!(consume_composer_echo(&mut pending, &message("continuation prompt")).is_none());
         assert!(rx.try_recv().is_err(), "a prompt still waiting for readiness is not delivered");
         pending[0].submitted = true;
@@ -2887,7 +2954,7 @@ mod tests {
         let mut pending = std::collections::VecDeque::new();
         pending.push_back(ComposerEcho::new("first".into(), 0));
         pending.push_back(ComposerEcho::new("second".into(), 0));
-        let user = |text: &str| Payload::UserMessage { text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
+        let user = |text: &str| Payload::UserMessage { author: None, text: text.into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
 
         assert!(consume_composer_echo(&mut pending, &user("typed in the pane")).is_none());
         assert_eq!(pending.len(), 2);

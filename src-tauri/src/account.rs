@@ -637,6 +637,8 @@ impl AccountManager {
     /// reach, as last loaded, without a Keychain load or token refresh:
     /// cheap enough to poll, and never waiting on either (the account lock
     /// is not held across them).
+    pub(crate) fn current_generation(&self) -> u64 { self.inner.lock().unwrap().generation }
+
     pub(crate) fn current_scope(&self) -> Option<CloudScope> {
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(cloud_scope)

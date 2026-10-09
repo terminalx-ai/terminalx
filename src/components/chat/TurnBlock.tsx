@@ -66,6 +66,7 @@ export const TurnBlock = memo(function TurnBlock({
                 )}
               </div>
             ) : null}
+            {turn.prompt.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={turn.prompt.author.userId}>{turn.prompt.author.displayName}</div>}
             <LinkedText text={turn.prompt.text} context={linkContext} />
           </div>
         </div>
@@ -185,6 +186,7 @@ function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; lin
       return (
         <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground">
           <Clock className="size-3.5" />
+          {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
           <span className="whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
         </div>
       );

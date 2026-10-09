@@ -23,7 +23,7 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
+  | { kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
@@ -36,7 +36,7 @@ export interface Turn {
   seq: number;
   /** Time of the event that opened this turn, even without a prompt or completion. */
   ts: string;
-  prompt?: { text: string; images?: { url: string; name?: string }[]; ts: string; seq: number };
+  prompt?: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; ts: string; seq: number };
   work: WorkItem[];
   finalText?: string;
   completed?: { status: string; durationMs?: number; ts: string; head?: string };
@@ -147,7 +147,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
         if (!text.trim() && !payload.images?.length && text !== payload.text) break;
         if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
+          current.work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
@@ -155,7 +155,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           key: `t${event.seq}`,
           seq: event.seq,
           ts: event.ts,
-          prompt: { text, images: payload.images, ts: event.ts, seq: event.seq },
+          prompt: { author: payload.author, text, images: payload.images, ts: event.ts, seq: event.seq },
           work: [],
           toolCount: 0,
           editedFiles: 0,

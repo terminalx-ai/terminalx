@@ -8,7 +8,7 @@ import { webkit } from "playwright";
 
 const root = fileURLToPath(new URL("../../dist/", import.meta.url));
 const read = (name) => readFile(new URL(name, import.meta.url), "utf8");
-const stub = `${await read("./tauri-stub.js")}\n${await read("./cloud-runtime-stub.js")}`;
+const stub = `${await read("./tauri-stub.js")}\n${await read("./cloud-runtime-stub.js")}\n${await read("./local-sharing-stub.js")}`;
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".wasm": "application/wasm" };
 
 /** Serve `dist/` on a free local port. */

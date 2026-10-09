@@ -41,6 +41,11 @@ impl DesktopLinks {
             && url.host_str() == Some("auth")
             && url.path() == "/callback"
     }
+
+    pub fn is_join_link(self, url: &Url) -> bool {
+        self.accepts_scheme(url.scheme()) && url.host_str() == Some("join")
+            && matches!(url.path(), "" | "/") && url.query().is_none() && url.fragment().is_some()
+    }
 }
 
 #[cfg(test)]

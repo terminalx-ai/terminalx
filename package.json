@@ -24,6 +24,7 @@
     "clean:build": "node scripts/clean-build.mjs",
     "tauri:dev": "node scripts/clean-build.mjs --quiet && tauri dev --config src-tauri/tauri.dev.conf.json",
     "test:webkit-layout": "node scripts/webkit/sidebar-scroll.mjs && node scripts/webkit/cloud-session.mjs && node scripts/webkit/cloud-sidebar.mjs && node scripts/webkit/shortcuts.mjs && node scripts/webkit/worktree-cleanup.mjs && node scripts/webkit/account-row.mjs && node scripts/webkit/sidebar-filter.mjs && node scripts/webkit/issue-session.mjs && node scripts/webkit/agent-dashboard.mjs && node scripts/webkit/organization-visibility.mjs && node scripts/webkit/chat-links.mjs && node scripts/webkit/app-resources.mjs",
+    "test:webkit-local-sharing": "node scripts/webkit/local-sharing.mjs",
     "test:webkit-app-resources": "node scripts/webkit/app-resources.mjs",
     "test:webkit-chat-links": "node scripts/webkit/chat-links.mjs"
   },

@@ -1,0 +1,1074 @@
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 3f5dc095..5b7e63f3 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -1,6 +1,6 @@
+ {
+     "name": "api",
+-    "version": "0.0.488",
++    "version": "0.0.489",
+     "private": true,
+     "type": "module",
+     "scripts": {
+diff --git a/apps/api/src/controllers/auth/verifyOtp.ts b/apps/api/src/controllers/auth/verifyOtp.ts
+index 3f4aac00..73df713d 100644
+--- a/apps/api/src/controllers/auth/verifyOtp.ts
++++ b/apps/api/src/controllers/auth/verifyOtp.ts
+@@ -93,11 +93,6 @@ const verifyOtp = withErrorHandler('verifyOtp')(async (c: Context) => {
+ 
+     if (existingUser) {
+         uid = existingUser.id
+-        try {
+-            await auth().updateUser(uid, { email: normalizedEmail })
+-        } catch (error) {
+-            console.error('verifyOtp', error)
+-        }
+     } else {
+         if (email.includes('+'))
+             return fail(c, t('api.plusAddressingNotAllowed'), 400)
+@@ -115,6 +110,11 @@ const verifyOtp = withErrorHandler('verifyOtp')(async (c: Context) => {
+         })
+     }
+ 
++    await auth().updateUser(uid, {
++        email: normalizedEmail,
++        emailVerified: true
++    })
++
+     const keysToClean = [`email:${normalizedEmail}`]
+     const ip = getClientIp(c)
+     if (ip) keysToClean.push(`ip:${ip}`)
+diff --git a/apps/api/src/controllers/desktop/auth.capabilities.test.ts b/apps/api/src/controllers/desktop/auth.capabilities.test.ts
+new file mode 100644
+index 00000000..dfca9453
+--- /dev/null
++++ b/apps/api/src/controllers/desktop/auth.capabilities.test.ts
+@@ -0,0 +1,99 @@
++import { Hono } from 'hono'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++const mocks = vi.hoisted(() => ({
++    resolveDesktop: vi.fn(),
++    resolveMobile: vi.fn(),
++    session: vi.fn(),
++    getUser: vi.fn()
++}))
++
++vi.mock('@/services/desktopTokens', () => ({
++    resolveAccessToken: mocks.resolveDesktop,
++    issueDesktopSession: vi.fn(),
++    revokeDesktopSession: vi.fn(),
++    rotateRefreshToken: vi.fn()
++}))
++vi.mock('@/services/cloudTokens', () => ({
++    default: { resolveAccess: mocks.resolveMobile }
++}))
++vi.mock('@/services/firebase', () => ({
++    auth: () => ({ getUser: mocks.getUser })
++}))
++vi.mock('@/controllers/desktop/buildDesktopSession', () => ({
++    buildDesktopSessionBody: mocks.session,
++    buildMobileCapabilitySessionBody: mocks.session
++}))
++
++const { default: authenticate } =
++    await import('@/middleware/desktopOrMobileAuth')
++const { desktopAuthCapabilities } = await import('@/controllers/desktop/auth')
++const app = new Hono()
++app.post('/capabilities', authenticate, desktopAuthCapabilities)
++const request = (token = 'valid-account') =>
++    app.request('/capabilities', {
++        method: 'POST',
++        headers: { Authorization: `Bearer ${token}` }
++    })
++
++beforeEach(() => {
++    vi.resetAllMocks()
++    mocks.resolveDesktop.mockImplementation(async (token: string) =>
++        token === 'valid-account'
++            ? { userId: 'guest', cloudProfileId: 'profile' }
++            : null
++    )
++    mocks.resolveMobile.mockResolvedValue(null)
++    mocks.session.mockResolvedValue({
++        cloud: {
++            userId: 'guest',
++            email: 'Guest@example.com',
++            displayName: 'Guest'
++        },
++        organizations: []
++    })
++    mocks.getUser.mockResolvedValue({
++        email: 'guest@example.com',
++        emailVerified: true
++    })
++})
++
++describe('signed-in session guest identity', () => {
++    it('returns stable identity and verified email without organization membership', async () => {
++        const response = await request()
++        expect(response.status).toBe(200)
++        const body = await response.json()
++        expect(body.cloud).toEqual({
++            userId: 'guest',
++            email: 'Guest@example.com',
++            displayName: 'Guest',
++            emailVerified: true
++        })
++        expect(body.organizations).toEqual([])
++        expect(mocks.getUser).toHaveBeenCalledWith('guest')
++    })
++    it.each([
++        { email: 'other@example.com', emailVerified: true },
++        { email: 'guest@example.com', emailVerified: false }
++    ])(
++        'fails closed for a mismatched or unverified Firebase email',
++        async (identity) => {
++            mocks.getUser.mockResolvedValue(identity)
++            expect((await (await request()).json()).cloud.emailVerified).toBe(
++                false
++            )
++        }
++    )
++    it('does not assert email verification if Firebase is unavailable', async () => {
++        mocks.getUser.mockRejectedValue(new Error('unavailable'))
++        expect((await (await request()).json()).cloud.emailVerified).toBe(false)
++    })
++    it('refuses anonymous and invalid credentials before reading identity', async () => {
++        expect(
++            (await app.request('/capabilities', { method: 'POST' })).status
++        ).toBe(401)
++        expect((await request('invalid-account')).status).toBe(401)
++        expect(mocks.session).not.toHaveBeenCalled()
++        expect(mocks.getUser).not.toHaveBeenCalled()
++    })
++})
+\ No newline at end of file
+diff --git a/apps/api/src/controllers/desktop/auth.ts b/apps/api/src/controllers/desktop/auth.ts
+index b7ebd2dd..bded16de 100644
+--- a/apps/api/src/controllers/desktop/auth.ts
++++ b/apps/api/src/controllers/desktop/auth.ts
+@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
+ import { and, eq } from 'drizzle-orm'
+ import { db } from '@/db'
+ import { cloudProfiles, desktopAuthCodes, memberships } from '@/db/schema'
++import { auth } from '@/services/firebase'
+ import { desktopError, desktopJson } from '@/lib/desktopResponse'
+ import {
+     issueDesktopSession,
+@@ -128,7 +129,20 @@ export const desktopAuthCapabilities = async (c: Context) => {
+           ? await buildMobileCapabilitySessionBody(mobileUserId)
+           : null
+     if (!session) return desktopError(c, 'server_error', 500)
+-    return desktopJson(c, session)
++    let emailVerified = false
++    try {
++        const identity = await auth().getUser(session.cloud.userId)
++        emailVerified =
++            identity.emailVerified &&
++            identity.email?.trim().toLowerCase() ===
++                session.cloud.email.trim().toLowerCase()
++    } catch {
++        emailVerified = false
++    }
++    return desktopJson(c, {
++        ...session,
++        cloud: { ...session.cloud, emailVerified }
++    })
+ }
+ 
+ /**
+diff --git a/apps/api/src/services/sessionRuntimes/CloudSessionRuntimeController.ts b/apps/api/src/services/sessionRuntimes/CloudSessionRuntimeController.ts
+index e2eb169b..7d8b5dda 100644
+--- a/apps/api/src/services/sessionRuntimes/CloudSessionRuntimeController.ts
++++ b/apps/api/src/services/sessionRuntimes/CloudSessionRuntimeController.ts
+@@ -901,4 +901,4 @@ class CloudSessionRuntimeController {
+     }
+ }
+ 
+-export default CloudSessionRuntimeController
++export default CloudSessionRuntimeController
+\ No newline at end of file
+diff --git a/apps/console/src/App.tsx b/apps/console/src/App.tsx
+index abe4f747..7ba88230 100644
+--- a/apps/console/src/App.tsx
++++ b/apps/console/src/App.tsx
+@@ -3,7 +3,7 @@ import type { Languages } from '@openclaw/i18n'
+ import type { UserProfile } from '@/ts/Interfaces'
+ 
+ import { useEffect, useState } from 'react'
+-import { Navigate, Route, Routes } from 'react-router-dom'
++import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+ import { t } from '@openclaw/i18n'
+ import { Button } from '@/components/ui'
+ import Header from '@/components/layout/Header'
+@@ -16,11 +16,13 @@ import Account from '@/pages/Account'
+ import DesktopAuth from '@/pages/DesktopAuth'
+ import Admin from '@/pages/Admin'
+ import Launch from '@/pages/Launch'
++import JoinSession from '@/pages/JoinSession'
+ import ProfileSetup from '@/pages/ProfileSetup'
+ import { useAuth } from '@/lib/AuthProvider'
+ import api from '@/lib/api'
+ import { useLanguage } from '@/lib/language'
+ import useTheme from '@/lib/useTheme'
++import localSessionJoin from '@/lib/localSessionJoin'
+ 
+ interface AuthenticatedAppProps {
+     userId: string
+@@ -121,7 +123,10 @@ const AuthenticatedApp: FC<AuthenticatedAppProps> = ({
+                     path='/organizations/new'
+                     element={<CreateOrganization />}
+                 />
+-                <Route path='/organizations/:id/setup' element={<CreateOrganization />} />
++                <Route
++                    path='/organizations/:id/setup'
++                    element={<CreateOrganization />}
++                />
+                 <Route
+                     path='/organizations/:id'
+                     element={<OrganizationDetail />}
+@@ -145,10 +150,13 @@ const AuthenticatedApp: FC<AuthenticatedAppProps> = ({
+ }
+ 
+ const App: FC = (): ReactNode => {
++    const location = useLocation()
+     const { user, loading } = useAuth()
+     const { theme, toggle } = useTheme()
+     const { language, change, supported } = useLanguage()
+ 
++    if (location.pathname === localSessionJoin.path) return <JoinSession />
++
+     if (loading) return <LoadingScreen />
+ 
+     if (!user)
+diff --git a/apps/console/src/lib/localSessionJoin.ts b/apps/console/src/lib/localSessionJoin.ts
+new file mode 100644
+index 00000000..a62be2d9
+--- /dev/null
++++ b/apps/console/src/lib/localSessionJoin.ts
+@@ -0,0 +1,8 @@
++const localSessionJoin = {
++    path: '/join',
++    scheme: 'terminalx://join',
++    downloadUrl: 'https://terminalx.ai/go',
++    secretLimit: 16384
++} as const
++
++export default localSessionJoin
+\ No newline at end of file
+diff --git a/apps/console/src/pages/CreateOrganization.tsx b/apps/console/src/pages/CreateOrganization.tsx
+index 6e4d2219..3c0c80a5 100644
+--- a/apps/console/src/pages/CreateOrganization.tsx
++++ b/apps/console/src/pages/CreateOrganization.tsx
+@@ -80,4 +80,4 @@ export default function CreateOrganization() {
+             </Link>
+         </div>
+     )
+-}
++}
+\ No newline at end of file
+diff --git a/apps/console/src/pages/JoinSession.test.tsx b/apps/console/src/pages/JoinSession.test.tsx
+new file mode 100644
+index 00000000..a39a5c38
+--- /dev/null
++++ b/apps/console/src/pages/JoinSession.test.tsx
+@@ -0,0 +1,47 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { StaticRouter } from 'react-router-dom/server'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { setLanguage } from '@openclaw/i18n'
++import App from '@/App'
++import JoinSession from '@/pages/JoinSession'
++
++vi.mock('@/lib/AuthProvider', () => ({
++    useAuth: () => ({ user: null, loading: true })
++}))
++vi.mock('@/lib/useTheme', () => ({
++    default: () => ({ theme: 'dark', toggle: vi.fn() })
++}))
++vi.mock('@/lib/language', () => ({
++    useLanguage: () => ({ language: 'en', supported: ['en'], change: vi.fn() })
++}))
++
++beforeEach(() => setLanguage('en'))
++afterEach(() => window.history.replaceState({}, '', '/'))
++
++describe('public session invitation', () => {
++    it('opens the app with the invitation only in its fragment', () => {
++        window.history.replaceState({}, '', '/join#secret_fixture')
++        const html = renderToStaticMarkup(<JoinSession />)
++        expect(html).toContain('href="terminalx://join#secret_fixture"')
++        expect(html).toContain('href="https://terminalx.ai/go"')
++    })
++
++    it.each(['', '#invalid?token=secret'])(
++        'refuses malformed fragment %s',
++        (fragment) => {
++            window.history.replaceState({}, '', `/join${fragment}`)
++            const html = renderToStaticMarkup(<JoinSession />)
++            expect(html).not.toContain('href="terminalx://join')
++        }
++    )
++
++    it('shows the invitation before browser sign-in has completed', () => {
++        window.history.replaceState({}, '', '/join#secret_fixture')
++        const html = renderToStaticMarkup(
++            <StaticRouter location='/join#secret_fixture'>
++                <App />
++            </StaticRouter>
++        )
++        expect(html).toContain('href="terminalx://join#secret_fixture"')
++    })
++})
+\ No newline at end of file
+diff --git a/apps/console/src/pages/JoinSession.tsx b/apps/console/src/pages/JoinSession.tsx
+new file mode 100644
+index 00000000..fa21ac75
+--- /dev/null
++++ b/apps/console/src/pages/JoinSession.tsx
+@@ -0,0 +1,49 @@
++import type { FC, ReactNode } from 'react'
++
++import { t } from '@openclaw/i18n'
++import { Button } from '@/components/ui'
++import localSessionJoin from '@/lib/localSessionJoin'
++
++const JoinSession: FC = (): ReactNode => {
++    const secret = window.location.hash
++    const valid =
++        secret.length > 1 &&
++        secret.length < localSessionJoin.secretLimit &&
++        /^#[A-Za-z0-9_-]+$/.test(secret)
++
++    return (
++        <main className='flex min-h-screen items-center justify-center p-8'>
++            <div className='max-w-md space-y-6 text-center'>
++                <h1 className='text-2xl font-semibold'>
++                    {t('sessionJoin.title')}
++                </h1>
++                <p className='text-muted-foreground'>
++                    {t(
++                        valid
++                            ? 'sessionJoin.description'
++                            : 'sessionJoin.invalid'
++                    )}
++                </p>
++                {valid && (
++                    <Button size='lg' asChild>
++                        <a href={`${localSessionJoin.scheme}${secret}`}>
++                            {t('sessionJoin.open')}
++                        </a>
++                    </Button>
++                )}
++                <div>
++                    <p className='mb-3'>{t('sessionJoin.install')}</p>
++                    <a
++                        className='font-medium underline'
++                        href={localSessionJoin.downloadUrl}
++                        rel='noreferrer'
++                    >
++                        {t('console.launchDownload')}
++                    </a>
++                </div>
++            </div>
++        </main>
++    )
++}
++
++export default JoinSession
+\ No newline at end of file
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index 2d5ca23c..7594771e 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -1,7 +1,7 @@
+ {
+     "name": "desktop",
+     "productName": "TerminalXGo",
+-    "version": "0.0.221",
++    "version": "0.0.222",
+     "description": "ClawHost Go — desktop client to deploy and manage OpenClaw instances on your machine.",
+     "author": {
+         "name": "TerminalX",
+diff --git a/apps/mobile/package.json b/apps/mobile/package.json
+index 265fb610..019beded 100644
+--- a/apps/mobile/package.json
++++ b/apps/mobile/package.json
+@@ -1,6 +1,6 @@
+ {
+     "name": "mobile",
+-    "version": "0.0.411",
++    "version": "0.0.412",
+     "private": true,
+     "main": "./index.ts",
+     "scripts": {
+diff --git a/apps/relay/src/cell/host-control-commands.ts b/apps/relay/src/cell/host-control-commands.ts
+index b5b418c7..950ec7cd 100644
+--- a/apps/relay/src/cell/host-control-commands.ts
++++ b/apps/relay/src/cell/host-control-commands.ts
+@@ -63,7 +63,8 @@ export class HostControlCommands {
+                 const minted = await this.credentials.mintInvite(
+                     session.relayHostId,
+                     invite.data.relayDeviceId,
+-                    now
++                    now,
++                    invite.data.sessionShare
+                 )
+                 return inviteCreatedFrame({
+                     reqId: invite.data.reqId,
+diff --git a/apps/relay/src/conformance/session-invites.test.ts b/apps/relay/src/conformance/session-invites.test.ts
+new file mode 100644
+index 00000000..c6a8d768
+--- /dev/null
++++ b/apps/relay/src/conformance/session-invites.test.ts
+@@ -0,0 +1,80 @@
++import { afterAll, describe, expect, test } from 'bun:test'
++import { randomUUID } from 'node:crypto'
++import { connectRelayRedis } from '@/registry/redis-store'
++import { DeviceCredentialStore } from '@/registry/device-credential-store'
++
++const redis = connectRelayRedis(
++    process.env.RELAY_TEST_REDIS_URL ?? 'redis://127.0.0.1:56379',
++    `share-test-${randomUUID()}`
++)
++const credentials = new DeviceCredentialStore(redis)
++afterAll(() => redis.close())
++
++describe('session invitations', () => {
++    test('allows several opaque relay connections until the host revokes the invitation', async () => {
++        const now = Date.now()
++        const invite = await credentials.mintInvite(
++            'host',
++            'session-link',
++            now,
++            { expiresAt: now + 60_000 }
++        )
++        expect(
++            await credentials.redeemInvite(
++                'other-host',
++                invite.inviteToken,
++                now
++            )
++        ).toBeNull()
++        expect(
++            await credentials.redeemInvite('host', invite.inviteToken, now)
++        ).toMatchObject({ relayDeviceId: 'session-link', reusable: true })
++        expect(
++            await credentials.redeemInvite('host', invite.inviteToken, now + 1)
++        ).not.toBeNull()
++        await credentials.revoke('host', 'session-link', 'revoke')
++        expect(
++            await credentials.redeemInvite('host', invite.inviteToken, now + 2)
++        ).toBeNull()
++    })
++    test('expires and replaces invitations without permitting the old secret to revive', async () => {
++        const now = Date.now()
++        const old = await credentials.mintInvite('host', 'replacement', now, {
++            expiresAt: now + 60_000
++        })
++        const next = await credentials.mintInvite('host', 'replacement', now, {
++            expiresAt: now + 120_000
++        })
++        expect(
++            await credentials.redeemInvite('host', old.inviteToken, now + 1)
++        ).toBeNull()
++        expect(
++            await credentials.redeemInvite('host', next.inviteToken, now + 1)
++        ).not.toBeNull()
++        expect(
++            await credentials.redeemInvite(
++                'host',
++                next.inviteToken,
++                now + 120_000
++            )
++        ).toBeNull()
++    })
++    test('preserves single-use phone pairing invitations', async () => {
++        const now = Date.now()
++        const invite = await credentials.mintInvite('host', 'phone', now)
++        expect(
++            await credentials.redeemInvite('host', invite.inviteToken, now)
++        ).not.toBeNull()
++        expect(
++            await credentials.redeemInvite('host', invite.inviteToken, now)
++        ).toBeNull()
++    })
++    test('refuses unbounded or already expired lifetimes', async () => {
++        const now = Date.now()
++        for (const expiresAt of [now, now - 1, now + 86_400_001]) {
++            await expect(
++                credentials.mintInvite('host', 'invalid', now, { expiresAt })
++            ).rejects.toThrow('invalid_share_invite_expiry')
++        }
++    })
++})
+\ No newline at end of file
+diff --git a/apps/relay/src/protocol/host-control-wire.ts b/apps/relay/src/protocol/host-control-wire.ts
+index 36e43242..91628cb5 100644
+--- a/apps/relay/src/protocol/host-control-wire.ts
++++ b/apps/relay/src/protocol/host-control-wire.ts
+@@ -58,7 +58,11 @@ export const InviteCreateSchema = z
+     .object({
+         type: z.literal('invite-create'),
+         reqId: OpaqueId,
+-        relayDeviceId: OpaqueId
++        relayDeviceId: OpaqueId,
++        sessionShare: z
++            .object({ expiresAt: z.number().int().positive() })
++            .strict()
++            .optional()
+     })
+     .strict()
+ 
+diff --git a/apps/relay/src/registry/device-credential-store.ts b/apps/relay/src/registry/device-credential-store.ts
+index 0e022a87..11456401 100644
+--- a/apps/relay/src/registry/device-credential-store.ts
++++ b/apps/relay/src/registry/device-credential-store.ts
+@@ -16,6 +16,9 @@ import type {
+ } from '../protocol/outbound-control'
+ 
+ const INVITE = (token: string): string => `invite:${token}`
++const SHARE_INVITE_INDEX = (host: string, device: string): string =>
++    `shareinvite:${host}:${device}`
++const SHARE_INVITE_TTL_MS = 24 * 60 * 60 * 1000
+ const CREDENTIAL = (relayHostId: string, relayDeviceId: string): string =>
+     `cred:${relayHostId}:${relayDeviceId}`
+ const CREDENTIAL_INDEX = (relayHostId: string, hash: string): string =>
+@@ -36,6 +39,7 @@ export type InviteRecord = {
+     relayDeviceId: string
+     expiresAt: number
+     maxAttempts: number
++    reusable?: boolean
+ }
+ 
+ export type CredentialRecord = {
+@@ -82,30 +86,36 @@ export class DeviceCredentialStore {
+     async mintInvite(
+         relayHostId: string,
+         relayDeviceId: string,
+-        now: number
++        now: number,
++        sessionShare?: { expiresAt: number }
+     ): Promise<{
+         inviteToken: string
+         expiresAt: number
+         maxAttempts: number
+     }> {
+         const inviteToken = freshToken()
+-        const expiresAt = now + INVITE_TTL_MS
++        const expiresAt = sessionShare?.expiresAt ?? now + INVITE_TTL_MS
++        if (expiresAt <= now || expiresAt > now + SHARE_INVITE_TTL_MS)
++            throw new Error('invalid_share_invite_expiry')
+         const record: InviteRecord = {
+             relayHostId,
+             relayDeviceId,
+             expiresAt,
+-            maxAttempts: INVITE_MAX_ATTEMPTS
++            maxAttempts: INVITE_MAX_ATTEMPTS,
++            ...(sessionShare ? { reusable: true } : {})
+         }
+-        await this.redis.writeJson(INVITE(inviteToken), record, INVITE_TTL_MS)
++        await this.redis.writeJson(INVITE(inviteToken), record, expiresAt - now)
++        if (sessionShare)
++            await this.redis.writeRaw(
++                SHARE_INVITE_INDEX(relayHostId, relayDeviceId),
++                inviteToken,
++                expiresAt - now
++            )
+         return { inviteToken, expiresAt, maxAttempts: INVITE_MAX_ATTEMPTS }
+     }
+ 
+-    /**
+-     * Single-use: the record is deleted on the first successful lookup.
+-     *
+-     * An invite that survived redemption would let anyone who saw the pairing URL
+-     * attach a second device, which is the failure the token exists to prevent.
+-     */
++    /** Pairing invites are single use. Session invitations remain redeemable
++     * until revoked or expired; the E2EE host enforces identity and session policy. */
+     async redeemInvite(
+         relayHostId: string,
+         token: string,
+@@ -119,7 +129,14 @@ export class DeviceCredentialStore {
+         ) {
+             return null
+         }
+-        await this.redis.delete(INVITE(token))
++        if (record.reusable) {
++            const current = await this.redis.readRaw(
++                SHARE_INVITE_INDEX(relayHostId, record.relayDeviceId)
++            )
++            if (current !== token) return null
++        } else {
++            await this.redis.delete(INVITE(token))
++        }
+         return record
+     }
+ 
+@@ -305,6 +322,11 @@ export class DeviceCredentialStore {
+         relayDeviceId: string,
+         reqId: string
+     ): Promise<void> {
++        const shareInvite = await this.redis.readRaw(
++            SHARE_INVITE_INDEX(relayHostId, relayDeviceId)
++        )
++        if (shareInvite) await this.redis.delete(INVITE(shareInvite))
++        await this.redis.delete(SHARE_INVITE_INDEX(relayHostId, relayDeviceId))
+         const existing = await this.readCredential(relayHostId, relayDeviceId)
+         if (existing) {
+             await this.redis.delete(
+diff --git a/apps/web/index.html b/apps/web/index.html
+index 97f45393..2fc63b3e 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -47,9 +47,12 @@
+ 
+         <script>
+             ;(function () {
++                // Invitation fragments are bearer secrets. The join page must
++                // never load analytics that can collect the complete URL.
++                if (window.location.pathname === '/join') return
+                 var loaded = false
+                 function loadAnalytics() {
+-                    if (loaded) return
++                    if (loaded || window.location.pathname === '/join') return
+                     loaded = true
+                     window.removeEventListener('scroll', loadAnalytics)
+                     window.removeEventListener('click', loadAnalytics)
+@@ -127,4 +130,4 @@
+         <div id="root"></div>
+         <script type="module" src="/src/main.tsx" fetchpriority="high"></script>
+     </body>
+-</html>
++</html>
+\ No newline at end of file
+diff --git a/apps/web/package.json b/apps/web/package.json
+index 068c902f..474d0a3b 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,6 +1,6 @@
+ {
+     "name": "web",
+-    "version": "0.0.484",
++    "version": "0.0.485",
+     "private": true,
+     "type": "module",
+     "scripts": {
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 16b7e4c1..21a72dd5 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -11,6 +11,7 @@ import { useThemeEffect, useLanguageEffect, useRefer } from '@/hooks'
+ 
+ import Go from '@/pages/Go'
+ import Landing from '@/pages/Landing'
++const JoinSession = lazy(() => import('@/pages/JoinSession'))
+ const Login = lazy(() => import('@/pages/Login'))
+ const Dashboard = lazy(() => import('@/pages/Dashboard'))
+ const SSHKeys = lazy(() => import('@/pages/SSHKeys'))
+@@ -51,6 +52,7 @@ const App: FC = (): ReactNode => {
+                     <Routes>
+                         <Route path={ROUTES.HOME} element={<Landing />} />
+                         <Route path={ROUTES.GO} element={<Go />} />
++                        <Route path={ROUTES.JOIN} element={<JoinSession />} />
+                         <Route path={ROUTES.TERMS} element={<Terms />} />
+                         <Route path={ROUTES.PRIVACY} element={<Privacy />} />
+                         <Route
+diff --git a/apps/web/src/lib/constants/routes.ts b/apps/web/src/lib/constants/routes.ts
+index 71335209..5ac19452 100644
+--- a/apps/web/src/lib/constants/routes.ts
++++ b/apps/web/src/lib/constants/routes.ts
+@@ -3,6 +3,7 @@ import PATHS from '@/lib/paths'
+ const ROUTES = {
+     HOME: PATHS.HOME,
+     GO: `/${PATHS.GO}`,
++    JOIN: `/${PATHS.JOIN}`,
+     LOGIN: `/${PATHS.LOGIN}`,
+     AGENTS: `/${PATHS.AGENTS}`,
+     SSH_KEYS: `/${PATHS.SSH_KEYS}`,
+diff --git a/apps/web/src/lib/paths.ts b/apps/web/src/lib/paths.ts
+index 33117403..63c49a1a 100644
+--- a/apps/web/src/lib/paths.ts
++++ b/apps/web/src/lib/paths.ts
+@@ -1,6 +1,7 @@
+ const PATHS = {
+     HOME: '/',
+     GO: 'go',
++    JOIN: 'join',
+     LOGIN: 'auth',
+     AGENTS: 'agents',
+     SSH_KEYS: 'ssh-keys',
+diff --git a/apps/web/src/pages/JoinSession.test.tsx b/apps/web/src/pages/JoinSession.test.tsx
+new file mode 100644
+index 00000000..fca132bf
+--- /dev/null
++++ b/apps/web/src/pages/JoinSession.test.tsx
+@@ -0,0 +1,44 @@
++import { renderToStaticMarkup } from 'react-dom/server'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { readFileSync } from 'node:fs'
++import { URL as NodeURL } from 'node:url'
++
++vi.mock('@openclaw/i18n', () => ({ t: (key: string) => key }))
++vi.mock('@/components', () => ({
++    GoDownloadButton: () => <button>Download</button>
++}))
++import JoinSession from '@/pages/JoinSession'
++
++afterEach(() => {
++    window.history.replaceState({}, '', '/')
++})
++describe('session invitation landing page', () => {
++    it('passes the secret only in the app-link fragment', () => {
++        window.history.replaceState({}, '', '/join#secret_fixture')
++        const html = renderToStaticMarkup(<JoinSession />)
++        expect(html).toContain('href="terminalx://join#secret_fixture"')
++        expect(html).toContain('Download')
++    })
++    it('offers no join for an absent or malformed fragment', () => {
++        window.history.replaceState({}, '', '/join#invalid?token=secret')
++        const html = renderToStaticMarkup(<JoinSession />)
++        expect(html).not.toContain('href=')
++        expect(html).toContain('sessionJoin.invalid')
++    })
++    it('does not install analytics on a page containing a bearer invitation', () => {
++        window.history.replaceState({}, '', '/join#secret_fixture')
++        const html = readFileSync(
++            new NodeURL('../../index.html', import.meta.url),
++            'utf8'
++        )
++        const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
++        expect(script).toBeTruthy()
++        const createElement = vi.spyOn(document, 'createElement')
++        const listen = vi.spyOn(window, 'addEventListener')
++        new Function('window', 'document', script)(window, document)
++        expect(createElement).not.toHaveBeenCalled()
++        expect(listen).not.toHaveBeenCalled()
++        createElement.mockRestore()
++        listen.mockRestore()
++    })
++})
+\ No newline at end of file
+diff --git a/apps/web/src/pages/JoinSession.tsx b/apps/web/src/pages/JoinSession.tsx
+new file mode 100644
+index 00000000..83071aa0
+--- /dev/null
++++ b/apps/web/src/pages/JoinSession.tsx
+@@ -0,0 +1,46 @@
++import type { FC, ReactNode } from 'react'
++
++import { t } from '@openclaw/i18n'
++import { GoDownloadButton } from '@/components'
++
++const JOIN_SCHEME = 'terminalx://join' as const
++const SECRET_LIMIT = 16384 as const
++
++const JoinSession: FC = (): ReactNode => {
++    const secret = window.location.hash
++    const valid =
++        secret.length > 1 &&
++        secret.length < SECRET_LIMIT &&
++        /^#[A-Za-z0-9_-]+$/.test(secret)
++
++    return (
++        <main className='bg-background text-foreground flex min-h-screen items-center justify-center p-8'>
++            <div className='max-w-md space-y-6 text-center'>
++                <h1 className='text-2xl font-semibold'>
++                    {t('sessionJoin.title')}
++                </h1>
++                <p className='text-muted-foreground'>
++                    {t(
++                        valid
++                            ? 'sessionJoin.description'
++                            : 'sessionJoin.invalid'
++                    )}
++                </p>
++                {valid && (
++                    <a
++                        className='bg-primary text-primary-foreground inline-flex rounded-lg px-5 py-3'
++                        href={`${JOIN_SCHEME}${secret}`}
++                    >
++                        {t('sessionJoin.open')}
++                    </a>
++                )}
++                <div>
++                    <p className='mb-3'>{t('sessionJoin.install')}</p>
++                    <GoDownloadButton />
++                </div>
++            </div>
++        </main>
++    )
++}
++
++export default JoinSession
+\ No newline at end of file
+diff --git a/packages/i18n/src/langs/ar.ts b/packages/i18n/src/langs/ar.ts
+index 963e59c1..30e399d6 100644
+--- a/packages/i18n/src/langs/ar.ts
++++ b/packages/i18n/src/langs/ar.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const ar: Translations = {
++    sessionJoin: {
++        title: 'الانضمام إلى جلسة مشتركة',
++        description:
++            'افتح TerminalX لتسجيل الدخول والانضمام. تبقى المحادثة والطرفيات على جهاز المضيف.',
++        open: 'فتح في TerminalX',
++        install: 'تثبيت TerminalX',
++        invalid: 'هذا الرابط غير مكتمل. اطلب رابطًا جديدًا من المضيف.'
++    },
+     console: {
+         agentsTitle: 'الوكلاء',
+         pendingAgentsTitle: 'قيد الانتظار',
+diff --git a/packages/i18n/src/langs/de.ts b/packages/i18n/src/langs/de.ts
+index 6e4c3962..3ccb2e73 100644
+--- a/packages/i18n/src/langs/de.ts
++++ b/packages/i18n/src/langs/de.ts
+@@ -1,6 +1,15 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const de: Translations = {
++    sessionJoin: {
++        title: 'Einer geteilten Sitzung beitreten',
++        description:
++            'Öffne TerminalX, um dich anzumelden und beizutreten. Chat und Terminals bleiben auf dem Computer des Gastgebers.',
++        open: 'In TerminalX öffnen',
++        install: 'TerminalX installieren',
++        invalid:
++            'Dieser Link ist unvollständig. Bitte den Gastgeber um einen neuen Link.'
++    },
+     console: {
+         agentsTitle: 'Agenten',
+         pendingAgentsTitle: 'Ausstehend',
+diff --git a/packages/i18n/src/langs/en.ts b/packages/i18n/src/langs/en.ts
+index b187ba32..88d8ed07 100644
+--- a/packages/i18n/src/langs/en.ts
++++ b/packages/i18n/src/langs/en.ts
+@@ -1,4 +1,12 @@
+ const en = {
++    sessionJoin: {
++        title: 'Join a shared session',
++        description:
++            'Open TerminalX to sign in and join. The host’s transcript and terminals stay on their computer.',
++        open: 'Open in TerminalX',
++        install: 'Install TerminalX',
++        invalid: 'This link is incomplete. Ask the host for a new link.'
++    },
+     console: {
+         agentsTitle: 'Agents',
+         pendingAgentsTitle: 'Pending',
+diff --git a/packages/i18n/src/langs/es.ts b/packages/i18n/src/langs/es.ts
+index 62a3b445..2075d896 100644
+--- a/packages/i18n/src/langs/es.ts
++++ b/packages/i18n/src/langs/es.ts
+@@ -1,6 +1,15 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const es: Translations = {
++    sessionJoin: {
++        title: 'Unirse a una sesión compartida',
++        description:
++            'Abre TerminalX para iniciar sesión y unirte. La conversación y los terminales permanecen en el ordenador del anfitrión.',
++        open: 'Abrir en TerminalX',
++        install: 'Instalar TerminalX',
++        invalid:
++            'Este enlace está incompleto. Pide un nuevo enlace al anfitrión.'
++    },
+     console: {
+         agentsTitle: 'Agentes',
+         pendingAgentsTitle: 'Pendientes',
+diff --git a/packages/i18n/src/langs/fr.ts b/packages/i18n/src/langs/fr.ts
+index 547d96e6..ac1d96b1 100644
+--- a/packages/i18n/src/langs/fr.ts
++++ b/packages/i18n/src/langs/fr.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const fr: Translations = {
++    sessionJoin: {
++        title: 'Rejoindre une session partagée',
++        description:
++            'Ouvrez TerminalX pour vous connecter et rejoindre la session. La conversation et les terminaux restent sur l’ordinateur de l’hôte.',
++        open: 'Ouvrir dans TerminalX',
++        install: 'Installer TerminalX',
++        invalid: 'Ce lien est incomplet. Demandez un nouveau lien à l’hôte.'
++    },
+     console: {
+         agentsTitle: 'Agents',
+         pendingAgentsTitle: 'En attente',
+diff --git a/packages/i18n/src/langs/hi.ts b/packages/i18n/src/langs/hi.ts
+index e5cc225e..5375424c 100644
+--- a/packages/i18n/src/langs/hi.ts
++++ b/packages/i18n/src/langs/hi.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const hi: Translations = {
++    sessionJoin: {
++        title: 'साझा सत्र में शामिल हों',
++        description:
++            'साइन इन करके शामिल होने के लिए TerminalX खोलें। बातचीत और टर्मिनल होस्ट के कंप्यूटर पर रहते हैं।',
++        open: 'TerminalX में खोलें',
++        install: 'TerminalX इंस्टॉल करें',
++        invalid: 'यह लिंक अधूरा है। होस्ट से नया लिंक माँगें।'
++    },
+     console: {
+         agentsTitle: 'एजेंट',
+         pendingAgentsTitle: 'लंबित',
+diff --git a/packages/i18n/src/langs/it.ts b/packages/i18n/src/langs/it.ts
+index 7a9624dc..516c41fe 100644
+--- a/packages/i18n/src/langs/it.ts
++++ b/packages/i18n/src/langs/it.ts
+@@ -1,6 +1,15 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const it: Translations = {
++    sessionJoin: {
++        title: 'Partecipa a una sessione condivisa',
++        description:
++            'Apri TerminalX per accedere e partecipare. La conversazione e i terminali restano sul computer del proprietario.',
++        open: 'Apri in TerminalX',
++        install: 'Installa TerminalX',
++        invalid:
++            'Questo link è incompleto. Chiedi un nuovo link al proprietario.'
++    },
+     console: {
+         agentsTitle: 'Agenti',
+         pendingAgentsTitle: 'In sospeso',
+diff --git a/packages/i18n/src/langs/ja.ts b/packages/i18n/src/langs/ja.ts
+index 4cabd2b4..09148de0 100644
+--- a/packages/i18n/src/langs/ja.ts
++++ b/packages/i18n/src/langs/ja.ts
+@@ -1,6 +1,15 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const ja: Translations = {
++    sessionJoin: {
++        title: '共有セッションに参加',
++        description:
++            'TerminalX を開いてサインインし、参加してください。会話とターミナルはホストのコンピューターに保持されます。',
++        open: 'TerminalX で開く',
++        install: 'TerminalX をインストール',
++        invalid:
++            'このリンクは不完全です。ホストに新しいリンクを依頼してください。'
++    },
+     console: {
+         agentsTitle: 'エージェント',
+         pendingAgentsTitle: '保留中',
+diff --git a/packages/i18n/src/langs/nl.ts b/packages/i18n/src/langs/nl.ts
+index 9cf16e6d..ec1c2de6 100644
+--- a/packages/i18n/src/langs/nl.ts
++++ b/packages/i18n/src/langs/nl.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const nl: Translations = {
++    sessionJoin: {
++        title: 'Deelnemen aan een gedeelde sessie',
++        description:
++            'Open TerminalX om in te loggen en deel te nemen. Het gesprek en de terminals blijven op de computer van de host.',
++        open: 'Openen in TerminalX',
++        install: 'TerminalX installeren',
++        invalid: 'Deze link is onvolledig. Vraag de host om een nieuwe link.'
++    },
+     console: {
+         agentsTitle: 'Agents',
+         pendingAgentsTitle: 'In behandeling',
+diff --git a/packages/i18n/src/langs/pl.ts b/packages/i18n/src/langs/pl.ts
+index b33f7fb5..283947cb 100644
+--- a/packages/i18n/src/langs/pl.ts
++++ b/packages/i18n/src/langs/pl.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const pl: Translations = {
++    sessionJoin: {
++        title: 'Dołącz do udostępnionej sesji',
++        description:
++            'Otwórz TerminalX, zaloguj się i dołącz. Rozmowa i terminale pozostają na komputerze gospodarza.',
++        open: 'Otwórz w TerminalX',
++        install: 'Zainstaluj TerminalX',
++        invalid: 'Ten link jest niekompletny. Poproś gospodarza o nowy link.'
++    },
+     console: {
+         agentsTitle: 'Agenci',
+         pendingAgentsTitle: 'Oczekujące',
+diff --git a/packages/i18n/src/langs/pt.ts b/packages/i18n/src/langs/pt.ts
+index 09a5afcb..035ebd9b 100644
+--- a/packages/i18n/src/langs/pt.ts
++++ b/packages/i18n/src/langs/pt.ts
+@@ -1,6 +1,15 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const pt: Translations = {
++    sessionJoin: {
++        title: 'Entrar numa sessão partilhada',
++        description:
++            'Abra o TerminalX para iniciar sessão e entrar. A conversa e os terminais permanecem no computador do anfitrião.',
++        open: 'Abrir no TerminalX',
++        install: 'Instalar TerminalX',
++        invalid:
++            'Esta ligação está incompleta. Peça uma nova ligação ao anfitrião.'
++    },
+     console: {
+         agentsTitle: 'Agentes',
+         pendingAgentsTitle: 'Pendentes',
+diff --git a/packages/i18n/src/langs/ru.ts b/packages/i18n/src/langs/ru.ts
+index 293c905a..401e724c 100644
+--- a/packages/i18n/src/langs/ru.ts
++++ b/packages/i18n/src/langs/ru.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const ru: Translations = {
++    sessionJoin: {
++        title: 'Присоединиться к общему сеансу',
++        description:
++            'Откройте TerminalX, войдите в аккаунт и присоединитесь. Чат и терминалы остаются на компьютере владельца.',
++        open: 'Открыть в TerminalX',
++        install: 'Установить TerminalX',
++        invalid: 'Эта ссылка неполная. Попросите владельца отправить новую.'
++    },
+     console: {
+         agentsTitle: 'Агенты',
+         pendingAgentsTitle: 'Ожидают',
+diff --git a/packages/i18n/src/langs/tr.ts b/packages/i18n/src/langs/tr.ts
+index a9aa48d4..5b6b5910 100644
+--- a/packages/i18n/src/langs/tr.ts
++++ b/packages/i18n/src/langs/tr.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const tr: Translations = {
++    sessionJoin: {
++        title: 'Paylaşılan oturuma katıl',
++        description:
++            'Giriş yapıp katılmak için TerminalX’i açın. Sohbet ve terminaller ev sahibinin bilgisayarında kalır.',
++        open: 'TerminalX’te aç',
++        install: 'TerminalX’i yükle',
++        invalid: 'Bu bağlantı eksik. Ev sahibinden yeni bir bağlantı isteyin.'
++    },
+     console: {
+         agentsTitle: 'Ajanlar',
+         pendingAgentsTitle: 'Bekleyen',
+diff --git a/packages/i18n/src/langs/zh.ts b/packages/i18n/src/langs/zh.ts
+index f6c58abc..e9676f31 100644
+--- a/packages/i18n/src/langs/zh.ts
++++ b/packages/i18n/src/langs/zh.ts
+@@ -1,6 +1,14 @@
+ import type { Translations } from '#i18n/types'
+ 
+ const zh: Translations = {
++    sessionJoin: {
++        title: '加入共享会话',
++        description:
++            '打开 TerminalX，登录并加入。聊天记录和终端保留在主机电脑上。',
++        open: '在 TerminalX 中打开',
++        install: '安装 TerminalX',
++        invalid: '此链接不完整。请向主机用户索取新链接。'
++    },
+     console: {
+         agentsTitle: '代理',
+         pendingAgentsTitle: '待处理',

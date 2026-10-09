@@ -64,6 +64,60 @@ pub fn register_host(context: &AccountContext, payload: &HostBindingPayload) -> 
     )
 }
 
+/// A guest's token is presented only to the fixed account API. No active
+/// organization, profile or host membership is needed to verify a person.
+pub(super) fn verify_guest(token: &str) -> Result<crate::local_sharing::Person> {
+    verify_guest_at(&crate::account::api_base_url(), token)
+}
+
+fn verify_guest_at(base: &str, token: &str) -> Result<crate::local_sharing::Person> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Identity {
+        user_id: String,
+        email: String,
+        display_name: Option<String>,
+        #[serde(default)]
+        email_verified: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Organization {
+        org_id: String,
+    }
+    #[derive(Deserialize)]
+    struct Response {
+        cloud: Identity,
+        #[serde(default)]
+        organizations: Vec<Organization>,
+    }
+    let response: Response = request_json(
+        base,
+        "/v1/desktop/auth/capabilities",
+        "POST",
+        Some(json!({})),
+        token,
+    )?;
+    let identity = response.cloud;
+    if identity.user_id.trim().is_empty() || identity.email.trim().is_empty() {
+        return Err(anyhow!("Account API returned no verified identity."));
+    }
+    Ok(crate::local_sharing::Person {
+        user_id: identity.user_id,
+        display_name: identity
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| identity.email.clone()),
+        email: identity.email,
+        email_verified: identity.email_verified,
+        organization_ids: response
+            .organizations
+            .into_iter()
+            .map(|o| o.org_id)
+            .collect(),
+    })
+}
+
 pub fn heartbeat(
     context: &AccountContext,
     host_id: &str,
@@ -285,7 +339,7 @@ fn send(
     }
 }
 
-fn allowed_https_origin(value: &str) -> bool {
+pub(super) fn allowed_https_origin(value: &str) -> bool {
     url::Url::parse(value)
         .ok()
         .is_some_and(|url| url.scheme() == "https" && url.origin().ascii_serialization() == value)
@@ -294,6 +348,72 @@ fn allowed_https_origin(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_identity_is_verified_with_bearer_token_without_an_organization() {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                (
+                    200,
+                    r#"{"cloud":{"userId":"verified-user","email":"guest@example.com","displayName":"Verified Guest","emailVerified":true},"organizations":[]}"#,
+                ),
+                (
+                    200,
+                    r#"{"cloud":{"userId":"verified-user","email":"guest@example.com","displayName":null}}"#,
+                ),
+                (401, r#"{"userId":"forged","email":"forged@example.com"}"#),
+                (
+                    200,
+                    r#"{"cloud":{"userId":"","email":"guest@example.com"}}"#,
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), "POST /v1/desktop/auth/capabilities HTTP/1.1");
+                let mut length = 0;
+                let mut authenticated = false;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length: ") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    authenticated |= lower.trim() == "authorization: bearer synthetic-guest-token";
+                }
+                assert!(authenticated);
+                let mut payload = vec![0; length];
+                reader.read_exact(&mut payload).unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+                    json!({})
+                );
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let person = verify_guest_at(&base, "synthetic-guest-token").unwrap();
+        assert_eq!(person.user_id, "verified-user");
+        assert_eq!(person.display_name, "Verified Guest");
+        assert!(person.email_verified);
+        assert!(person.organization_ids.is_empty());
+        let legacy = verify_guest_at(&base, "synthetic-guest-token").unwrap();
+        assert!(!legacy.email_verified);
+        assert_eq!(legacy.display_name, "guest@example.com");
+        assert!(verify_guest_at(&base, "synthetic-guest-token").is_err());
+        assert!(verify_guest_at(&base, "synthetic-guest-token").is_err());
+        server.join().unwrap();
+    }
 
     #[test]
     fn relay_cells_must_be_canonical_https_origins() {

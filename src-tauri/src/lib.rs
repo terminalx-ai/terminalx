@@ -83,6 +83,7 @@ mod installation;
 #[cfg(feature = "desktop")]
 mod keychain;
 mod landed;
+mod local_sharing;
 mod memory_baseline;
 mod models;
 mod names;
@@ -227,11 +228,19 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 let links = desktop_links::DesktopLinks::for_identifier(&app.config().identifier);
                 let account = account.clone();
+                let joining = pairing.clone();
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        if links.is_join_link(&url) { let _ = joining.set_pending_join(url.to_string()); }
+                    }
+                }
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
                         if links.accepts_scheme(url.scheme()) {
                             account::focus_main_window(&app_handle);
-                            if links.is_launch_link(&url) {
+                            if links.is_join_link(&url) {
+                                if joining.set_pending_join(url.to_string()).is_err() { log::warn!("ignored invalid session link"); }
+                            } else if links.is_launch_link(&url) {
                                 log::info!("received TerminalX launch link");
                             } else if account.handle_deep_link(&app_handle, &url) {
                                 log::info!("received TerminalX account callback");
@@ -269,7 +278,7 @@ pub fn run() {
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone());
+            let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone()).with_pairing(pairing.clone());
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),
@@ -403,6 +412,13 @@ pub fn run() {
             cloud_catalog::cloud_catalog_load,
             cloud_catalog::cloud_catalog_save,
             commands::pairing_status,
+            commands::session_share_create,
+            commands::session_share_status,
+            commands::session_share_change,
+            commands::session_join_pending,
+            commands::session_guest_join,
+            commands::session_guest_send,
+            commands::session_guest_leave,
             commands::pairing_generate,
             commands::pairing_revoke,
             commands::pairing_set_host_name,
