@@ -26,6 +26,7 @@ import {
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
 import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
+import { START_ACTIONS } from "@/lib/projectStart";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { TITLEBAR_INSET } from "./AppShell";
@@ -197,7 +198,7 @@ export function ProjectRail({
           ) : showArchived ? (
             "Nothing archived."
           ) : (
-            "Add a project to start."
+            <StartLinks onError={setError} />
           )}
         </div>
       )}
@@ -353,6 +354,30 @@ export function ProjectRail({
             <Settings />
           </Button>
         </WithTooltip>
+      </div>
+    </div>
+  );
+}
+
+/** The empty sidebar points at the same three ways to a project as the start screen. */
+function StartLinks({ onError }: { onError: (message: string | null) => void }) {
+  return (
+    <div data-testid="sidebar-start">
+      Add a project to get started.
+      <div className="mt-2 flex flex-col items-center gap-1">
+        {START_ACTIONS.map((action) => (
+          <button
+            key={action.id}
+            type="button"
+            className="rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            onClick={() => {
+              onError(null);
+              void Promise.resolve(action.run()).catch((cause) => onError(errorMessage(cause)));
+            }}
+          >
+            {action.label}
+          </button>
+        ))}
       </div>
     </div>
   );

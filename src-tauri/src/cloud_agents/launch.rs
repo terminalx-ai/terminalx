@@ -69,8 +69,8 @@ const STAGING_PREFIX: &str = ".terminalx-clone-";
 pub const CLONE_BUDGET: Duration = Duration::from_secs(30 * 60);
 /// A transfer slower than this many bytes a second for this many seconds is
 /// given up, so a stalled clone fails the launch long before the budget.
-const LOW_SPEED_LIMIT: &str = "http.lowSpeedLimit=1000";
-const LOW_SPEED_TIME: &str = "http.lowSpeedTime=60";
+pub(crate) const LOW_SPEED_LIMIT: &str = "http.lowSpeedLimit=1000";
+pub(crate) const LOW_SPEED_TIME: &str = "http.lowSpeedTime=60";
 /// How often a running clone asks the server whether its create was canceled.
 pub const CANCEL_POLL: Duration = Duration::from_secs(10);
 

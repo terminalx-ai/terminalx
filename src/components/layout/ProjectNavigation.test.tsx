@@ -330,3 +330,54 @@ it("opens an empty folder from the project rail and shows folder navigation", as
   expect(store.getSessions().selectedProject).toBe(folder.path);
   expect(store.getSessions().projects.find((p) => p.path === folder.path)?.kind).toBe("folder");
 });
+
+describe("the sidebar with no projects", () => {
+  const emptyRail = async () => {
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (cmd: string, args?: Record<string, string>) => {
+      if (cmd === "list_projects") return { projects: [], lastSelected: null };
+      if (cmd === "list_sessions") return [];
+      if (cmd === "add_project") return { path: args!.path, name: "widgets", kind: "git" } satisfies Project;
+      if (cmd === "select_project") return;
+      return original(cmd, args);
+    });
+    await act(async () => {
+      await store.refreshEverything();
+      store.selectSession(null);
+    });
+    mount();
+    return within(screen.getByTestId("sidebar-start"));
+  };
+
+  it("points at the start screen's three ways to a project", async () => {
+    const start = await emptyRail();
+    expect(screen.getByTestId("sidebar-start").textContent).toContain("Add a project to get started.");
+    expect(start.getAllByRole("button").map((button) => button.textContent)).toEqual(["Open local project", "Open GitHub project", "Quick start"]);
+  });
+
+  it("opens a local project from there, and the links give way to it", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockResolvedValue("/code/widgets");
+    const start = await emptyRail();
+
+    fireEvent.click(start.getByRole("button", { name: "Open local project" }));
+
+    await screen.findByRole("treeitem", { name: "widgets" });
+    expect(screen.queryByTestId("sidebar-start")).toBeNull();
+    // A new session in that project, never one without a project.
+    expect(store.getSessionStore().newSessionPreset).toEqual({ projectPath: "/code/widgets", cwd: null });
+  });
+
+  it("opens the GitHub and Quick start dialogs from there", async () => {
+    const { useProjectStartDialog, openProjectStart } = await import("@/lib/projectStart");
+    const Probe = () => <output data-testid="start-dialog">{useProjectStartDialog() ?? "none"}</output>;
+    const start = await emptyRail();
+    render(<Probe />);
+
+    fireEvent.click(start.getByRole("button", { name: "Open GitHub project" }));
+    expect(screen.getByTestId("start-dialog").textContent).toBe("github");
+    fireEvent.click(start.getByRole("button", { name: "Quick start" }));
+    expect(screen.getByTestId("start-dialog").textContent).toBe("quick");
+    act(() => openProjectStart(null));
+  });
+});

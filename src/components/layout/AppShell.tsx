@@ -5,6 +5,8 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { NewSessionView } from "@/components/session/NewSessionView";
+import { StartScreen } from "@/components/start/StartScreen";
+import { ProjectStartDialogHost } from "@/components/start/ProjectStartDialogs";
 import { IssuesView } from "@/components/issues/IssuesView";
 import { AgentDashboard } from "@/components/dashboard/AgentDashboard";
 import { SkillsView } from "@/components/skills/SkillsView";
@@ -153,6 +155,7 @@ export function AppShell() {
       <CloudShareDialogHost />
       <NewCloudWorkspaceDialogHost />
       <WorkspaceRemoveDialog />
+      <ProjectStartDialogHost />
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
@@ -202,6 +205,7 @@ export function AppShell() {
                 sidebarOpen={sidebarOpen}
                 onToggleSidebar={toggleSidebar}
                 onTogglePanel={togglePanel}
+                onOpenSettings={openSettings}
                 onCreated={onCreated}
               />
             )}
@@ -227,11 +231,13 @@ function UnselectedWorkspace({
   sidebarOpen,
   onToggleSidebar,
   onTogglePanel,
+  onOpenSettings,
   onCreated,
 }: {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onTogglePanel: () => void;
+  onOpenSettings: (tab?: SettingsTab) => void;
   onCreated: (sessionId: string, tabId: string, text: string, images?: ImageInput[]) => void;
 }) {
   const prefs = usePrefs();
@@ -252,6 +258,9 @@ function UnselectedWorkspace({
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
   const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";
+  // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
+  // Not before the projects are read, and not over a cloud draft, which needs no local project.
+  const startScreen = store.view === "new" && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset;
 
   return (
     <>
@@ -276,7 +285,9 @@ function UnselectedWorkspace({
                 ? ""
                 : store.view === "automations"
                   ? "Automations"
-                  : "New session"}
+                  : startScreen
+                    ? ""
+                    : "New session"}
           </span>
           {panelAvailable && (
             <WithTooltip label={prefs.panelOpen ? "Hide panel" : "Show panel"} shortcut="app.togglePanel">
@@ -309,6 +320,8 @@ function UnselectedWorkspace({
                 projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
                 initialAgent={store.skillsFilter?.agent ?? null}
               />
+            ) : startScreen ? (
+              <StartScreen onOpenSettings={onOpenSettings} />
             ) : (
               <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
             )}
