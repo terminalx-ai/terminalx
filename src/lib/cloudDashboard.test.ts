@@ -199,6 +199,18 @@ describe("one notice per wait", () => {
     ...fields,
   });
 
+  it("raises a new recovery failure once even after a permission wait or a recently closed connection", () => {
+    const observe = createCloudAttentionTracker(() => 1_000);
+    const waiting = waitingWorld({ live: { "ws-1": [session("s1", "Fix login", "waiting")] }, tabs: { "ws-1": [agentTab("s1", "waiting", ["r1"])] }, connected: ["ws-1"] });
+    expect(observe(project(waiting))).toEqual([expect.objectContaining({ kind: "waiting" })]);
+    const failure = waitingWorld({ workspaces: [item("ws-1", { state: "attention-required" })] });
+    const projected = project(failure);
+    expect(columnOf(projected, `cloud:${ORG}:ws-1:s1`)).toBe("needs");
+    expect(observe(projected)).toEqual([expect.objectContaining({ kind: "failed" })]);
+    expect(observe(project(failure))).toEqual([]);
+    expect(observe(project(failure))).toEqual([]);
+  });
+
   it("raises a list-reported wait once, however many polls repeat it", () => {
     const observe = createCloudAttentionTracker(() => 1_000);
     const raised = [1, 2, 3, 4].flatMap(() => observe(project(waitingWorld())));

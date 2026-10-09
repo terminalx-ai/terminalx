@@ -176,9 +176,9 @@ function agentLabel(harness: string): string {
 /** Raise a cloud session's wait or finish: the same focus-aware path as a local tab's. */
 export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
   const agent = agentLabel(tab.harness);
-  const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : `${agent} finished`}`;
+  const title = `TerminalX — ${kind === "waiting" ? `${agent} needs attention` : kind === "failed" ? `${agent} hit a problem` : `${agent} finished`}`;
   const where = `${session.title} · ${session.orgName} cloud`;
-  const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : `${where}. Open the session to review the conversation.`;
+  const body = kind === "waiting" ? `${where}. Open the session to review its pending request.` : kind === "failed" ? `${where}. Open the session to review its recovery actions.` : `${where}. Open the session to review the conversation.`;
   if (!focused) {
     void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
@@ -192,6 +192,7 @@ export function raiseCloudAttention({ kind, session, tab }: CloudAttention) {
 }
 
 function onCloudSessions() {
+  // Attention and badge counts deliberately use ALL live organizations, never the sidebar visibility projection.
   observeCloud ??= createCloudAttentionTracker();
   for (const event of observeCloud(getCloudDashboard())) raiseCloudAttention(event);
 }
