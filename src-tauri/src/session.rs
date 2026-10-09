@@ -378,6 +378,10 @@ pub struct TabRuntime {
     /// again (a status line repeats itself) costs nothing. Forgotten whenever
     /// the app asks for a change, since the answer to that must be heard.
     last_settings_report: Option<Signal>,
+    /// A mode the provider reported that a shared session may not be in, not
+    /// stored yet: whether the session is shared is asked under the sharing
+    /// lock, which is taken before this tab's and so not from under it.
+    reported_mode_to_judge: Option<String>,
     pub stopping: bool,
     pub stop_in_flight: bool,
     pub stopping_pid: Option<u32>,
@@ -722,6 +726,7 @@ impl SessionManager {
                 recovery: None,
                 stalled_at: None,
                 last_settings_report: None,
+                reported_mode_to_judge: None,
                 stopping: false,
                 stop_in_flight: false,
                 stopping_pid: None,
@@ -1521,7 +1526,7 @@ impl SessionManager {
         }
     }
 
-    /// Change the tab's model and effort through `change`, and tell every
+    /// Change the tab's model, effort and permission mode through `change`, and tell every
     /// view what moved: a `settings_changed` in the tab's own log when what
     /// is running changed, and the session itself — which the sidebar, the
     /// header, the dashboard and a paired device all draw from — whenever
@@ -1546,8 +1551,14 @@ impl SessionManager {
         })?;
         let model = (wanted.model != current.model).then(|| wanted.model.clone());
         let effort = (wanted.effort != current.effort).then(|| wanted.effort.clone()).flatten();
-        if model.is_some() || wanted.effort != current.effort {
-            self.publish(rt, Payload::SettingsChanged { model, effort, permission_mode: None }, None);
+        let permission_mode = (wanted.permission_mode != current.permission_mode).then(|| wanted.permission_mode.clone());
+        if let (Some(mode), Engine::Cli(p)) = (&permission_mode, &mut rt.engine) {
+            // What Codex's every-tool gate goes by: a mode the reader left in
+            // the terminal is not asked about on the app's side either.
+            p.mode = mode.clone();
+        }
+        if model.is_some() || wanted.effort != current.effort || permission_mode.is_some() {
+            self.publish(rt, Payload::SettingsChanged { model, effort, permission_mode }, None);
         }
         if let Ok(session) = index::get(&rt.session_id) {
             self.sink.emit("session_updated", &session);
@@ -1557,9 +1568,10 @@ impl SessionManager {
         Ok((current, wanted))
     }
 
-    /// The provider said something about its own model or effort: the one
-    /// way a change made on its side — the CLI's `/model`, its picker, a
-    /// default it resolved at startup — reaches the tab.
+    /// The provider said something about its own model, effort or permission
+    /// stance: the one way a change made on its side — the CLI's `/model`,
+    /// its picker, Shift+Tab, a default it resolved at startup — reaches the
+    /// tab.
     fn provider_settings(&self, rt: &mut TabRuntime, signal: Signal) {
         if rt.last_settings_report.as_ref() == Some(&signal) {
             return;
@@ -1614,6 +1626,27 @@ impl SessionManager {
             }
             Signal::Accepted { setting } => self.update_settings(rt, |s| s.accepted(*setting)).map(|(_, now)| now),
             Signal::Refused { setting, value, message } => self.refuse_setting(rt, *setting, value.as_deref(), message),
+            Signal::Permissions { stance } => {
+                // The last words of a CLI that has been let go of say nothing
+                // about the one that replaces it.
+                if !matches!(rt.engine, Engine::Cli(_)) {
+                    return;
+                }
+                // A mode a share refuses is held back rather than stored:
+                // `judge_reported_mode` says what becomes of it.
+                let mut held = None;
+                let result = self.update_settings(rt, |s| {
+                    held = None;
+                    let mode = stance.mode(&s.permission_mode);
+                    if mode != s.permission_mode && !settings::allowed_while_shared(&mode) {
+                        held = Some(mode);
+                    } else {
+                        s.reported_mode(&mode);
+                    }
+                });
+                rt.reported_mode_to_judge = held;
+                result.map(|(_, now)| now)
+            }
         };
         match result {
             Ok(now) => {
@@ -1642,39 +1675,88 @@ impl SessionManager {
         Ok(now)
     }
 
+    /// Settle a reported mode `provider_settings` held back. In a session
+    /// that is not shared it is simply the mode the tab is in. A shared one
+    /// may not be in it, and showing it would not make that so: the CLI is
+    /// let go of here, before any guest's prompt can be typed into it, and
+    /// started again in the mode the tab was in. Returns whether it was.
+    ///
+    /// Called with no lock held, after anything that may have heard a report.
+    fn judge_reported_mode(&self, rt_arc: &Arc<Mutex<TabRuntime>>) -> bool {
+        if rt_arc.lock().unwrap().reported_mode_to_judge.is_none() {
+            return false;
+        }
+        let sharing = self.sharing.lock().unwrap();
+        let mut rt = rt_arc.lock().unwrap();
+        let Some(mode) = rt.reported_mode_to_judge.take() else { return false };
+        if !sharing.sessions.contains_key(&rt.session_id) {
+            if let Err(error) = self.update_settings(&mut rt, |s| s.reported_mode(&mode)) {
+                log::warn!("mode reported by {}/{}: {error:#}", rt.session_id, rt.tab_id);
+            }
+            return false;
+        }
+        let agent = agent_name(&rt.harness);
+        let kept = index::get(&rt.session_id).ok().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| tab.permission_mode.clone())).unwrap_or_default();
+        let (reported, kept) = (settings::mode_label(&mode), settings::mode_label(&kept));
+        log::warn!("{}/{} reported {mode} while shared: restarting it in {kept}", rt.session_id, rt.tab_id);
+        self.publish(
+            &mut rt,
+            Payload::Status { text: format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}.") },
+            None,
+        );
+        // Whatever it was doing, it was doing in a mode the share forbids.
+        self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
+        self.release_cli(&mut rt);
+        let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        drop(rt);
+        drop(sharing);
+        let manager = self.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = manager.restart_for_settings(&session, &tab) {
+                log::warn!("restart {session}/{tab}: {e:#}");
+            }
+        });
+        true
+    }
+
     /// Add an agent tab to a session, from whichever surface asked. A shared
     /// session takes no Bypass tab, and the share cannot start between the
     /// check and the save because both hold the sharing lock.
     pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
         let sharing = self.sharing.lock().unwrap();
-        if sharing.sessions.contains_key(session_id) && index::permission_mode_or_default(tab.permission_mode.as_deref()) == "bypassPermissions" {
+        if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
         }
         crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))
     }
 
+    /// The app asks for another permission mode. Neither TUI has a command
+    /// for one — Claude Code cycles modes on a key, Codex's `/permissions` is
+    /// a menu — so the change means replacing the process: now, or once the
+    /// turn it would interrupt is over. Until that restart the tab is in the
+    /// mode it was in, and is shown in it (`harness::settings`).
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
         let sharing = self.sharing.lock().unwrap();
-        if mode == "bypassPermissions" && sharing.sessions.contains_key(session_id) {
-            bail!("Stop sharing this session before switching to Bypass.");
+        if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(mode) {
+            bail!("Stop sharing this session before switching to {}.", settings::mode_label(mode));
         }
-        index::update_tab(session_id, tab_id, |t| {
-            t.permission_mode = mode.into();
-            Ok(())
-        })?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
         let turn_open = rt.turn_open;
+        let waits = turn_open && matches!(rt.engine, Engine::Cli(_));
+        let (_, after) = self.update_settings(&mut rt, |s| s.request_mode(mode, waits))?;
         let mut restart = false;
         match &mut rt.engine {
-            // Neither TUI has a command for this — Claude cycles modes on a
-            // key with no way to read the result back, Codex fixes its
-            // approval policy and sandbox at launch — so the change means
-            // replacing the process.
             Engine::Cli(p) => {
                 if turn_open {
-                    p.restart_when_idle = true;
+                    // Asking for the mode it is in takes a waiting change
+                    // back, and with it the restart, unless Codex still has
+                    // a model or effort waiting on one.
+                    let codex_waits = p.harness == CliKind::Codex && (after.requested_model.is_some() || after.requested_effort.is_some());
+                    p.restart_when_idle = after.requested_permission_mode.is_some() || codex_waits;
                 } else {
+                    // Even for the mode the tab is shown in: the reader may
+                    // have left it in the terminal since the CLI last said.
                     restart = true;
                 }
             }
@@ -1685,10 +1767,6 @@ impl SessionManager {
             Engine::OpenCode(o) => o.mode = mode.into(),
             _ => {}
         }
-        if turn_open && matches!(rt.engine, Engine::Cli(_)) {
-            self.publish(&mut rt, Payload::Status { text: "Permission mode applies after this turn.".into() }, None);
-        }
-        self.publish(&mut rt, Payload::SettingsChanged { model: None, effort: None, permission_mode: Some(mode.into()) }, None);
         drop(rt);
         if restart {
             self.restart_for_settings(session_id, tab_id)?;
@@ -1858,18 +1936,21 @@ impl SessionManager {
             }
         }
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
-        // A model or effort that was waiting for the process to be replaced
-        // rides with this launch, and is what the tab runs from here on.
+        // A model, effort or mode that was waiting for the process to be
+        // replaced rides with this launch, and is what the tab runs from
+        // here on.
         let waited = Settings::of(tab);
         let mut launching = waited.clone();
         launching.launched();
-        let launched_for = (launching != waited).then(|| launching.clone());
+        // A mode that waited is not part of that check: the CLI names its
+        // mode with its first prompt, and that is simply shown.
+        let launched_for = (launching.model != waited.model || launching.effort != waited.effort).then(|| launching.clone());
         let tab = &{
             let mut tab = tab.clone();
             launching.write(&mut tab);
             tab
         };
-        if launched_for.is_some() {
+        if launching != waited {
             self.update_settings(rt, |s| s.launched())?;
         }
         // A quick chat's scratch directory is ours to keep there: one removed
@@ -2090,7 +2171,8 @@ impl SessionManager {
 
     /// Restart the CLI so it reads a setting it only takes at startup: the
     /// permission mode for either CLI, and the model and effort for Codex,
-    /// which has no command for them. The pane is kept and the conversation
+    /// which has no command for them. It is also how a CLI is put back in
+    /// the tab's mode when it reports one it may not be in. The pane is kept and the conversation
     /// resumes, so what the reader sees is the CLI redrawing, not a new tab.
     ///
     /// The old process has to be *gone*, not merely signalled: it holds the
@@ -2270,6 +2352,9 @@ impl SessionManager {
                 p.transcript_turn = open.then_some(mark);
             }
         }
+        // Codex reports its stance in the rollout just read.
+        drop(rt);
+        self.judge_reported_mode(rt_arc);
     }
 
     /// Wait, briefly, for the transcript to deliver the reply the `Stop` hook
@@ -2422,7 +2507,7 @@ impl SessionManager {
                     share.admit_at_writer(connection, tab_id, chrono::Utc::now().timestamp_millis())?;
                     let current = index::get(session_id)?;
                     let tab = current.tab(tab_id).ok_or_else(|| anyhow!("Tab closed before prompt delivery."))?;
-                    if tab.permission_mode == "bypassPermissions" || manager.pane_of(session_id, tab_id).is_none_or(|current| current.pane_id != pane) {
+                    if !settings::allowed_while_shared(&tab.permission_mode) || manager.pane_of(session_id, tab_id).is_none_or(|current| current.pane_id != pane) {
                         bail!("The shared tab changed before prompt delivery.");
                     }
                 }
@@ -2636,6 +2721,20 @@ impl SessionManager {
                 }
             }
             return HookReply::default();
+        }
+        // Claude Code names its permission mode on the frames that fire
+        // around work, which is the first the app hears of a Shift+Tab in the
+        // terminal: read before anything this frame is about is drawn.
+        if let Some(signal) = (kind == CliKind::Claude).then(|| claude::transcript::hook_permissions(&frame.payload)).flatten() {
+            {
+                let mut rt = rt_arc.lock().unwrap();
+                if matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
+                    self.provider_settings(&mut rt, signal);
+                }
+            }
+            if self.judge_reported_mode(&rt_arc) {
+                return HookReply::default();
+            }
         }
         // Stop at hook receipt, before transcript settling/git snapshots, so
         // time spent waiting for display bookkeeping is not agent work.

@@ -465,7 +465,7 @@ mod tests {
     fn bound_agents_never_have_a_kill_rule() {
         let pane = PaneInfo { id: "tab:t1".into(), pid: Some(400), running: true, cwd: "/work".into() };
         let tab = index::TabEntry {
-            id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None,
+            id: "t1".into(), harness: "claude".into(), title: None, model: String::new(), effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
             permission_mode: "auto".into(), provider_session_id: None, status: index::TabStatus::Idle,
             created: String::new(), modified: String::new(), context_used: None, context_max: None,
             fork_from: None, unknown: Default::default(),

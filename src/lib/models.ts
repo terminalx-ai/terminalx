@@ -192,8 +192,27 @@ export const PERMISSION_MODES: { id: string; label: string; hint: string }[] = [
   { id: BYPASS_MODE, label: "Bypass permissions", hint: "Nothing asks. Only in a tree you can throw away." },
 ];
 
+/** Spellings of a picker mode that older tabs and other clients still carry. */
+const MODE_ALIASES: Record<string, string> = { "": BYPASS_MODE, bypass: BYPASS_MODE, default: "manual", ask: "manual", accept_edits: "acceptEdits" };
+
+/** The picker's entry for a mode, if it has one. */
+export function pickerMode(id: string): { id: string; label: string; hint: string } | undefined {
+  const known = MODE_ALIASES[id] ?? id;
+  return PERMISSION_MODES.find((m) => m.id === known);
+}
+
+/**
+ * A mode's name. One the picker does not offer is the mode the agent reported
+ * itself in (#417) — Claude Code's `dontAsk`, a Codex approval policy and
+ * sandbox no mode of ours launches — and is named exactly as reported.
+ */
 export function modeLabel(id: string): string {
-  return PERMISSION_MODES.find((m) => m.id === id)?.label ?? "Bypass permissions";
+  return pickerMode(id)?.label ?? id;
+}
+
+/** Whether nothing stands between the agent and the machine in this mode: Bypass, or any Codex stance with no sandbox. */
+export function modeIsUnguarded(id: string): boolean {
+  return pickerMode(id)?.id === BYPASS_MODE || id.endsWith("danger-full-access");
 }
 
 /**
@@ -233,17 +252,24 @@ export const EFFORT_LABEL: Record<string, string> = {
 };
 
 /**
- * What to say while a model or effort that was asked for is not yet what the
- * agent is running (#404); `null` when nothing is waiting. The pickers go on
- * showing what is running, so this is the only place the choice appears until
- * the agent confirms it. A change made mid-turn waits for the turn: a CLI
- * holds what is typed at it until then, and Codex is restarted after it.
+ * What to say while a model, effort or permission mode that was asked for is
+ * not yet what the agent is on (#404, #417); `null` when nothing is waiting.
+ * The pickers go on showing what is in force, so this is the only place the
+ * choice appears until the agent confirms it. A change made mid-turn waits
+ * for the turn: a CLI holds what is typed at it until then, and is restarted
+ * after it for a setting it only reads at startup, which a mode always is.
  */
-export function pendingSettingsNote(tab: { requestedModel?: string | null; requestedEffort?: string | null }, models: ModelInfo[], busy: boolean): string | null {
+export function pendingSettingsNote(
+  tab: { requestedModel?: string | null; requestedEffort?: string | null; requestedPermissionMode?: string | null },
+  models: ModelInfo[],
+  busy: boolean,
+): string | null {
   const model = tab.requestedModel ? (models.find((m) => m.id === tab.requestedModel)?.label ?? prettyModelId(tab.requestedModel)) : null;
   const effort = tab.requestedEffort ? (EFFORT_LABEL[tab.requestedEffort] ?? tab.requestedEffort) : null;
-  if (!model && !effort) return null;
-  const what = model && effort ? `${model} · ${effort}` : (model ?? `${effort} effort`);
+  const mode = tab.requestedPermissionMode ? modeLabel(tab.requestedPermissionMode) : null;
+  const running = model && effort ? `${model} · ${effort}` : (model ?? (effort ? `${effort} effort` : null));
+  const what = [running, mode && running ? `${mode} mode` : mode].filter(Boolean).join(" and ");
+  if (!what) return null;
   return busy ? `Switching to ${what} after this turn` : `Switching to ${what}…`;
 }
 

@@ -16,7 +16,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
@@ -428,6 +428,8 @@ export function Composer({
   const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
+  // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
+  const pickedMode = pickerMode(tab.permissionMode)?.id;
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
 
   return (
@@ -580,7 +582,7 @@ export function Composer({
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",
-                    tab.permissionMode === "bypassPermissions" ? "bg-destructive" : tab.permissionMode === "plan" ? "bg-info" : "bg-add",
+                    modeIsUnguarded(tab.permissionMode) ? "bg-destructive" : pickedMode === "plan" ? "bg-info" : "bg-add",
                   )}
                 />
                 <span className="flex h-5 min-w-0 flex-wrap content-start overflow-hidden leading-5">
@@ -595,10 +597,20 @@ export function Composer({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="min-w-[16rem]">
               <DropdownMenuLabel>Permissions</DropdownMenuLabel>
-              <DropdownMenuRadioGroup value={tab.permissionMode} onValueChange={(v) => chooseMode(tab.harness, v, onSetMode)}>
+              <DropdownMenuRadioGroup value={pickedMode ?? tab.permissionMode} onValueChange={(v) => chooseMode(tab.harness, v, onSetMode)}>
+                {/* A mode set in the terminal that the picker does not offer is still the one in force. */}
+                {!pickedMode && (
+                  <DropdownMenuRadioItem value={tab.permissionMode} className="flex-col items-start gap-0" data-testid="permission-mode-reported">
+                    <span>{permissionLabel}</span>
+                    <span className="text-[11px] text-faint">Set in the terminal.</span>
+                  </DropdownMenuRadioItem>
+                )}
                 {PERMISSION_MODES.map((m) => (
                   <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
-                    <span>{m.label}</span>
+                    <span>
+                      {m.label}
+                      {m.id === tab.requestedPermissionMode ? <span className="ml-1.5 text-faint">switching…</span> : null}
+                    </span>
                     <span className="text-[11px] text-faint">{m.hint}</span>
                   </DropdownMenuRadioItem>
                 ))}

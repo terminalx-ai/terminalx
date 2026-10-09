@@ -163,6 +163,7 @@ export interface AgentTabInfo {
   requestedModel?: string | null;
   requestedEffort?: string | null;
   permissionMode: string;
+  requestedPermissionMode?: string | null;
   status: AgentTabStatus;
   process: AgentProcessState;
   pendingPermissions: { requestId: string; toolName: string; input: unknown; options: unknown[] }[];

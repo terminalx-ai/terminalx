@@ -324,7 +324,7 @@ export function TabView({
           }}
           onSetMode={(m) => {
             if (gate && !gate.mayConfigure) return;
-            backend.patchTab(tab.id, { permissionMode: m });
+            // Not patched in here either: the tab's mode is the one the agent is in (#417).
             void backend.setPermissionMode(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           reportedModel={transcript.model}

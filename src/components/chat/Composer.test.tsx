@@ -29,7 +29,6 @@ vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   EFFORT_LABEL: {},
   PERMISSION_MODES: [{ id: "auto", label: "Auto", hint: "" }],
-  modeLabel: () => "Auto",
   refreshModels: vi.fn(),
   upgradeHint: () => null,
   useModels: () => listed.models,
@@ -462,6 +461,42 @@ describe("the pickers show what the agent is running (#404)", () => {
   it("names a requested model it has no entry for by its id", () => {
     show({ ...onSol, requestedModel: "gpt-9-nova", requestedEffort: "ultra" });
     expect(pending()).toBe("Switching to GPT-9 Nova · Ultra…");
+  });
+
+  it("keeps showing the mode the agent is in while another waits for the restart (#417)", async () => {
+    show({ ...onSol, permissionMode: "plan", requestedPermissionMode: "auto" }, { busy: true });
+    const button = screen.getByTitle("Permission mode: Plan");
+    expect(screen.getByTestId("permission-mode-label").textContent).toBe("Plan");
+    expect(pending()).toBe("Switching to Auto after this turn");
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    expect(ticked(menu)).toEqual([]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Autoswitching…"]);
+  });
+
+  it("names a waiting mode alongside a waiting model", () => {
+    show({ ...onSol, requestedModel: "gpt-6-astra", requestedPermissionMode: "plan" }, { busy: true });
+    expect(pending()).toBe("Switching to GPT-6 Astra and Plan mode after this turn");
+  });
+
+  it("shows a mode set in the terminal that the picker does not offer as reported (#417)", async () => {
+    show({ ...onSol, permissionMode: "never, workspace-write" });
+    const button = screen.getByTitle("Permission mode: never, workspace-write");
+    expect(screen.getByTestId("permission-mode-label").textContent).toBe("never, workspace-write");
+    mouseClick(button);
+    const menu = await screen.findByRole("menu");
+    // It is the one ticked, and what the picker does offer is still there to choose.
+    expect(ticked(menu)).toEqual(["never, workspace-writeSet in the terminal."]);
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["never, workspace-writeSet in the terminal.", "Auto"]);
+  });
+
+  it("ticks the picker's entry for a mode stored under an older spelling", async () => {
+    listed.models = [];
+    show({ ...tab, permissionMode: "auto" });
+    mouseClick(screen.getByTitle("Permission mode: Auto"));
+    const menu = await screen.findByRole("menu");
+    expect(ticked(menu)).toEqual(["Auto"]);
+    expect(screen.queryByTestId("permission-mode-reported")).toBeNull();
   });
 
   it("offers no effort for an agent that has none", async () => {

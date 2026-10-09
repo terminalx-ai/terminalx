@@ -17,6 +17,12 @@
 //! Every harness has to answer both halves. [`HarnessId::settings`] has no
 //! catch-all arm, so a new harness does not compile until it says how it
 //! takes a change, and [`Signal`] is the one way any of them reports back.
+//!
+//! The permission mode is held the same way (#417), with two differences.
+//! Neither CLI takes a mode from the app while it runs, so a change from the
+//! chat is always a restart, and waits for a turn that is open. And what a
+//! provider reports is its own [`Stance`], not one of the app's modes: which
+//! mode that makes the tab is each harness's to say.
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +94,51 @@ impl HarnessId {
     }
 }
 
+/// The mode every protection is off in.
+pub const BYPASS_MODE: &str = "bypassPermissions";
+
+/// The permission stance a provider says it is in, in its own terms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Stance {
+    /// Claude Code names a mode.
+    Mode { mode: String },
+    /// Codex has no modes: an approval policy and a sandbox.
+    Sandboxed { approval: String, sandbox: String },
+}
+
+impl Stance {
+    /// The mode this makes a tab that was in `current`. The app's modes and
+    /// a CLI's do not map one-to-one, so the tab keeps the mode it is in
+    /// whenever that is one way of saying what was reported.
+    pub fn mode(&self, current: &str) -> String {
+        match self {
+            Stance::Mode { mode } => super::claude::mode_reported(mode, current),
+            Stance::Sandboxed { approval, sandbox } => super::codex::mode_reported(approval, sandbox, current),
+        }
+    }
+}
+
+/// Whether a tab in a shared session may be in `mode`. Bypass is the mode a
+/// share refuses; a Codex stance with no sandbox is refused with it, whatever
+/// it is called and whatever its approval policy.
+pub fn allowed_while_shared(mode: &str) -> bool {
+    mode != BYPASS_MODE && !mode.ends_with(super::codex::NO_SANDBOX)
+}
+
+/// A mode by the name the pickers give it, for a line in the chat. One the
+/// app has no entry for is named as reported.
+pub fn mode_label(mode: &str) -> &str {
+    match mode {
+        "plan" => "Plan",
+        "manual" | "default" | "ask" => "Ask every time",
+        "auto" => "Auto",
+        "acceptEdits" => "Accept edits",
+        BYPASS_MODE => "Bypass",
+        other => other,
+    }
+}
+
 /// What a provider says about its own settings. A decoder or an engine emits
 /// it as [`crate::events::Payload::ProviderSettings`]; the session manager
 /// takes it from there and it is never logged or sent to a window as is.
@@ -113,6 +164,8 @@ pub enum Signal {
         value: Option<String>,
         message: String,
     },
+    /// The permission stance it is in now, whoever put it there.
+    Permissions { stance: Stance },
 }
 
 impl Signal {
@@ -123,13 +176,15 @@ impl Signal {
     }
 }
 
-/// The four fields of a tab this module owns.
+/// The fields of a tab this module owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
     pub model: String,
     pub effort: Option<String>,
+    pub permission_mode: String,
     pub requested_model: Option<String>,
     pub requested_effort: Option<String>,
+    pub requested_permission_mode: Option<String>,
 }
 
 impl Settings {
@@ -137,16 +192,20 @@ impl Settings {
         Self {
             model: tab.model.clone(),
             effort: tab.effort.clone(),
+            permission_mode: tab.permission_mode.clone(),
             requested_model: tab.requested_model.clone(),
             requested_effort: tab.requested_effort.clone(),
+            requested_permission_mode: tab.requested_permission_mode.clone(),
         }
     }
 
     pub fn write(&self, tab: &mut TabEntry) {
         tab.model = self.model.clone();
         tab.effort = self.effort.clone();
+        tab.permission_mode = self.permission_mode.clone();
         tab.requested_model = self.requested_model.clone();
         tab.requested_effort = self.requested_effort.clone();
+        tab.requested_permission_mode = self.requested_permission_mode.clone();
     }
 
     #[cfg(test)]
@@ -188,6 +247,28 @@ impl Settings {
         self.requested_model.is_some() || self.requested_effort.is_some()
     }
 
+    /// The app asks for a permission mode. It is what the next launch is
+    /// given; `waits` says that launch is held up by a turn the restart would
+    /// interrupt, and until then the tab is in the mode it was in.
+    pub fn request_mode(&mut self, mode: &str, waits: bool) {
+        if !waits || mode == self.permission_mode {
+            self.permission_mode = mode.to_string();
+            self.requested_permission_mode = None;
+        } else {
+            self.requested_permission_mode = Some(mode.to_string());
+        }
+    }
+
+    /// The provider is in `mode`, already read through [`Stance::mode`]. As
+    /// with a model: it is the truth about now, and a request for something
+    /// else goes on waiting for the restart that applies it.
+    pub fn reported_mode(&mut self, mode: &str) {
+        if self.requested_permission_mode.as_deref() == Some(mode) {
+            self.requested_permission_mode = None;
+        }
+        self.permission_mode = mode.to_string();
+    }
+
     /// A process is being started, or the one that was running is gone:
     /// whatever was waiting rides with the launch, and is what the tab runs.
     pub fn launched(&mut self) {
@@ -196,6 +277,9 @@ impl Settings {
         }
         if let Some(effort) = self.requested_effort.take() {
             self.effort = Some(effort);
+        }
+        if let Some(mode) = self.requested_permission_mode.take() {
+            self.permission_mode = mode;
         }
     }
 
@@ -469,6 +553,69 @@ mod tests {
         // default goes on following a family rather than one version.
         assert_eq!(canonical_model(&on("opus", None), "claude-sonnet-5-5", &models), "sonnet");
         assert_eq!(canonical_model(&on("", None), "claude-opus-5-5", &models), "opus");
+    }
+
+    fn in_mode(mode: &str) -> Settings {
+        Settings { permission_mode: mode.into(), ..Default::default() }
+    }
+
+    /// Mid-turn the mode waits for the restart; the turn in progress is still
+    /// judged under the one it started in, and that is what is shown.
+    #[test]
+    fn a_mode_asked_for_mid_turn_waits_for_the_restart() {
+        let mut s = in_mode("auto");
+        s.request_mode("plan", true);
+        assert_eq!((s.permission_mode.as_str(), s.requested_permission_mode.as_deref()), ("auto", Some("plan")));
+        // What the running CLI reports meanwhile is still the truth.
+        s.reported_mode("auto");
+        assert_eq!(s.requested_permission_mode.as_deref(), Some("plan"));
+        s.launched();
+        assert_eq!(s, in_mode("plan"));
+    }
+
+    #[test]
+    fn a_mode_asked_for_with_no_turn_open_is_the_setting() {
+        let mut s = in_mode("auto");
+        s.request_mode("plan", false);
+        assert_eq!(s, in_mode("plan"));
+        // Asking for the mode it is in takes back one that was waiting.
+        s.request_mode("manual", true);
+        s.request_mode("plan", true);
+        assert_eq!(s, in_mode("plan"));
+    }
+
+    #[test]
+    fn a_mode_changed_in_the_terminal_shows_while_another_is_pending() {
+        let mut s = in_mode("auto");
+        s.request_mode("plan", true);
+        s.reported_mode("acceptEdits");
+        assert_eq!((s.permission_mode.as_str(), s.requested_permission_mode.as_deref()), ("acceptEdits", Some("plan")));
+        // The terminal getting there first settles the request.
+        s.reported_mode("plan");
+        assert_eq!(s, in_mode("plan"));
+    }
+
+    #[test]
+    fn a_stance_is_read_by_the_harness_that_reported_it() {
+        assert_eq!(Stance::Mode { mode: "default".into() }.mode("plan"), "manual");
+        assert_eq!(Stance::Sandboxed { approval: "on-request".into(), sandbox: "read-only".into() }.mode("auto"), "plan");
+    }
+
+    #[test]
+    fn a_share_refuses_bypass_and_any_stance_with_no_sandbox() {
+        for mode in ["plan", "manual", "auto", "acceptEdits", "dontAsk", "never, workspace-write", "something-newer"] {
+            assert!(allowed_while_shared(mode), "{mode}");
+        }
+        assert!(!allowed_while_shared(BYPASS_MODE));
+        assert!(!allowed_while_shared("on-request, danger-full-access"));
+    }
+
+    #[test]
+    fn a_mode_with_no_entry_is_named_as_reported() {
+        assert_eq!(mode_label("acceptEdits"), "Accept edits");
+        assert_eq!(mode_label(BYPASS_MODE), "Bypass");
+        assert_eq!(mode_label("dontAsk"), "dontAsk");
+        assert_eq!(mode_label("never, workspace-write"), "never, workspace-write");
     }
 
     #[test]

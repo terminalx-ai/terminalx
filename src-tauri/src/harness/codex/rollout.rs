@@ -30,14 +30,20 @@
 //!   has been sent — has nowhere to write it, and the first `turn_context`
 //!   says the same thing a moment after the first prompt.
 //!
+//! Both also say what the conversation may do without asking (#417): the
+//! `approval_policy`, and the sandbox — by name in `turn_context`
+//! (`sandbox_policy.type`), as a `permission_profile` in
+//! `thread_settings_applied`, which the TUI's `/permissions` writes the
+//! moment a preset is confirmed.
+//!
 //! Every shape here came out of rollouts written by codex-cli 0.152.0 and
-//! 0.153.4 driven through a PTY; two of them are the fixtures this module is
-//! tested on.
+//! 0.153.4 driven through a PTY; three of them are the fixtures this module
+//! is tested on.
 
 use serde_json::Value;
 
 use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
-use crate::harness::settings::Signal;
+use crate::harness::settings::{Signal, Stance};
 use crate::harness::tui::TurnMark;
 
 fn block(id: &str) -> BlockRef {
@@ -125,7 +131,9 @@ pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out:
     match v["type"].as_str() {
         Some("event_msg") => {}
         Some("turn_context") => {
-            report_settings(v["payload"]["model"].as_str(), v["payload"]["effort"].as_str(), out);
+            let context = &v["payload"];
+            report_settings(context["model"].as_str(), context["effort"].as_str(), out);
+            report_stance(context["approval_policy"].as_str(), context["sandbox_policy"]["type"].as_str(), out);
             return None;
         }
         _ => return None,
@@ -152,12 +160,38 @@ fn report_settings(model: Option<&str>, effort: Option<&str>, out: &mut Vec<Payl
     }
 }
 
+/// The approval policy and sandbox a record says the conversation is under
+/// (#417). Both or nothing: half a stance is not one.
+fn report_stance(approval: Option<&str>, sandbox: Option<&str>, out: &mut Vec<Payload>) {
+    if let (Some(approval), Some(sandbox)) = (approval, sandbox) {
+        let stance = Stance::Sandboxed { approval: approval.into(), sandbox: sandbox.into() };
+        out.push(Payload::ProviderSettings { signal: Signal::Permissions { stance } });
+    }
+}
+
+/// The sandbox a `permission_profile` comes down to. `thread_settings_applied`
+/// carries the profile and not the sandbox's name (0.153.4): no profile at
+/// all is no sandbox, and a managed one is the workspace sandbox if it may
+/// write anywhere and the read-only one if it may not. Any other shape is
+/// left to the next `turn_context`, which names the sandbox outright.
+fn profile_sandbox(profile: &Value) -> Option<&'static str> {
+    match profile["type"].as_str()? {
+        "disabled" => Some(crate::harness::codex::NO_SANDBOX),
+        "managed" => {
+            let entries = profile["file_system"]["entries"].as_array()?;
+            Some(if entries.iter().any(|entry| entry["access"] == "write") { "workspace-write" } else { "read-only" })
+        }
+        _ => None,
+    }
+}
+
 fn decode_event(p: &Value, out: &mut Vec<Payload>) {
     match p["type"].as_str().unwrap_or("") {
         "task_started" => out.push(Payload::ModelRequestStarted),
         "thread_settings_applied" => {
             let settings = &p["thread_settings"];
             report_settings(settings["model"].as_str(), settings["reasoning_effort"].as_str(), out);
+            report_stance(settings["approval_policy"].as_str(), profile_sandbox(&settings["permission_profile"]), out);
         }
         // `task_complete` and `turn_aborted` say the turn ended, and so do the
         // `Stop` and `Interrupt` hooks — with the same reply and moments
@@ -411,9 +445,76 @@ mod tests {
                 (Some("gpt-5.6-terra"), Some("low")),
             ]
         );
-        assert_eq!(p.len(), 5, "and none of it is drawn");
+        assert!(drawn(&p).is_empty(), "and none of it is drawn");
         // They say nothing about where a turn opens or ends.
         assert!(SETTINGS.lines().all(|line| turn_mark(line).is_none()));
+    }
+
+    /// codex-cli 0.153.4 started with `-a on-request -s read-only`, then taken
+    /// through the three presets of its `/permissions` with a prompt after
+    /// each: the `turn_context` and `thread_settings_applied` records of that
+    /// rollout, whole but for the working directory, which reads `/w/demo`.
+    const PERMISSIONS: &str = include_str!("fixtures/permissions.jsonl");
+
+    fn stances(payloads: &[Payload]) -> Vec<(&str, &str)> {
+        payloads
+            .iter()
+            .filter_map(|p| match p {
+                Payload::ProviderSettings { signal: Signal::Permissions { stance: Stance::Sandboxed { approval, sandbox } } } => Some((approval.as_str(), sandbox.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #417. A preset is recorded the moment it is confirmed, twice over, and
+    /// the next turn says the same by the sandbox's name.
+    #[test]
+    fn a_change_made_in_the_tuis_permissions_menu_is_reported() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(PERMISSIONS.as_bytes());
+        assert_eq!(
+            stances(&p),
+            [
+                // The first turn, as launched.
+                ("on-request", "read-only"),
+                // "Ask for approval".
+                ("on-request", "workspace-write"),
+                // "Approve for me": another reviewer, the same policy and sandbox.
+                ("on-request", "workspace-write"),
+                ("on-request", "workspace-write"),
+                ("on-request", "workspace-write"),
+                // "Full Access", and the turn after it.
+                ("never", "danger-full-access"),
+                ("never", "danger-full-access"),
+                ("never", "danger-full-access"),
+            ]
+        );
+        assert!(drawn(&p).is_empty());
+        // The model/effort records of #404 report a stance as well.
+        let p = Streamer::at(0, decode_line).push(SETTINGS.as_bytes());
+        assert_eq!(stances(&p), [("on-request", "workspace-write")].repeat(5));
+    }
+
+    #[test]
+    fn a_stance_is_reported_whole_or_not_at_all() {
+        let stance_of = |record: &str| {
+            let mut out = Vec::new();
+            decode_line(record, &none(), &mut out);
+            stances(&out).into_iter().map(|(a, s)| (a.to_string(), s.to_string())).collect::<Vec<_>>()
+        };
+        // A policy with no sandbox named, and a sandbox with no policy.
+        assert!(stance_of(r#"{"type":"turn_context","payload":{"approval_policy":"never"}}"#).is_empty());
+        assert!(stance_of(r#"{"type":"turn_context","payload":{"sandbox_policy":{"type":"read-only"}}}"#).is_empty());
+        // A profile of a shape this build cannot read is left to the next turn.
+        let applied = |profile: &str| format!(r#"{{"type":"event_msg","payload":{{"type":"thread_settings_applied","thread_settings":{{"approval_policy":"on-request","permission_profile":{profile}}}}}}}"#);
+        assert!(stance_of(&applied(r#"{"type":"external"}"#)).is_empty());
+        assert!(stance_of(&applied(r#"{"type":"managed","file_system":{"type":"unrestricted"}}"#)).is_empty());
+        assert_eq!(stance_of(&applied(r#"{"type":"managed","file_system":{"entries":[{"access":"read"}]}}"#)), [("on-request".to_string(), "read-only".to_string())]);
+        // A policy and sandbox this build has never heard of are still the ones in force.
+        assert_eq!(
+            stance_of(r#"{"type":"turn_context","payload":{"approval_policy":"untrusted","sandbox_policy":{"type":"seatbelt-strict"}}}"#),
+            [("untrusted".to_string(), "seatbelt-strict".to_string())]
+        );
     }
 
     /// The effort changes between the second and third turns of the older

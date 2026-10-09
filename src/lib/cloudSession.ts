@@ -256,6 +256,7 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
     requestedModel: info.requestedModel,
     requestedEffort: info.requestedEffort,
     permissionMode: info.permissionMode,
+    requestedPermissionMode: info.requestedPermissionMode,
     status: statusShown(tab, asleep),
     created: info.created,
     modified: info.modified,

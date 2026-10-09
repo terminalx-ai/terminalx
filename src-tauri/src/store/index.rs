@@ -68,8 +68,13 @@ pub struct TabEntry {
     pub requested_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_effort: Option<String>,
+    /// The mode the agent is in: what its next tool call is judged under.
     #[serde(default = "default_mode", deserialize_with = "mode_or_default")]
     pub permission_mode: String,
+    /// A mode the app asked for that waits for the restart that applies it
+    /// (`harness::settings`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
     /// The harness's own conversation id (Claude session id, Codex thread id).
     #[serde(default)]
     pub provider_session_id: Option<String>,
@@ -495,7 +500,7 @@ mod tests {
             harness: "codex".into(),
             title: None,
             model: "gpt-5".into(),
-            effort: None, requested_model: None, requested_effort: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
             permission_mode: DEFAULT_PERMISSION_MODE.into(),
             provider_session_id: Some("provider-session".into()),
             status: TabStatus::InProgress,

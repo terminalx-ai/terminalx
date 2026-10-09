@@ -171,12 +171,15 @@ fn project(tab: &super::AgentTabInfo, session: Option<&super::SessionSummary>, e
     if let Some(session) = session {
         projection["session"] = json!({ "title": session.title, "branch": session.branch });
     }
-    // Asked for and not running yet (#404); absent when nothing is waiting.
+    // Asked for and not in force yet (#404, #417); absent when nothing is waiting.
     if let Some(model) = &tab.requested_model {
         projection["requestedModel"] = json!(model);
     }
     if let Some(effort) = &tab.requested_effort {
         projection["requestedEffort"] = json!(effort);
+    }
+    if let Some(mode) = &tab.requested_permission_mode {
+        projection["requestedPermissionMode"] = json!(mode);
     }
     projection
 }

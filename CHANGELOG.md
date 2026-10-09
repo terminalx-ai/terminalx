@@ -17,6 +17,23 @@
   reported it instead of as the default, and a tab on the agent's own default
   shows which model that is. (#404)
 
+### Permission mode
+
+- The chat's permission picker now shows the mode the agent is really in. A
+  mode cycled with Shift+Tab in Claude Code's terminal shows in the chat with
+  the next prompt or tool call, and a preset chosen in Codex's `/permissions`
+  shows straight away. (#417)
+- A mode chosen in the chat while a turn is running is shown as "Switching to
+  … after this turn" until the restart that applies it; the picker keeps
+  showing the mode the running turn is under. (#417)
+- A mode TerminalX has no entry for (Claude Code's `dontAsk`, an unusual
+  Codex approval policy and sandbox) is shown as the agent reported it
+  instead of as Bypass. (#417)
+- A shared session still cannot be in Bypass: if the agent is switched to it
+  in the terminal, the agent is restarted in the mode it was in and the chat
+  says why. A session with a tab waiting to switch to Bypass cannot be
+  shared. (#417)
+
 ### Delete workspace from the chat
 
 - Once a worktree's pull request has merged, the chat offers **Delete

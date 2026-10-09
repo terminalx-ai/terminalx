@@ -75,7 +75,10 @@ pub struct AgentTabInfo {
     pub requested_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_effort: Option<String>,
+    /// The mode the agent is in, and one asked for that waits for a restart.
     pub permission_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
     pub status: TabStatus,
     /// `running`, `exited` (it ran and its process is gone; the saved
     /// conversation resumes on the next send) or `not-started`.
@@ -236,6 +239,7 @@ impl AgentOps for ManagerOps {
                     requested_model: tab.requested_model.clone(),
                     requested_effort: tab.requested_effort.clone(),
                     permission_mode: tab.permission_mode.clone(),
+                    requested_permission_mode: tab.requested_permission_mode.clone(),
                     status: tab.status,
                     process: if running {
                         "running"
@@ -326,7 +330,8 @@ impl AgentOps for ManagerOps {
         if let Some(effort) = settings.effort.as_deref().filter(|effort| has_effort && Some(*effort) != asked_effort) {
             self.manager.set_effort(session_id, tab_id, Some(effort))?;
         }
-        if let Some(mode) = settings.mode.as_deref().filter(|mode| *mode != tab.permission_mode) {
+        let asked_mode = tab.requested_permission_mode.as_deref().unwrap_or(&tab.permission_mode);
+        if let Some(mode) = settings.mode.as_deref().filter(|mode| *mode != asked_mode) {
             self.manager.set_permission_mode(session_id, tab_id, mode)?;
         }
         Ok(())

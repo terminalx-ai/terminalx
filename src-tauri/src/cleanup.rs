@@ -594,7 +594,7 @@ mod tests {
             harness: harness.into(),
             title: None,
             model: String::new(),
-            effort: None, requested_model: None, requested_effort: None,
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
             permission_mode: "default".into(),
             provider_session_id: Some(conversation.into()),
             status: TabStatus::Idle,
