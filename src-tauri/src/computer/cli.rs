@@ -435,6 +435,7 @@ pub fn format_capabilities(value: &Value) -> String {
     .into_iter()
     .chain(value.get("permissions").map(|_| format!("  Permissions: {}", format_permission_list(value))))
     .chain(s(value, "nextStep").map(|step| format!("  Permission missing: {step}")))
+    .chain(s(value, "warning").map(|warning| format!("  Warning: {warning}")))
     .collect::<Vec<_>>()
     .join("\n")
 }
@@ -460,7 +461,7 @@ pub fn format_permissions(value: &Value) -> String {
     let launched = b(value, "launchedHelper");
     let mut lines = vec![
         if launched {
-            "Opened TerminalX Computer Use permission setup.".to_string()
+            "Opened TerminalX Computer Use Helper permission setup.".to_string()
         } else {
             "Computer Use permissions checked.".to_string()
         },
@@ -473,10 +474,11 @@ pub fn format_permissions(value: &Value) -> String {
     ];
     if launched {
         lines.push(
-            "Use the Allow buttons or drag \"TerminalX Computer Use\" into the macOS permission list."
+            "Use the Allow buttons or drag \"TerminalX Computer Use Helper\" into the macOS permission list."
                 .into(),
         );
     }
+    lines.extend(removal_warning(value));
     lines.join("\n")
 }
 
@@ -491,7 +493,19 @@ pub fn format_permission_status(value: &Value) -> String {
     if let Some(bundle) = s(value, "bundleId") {
         lines.push(format!("Reset TCC rows for {bundle}."));
     }
+    lines.extend(removal_warning(value));
     lines.join("\n")
+}
+
+/// An older helper's permission could not be removed in this launch: say it
+/// wherever permissions are shown, whether the result carries the sentence
+/// (`warning`) or only the report (`legacyHelper`).
+fn removal_warning(value: &Value) -> Option<String> {
+    let failed = value.get("legacyHelper").is_some_and(|legacy| legacy.get("removed").and_then(Value::as_bool) == Some(false));
+    s(value, "warning")
+        .map(str::to_owned)
+        .or_else(|| failed.then(|| super::permissions::LEGACY_REMOVAL_FAILED.to_string()))
+        .map(|warning| format!("Warning: {warning}"))
 }
 
 pub fn format_list_apps(value: &Value) -> String {
@@ -998,14 +1012,29 @@ mod tests {
     fn capabilities_output_names_a_missing_permission_and_the_way_to_grant_it() {
         let mut value = json!({"provider": "terminalx-computer-use-macos", "platform": "darwin", "protocolVersion": 1,
             "permissions": [{"id": "accessibility", "status": "not-granted"}, {"id": "screenshots", "status": "granted"}],
-            "nextStep": "Grant Accessibility to TerminalX Computer Use, then retry get-app-state."});
+            "nextStep": "Grant Accessibility to TerminalX Computer Use Helper, then retry get-app-state."});
         let text = format_capabilities(&value);
         assert!(text.contains("  Permissions: accessibility=not-granted, screenshots=granted"), "{text}");
-        assert!(text.ends_with("  Permission missing: Grant Accessibility to TerminalX Computer Use, then retry get-app-state."), "{text}");
+        assert!(text.ends_with("  Permission missing: Grant Accessibility to TerminalX Computer Use Helper, then retry get-app-state."), "{text}");
         value.as_object_mut().unwrap().remove("nextStep");
         value.as_object_mut().unwrap().remove("permissions");
         let plain = format_capabilities(&value);
-        assert!(!plain.contains("Permission"), "{plain}");
+        assert!(!plain.contains("Permission") && !plain.contains("Warning"), "{plain}");
+        value["warning"] = json!("could not remove the old helper");
+        assert!(format_capabilities(&value).ends_with("  Warning: could not remove the old helper"));
+    }
+
+    #[test]
+    fn permission_output_says_when_the_old_helpers_permission_could_not_be_removed() {
+        let failed = json!({"platform": "macos", "helperAppPath": "/h", "permissions": [], "legacyHelper": {"removed": false, "bundleIds": ["old"]}});
+        let status = format_permission_status(&failed);
+        assert!(status.contains("Warning: TerminalX could not remove the permission"), "{status}");
+        assert!(status.contains("\"TerminalX Computer Use\" (not \"TerminalX Computer Use Helper\")"), "{status}");
+        let setup = json!({"platform": "macos", "helperAppPath": "/h", "permissions": [], "warning": "old helper still granted"});
+        assert!(format_permissions(&setup).ends_with("Warning: old helper still granted"));
+        let fine = json!({"platform": "macos", "helperAppPath": "/h", "permissions": [], "legacyHelper": {"removed": true, "bundleIds": ["old"]}});
+        assert!(!format_permission_status(&fine).contains("Warning"));
+        assert!(!format_permissions(&fine).contains("Warning"));
     }
 
     #[test]

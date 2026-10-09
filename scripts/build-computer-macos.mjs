@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Builds the macOS computer-use helper ("TerminalX Computer Use.app") from
+// Builds the macOS computer-use helper ("TerminalX Computer Use Helper.app") from
 // native/computer-use-macos and signs it.
 //
 // The helper is its own app bundle on purpose: macOS keys Accessibility and
@@ -33,14 +33,14 @@ const dev = process.argv.includes('--dev')
 const outputDirName = dev ? 'release-dev' : 'release'
 const outputDir = path.join(packagePath, '.build', outputDirName)
 const binaryPath = path.join(outputDir, 'terminalx-computer-use-macos')
-export const appName = 'TerminalX Computer Use.app'
+export const appName = 'TerminalX Computer Use Helper.app'
 const appPath = path.join(outputDir, appName)
 const appExecutablePath = path.join(appPath, 'Contents', 'MacOS', 'terminalx-computer-use-macos')
 const appIconPath = path.join(appPath, 'Contents', 'Resources', 'AppIcon.icns')
 const iconSource = path.join(repoRoot, 'src-tauri', dev ? 'icons-dev' : 'icons', 'icon.icns')
 const entitlementsPath = path.join(repoRoot, 'src-tauri', 'Entitlements.computer-use.plist')
 const bundleId = helperBundleId({ dev, override: process.env.TERMINALX_COMPUTER_MACOS_BUNDLE_ID })
-const displayName = dev ? 'TerminalX Dev Computer Use' : 'TerminalX Computer Use'
+const displayName = dev ? 'TerminalX Dev Computer Use Helper' : 'TerminalX Computer Use Helper'
 const universal = process.env.TERMINALX_COMPUTER_MACOS_UNIVERSAL === '1'
 
 if (process.platform !== 'darwin') {
@@ -101,6 +101,14 @@ function createHelperApp() {
   const builtId = built.stdout?.trim()
   if (built.status !== 0 || builtId !== bundleId || legacyHelperBundleIds.includes(builtId)) {
     console.error(`build-computer-macos: the assembled helper declares "${builtId}", expected "${bundleId}"`)
+    process.exit(1)
+  }
+  // The signing identifier is what macOS keys a permission to; it must be the
+  // same new id, not only the plist.
+  const signed = spawnSync('codesign', ['-dv', appPath], { encoding: 'utf8' })
+  const signedId = `${signed.stderr}${signed.stdout}`.match(/^Identifier=(.+)$/m)?.[1]?.trim()
+  if (signed.status !== 0 || signedId !== bundleId) {
+    console.error(`build-computer-macos: the helper is signed as "${signedId}", expected "${bundleId}"`)
     process.exit(1)
   }
 }

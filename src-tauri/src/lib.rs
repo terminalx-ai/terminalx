@@ -231,7 +231,7 @@ pub fn run() {
             }
             status::install_menu(app)?;
             if let Ok(resources) = app.path().resource_dir() {
-                computer.set_resource_dir(resources);
+                computer.set_resource_dir(resources, &app.config().identifier);
             }
             // Recover local history before hooks/automations can publish live
             // activity. Provider cache scans are deliberately unrelated.

@@ -695,11 +695,15 @@ final class Provider {
             // should open macOS privacy prompts/settings; runtime calls stay quiet.
             throw ProviderError.coded(
                 "permission_denied",
-                "Accessibility permission is required for TerminalX Computer Use. Run `terminalx computer permissions` or open TerminalX Settings > General > Computer use, grant Accessibility to TerminalX Computer Use, then retry."
+                "Accessibility permission is required for TerminalX Computer Use Helper. Run `terminalx computer permissions` or open TerminalX Settings > General > Computer use, grant Accessibility to TerminalX Computer Use Helper, then retry."
             )
         }
         let appElement = AXUIElementCreateApplication(app.pid)
-        enableManualAccessibilityIfNeeded(appElement, app: app)
+        // Why: this writes accessibility attributes on the target; a protected
+        // app is not written to at all.
+        if !protectedTarget {
+            enableManualAccessibilityIfNeeded(appElement, app: app)
+        }
         let windowCandidates = WindowCapture.candidates(pid: app.pid)
         let focused = try focusedWindow(
             appElement: appElement,
@@ -743,7 +747,7 @@ final class Provider {
         } else if includeScreenshot && protectedTarget {
             .withheld(OwnAppProtection.screenshotRefusal)
         } else if includeScreenshot && !canCaptureScreenshot {
-            .failed("Screen Recording permission is required for TerminalX Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
+            .failed("Screen Recording permission is required for TerminalX Computer Use Helper; grant permission or pass --no-screenshot to inspect accessibility state only.")
         } else if includeScreenshot {
             .failed("window screenshot capture returned no image; retry with --no-screenshot if accessibility state is sufficient.")
         } else {
@@ -1223,7 +1227,7 @@ private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleW
         if let window = settledWindow, outcome.settled {
             return window
         }
-        throw ProviderError.coded("permission_denied", "app '\(app.name)' has visible windows but no accessibility window (AX reads stayed blocked for \(outcome.waitedMs)ms after retries). macOS Accessibility may need TerminalX Computer Use toggled off and on again in System Settings.")
+        throw ProviderError.coded("permission_denied", "app '\(app.name)' has visible windows but no accessibility window (AX reads stayed blocked for \(outcome.waitedMs)ms after retries). macOS Accessibility may need TerminalX Computer Use Helper toggled off and on again in System Settings.")
     }
     throw ProviderError.coded("window_not_found", "app '\(app.name)' has no accessibility window; make sure the app has a visible window, then retry with --restore-window.")
 }
@@ -3118,7 +3122,7 @@ private final class PermissionWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Enable TerminalX Computer Use"
+        window.title = "Enable TerminalX Computer Use Helper"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.backgroundColor = PermissionPalette.background
@@ -3244,9 +3248,9 @@ private enum PermissionKind: CaseIterable {
     var dragInstruction: String {
         switch self {
         case .accessibility:
-            "Drag TerminalX Computer Use into the list above to allow Accessibility."
+            "Drag TerminalX Computer Use Helper into the list above to allow Accessibility."
         case .screenshots:
-            "Drag TerminalX Computer Use into the list above to allow Screenshots."
+            "Drag TerminalX Computer Use Helper into the list above to allow Screenshots."
         }
     }
 
@@ -3348,7 +3352,7 @@ private final class PermissionView: NSView {
 
         let titleText = checking
             ? "Checking Computer Use"
-            : (ready ? "Computer Use is Ready" : "Enable TerminalX Computer Use")
+            : (ready ? "Computer Use is Ready" : "Enable TerminalX Computer Use Helper")
         let title = label(titleText, size: 22, weight: .bold)
         let subtitle = label(
             checking
@@ -3527,7 +3531,7 @@ private final class PermissionDragAssistantController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Drag TerminalX Computer Use"
+        window.title = "Drag TerminalX Computer Use Helper"
         window.backgroundColor = .clear
         window.isOpaque = false
         window.isReleasedWhenClosed = false
@@ -3939,7 +3943,7 @@ private final class DraggableAppTile: NSView, NSDraggingSource {
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = NSTextField(labelWithString: "TerminalX Computer Use")
+        let title = NSTextField(labelWithString: "TerminalX Computer Use Helper")
         title.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
         title.textColor = PermissionPalette.primaryText
         title.translatesAutoresizingMaskIntoConstraints = false
@@ -4382,7 +4386,7 @@ private func writePermissionStatus(to path: String) {
 }
 
 private func runStdio() {
-    fputs("TerminalX Computer Use provider must be launched by TerminalX in app-agent mode.\n", stderr)
+    fputs("TerminalX Computer Use Helper provider must be launched by TerminalX in app-agent mode.\n", stderr)
     exit(13)
 }
 

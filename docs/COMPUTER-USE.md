@@ -10,7 +10,7 @@ installed `~/.claude/skills/computer-use/SKILL.md` stub works unchanged.
 ## How it works
 
 ```
-terminalx computer … ──control socket──▶ TerminalX app ──unix socket──▶ TerminalX Computer Use.app
+terminalx computer … ──control socket──▶ TerminalX app ──unix socket──▶ TerminalX Computer Use Helper.app
    (any shell)                          src-tauri/src/computer/           native/computer-use-macos/
 ```
 
@@ -144,30 +144,44 @@ Accessibility, any program can run a copy and press TerminalX's buttons with
 it, whatever version of TerminalX is installed. So:
 
 - this helper has a new identity, `com.terminalx.next.computer-use.v2`
-  (`…dev.computer-use.v2` for dev builds); the old permission does not apply
-  to it, and people grant Accessibility and Screen Recording once more;
-- once, at the first launch of a version with the new helper and before the
-  helper is started or probed, the app runs `tccutil reset Accessibility` and
-  `tccutil reset ScreenCapture` for the old ids (no administrator password is
-  needed for one's own entries). It records that in
-  `computer-use-legacy-helper-reset.json` in the TerminalX home and does not
-  repeat it; a failed reset is not recorded and is tried again at the next
-  launch, without holding up startup. A debug build clears only the old dev
-  id, so it does not break an older installed TerminalX on a development
-  machine;
-- `tccutil` only resets an app macOS can still find. If the old helper is no
-  longer anywhere on disk after the update, the reset is refused ("No such
-  bundle identifier") and the app cannot tell whether an old permission
-  remains. Settings → General → Computer use then asks the person to remove
-  every "TerminalX Computer Use" entry under Accessibility and Screen
-  Recording in System Settings and grant again;
+  (`…dev.computer-use.v2` for dev builds), and a new name, "TerminalX Computer
+  Use Helper" (the old one is "TerminalX Computer Use"), so the two rows can
+  be told apart in System Settings. The old permission does not apply to it;
+  people who granted before grant Accessibility and Screen Recording once
+  more;
+- at every launch, off the main thread and before the helper is started, the
+  app runs `tccutil reset Accessibility` and `tccutil reset ScreenCapture` for
+  the old ids (no administrator password is needed for one's own entries).
+  Nothing on disk records that it ran: a record could be forged by an agent
+  to switch the removal off, and an old helper can be granted again at any
+  time. Each tool gets ten seconds;
+- `tccutil` only resets an app LaunchServices can still find, and after an
+  update the old helper is no longer on disk. When the plain reset is refused
+  the app writes a stub bundle that does nothing and declares the old id,
+  under `~/Library/Application Support/TerminalX/old-helper-removal`
+  (LaunchServices ignores bundles in temporary directories), registers it
+  with `lsregister -f`, resets, then unregisters and deletes it whatever
+  happened;
+- which ids are cleared depends on the app's own bundle id, not on how it was
+  compiled: only `com.terminalx.next` clears the released helper's old id;
+  every build clears the old dev id. A Dev or local build therefore never
+  breaks an older installed TerminalX on the same Mac;
+- if the removal still fails, this launch says so in Settings → General →
+  Computer use and in `terminalx computer capabilities` / `permissions`
+  (`warning`, and `legacyHelper.removed: false`), with the steps to remove
+  "TerminalX Computer Use" by hand; it is tried again at the next launch;
 - the app refuses to start a helper that declares an old id, and the build
-  script refuses to build one.
+  script refuses to build one and checks both the plist and the signed
+  identifier.
 
-**A helper from 0.2.8 or earlier keeps working for whoever starts it until
-its permission is removed**, which the app does as described above. Someone
-who adds an old helper back by hand in System Settings, or grants it again by
-running an older TerminalX, reopens the hole; the reset is not repeated.
+**A helper from 0.2.8 or earlier keeps working for whoever starts it for as
+long as it is granted.** The app removes that grant each time it starts, so
+the exposure is bounded by one launch, not closed: until TerminalX is next
+started, the old row can be put back, by the person or by an agent (for
+example by opening an old helper's own permission window and getting the
+person to approve it). Only "TerminalX Computer Use Helper" should ever be
+approved. That the stub reset removes a row created by a Developer ID signed
+helper has been verified with scratch ids only, not yet on a signed build.
 
 **What a local build cannot promise.** A helper that is ad-hoc or development
 signed has no signing identity to check the app against, so it trusts its
@@ -190,7 +204,7 @@ drives the screen without the helper:
   or Screen Recording.** It never asks for either (it declares no usage
   string for them and calls neither API; its only privacy prompts are the
   microphone and speech recognition for dictation), so an entry for
-  "TerminalX" was added by hand. Only "TerminalX Computer Use" should be
+  "TerminalX" was added by hand. Only "TerminalX Computer Use Helper" should be
   listed; remove TerminalX from both lists. Settings says so too.
 - `osascript` / System Events, or any other app the person has granted
   Accessibility, can press the same buttons.

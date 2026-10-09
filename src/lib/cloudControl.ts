@@ -188,8 +188,9 @@ function assertAllowed() {
  * mistakes and nagging. Computer use never operates this app's own windows
  * and this version's helper serves only the app (PRO-90). A hostile agent
  * with a shell can still press the button by other means: a helper from an
- * older version if it still holds Accessibility (the app removes that grant
- * once after updating), the system's own scripting,
+ * older version while it holds Accessibility (the app tries to remove that
+ * grant at every launch and warns when it could not), the system's own
+ * scripting,
  * or anything at all when TerminalX itself was granted Accessibility (see
  * skill-guides/terminalx-cli.md and docs/COMPUTER-USE.md, Security).
  */

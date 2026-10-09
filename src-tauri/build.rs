@@ -32,7 +32,7 @@ fn main() {
 #[cfg(feature = "desktop")]
 fn ensure_helper_resource_dirs() {
     for output in ["release", "release-dev"] {
-        let dir = format!("../native/computer-use-macos/.build/{output}/TerminalX Computer Use.app");
+        let dir = format!("../native/computer-use-macos/.build/{output}/TerminalX Computer Use Helper.app");
         if !std::path::Path::new(&dir).exists() {
             let _ = std::fs::create_dir_all(&dir);
         }

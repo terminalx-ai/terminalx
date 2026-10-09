@@ -45,6 +45,7 @@ final class OwnAppProtectionSourceSafetyTests: XCTestCase {
         ))
         XCTAssertTrue(build.contains("renderer.withhold(reason: OwnAppProtection.treeRefusal)\n        } else {\n            renderer.render(window)\n        }"))
         XCTAssertEqual(build.components(separatedBy: "renderer.render(").count - 1, 1)
+        XCTAssertTrue(build.contains("if !protectedTarget {\n            enableManualAccessibilityIfNeeded(appElement, app: app)"))
         // Withholding leaves no element records for an action to use.
         XCTAssertTrue(source.contains("lines = [\"(\\(reason))\"]\n        records = [:]"))
     }

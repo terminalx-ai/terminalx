@@ -199,8 +199,9 @@ TerminalX's computer use never operates TerminalX's own windows (`own_app_protec
 macOS this version's helper serves only the app itself: an agent that talks to it directly, or
 starts its own copy of it, is refused. It does not stop a hostile program that drives the
 screen by other means: a computer-use helper from an older TerminalX (0.2.8 or earlier), which
-serves whoever starts it for as long as it has Accessibility in System Settings (the app removes
-that permission once after updating; adding it back by hand reopens the hole); the system's own
+serves whoever starts it for as long as it has Accessibility in System Settings (the app tries
+to remove that permission each time it starts and warns when it could not; the row can be put
+back before the next start); the system's own
 scripting; or any program when TerminalX itself has been granted Accessibility. The app cannot
 prevent the last two from inside. The person's switch and their
 answer are the control, not a security boundary against software already running as them.
