@@ -49,7 +49,7 @@ pub fn body_bytes(text: &str) -> Vec<u8> {
     format!("{BRACKETED_PASTE_START}{sanitized}{BRACKETED_PASTE_END}").into_bytes()
 }
 
-fn is_slash_command(text: &str) -> bool {
+pub fn is_slash_command(text: &str) -> bool {
     text.starts_with('/') && !text.contains('\n') && !text.contains('\r')
 }
 
@@ -65,9 +65,60 @@ pub fn attachment_bytes(path: &str) -> Vec<u8> {
 /// the text lands in the composer and never sends: the two writes have to be
 /// separated in time as well as in call. The floor is the TUI's own settle;
 /// the slope is how fast a pty ingests a paste, so a long prompt still gets
-/// its Enter after the last character has arrived.
+/// its Enter after the last character has arrived. Counted from when the CLI
+/// has read the paste (`await_read`), not from when it was written: a busy
+/// CLI can leave a paste unread for longer than this.
 pub fn submit_delay(body_len: usize) -> Duration {
     Duration::from_millis(250 + (body_len / 4096) as u64)
+}
+
+/// How long the Enter waits for the CLI to read the paste it follows. A CLI
+/// that is busy — finishing a turn, replaying a resumed conversation, coming
+/// back from a suspended machine — may not look at its input for longer than
+/// any fixed delay, and an Enter already queued behind the paste by then is
+/// read in the same gulp as the paste. Past this the CLI is not reading at
+/// all; the Enter is written anyway and the prompt is watched for acceptance.
+pub const PASTE_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a submitted prompt may go unacknowledged by an idle CLI before the
+/// reader is told. Both CLIs acknowledge within a second: a `UserPromptSubmit`
+/// hook, or the prompt's record in the transcript. Bytes written into the
+/// pane are not an acknowledgement, and neither is the pane redrawing — the
+/// paste appearing in the composer is itself a redraw.
+pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Whether the CLI read what was written into its pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteRead {
+    /// Nothing written is left unread: the CLI has the whole paste.
+    Read,
+    /// Still unread when the wait ran out.
+    Unread,
+    /// This platform's PTY cannot say; the delay alone separates the writes.
+    Unknown,
+}
+
+impl PasteRead {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Unread => "unread",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Wait until the CLI has read everything written into its pane. `unread` is
+/// how many bytes it has yet to take, or `None` where that cannot be asked.
+pub fn await_read(unread: impl Fn() -> Option<usize>, timeout: Duration) -> PasteRead {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match unread() {
+            None => return PasteRead::Unknown,
+            Some(0) => return PasteRead::Read,
+            Some(_) if std::time::Instant::now() >= deadline => return PasteRead::Unread,
+            Some(_) => std::thread::sleep(Duration::from_millis(5)),
+        }
+    }
 }
 
 /// A TUI drops keystrokes while it is still painting its first frame, and the
@@ -604,6 +655,20 @@ mod tests {
         assert!(submit_delay(body.len()) >= Duration::from_millis(250));
         // A long paste gets longer to arrive, so its Enter waits longer.
         assert!(submit_delay(200_000) > submit_delay(10));
+    }
+
+    #[test]
+    fn the_enter_waits_for_the_paste_to_be_read_and_no_longer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Read on the third look: the wait ends there, however long is left.
+        let looks = AtomicUsize::new(0);
+        let unread = || Some(if looks.fetch_add(1, Ordering::Relaxed) < 2 { 64 } else { 0 });
+        assert_eq!(await_read(unread, Duration::from_secs(60)), PasteRead::Read);
+        assert_eq!(looks.load(Ordering::Relaxed), 3);
+        // A CLI that never reads is given up on, and a PTY that cannot be
+        // asked is not waited on at all.
+        assert_eq!(await_read(|| Some(64), Duration::from_millis(20)), PasteRead::Unread);
+        assert_eq!(await_read(|| None, Duration::from_secs(60)), PasteRead::Unknown);
     }
 
     #[test]

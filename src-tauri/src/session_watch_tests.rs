@@ -166,6 +166,8 @@ impl Rig {
                 tail: tail.clone(),
                 echoed: Default::default(),
                 awaiting_delivery: None,
+                delivery_sent_at: None,
+                accept_by: None,
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,
