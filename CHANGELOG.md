@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Delete workspace from the chat
+
+- Once a worktree's pull request has merged, the chat offers **Delete
+  workspace** next to Commit, Create PR and Run it. It appears when the merge
+  is noticed, with no new turn, and opens the same removal dialog as every
+  other way of removing a workspace; nothing is removed from the chat. It is
+  not offered in a project's main directory, for a pull request that is open,
+  closed or could not be checked, with uncommitted or unpushed work, or while
+  an agent turn runs in the workspace. Cloud sessions have it too, for a
+  manager of the workspace: the worktree is read and removed by its own
+  runtime (`workspace/1`), so a stopped or older workspace does not offer it
+  until it is restarted. (#411)
+
 ### Floating chat window and quick chats
 
 - A floating chat window: a small TerminalX window for asking an agent

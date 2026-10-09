@@ -5,6 +5,7 @@ import { api, type PullRequest } from "@/lib/api";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,18 +18,6 @@ type WorkspaceCleanup = {
   projectPath: string;
   onDelete: () => void;
 };
-
-/** Only a confirmed merged PR with no local-only work is a safe cleanup shortcut. */
-export function canDeleteMergedWorkspace(disposition: WorkspaceDisposition | null): boolean {
-  return !!(
-    disposition?.exists &&
-    !disposition.isMain &&
-    disposition.uncommitted === 0 &&
-    disposition.unpushed === 0 &&
-    disposition.prChecked &&
-    disposition.pr?.state === "MERGED"
-  );
-}
 
 /** Readiness in one fixed order: state, then conflicts, then checks. */
 export function mergeReadiness(pr: PullRequest): { ok: boolean; label: string } {

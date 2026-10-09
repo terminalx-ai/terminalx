@@ -141,3 +141,80 @@ async fn a_terminal_open_in_a_worktree_keeps_it() {
     assert!(busy.exists());
     let _ = call(&f.rpc, &manager, "pty.kill", json!({ "ptyId": pty["ptyId"] })).await;
 }
+
+// ---- workspace/1: one session's worktree --------------------------------------
+
+/// A session in the index, in a worktree of its own or in the main directory.
+fn session(f: &Fixture, title: &str, worktree: Option<&str>) -> crate::store::index::SessionEntry {
+    crate::session_ops::create_session_entry(crate::session_ops::NewSession {
+        project_path: f.root.to_string_lossy().into_owned(),
+        title: Some(title.into()),
+        use_worktree: worktree.is_some(),
+        base_ref: worktree.map(|_| "main".into()),
+        worktree_name: worktree.map(String::from),
+        on_main: worktree.is_none(),
+        issue: None,
+        automation: None,
+        cwd: None,
+        tab: Some(crate::session_ops::NewTab { harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+    })
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_manager_that_was_granted_it_reads_or_removes_a_sessions_worktree() {
+    let f = fixture();
+    let viewer = peer(&f.rpc, Authority::Participate, &["workspace/1"]).await;
+    let ungranted = peer(&f.rpc, Authority::Manage, &["cleanup/1"]).await;
+    let held = session(&f, "held", Some("held-one"));
+    for method in ["workspace.disposition", "workspace.remove"] {
+        let params = json!({ "clientRequestId": "request-0001", "sessionId": held.id, "expectedSessions": [held.id] });
+        assert_eq!(call(&f.rpc, &viewer, method, params.clone()).await.unwrap_err(), "forbidden", "{method}");
+        assert_eq!(call(&f.rpc, &ungranted, method, params).await.unwrap_err(), "capability_not_granted", "{method}");
+    }
+    assert!(Path::new(&held.cwd).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sessions_worktree_is_read_and_removed_by_its_session_and_the_main_directory_never() {
+    let f = fixture();
+    let manager = peer(&f.rpc, Authority::Manage, &["workspace/1"]).await;
+    let main = session(&f, "in main", None);
+    let done = session(&f, "done", Some("done-one"));
+    let wip = session(&f, "wip", Some("wip-one"));
+    std::fs::write(Path::new(&wip.cwd).join("wip.txt"), "wip").unwrap();
+
+    // The main directory answers as such, and is never removed.
+    let read = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": main.id })).await.unwrap();
+    assert_eq!(read["disposition"]["isMain"], true);
+    let refused = call(&f.rpc, &manager, "workspace.remove", json!({ "clientRequestId": "request-0001", "sessionId": main.id, "expectedSessions": [main.id] })).await;
+    assert_eq!(refused.unwrap_err(), "invalid_params");
+    assert!(f.root.join("README.md").exists());
+    assert_eq!(call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": "no-such-session" })).await.unwrap_err(), "not_found");
+
+    // The quick read stays off the network and gives no verdict; the dialog's asks for one.
+    let quick = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": done.id })).await.unwrap();
+    assert_eq!((&quick["disposition"]["exists"], &quick["disposition"]["isMain"], &quick["disposition"]["uncommitted"]), (&json!(true), &json!(false), &json!(0)));
+    assert_eq!(quick["disposition"]["sessionIds"], json!([done.id]));
+    assert!(quick["disposition"]["landed"].is_null());
+    let checked = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": done.id, "fetch": true })).await.unwrap();
+    assert_eq!(checked["disposition"]["landed"]["safe"], true, "{checked}");
+
+    // Not clean: one confirmation is not enough, and nothing is removed.
+    let dirty = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": wip.id, "fetch": true })).await.unwrap();
+    assert_eq!(dirty["disposition"]["landed"]["safe"], false);
+    assert!(call(&f.rpc, &manager, "workspace.remove", json!({ "clientRequestId": "request-0002", "sessionId": wip.id, "expectedSessions": [wip.id] })).await.is_err());
+    assert!(Path::new(&wip.cwd).exists() && crate::store::index::get(&wip.id).is_ok());
+    // Nor is one whose sessions are not the ones that were shown.
+    assert!(call(&f.rpc, &manager, "workspace.remove", json!({ "clientRequestId": "request-0003", "sessionId": done.id, "expectedSessions": [] })).await.is_err());
+    assert!(Path::new(&done.cwd).exists());
+
+    let removed = call(&f.rpc, &manager, "workspace.remove", json!({ "clientRequestId": "request-0004", "sessionId": done.id, "deleteBranch": true, "expectedSessions": [done.id] })).await.unwrap();
+    assert_eq!(removed["deleted"], json!([done.id]));
+    assert!(!Path::new(&done.cwd).exists() && crate::store::index::get(&done.id).is_err());
+    // The second confirmation is for what was shown: the dirty worktree goes with its digest.
+    let digest = dirty["disposition"]["landed"]["digest"].clone();
+    let forced = call(&f.rpc, &manager, "workspace.remove", json!({ "clientRequestId": "request-0005", "sessionId": wip.id, "confirmedDigest": digest, "expectedSessions": [wip.id] })).await.unwrap();
+    assert_eq!(forced["deleted"], json!([wip.id]));
+    assert!(!Path::new(&wip.cwd).exists() && f.root.join("README.md").exists());
+}

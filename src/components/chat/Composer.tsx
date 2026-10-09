@@ -74,6 +74,9 @@ const NO_HISTORY: string[] = [];
 /** The least of its label the permission picker shows: about a first word ("Bypass…"). With less room it shows none. */
 const PERMISSION_LABEL_MIN_CHARS = 9;
 
+/** A one-click next step above the input. */
+export type Handoff = { label: string; prompt: string } | { label: string; run: () => void };
+
 /**
  * The composer inside a session. Enter sends, Shift+Enter breaks a line.
  * While a turn runs the send button becomes Stop and a new prompt queues.
@@ -136,8 +139,8 @@ export function Composer({
   /** The workspace that supplies cloud model choices, while connected. */
   modelClient?: WorkspaceRpcClient | null;
   contextMax?: number;
-  /** Next-step prompts offered after a turn lands (commit, PR, run). */
-  handoffs?: { label: string; prompt: string }[];
+  /** One-click next steps above the input: a prompt put in the composer for the reader to send, or (`run`) something the app does itself. */
+  handoffs?: Handoff[];
   disabledReason?: string | null;
   /** Nothing can be typed or sent (shown with `disabledReason`); stopping stays with the owner. */
   disabled?: boolean;
@@ -453,6 +456,7 @@ export function Composer({
                 key={h.label}
                 type="button"
                 onClick={() => {
+                  if ("run" in h) return h.run();
                   onDraftChange(h.prompt);
                   requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
                 }}
