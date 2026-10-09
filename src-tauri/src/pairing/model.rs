@@ -35,6 +35,7 @@ pub struct DeviceEntry {
 pub enum DeviceScope {
     Viewer,
     Driver,
+    Session,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

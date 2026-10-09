@@ -127,6 +127,7 @@ export type Payload =
   | { type: "settings_changed"; model?: string; effort?: string; permissionMode?: string }
   | {
       type: "user_message";
+      author?: { userId: string; displayName: string };
       text: string;
       images?: ImageRef[];
       baseline?: string;

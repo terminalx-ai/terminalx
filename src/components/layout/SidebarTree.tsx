@@ -1,3 +1,4 @@
+import { openSessionShare } from "@/lib/localSharing";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe,
@@ -511,6 +512,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
         <PictureInPicture2 /> Open in floating window
       </DropdownMenuItem>
       <QuickChatMenuItems session={session} />
+      <DropdownMenuItem onSelect={() => openSessionShare(session.id)}>Share session…</DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onSelect={() => pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}

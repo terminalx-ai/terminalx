@@ -69,6 +69,42 @@ struct Rig {
     _home: store::TempHome,
 }
 
+#[test]
+fn sharing_blocks_bypass_before_changing_the_saved_tab_or_runtime() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "shared", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
+        crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+    assert!(rig.manager.set_permission_mode(SESSION, TAB, "bypassPermissions").is_err());
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().permission_mode, "default");
+    let rt = rig.rt.lock().unwrap();
+    assert!(matches!(&rt.engine, Engine::Cli(p) if p.mode == "default"));
+}
+
+#[test]
+fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "shared", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    let tab = |mode: &str| crate::session_ops::NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
+    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
+        crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
+    assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
+    assert_eq!(index::get(SESSION).unwrap().tabs.len(), 1);
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("plan")).unwrap().permission_mode, "plan");
+    rig.manager.sharing.lock().unwrap().sessions.clear();
+    assert_eq!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).unwrap().permission_mode, "bypassPermissions");
+}
+
 impl Rig {
     /// A tab with no pane process behind it: what its pane draws, and when,
     /// is the test's to say.
@@ -257,7 +293,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);

@@ -164,7 +164,7 @@ fn decode_item(item: &Value, out: &mut Vec<Payload>) {
         "UserMessage" => {
             let text = text_of(&item["content"]);
             if !text.is_empty() {
-                out.push(Payload::UserMessage { text, images: Vec::new(), baseline: None, queued: false, cwd: None });
+                out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: None });
             }
         }
         "AgentMessage" => {

@@ -125,7 +125,7 @@ describe("Quick chats in the sidebar", () => {
     const { sessions } = await mount();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Session menu for Regex help" }), { button: 0, ctrlKey: false });
     const labels = (await screen.findAllByRole("menuitem")).map((item) => item.textContent?.trim());
-    expect(labels).toEqual(["Rename…", "Open in floating window", "Set working directory…", "Move to project…", "Pin", "Archive", "Fork session", "Delete quick chat…"]);
+    expect(labels).toEqual(["Rename…", "Open in floating window", "Set working directory…", "Move to project…", "Share session…", "Pin", "Archive", "Fork session", "Delete quick chat…"]);
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Open in floating window" }));
     await waitFor(() => expect(called("floating_show")).toEqual([{ sessionId: "chat-2", tabId: "chat-2-tab" }]));

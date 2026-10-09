@@ -593,6 +593,13 @@ impl Terminals {
         pane.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("resize: {e}"))
     }
 
+    pub(crate) fn size(&self, id: &str) -> Result<(u16, u16)> {
+        let panes = self.panes.lock().unwrap();
+        let pane = panes.get(id).ok_or_else(|| anyhow!("pane not found"))?;
+        let size = pane.master.get_size().map_err(|e| anyhow!("terminal size: {e}"))?;
+        Ok((size.cols, size.rows))
+    }
+
     pub fn kill(&self, id: &str) {
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
             if let Some(pid) = pane.pid {

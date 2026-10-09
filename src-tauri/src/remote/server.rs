@@ -2423,11 +2423,12 @@ impl WorkspaceRpc {
         let session = self.visible_session(peer, &p.session_id)?;
         let mode = index::requested_mode(p.mode);
         self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
-        let tab = crate::session_ops::add_tab_entry(
-            &session.id,
-            &crate::session_ops::NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode },
-        )
-        .map_err(RpcError::internal)?;
+        let new_tab = crate::session_ops::NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        // Through the session manager where there is one: it is the one place that refuses a Bypass tab in a shared session.
+        let tab = match &self.sessions {
+            Some(manager) => manager.add_tab(&session.id, &new_tab).map_err(|error| RpcError::new("refused", error.to_string()))?,
+            None => crate::session_ops::add_tab_entry(&session.id, &new_tab).map_err(RpcError::internal)?,
+        };
         let updated = index::get(&session.id).map_err(RpcError::internal)?;
         self.sink.emit("session_updated", &updated);
         let info = self.agents.get().and_then(|agents| {

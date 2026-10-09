@@ -1,3 +1,4 @@
+import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -493,6 +494,8 @@ export function SessionView({
           )}
 
           <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && "max-w-[70%]")}>
+            {/* The compact (floating) window has no share dialog to open. */}
+            {local && !compact && <LocalShareButton sessionId={session.id} />}
             {/* Keyed by session: a menu left open never carries over to another session. */}
             {!cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
             {activeTab && local && (
