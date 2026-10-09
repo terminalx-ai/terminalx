@@ -157,7 +157,7 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
     // No share survives: this is the delayed writer after the kill switch.
     let permit = crate::local_sharing::WritePermit { connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
-        ready: Some(ready), receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
+        ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
     });
     let deadline = Instant::now() + Duration::from_secs(2);
     while rig.delivery_pending() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
@@ -359,6 +359,232 @@ fn continuation_without_submission_or_provider_acceptance_stays_unconfirmed() {
         assert_eq!(receipt.recv_timeout(std::time::Duration::ZERO), Err(std::sync::mpsc::RecvTimeoutError::Timeout));
         assert_eq!(rig.told(), ["user: continue work", "user: unrelated terminal prompt"]);
     }
+}
+
+impl Rig {
+    /// The Enter of the newest composer prompt has been written, now: what
+    /// `type_prompt` records once its last byte is in the pane.
+    fn enter_written(&self) {
+        if let Engine::Cli(p) = &mut self.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().submitted = true;
+            if p.awaiting_delivery.is_some() {
+                p.accept_by = Some(self.now.get() + tui::ACCEPT_TIMEOUT);
+            }
+        }
+    }
+
+    /// The stages the tab's diagnostics recorded, in order, and the file.
+    fn delivery_stages(&self) -> (Vec<String>, String) {
+        let file = std::fs::read_to_string(self._dir.path().join("tab.diagnostics.jsonl")).unwrap_or_default();
+        let stages = file
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["type"] == "prompt_delivery")
+            .map(|line| line["stage"].as_str().unwrap_or("").to_string())
+            .collect();
+        (stages, file)
+    }
+}
+
+/// The report (#403): the message is in the CLI's input and the agent never
+/// starts. Writing the Enter proves nothing, and neither does the pane
+/// drawing — the paste appearing in the composer is a draw. An idle CLI that
+/// was given a prompt acknowledges it at once, so one that has not within
+/// seconds gets the reader told, not five minutes of "Working".
+#[test]
+fn a_submitted_prompt_the_cli_never_acknowledges_is_flagged_within_seconds() {
+    for kind in BOTH {
+        for evidence in ["hook", "echo"] {
+            let rig = Rig::of(kind, "");
+            rig.compose("a stranded prompt", 0);
+            rig.enter_written();
+            rig.pane_draws();
+            rig.advance(tui::ACCEPT_TIMEOUT - MOMENT);
+            rig.tick();
+            assert_eq!(rig.banner(), None, "{kind:?}: still within the time an acknowledgement takes");
+            assert_eq!(rig.status(), TabStatus::InProgress);
+
+            rig.advance(MOMENT);
+            rig.pane_draws();
+            rig.tick();
+            assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed), "{kind:?}");
+            assert_eq!(rig.status(), TabStatus::Waiting);
+            // The pane drawing again is not the CLI taking the prompt.
+            rig.advance(MOMENT);
+            rig.pane_draws();
+            rig.tick();
+            assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed), "{kind:?}: a redraw does not take it back");
+            // Told once, and nothing sent again: the prompt is the reader's to
+            // submit or recall, wherever it now is.
+            assert_eq!(rig.kinds(), ["user_message", "recovery"], "{kind:?}");
+            assert_eq!(rig.told(), ["user: a stranded prompt"]);
+            assert!(rig.delivery_pending());
+
+            // The reader presses Enter in the terminal; the CLI takes it.
+            match evidence {
+                "hook" => rig.hook("UserPromptSubmit", json!({ "prompt": "a stranded prompt" })),
+                _ => rig.append(&match kind {
+                    CliKind::Claude => rig.cli().prompt("a stranded prompt"),
+                    CliKind::Codex => rig.cli().steer("a stranded prompt"),
+                }),
+            }
+            assert_eq!(rig.banner(), None, "{kind:?}, {evidence}");
+            assert_eq!(rig.status(), TabStatus::InProgress, "{kind:?}, {evidence}");
+            assert!(!rig.delivery_pending());
+            assert_eq!(rig.told(), ["user: a stranded prompt"], "{kind:?}, {evidence}: still one message");
+            let (stages, _) = rig.delivery_stages();
+            assert_eq!(stages, ["unconfirmed", "accepted"], "{kind:?}, {evidence}");
+        }
+    }
+}
+
+#[test]
+fn a_prompt_acknowledged_in_time_is_never_flagged() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("taken at once", 0);
+        rig.enter_written();
+        rig.advance(tui::ACCEPT_TIMEOUT / 2);
+        rig.hook("UserPromptSubmit", json!({ "prompt": "taken at once" }));
+        for _ in 0..4 {
+            rig.advance(tui::ACCEPT_TIMEOUT);
+            rig.pane_draws();
+            rig.tick();
+        }
+        assert_eq!(rig.banner(), None, "{kind:?}");
+        assert_eq!(rig.status(), TabStatus::InProgress, "{kind:?}");
+        assert_eq!(rig.kinds(), ["user_message"], "{kind:?}");
+    }
+}
+
+/// A follow-up sent while a turn runs is the CLI's to hold. If the turn ends
+/// and the CLI still has not taken it, it may be sitting in the CLI's input:
+/// the reader is told, and the words typed into the terminal afterwards are
+/// a message of their own rather than that one's echo.
+#[test]
+fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("and then this", 0));
+        rig.enter_written();
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}: held behind a running turn is where it belongs");
+        rig.cli_replies("one");
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}: the CLI has a moment to take it");
+
+        rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        rig.tick();
+        rig.tick();
+        assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed), "{kind:?}");
+        assert_eq!(rig.kinds().iter().filter(|k| *k == "recovery").count(), 1, "{kind:?}: said once");
+        assert_eq!(rig.told(), ["user: start", "queued: and then this", "reply: one", "end"], "{kind:?}: nothing sent again");
+
+        rig.cli_takes("and then this");
+        assert_eq!(rig.banner(), None, "{kind:?}");
+        assert_eq!(rig.told().last().unwrap(), "user: and then this", "{kind:?}");
+    }
+}
+
+#[test]
+fn a_queued_prompt_the_cli_takes_is_never_flagged() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("while you are at it", 0));
+        rig.enter_written();
+        rig.append(&rig.cli().steer("while you are at it"));
+        rig.cli_replies("both");
+        rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}");
+        assert!(!rig.kinds().iter().any(|k| k == "recovery"), "{kind:?}");
+    }
+}
+
+/// The regression for delayed paste processing, against a real pane.
+///
+/// The program in the pane stands in for a CLI that is busy when the prompt
+/// arrives: it does not look at its input for a second and a half, then
+/// reads whatever is there in one gulp. Like the TUIs this was written
+/// against, it takes a carriage return that arrives in the same read as the
+/// paste for part of the paste, and only one read on its own for Enter.
+///
+/// A fixed pause between the two writes loses to that: both are waiting by
+/// the time the program reads, and the prompt is left in its input. The
+/// Enter has to wait for the paste to have been *read*. Nothing here is
+/// timed against the fix — the program is slow for far longer than any pause
+/// the writer takes, and says which of the two it saw.
+#[cfg(unix)]
+#[test]
+fn an_enter_is_not_written_until_a_busy_cli_has_read_the_paste() {
+    const PROMPT: &str = "synthetic prompt for a busy cli";
+    let rig = Rig::of(CliKind::Claude, "");
+    let script = rig._dir.path().join("busy-cli.sh");
+    std::fs::write(
+        &script,
+        r#"stty raw -echo
+printf 'CLI-IS-UP'
+sleep 1.5
+first=$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')
+case "$first" in
+  *'[201~\r'*) printf 'PROMPT-LEFT-IN-INPUT' ;;
+  *'[201~') dd bs=1 count=1 2>/dev/null | od -An -c | grep -q '\\r' && printf 'PROMPT-SUBMITTED' ;;
+  *) printf 'UNEXPECTED-INPUT' ;;
+esac
+sleep 600
+"#,
+    )
+    .unwrap();
+    let screen = |rig: &Rig| String::from_utf8_lossy(&rig.manager.terminals.read_output(&rig.pane).unwrap_or_default()).into_owned();
+    let wait_for = |rig: &Rig, needles: &[&str]| {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let seen = screen(rig);
+            if let Some(found) = needles.iter().find(|needle| seen.contains(**needle)) {
+                return found.to_string();
+            }
+            assert!(Instant::now() < deadline, "the pane never said any of {needles:?}: {seen:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+    let command = format!("sh '{}'", script.display());
+    let spec = pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(&command), env: &[] };
+    rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
+    wait_for(&rig, &["CLI-IS-UP"]);
+
+    rig.compose(PROMPT, 0);
+    let (ready, seq) = {
+        let rt = rig.rt.lock().unwrap();
+        let Engine::Cli(cli) = &rt.engine else { unreachable!() };
+        (cli.ready.clone(), cli.awaiting_delivery.unwrap())
+    };
+    ready.mark();
+    rig.manager.type_prompt(&rig.rt, &rig.pane, PROMPT.into(), vec![], PromptDelivery { ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
+    assert_eq!(wait_for(&rig, &["PROMPT-SUBMITTED", "PROMPT-LEFT-IN-INPUT", "UNEXPECTED-INPUT"]), "PROMPT-SUBMITTED");
+
+    // The writer is done once it lets go of the pane.
+    let writer = rig.manager.writers.lock().unwrap().get(&rig.pane).unwrap().clone();
+    drop(writer.lock().unwrap());
+    // Every stage is on record with its timing, and none of the prompt is.
+    let (stages, file) = rig.delivery_stages();
+    assert_eq!(stages, ["ready", "body_written", "submit_written"]);
+    assert!(file.contains(r#""paste":"read""#), "{file}");
+    assert!(!file.contains("synthetic") && !file.contains(rig._dir.path().to_str().unwrap()), "{file}");
+
+    // An Enter the program read is still not a prompt the agent took. This
+    // one never says so, and the reader hears about it.
+    assert!(rig.delivery_pending());
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(cli) if cli.accept_by.is_some()));
+    rig.advance(Duration::from_secs(600));
+    rig.tick();
+    assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
+    assert_eq!(rig.told(), [format!("user: {PROMPT}")]);
 }
 
 impl Rig {

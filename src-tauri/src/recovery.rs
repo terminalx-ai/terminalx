@@ -22,7 +22,7 @@ impl RecoveryKind {
             Self::Capacity => "The provider is at capacity. Retry or choose another available model.",
             Self::Tool => "A tool or command failed. Review its outcome before continuing.",
             Self::Timeout => "No progress was confirmed before the timeout. The process outcome is unknown.",
-            Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal. To resend, stop the session, then press Up in the composer to recall your message.",
+            Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
             Self::Disconnected => "The connection was lost. The process outcome is unknown.",
             Self::PermissionExpired => "The permission request expired. Check the terminal for a new request or stop the session.",
             Self::Failed => "The agent encountered an error. Review the conversation before continuing.",
@@ -80,6 +80,33 @@ pub fn failure(payload: &Payload) -> Option<RecoveryKind> {
 }
 
 pub fn diagnose(path: &std::path::Path, payload: &Payload) {
+    if let Ok(line) = serde_json::to_string(payload) {
+        append_diagnostic(path, &line);
+    }
+}
+
+/// One stage of a composer prompt's way into a PTY-first CLI: `ready`,
+/// `body_written`, `submit_written`, then `accepted` or `unconfirmed`.
+///
+/// Counts and timings only. `seq` is the prompt's own event number in this
+/// tab's log; nothing here is the prompt, a path, a command or an id that
+/// means anything outside the tab, so the lines can be quoted in a report.
+pub fn diagnose_delivery(path: &std::path::Path, seq: u64, stage: &str, elapsed: std::time::Duration, detail: serde_json::Value) {
+    let mut line = serde_json::json!({
+        "type": "prompt_delivery",
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "seq": seq,
+        "stage": stage,
+        "elapsed_ms": elapsed.as_millis() as u64,
+    });
+    if let (Some(line), serde_json::Value::Object(detail)) = (line.as_object_mut(), detail) {
+        line.extend(detail);
+    }
+    log::info!("prompt delivery: {line}");
+    append_diagnostic(path, &line.to_string());
+}
+
+fn append_diagnostic(path: &std::path::Path, line: &str) {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -87,7 +114,7 @@ pub fn diagnose(path: &std::path::Path, payload: &Payload) {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    if let (Ok(mut file), Ok(line)) = (options.open(path), serde_json::to_string(payload)) {
+    if let Ok(mut file) = options.open(path) {
         let _ = writeln!(file, "{line}");
     }
 }

@@ -114,6 +114,18 @@ enum Readiness {
     Blocked(&'static str),
 }
 
+impl Readiness {
+    /// For the delivery diagnostics: which, and never the screen's own text.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Ready => "ready",
+            Self::TimedOut => "timed_out",
+            Self::Blocked(_) => "blocked",
+        }
+    }
+}
+
 type DeliveryReceipt = std::sync::mpsc::Sender<std::result::Result<(), String>>;
 
 /// A composer prompt waiting for the CLI transcript to echo it. Both CLIs
@@ -126,8 +138,9 @@ struct ComposerEcho {
     image_count: usize,
     sent_at: Instant,
     receipt: Option<DeliveryReceipt>,
-    /// Confirmation is armed only after Enter was written successfully, not
-    /// while the prompt is waiting for the CLI to become ready.
+    /// Enter was written. Confirmation is armed only from then, not while
+    /// the prompt is waiting for the CLI to become ready — and a prompt that
+    /// was never typed is not one the CLI can be said to have left unsent.
     submitted: bool,
     /// Sent while a turn was running, so the CLI holds it until it has a
     /// use for it. Its echo may be a long time coming, and may arrive after
@@ -248,17 +261,29 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
 /// after it was sent — a slow start, a queued prompt behind a long turn —
 /// and dropping its echo early would draw that record as a second message.
 /// The wait is counted from when the turn was last seen running.
-fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) {
+///
+/// Returns the events of the reader's own queued prompts among them: typed
+/// and submitted behind a turn, and still not taken once that turn was over.
+/// Those may be sitting in the CLI's input, and the reader is owed a word.
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<u64> {
     if turn_open {
         for prompt in pending.iter_mut() {
             prompt.sent_at = now;
         }
     }
     let before = pending.len();
-    pending.retain(|prompt| !prompt.expired(now));
+    let mut unsent = Vec::new();
+    pending.retain(|prompt| {
+        let expired = prompt.expired(now);
+        if expired && prompt.queued && prompt.submitted && !prompt.command {
+            unsent.push(prompt.seq);
+        }
+        !expired
+    });
     if pending.len() < before {
         log::warn!("{} composer prompt(s) expired without an echo", before - pending.len());
     }
+    unsent
 }
 
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
@@ -289,6 +314,12 @@ pub struct CliTab {
     /// The initial composer prompt, until the CLI confirms it through a
     /// transcript echo or turn activity. Startup readiness is not delivery.
     awaiting_delivery: Option<u64>,
+    /// When that prompt was sent, for the delivery diagnostics.
+    delivery_sent_at: Option<Instant>,
+    /// Set once that prompt's Enter is written: when an idle CLI should have
+    /// acknowledged it by. Past it the reader is told, rather than left
+    /// looking at a message the agent may never have been given (#403).
+    accept_by: Option<Instant>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -357,6 +388,11 @@ impl TabRuntime {
         if let Engine::Cli(p) = &mut self.engine {
             p.transcript_turn = None;
         }
+    }
+
+    /// The tab's private diagnostics, beside its log.
+    fn diagnostics_path(&self) -> PathBuf {
+        self.log_path.with_extension("diagnostics.jsonl")
     }
 
     fn key(&self) -> String {
@@ -442,6 +478,11 @@ struct PromptText {
 #[derive(Default)]
 struct PromptDelivery {
     ready: Option<Arc<tui::Ready>>,
+    /// The composer's `user_message` this is the typing of. `None` for a
+    /// command the app types for itself, which is nobody's message.
+    seq: Option<u64>,
+    /// Sent behind a running turn, for the CLI to hold.
+    queued: bool,
     receipt: Option<(u64, DeliveryReceipt)>,
     shared: Option<(crate::local_sharing::WritePermit, String, String, u64)>,
 }
@@ -552,7 +593,9 @@ impl SessionManager {
         };
         let watcher = manager.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            // Short, because an unacknowledged prompt is judged here and the
+            // reader is waiting on it; a pass only looks at each tab.
+            std::thread::sleep(std::time::Duration::from_secs(5));
             watcher.watch_tabs(recovery::Patience::DEFAULT, Instant::now(), |pane| watcher.terminals.last_output(pane));
         });
         manager
@@ -595,6 +638,34 @@ impl SessionManager {
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
                 self.after_turn_completed(&rt_arc, rt, final_message);
                 continue;
+            }
+            // A prompt whose Enter was written to an idle CLI is acknowledged
+            // at once or not at all. The pane drawing is no acknowledgement —
+            // a paste landing in the composer draws too — so this does not
+            // wait out the stall limit, and only the CLI's word takes it back.
+            let overdue = match &mut rt.engine {
+                Engine::Cli(p) if p.awaiting_delivery.is_some() && p.accept_by.is_some_and(|by| now >= by) => {
+                    p.accept_by = None;
+                    p.awaiting_delivery.zip(p.delivery_sent_at)
+                }
+                _ => None,
+            };
+            if let Some((seq, sent_at)) = overdue {
+                if rt.recovery.is_none() && rt.pending.is_empty() {
+                    recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "unconfirmed", now.saturating_duration_since(sent_at), serde_json::json!({ "queued": false }));
+                    self.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
+                    continue;
+                }
+            }
+            // A prompt queued behind a turn that is over, and still not taken.
+            if !rt.turn_open {
+                let unsent = match &mut rt.engine {
+                    Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, false, now),
+                    _ => Vec::new(),
+                };
+                if self.queued_prompts_unsent(&mut rt, &unsent) {
+                    continue;
+                }
             }
             // Only a PTY-first tab has a pane; the other engines are judged
             // on their events alone, as before.
@@ -673,7 +744,7 @@ impl SessionManager {
     fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
-            recovery::diagnose(&rt.log_path.with_extension("diagnostics.jsonl"), &payload);
+            recovery::diagnose(&rt.diagnostics_path(), &payload);
             recovery::sanitize(&mut payload);
         }
         rt.seq += 1;
@@ -735,9 +806,14 @@ impl SessionManager {
     /// startup recovery and continuation receipts separate: continuations
     /// require a matching echo or a submit hook after their Enter was written.
     fn delivery_confirmed(&self, rt: &mut TabRuntime) {
+        let mut accepted = None;
         if let Engine::Cli(p) = &mut rt.engine {
-            p.awaiting_delivery = None;
+            accepted = p.awaiting_delivery.take().zip(p.delivery_sent_at.take());
+            p.accept_by = None;
             p.ready.mark();
+        }
+        if let Some((seq, sent_at)) = accepted {
+            recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "accepted", sent_at.elapsed(), serde_json::json!({ "queued": false }));
         }
         self.stall_disproved(rt);
         if rt.recovery == Some(RecoveryKind::DeliveryUnconfirmed) {
@@ -748,6 +824,20 @@ impl SessionManager {
                 self.publish(rt, Payload::Recovery { kind: None }, None);
             }
         }
+    }
+
+    /// Queued prompts the CLI was given and never took: say so once, on a
+    /// tab with nothing else to say. The prompts stay in the chat as sent;
+    /// nothing is typed again, because where they are now is not known.
+    fn queued_prompts_unsent(&self, rt: &mut TabRuntime, unsent: &[u64]) -> bool {
+        for seq in unsent {
+            recovery::diagnose_delivery(&rt.diagnostics_path(), *seq, "unconfirmed", std::time::Duration::ZERO, serde_json::json!({ "queued": true }));
+        }
+        if unsent.is_empty() || rt.turn_open || rt.recovery.is_some() {
+            return false;
+        }
+        self.needs_recovery(rt, RecoveryKind::DeliveryUnconfirmed);
+        true
     }
 
     fn set_status(&self, rt: &mut TabRuntime, status: TabStatus) {
@@ -1678,6 +1768,8 @@ impl SessionManager {
             tail: tail.clone(),
             echoed: Default::default(),
             awaiting_delivery: None,
+            delivery_sent_at: None,
+            accept_by: None,
             decisions: HashMap::new(),
             turn_tail: Default::default(),
             transcript_turn: None,
@@ -1913,9 +2005,11 @@ impl SessionManager {
             self.stall_disproved(&mut rt);
         }
         let turn_open = rt.turn_open;
-        if let Engine::Cli(p) = &mut rt.engine {
-            expire_composer_echoes(&mut p.echoed, turn_open, Instant::now());
-        }
+        let unsent = match &mut rt.engine {
+            Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, turn_open, Instant::now()),
+            _ => Vec::new(),
+        };
+        self.queued_prompts_unsent(&mut rt, &unsent);
         for payload in payloads {
             // A prompt sent from the composer was published when it was sent;
             // the transcript's copy of it would be the same message twice.
@@ -2070,6 +2164,8 @@ impl SessionManager {
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
             ready: Some(ready),
+            seq: Some(ev.seq),
+            queued,
             receipt: receipt.map(|receipt| (ev.seq, receipt)),
             shared: prompt.shared_connection.map(|connection| (connection, entry.id.clone(), tab.id.clone(), ev.seq)),
         });
@@ -2093,6 +2189,8 @@ impl SessionManager {
             if !queued {
                 p.turn_tail.opened();
                 p.awaiting_delivery = Some(ev.seq);
+                p.delivery_sent_at = Some(Instant::now());
+                p.accept_by = None;
             }
         }
         if !queued {
@@ -2104,11 +2202,20 @@ impl SessionManager {
     }
 
     /// Write into a pane on its own thread, under that pane's write lock. The
-    /// Enter has to be a later write than the body — a carriage return inside
-    /// the same one is read as part of the paste and never submits — so this
+    /// Enter has to be a later *read* than the body — a carriage return the
+    /// CLI takes in the same gulp as the paste is read as part of it and never
+    /// submits — so this waits for the CLI to have read the paste and then
     /// sleeps, which no caller holding the tab lock could afford to do.
+    ///
+    /// Writing the Enter is still not delivery. A composer prompt's stages
+    /// are noted in the tab's diagnostics as they pass, and the watcher holds
+    /// the CLI to acknowledging it (`accept_by`).
     fn type_prompt(&self, rt_arc: &Arc<Mutex<TabRuntime>>, pane: &str, text: String, attachments: Vec<String>, delivery: PromptDelivery) {
-        let PromptDelivery { ready, receipt, shared } = delivery;
+        let PromptDelivery { ready, seq, queued, receipt, shared } = delivery;
+        let sent_at = Instant::now();
+        // A slash command opens a palette or runs in the CLI itself, and a
+        // continuation has its own receipt: neither is held to the deadline.
+        let acknowledged = ready.is_some() && receipt.is_none() && !queued && !tui::is_slash_command(&text);
         let lock = self.writers.lock().unwrap().entry(pane.to_string()).or_default().clone();
         let terminals = self.terminals.clone();
         let manager = self.clone();
@@ -2116,9 +2223,17 @@ impl SessionManager {
         let pane = pane.to_string();
         let spawn_receipt = receipt.clone();
         let spawned = std::thread::Builder::new().name("cli-input".into()).spawn(move || {
+            let diagnostics = seq.map(|seq| (seq, rt_arc.lock().unwrap().diagnostics_path()));
+            let stage = |stage: &str, mut detail: serde_json::Value| {
+                if let Some((seq, path)) = &diagnostics {
+                    detail["queued"] = queued.into();
+                    recovery::diagnose_delivery(path, *seq, stage, sent_at.elapsed(), detail);
+                }
+            };
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ready) = &ready {
                 let readiness = manager.wait_ready(&pane, ready, shared.as_ref());
+                stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
                 let mut rt = rt_arc.lock().unwrap();
                 // Stop or a restart may have replaced the CLI while waiting.
                 if !matches!(&rt.engine, Engine::Cli(p) if Arc::ptr_eq(&p.ready, ready)) {
@@ -2149,11 +2264,18 @@ impl SessionManager {
                 for path in &attachments {
                     terminals.write(&pane, &tui::attachment_bytes(path))?;
                 }
+                let unread = || terminals.unread_input(&pane);
                 if !attachments.is_empty() {
+                    tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
                     std::thread::sleep(std::time::Duration::from_millis(300));
                 }
                 let body = tui::body_bytes(&text);
                 terminals.write(&pane, &body)?;
+                stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len() }));
+                let read = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
+                if read == tui::PasteRead::Unread {
+                    log::warn!("[{pane}] the CLI has not read the prompt; submitting anyway and watching for acceptance");
+                }
                 std::thread::sleep(tui::submit_delay(body.len()));
                 if let Some((seq, _)) = &receipt {
                     // Hold the runtime lock across Enter and arming so a fast
@@ -2167,6 +2289,20 @@ impl SessionManager {
                     }
                 } else {
                     terminals.write(&pane, tui::SUBMIT)?;
+                }
+                stage("submit_written", serde_json::json!({ "paste": read.as_str() }));
+                if let Some(seq) = seq {
+                    // Armed after the write, not across it: an acknowledgement
+                    // that got here first has cleared `awaiting_delivery`.
+                    let mut rt = rt_arc.lock().unwrap();
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        if let Some(echo) = p.echoed.iter_mut().find(|echo| echo.seq == seq) {
+                            echo.submitted = true;
+                        }
+                        if acknowledged && p.awaiting_delivery == Some(seq) {
+                            p.accept_by = Some(Instant::now() + tui::ACCEPT_TIMEOUT);
+                        }
+                    }
                 }
                 Ok(())
             })();
