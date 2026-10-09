@@ -99,7 +99,7 @@ pub const BYPASS_MODE: &str = "bypassPermissions";
 
 /// The permission stance a provider says it is in, in its own terms.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Stance {
     /// Claude Code names a mode.
     Mode { mode: String },
