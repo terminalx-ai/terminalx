@@ -10,8 +10,9 @@
 //!
 //! - **protected**: the repository's primary worktree, the root of any open
 //!   project (also one nested inside the worktree, or reached through a
-//!   symlink or another spelling of the path), or a locked worktree. Never
-//!   removable, whatever a request says.
+//!   symlink or another spelling of the path), a worktree that has another
+//!   worktree checked out inside it, or a locked worktree. Never removable,
+//!   whatever a request says.
 //! - **active**: an agent is running or waiting for an answer, a terminal is
 //!   open, or some process has its working directory there. Nothing is ever
 //!   stopped to make a worktree removable.
@@ -21,8 +22,9 @@
 //! - **unpushed**: commits that no remote has and that are not in the default
 //!   branch as the remote has it now.
 //! - **unverifiable**: the answer could not be established (not a working
-//!   tree of the project, files hidden from `git status`, submodules, git
-//!   failing). Unknown is never read as clean.
+//!   tree of the project, files hidden from `git status`, submodules, another
+//!   checkout inside an ignored folder, git failing). Unknown is never read
+//!   as clean.
 //! - **ignoredData**: clean, but it holds ignored files that are not known
 //!   build or dependency output (`.env`, a local database). Removable only
 //!   when the request says so for that worktree.
@@ -399,6 +401,21 @@ fn disposable(entry: &str) -> bool {
     DISPOSABLE_NAMES.contains(&name) || DISPOSABLE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
+/// How far into an ignored folder a nested checkout is looked for.
+const NESTED_CHECKOUT_DEPTH: usize = 4;
+
+/// Whether `dir`, or a folder up to `depth` levels below it, is a Git
+/// checkout (has a `.git`). Links are not followed.
+fn holds_git_dir(dir: &Path, depth: usize) -> bool {
+    if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_git_dir(&entry.path(), depth - 1))
+}
+
 /// The git operation that is under way in the checkout, if one is.
 fn operation_in_progress(path: &Path) -> Result<Option<&'static str>, ()> {
     let dir = git::run(path, &["rev-parse", "--absolute-git-dir"]).map_err(|_| ())?;
@@ -410,6 +427,7 @@ fn operation_in_progress(path: &Path) -> Result<Option<&'static str>, ()> {
         ("CHERRY_PICK_HEAD", "cherry-pick"),
         ("REVERT_HEAD", "revert"),
         ("BISECT_LOG", "bisect"),
+        ("sequencer", "cherry-pick or revert"),
     ];
     Ok(marks.into_iter().find(|(mark, _)| std::fs::symlink_metadata(dir.join(mark)).is_ok()).map(|(_, what)| what))
 }
@@ -489,6 +507,12 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
         if entry.locked {
             return (Verdict::Protected, Some("It is locked with `git worktree lock`. Unlock it first if it is meant to go.".into()));
         }
+        // Removing a directory removes everything below it: another worktree
+        // checked out inside this one would go too, whatever state it is in.
+        let nested = repository.listed.iter().map(|other| canonical(Path::new(&other.path))).find(|other| *other != path && other.starts_with(&path));
+        if let Some(nested) = nested {
+            return (Verdict::Protected, Some(format!("It contains another worktree ({}). It is never removed while that is there.", nested.display())));
+        }
         if host.confine.is_some_and(|inside| !path.starts_with(canonical(inside))) {
             return unverifiable("It is outside this workspace, so it is not removed from here.");
         }
@@ -564,6 +588,12 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
         };
         for name in ignored.split('\0').filter(|name| !name.is_empty()) {
             if disposable(name) { candidate.disposable.push(name.to_string()) } else { candidate.ignored_data.push(name.to_string()) }
+        }
+        // An ignored folder can hold a whole checkout (a clone, or a worktree
+        // of some other repository) whose state nothing here has read.
+        let holds_checkout = candidate.disposable.iter().chain(&candidate.ignored_data).find(|name| name.ends_with('/') && holds_git_dir(&path.join(name), NESTED_CHECKOUT_DEPTH));
+        if let Some(name) = holds_checkout {
+            return unverifiable(&format!("The ignored folder {name} holds another Git checkout, and work in it cannot be checked from here."));
         }
         if !candidate.ignored_data.is_empty() {
             return (
@@ -652,39 +682,52 @@ fn result(item: &RemoveItem, outcome: Outcome, reason: impl Into<Option<String>>
     }
 }
 
-/// A worktree that is not on disk: an earlier removal took it, and may not
-/// have finished. Its sessions are filed under the project (never deleted
-/// here) and git's record of it is cleared.
-fn reconcile(sink: &dyn EventSink, repository: &Repository<'_>, item: &RemoveItem, target: &Path) -> ItemResult {
+/// A worktree that is not on disk. Nothing can be read of it, so nothing is
+/// removed and git's records are left as they are. The one thing done here
+/// finishes a removal that was cut short: when git no longer lists the
+/// worktree but sessions that ran in it still point there, they are filed
+/// under the project (never deleted).
+fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>, item: &RemoveItem, target: &Path) -> ItemResult {
     let Some(parent) = target.parent().filter(|parent| parent.is_dir()) else {
         return result(item, Outcome::Skipped, "Its folder cannot be reached, so nothing about it could be checked.".to_string());
     };
     let spelled = canonical(parent).join(target.file_name().unwrap_or_default());
-    let sessions: Vec<SessionEntry> = match index::load() {
-        Ok(sessions) => sessions.into_iter().filter(|session| !session.worktree_removed && Path::new(&session.cwd) == target && canonical(Path::new(&session.project_path)) == repository.root).collect(),
+    let sessions = match index::load() {
+        Ok(sessions) => sessions,
         Err(error) => return result(item, Outcome::Failed, format!("The session index could not be read: {error:#}")),
     };
-    let recorded = list_worktrees(&repository.root).is_ok_and(|listed| listed.iter().any(|entry| Path::new(&entry.path) == target || Path::new(&entry.path) == spelled));
-    if !recorded && sessions.is_empty() {
-        // Nothing of it is left to clear: a retry of a removal that finished.
-        return result(item, Outcome::AlreadyRemoved, "It was already removed.".to_string());
+    // A root that is missing is still a root.
+    let roots = Roots::of(host, &sessions);
+    if roots.protected.iter().any(|(root, _)| root.starts_with(target) || root.starts_with(&spelled)) || host.confine.is_some_and(|inside| !spelled.starts_with(canonical(inside))) {
+        return result(item, Outcome::Skipped, "That path is protected or outside this host's projects. Nothing was changed.".to_string());
     }
+    let recorded = match list_worktrees(&repository.root) {
+        Ok(listed) => listed.iter().any(|entry| Path::new(&entry.path) == target || Path::new(&entry.path) == spelled),
+        Err(_) => return result(item, Outcome::Skipped, "Git could not list the project's worktrees, so nothing was changed.".to_string()),
+    };
     if recorded {
-        let _ = git::run(&repository.root, &["worktree", "prune"]);
+        // Not removed by a clean-up: git would have dropped its record.
+        return result(item, Outcome::Skipped, "Its folder is missing, but Git still lists it as a worktree. Nothing was changed.".to_string());
     }
-    let mut done = result(item, Outcome::AlreadyRemoved, "It was already removed.".to_string());
-    if !sessions.is_empty() {
-        match session_ops::mark_workspace_sessions_removed(&repository.root, &sessions) {
-            Ok(moved) => {
-                done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
-                session_ops::notify_workspace_settled(sink, &repository.project.path, &moved);
-            }
-            Err(error) => return result(item, Outcome::Failed, format!("It is removed, but its sessions could not be updated: {error}")),
+    let left: Vec<SessionEntry> = sessions
+        .into_iter()
+        .filter(|session| {
+            let cwd = Path::new(&session.cwd);
+            session.worktree_name.is_some() && !session.worktree_removed && (cwd.starts_with(target) || cwd.starts_with(&spelled)) && canonical(Path::new(&session.project_path)) == repository.root
+        })
+        .collect();
+    if left.is_empty() {
+        return result(item, Outcome::Skipped, "Nothing is at that path. If an earlier clean-up removed it, there is nothing left to do.".to_string());
+    }
+    match session_ops::mark_workspace_sessions_removed(&repository.root, &left) {
+        Ok(moved) => {
+            let mut done = result(item, Outcome::AlreadyRemoved, "It was already removed; its conversations are now filed under the project.".to_string());
+            done.sessions_kept = moved.iter().map(|session| session.id.clone()).collect();
+            session_ops::notify_workspace_settled(sink, &repository.project.path, &moved);
+            done
         }
-    } else {
-        sink.emit(session_ops::WORKSPACES_CHANGED_EVENT, &repository.project.path);
+        Err(error) => result(item, Outcome::Failed, format!("It is removed, but its sessions could not be updated: {error}")),
     }
-    done
 }
 
 fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<'_>], item: &RemoveItem) -> ItemResult {
@@ -698,7 +741,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "Not a path on this host.".to_string());
     }
     if std::fs::symlink_metadata(target).is_err() {
-        return reconcile(sink, repository, item, target);
+        return reconcile(host, sink, repository, item, target);
     }
     let target = canonical(target);
     // Only what git lists for this project's repository is a worktree of it.
@@ -708,6 +751,9 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
     let Some(entry) = listed.iter().find(|entry| !entry.prunable && same_dir(&canonical(Path::new(&entry.path)), &target)) else {
         return result(item, Outcome::Skipped, "That path is not a worktree of this project.".to_string());
     };
+    // Measured first: walking a large tree takes a while, and nothing may
+    // come between the inspection below and the removal.
+    let freed = git::size_on_disk(&target);
     // Everything is read again now, as late as it can be.
     let sessions = match index::load() {
         Ok(sessions) => sessions,
@@ -732,7 +778,6 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "It has no commit checked out.".to_string());
     };
     let affected = session_ops::sessions_within(sessions, &target);
-    let freed = git::size_on_disk(&target);
     // Never forced, never deleted directly: git removes it or says why not.
     let options = crate::workspaces::DeleteOptions { delete_branch: false, direct: git::DirectDelete::Never, verified_head: Some(head) };
     if let Err(error) = crate::workspaces::delete(&repository.root, &target, options) {

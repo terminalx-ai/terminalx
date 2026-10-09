@@ -3039,7 +3039,7 @@ pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
         let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items))?;
-        for done in results.iter().filter(|done| done.outcome == crate::worktree_cleanup::Outcome::Removed) {
+        for done in results.iter().filter(|done| matches!(done.outcome, crate::worktree_cleanup::Outcome::Removed | crate::worktree_cleanup::Outcome::AlreadyRemoved)) {
             state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
         }
         Ok(results)

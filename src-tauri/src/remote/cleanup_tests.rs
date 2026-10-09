@@ -120,9 +120,9 @@ async fn the_runtime_removes_its_own_safe_worktrees_and_never_its_root() {
     // Sent again after a dropped connection: the first answer, not a second removal.
     let resent = call(&f.rpc, &manager, "cleanup.remove", json!({ "clientRequestId": "request-0001", "items": forged })).await.unwrap();
     assert_eq!(resent, done);
-    // Asked afresh: the worktree is found gone, and said to be.
+    // Asked afresh: there is nothing there any more, and nothing is done or claimed.
     let retry = call(&f.rpc, &manager, "cleanup.remove", json!({ "clientRequestId": "request-0002", "items": [forged[4]] })).await.unwrap();
-    assert_eq!(retry["results"][0]["outcome"], "alreadyRemoved");
+    assert_eq!(retry["results"][0]["outcome"], "skipped");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -66,6 +66,8 @@ export function WorktreeCleanupDialog() {
   const stopSizes = useRef<() => void>(() => undefined);
   const hostsRef = useRef<CleanupHost[]>([]);
   const scanId = useRef(0);
+  /** The hosts this scan asked: every selection belongs to one of them, whatever the catalog lists by now. */
+  const scanned = useRef<CleanupHost[]>([]);
 
   const hosts = useMemo(() => cleanupHosts(catalog), [catalog, connections]); // eslint-disable-line react-hooks/exhaustive-deps
   hostsRef.current = hosts;
@@ -80,6 +82,7 @@ export function WorktreeCleanupDialog() {
     setOutcomes([]);
     const found = await scanHosts(hostsRef.current);
     if (id !== scanId.current) return;
+    scanned.current = found.map((entry) => entry.host);
     setScans(found);
     setEstimating(true);
     stopSizes.current = estimateSizes(
@@ -91,6 +94,9 @@ export function WorktreeCleanupDialog() {
 
   useEffect(() => {
     if (!open) return;
+    // Each opening starts from the safe defaults: neither switch is remembered.
+    setIncludeIgnored(false);
+    setDeleteSessions(false);
     void scan();
     return () => {
       scanId.current++;
@@ -127,7 +133,7 @@ export function WorktreeCleanupDialog() {
     setStage("running");
     setOutcomes([]);
     const selections: CleanupSelection[] = chosen.map((row) => ({ hostId: row.host.id, candidate: row.candidate, deleteSessions }));
-    const done = await runCleanup(hostsRef.current, selections, setOutcomes);
+    const done = await runCleanup(scanned.current, selections, setOutcomes);
     for (const outcome of done) {
       if (outcome.hostId === LOCAL_HOST && outcome.outcome === "removed") forgetWorkspaceSize(outcome.path);
     }

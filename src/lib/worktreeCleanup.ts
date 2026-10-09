@@ -73,6 +73,9 @@ export const localHost: CleanupHost = {
   remove: (items) => api.worktreeCleanupRemove(items),
 };
 
+/** The host could not be asked at all: nothing was sent, so nothing happened there. */
+export class HostUnavailable extends Error {}
+
 const NOT_CONNECTED = "Not connected. A workspace that cannot be reached is skipped, never assumed clean or idle. Open it and scan again to include it.";
 
 function cloudUnavailable(client: WorkspaceRpcClient | null): string | null {
@@ -88,7 +91,7 @@ export function cloudHost(orgId: string, workspaceId: string, name: string, clie
   const client = () => {
     const current = clientOf(key);
     const unavailable = cloudUnavailable(current);
-    if (!current || unavailable) throw new Error(unavailable ?? NOT_CONNECTED);
+    if (!current || unavailable) throw new HostUnavailable(unavailable ?? NOT_CONNECTED);
     return current;
   };
   return {
@@ -207,8 +210,13 @@ export async function runCleanup(hosts: CleanupHost[], selections: CleanupSelect
         ]);
       } catch (error) {
         const why = errorMessage(error);
+        // Never sent is not the same as sent and unanswered.
+        const inFlight = (item: CleanupRemoveItem) =>
+          error instanceof HostUnavailable
+            ? unanswered(host.id, item, "skipped", `Not attempted: ${why}`)
+            : unanswered(host.id, item, "unknown", `The host stopped answering (${why}). It may or may not have been removed; scan again to see.`);
         report([
-          ...batches[index]!.map((item) => unanswered(host.id, item, "unknown", `The host stopped answering (${why}). It may or may not have been removed; scan again to see.`)),
+          ...batches[index]!.map(inFlight),
           ...batches.slice(index + 1).flat().map((item) => unanswered(host.id, item, "skipped", "Not attempted: the host stopped answering.")),
         ]);
         break;

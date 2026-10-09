@@ -175,6 +175,19 @@ describe("worktree clean-up across hosts", () => {
     expect(totals(retry).removed).toBe(1);
   });
 
+  it("a host that is already gone when asked was never sent anything, and says so", async () => {
+    const clients: Record<string, ReturnType<typeof runtime> | null> = { "cloud:org:box": runtime() };
+    const hosts = cleanupHosts(catalog({ id: "box", name: "Box" }), asClients(clients));
+    clients["cloud:org:box"] = null;
+    const outcomes = await runCleanup(hosts, [
+      { hostId: "cloud:org:box", candidate: candidate("/w", "a"), deleteSessions: false },
+      { hostId: "cloud:org:box", candidate: candidate("/w", "b"), deleteSessions: false },
+    ]);
+    expect(outcomes.map((outcome) => outcome.outcome)).toEqual(["skipped", "skipped"]);
+    expect(outcomes[0]!.reason).toMatch(/Not attempted: Not connected/);
+    expect(totals(outcomes)).toEqual({ removed: 0, skipped: 2, failed: 0, freedBytes: 0 });
+  });
+
   it("an answer that leaves a worktree out is not taken as success", async () => {
     local.remove.mockResolvedValue([]);
     const outcomes = await runCleanup(cleanupHosts(catalog()), [{ hostId: LOCAL_HOST, candidate: candidate("/p", "silent"), deleteSessions: false }]);

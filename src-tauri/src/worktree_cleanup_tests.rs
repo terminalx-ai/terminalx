@@ -528,8 +528,8 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     let session = f.session(&alpha, &wt, TabStatus::Idle);
     let main = f.session(&alpha, &alpha, TabStatus::Idle);
     let item = f.item(&f.find(&wt));
-    // The first attempt took the directory and died before the rest.
-    std::fs::remove_dir_all(&wt).unwrap();
+    // The first attempt removed the worktree and died before its sessions were filed.
+    sh(&alpha, &["worktree", "remove", wt.to_str().unwrap()]);
 
     let done = f.remove_one(RemoveItem { delete_sessions: true, ..item.clone() });
     assert_eq!(done.outcome, Outcome::AlreadyRemoved, "{:?}", done.reason);
@@ -538,13 +538,78 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     assert_eq!(done.sessions_kept, vec![session.id.clone()]);
     assert!(index::get(&session.id).unwrap().worktree_removed);
     assert_eq!(index::get(&main.id).unwrap(), main);
-    assert!(!git::run(&alpha, &["worktree", "list", "--porcelain"]).unwrap().contains("half-done"));
 
-    // And once more: still the same answer, nothing else touched.
+    // And once more: there is nothing left to do, and that is not called a removal.
     let again = f.remove_one(item);
-    assert_eq!(again.outcome, Outcome::AlreadyRemoved);
+    assert_eq!(again.outcome, Outcome::Skipped);
     assert!(again.sessions_kept.is_empty());
+    assert_eq!(index::get(&main.id).unwrap(), main);
     assert!(alpha.join("a.txt").exists());
+}
+
+#[test]
+fn a_folder_that_went_missing_is_not_taken_for_a_removed_worktree() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    // Moved aside (or on a volume that is not mounted): git still lists it.
+    let wt = f.pushed(&alpha, "moved-aside");
+    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let item = f.item(&f.find(&wt));
+    std::fs::rename(&wt, f.base.join("aside")).unwrap();
+    let done = f.remove_one(item);
+    assert_eq!(done.outcome, Outcome::Skipped, "{:?}", done.reason);
+    assert_eq!(index::get(&session.id).unwrap(), session);
+    assert!(git::run(&alpha, &["worktree", "list", "--porcelain"]).unwrap().contains("moved-aside"), "git's record of it is left alone");
+
+    // A made-up path is not reported as removed, and a session in a deleted
+    // subfolder of the main directory is not refiled by naming that folder.
+    let gone = alpha.join("deleted-subfolder");
+    let inside = f.session(&alpha, &alpha, TabStatus::Idle);
+    index::update_session(&inside.id, |entry| {
+        entry.cwd = gone.to_string_lossy().into_owned();
+        Ok(())
+    })
+    .unwrap();
+    let inside = index::get(&inside.id).unwrap();
+    for path in [gone.clone(), f.base.join("never-existed")] {
+        let forged = RemoveItem { project_path: alpha.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: "forged".into(), delete_sessions: true, accept_ignored: true };
+        assert_eq!(f.remove_one(forged).outcome, Outcome::Skipped);
+    }
+    assert_eq!(index::get(&inside.id).unwrap(), inside);
+    assert!(f.events.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_worktree_that_holds_another_checkout_is_never_removed() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    std::fs::write(alpha.join(".gitignore"), "node_modules/\n.env\nlocal.db\ntarget/\n.claude/\n").unwrap();
+    sh(&alpha, &["commit", "-qam", "ignore more"]);
+    sh(&alpha, &["push", "-q", "origin", "main"]);
+
+    // Another worktree of the same repository, under an ignored folder, with unsaved work.
+    let outer = f.pushed(&alpha, "outer");
+    let inner = outer.join("target/inner");
+    sh(&alpha, &["worktree", "add", "-q", "-b", "inner", inner.to_str().unwrap(), "main"]);
+    std::fs::write(inner.join("unsaved.txt"), "unsaved").unwrap();
+    assert_eq!(git::run(&outer, &["status", "--porcelain"]).unwrap().trim(), "", "git sees nothing wrong with the outer one");
+    let found = f.find(&outer);
+    assert_eq!(found.verdict, Verdict::Protected);
+    assert!(found.reason.as_deref().unwrap().contains("contains another worktree"), "{:?}", found.reason);
+    assert_eq!(f.remove_one(RemoveItem { accept_ignored: true, ..f.item(&found) }).outcome, Outcome::Skipped);
+    assert!(inner.join("unsaved.txt").exists());
+
+    // A separate clone inside an ignored folder that would otherwise be disposable.
+    let holder = f.pushed(&alpha, "holder");
+    let clone = holder.join("node_modules/vendored/clone");
+    std::fs::create_dir_all(&clone).unwrap();
+    sh(&clone, &["init", "-q"]);
+    std::fs::write(clone.join("work.txt"), "work").unwrap();
+    let found = f.find(&holder);
+    assert_eq!(found.verdict, Verdict::Unverifiable);
+    assert!(found.reason.as_deref().unwrap().contains("holds another Git checkout"), "{:?}", found.reason);
+    assert_eq!(f.remove_one(RemoveItem { accept_ignored: true, ..f.item(&found) }).outcome, Outcome::Skipped);
+    assert!(clone.join("work.txt").exists());
 }
 
 #[test]

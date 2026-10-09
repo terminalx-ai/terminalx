@@ -187,6 +187,18 @@ describe("WorktreeCleanupDialog", () => {
     expect(local.remove).toHaveBeenCalledWith([expect.objectContaining({ path: "/Users/me/alpha/.raccoon/worktrees/env-cat", deleteSessions: true, acceptIgnored: true })]);
   });
 
+  it("neither switch is remembered the next time the view is opened", async () => {
+    await opened();
+    fireEvent.click(screen.getByRole("switch", { name: "Allow worktrees with ignored local files" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Also delete conversation history" }));
+    act(() => closeWorktreeCleanup());
+    act(() => openWorktreeCleanup());
+    await screen.findByText("quiet-fox");
+    expect(screen.getByRole("switch", { name: "Allow worktrees with ignored local files" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("switch", { name: "Also delete conversation history" }).getAttribute("aria-checked")).toBe("false");
+    expect(box(/env-cat/).disabled).toBe(true);
+  });
+
   it("size estimation can be stopped without closing the view", async () => {
     local.size.mockImplementation(() => new Promise(() => undefined));
     await opened();
