@@ -17,15 +17,27 @@
 //!   command. Drawing it would show the reader the harness rather than the
 //!   conversation, so it is skipped whole.
 //!
-//! `session_meta`, `turn_context`, `world_state` and `thread_settings_applied`
-//! are configuration snapshots and carry nothing the transcript view draws.
+//! `session_meta` and `world_state` are configuration snapshots and carry
+//! nothing the transcript view draws. Two more are not drawn either, but say
+//! which model and reasoning effort the conversation is on, and that is how
+//! a change made in the terminal reaches the chat (#404):
 //!
-//! Every shape here came out of rollouts written by codex-cli 0.152.0 driven
-//! through a PTY; one of them is the fixture this module is tested on.
+//! - **`turn_context`** is written as each turn starts, with the `model` and
+//!   `effort` that turn runs on;
+//! - **`thread_settings_applied`** (an `event_msg`) is written the moment the
+//!   reader confirms the TUI's `/model` picker, with `model` and
+//!   `reasoning_effort`. A conversation that has no rollout yet — nothing
+//!   has been sent — has nowhere to write it, and the first `turn_context`
+//!   says the same thing a moment after the first prompt.
+//!
+//! Every shape here came out of rollouts written by codex-cli 0.152.0 and
+//! 0.153.4 driven through a PTY; two of them are the fixtures this module is
+//! tested on.
 
 use serde_json::Value;
 
 use crate::events::{BlockRef, EditKind, FileEdit, Payload, ToolResult, ToolType, Usage};
+use crate::harness::settings::Signal;
 use crate::harness::tui::TurnMark;
 
 fn block(id: &str) -> BlockRef {
@@ -102,8 +114,13 @@ pub fn decode_line(line: &str, skip: &std::collections::HashSet<String>, out: &m
 /// evidence that the turn is over rather than stalled.
 pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     let v = serde_json::from_str::<Value>(line).ok()?;
-    if v["type"].as_str() != Some("event_msg") {
-        return None;
+    match v["type"].as_str() {
+        Some("event_msg") => {}
+        Some("turn_context") => {
+            report_settings(v["payload"]["model"].as_str(), v["payload"]["effort"].as_str(), out);
+            return None;
+        }
+        _ => return None,
     }
     let mark = match v["payload"]["type"].as_str().unwrap_or("") {
         "task_started" => Some(TurnMark::Opened),
@@ -120,9 +137,20 @@ fn turn_mark(line: &str) -> Option<TurnMark> {
     decode_marked(line, &Default::default(), &mut Vec::new())
 }
 
+/// The model and effort a record says the conversation is on.
+fn report_settings(model: Option<&str>, effort: Option<&str>, out: &mut Vec<Payload>) {
+    if let Some(signal) = Signal::current(model, effort) {
+        out.push(Payload::ProviderSettings { signal });
+    }
+}
+
 fn decode_event(p: &Value, out: &mut Vec<Payload>) {
     match p["type"].as_str().unwrap_or("") {
         "task_started" => out.push(Payload::ModelRequestStarted),
+        "thread_settings_applied" => {
+            let settings = &p["thread_settings"];
+            report_settings(settings["model"].as_str(), settings["reasoning_effort"].as_str(), out);
+        }
         // `task_complete` and `turn_aborted` say the turn ended, and so do the
         // `Stop` and `Interrupt` hooks — with the same reply and moments
         // apart. Two closers is one too many: the second lands as a turn with
@@ -321,9 +349,80 @@ mod tests {
                 Payload::TurnCompleted { .. } => "end",
                 Payload::ContextCompacted { .. } => "compacted",
                 Payload::Error { .. } => "error",
+                Payload::ProviderSettings { .. } => "settings",
                 _ => "other",
             })
             .collect()
+    }
+
+    /// What is drawn: everything but the settings records, which have tests
+    /// of their own.
+    fn drawn(payloads: &[Payload]) -> Vec<&'static str> {
+        kinds(payloads).into_iter().filter(|kind| *kind != "settings").collect()
+    }
+
+    /// Model and effort changed in codex-cli 0.153.4's own `/model` picker,
+    /// between two turns: the `turn_context` and `thread_settings_applied`
+    /// records of that rollout, whole. The working directory reads `/w/demo`,
+    /// the timezone `UTC`, and the collaboration mode's standing instructions
+    /// are trimmed; nothing else is changed.
+    const SETTINGS: &str = include_str!("fixtures/settings.jsonl");
+
+    fn reported(payloads: &[Payload]) -> Vec<(Option<&str>, Option<&str>)> {
+        payloads
+            .iter()
+            .filter_map(|p| match p {
+                Payload::ProviderSettings { signal: Signal::Current { model, effort } } => Some((model.as_deref(), effort.as_deref())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #404. The picker writes one record when the model is chosen and one
+    /// when the effort is, the moment each is confirmed; the turns either
+    /// side say what they ran on.
+    #[test]
+    fn a_change_made_in_the_tuis_model_picker_is_reported() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(SETTINGS.as_bytes());
+        assert_eq!(
+            reported(&p),
+            [
+                // The turn before the change.
+                (Some("gpt-5.6-sol"), Some("high")),
+                // The picker: the model, then the effort chosen for it.
+                (Some("gpt-5.6-terra"), Some("high")),
+                (Some("gpt-5.6-terra"), Some("low")),
+                // The next prompt, and the turn it starts.
+                (Some("gpt-5.6-terra"), Some("low")),
+                (Some("gpt-5.6-terra"), Some("low")),
+            ]
+        );
+        assert_eq!(p.len(), 5, "and none of it is drawn");
+        // They say nothing about where a turn opens or ends.
+        assert!(SETTINGS.lines().all(|line| turn_mark(line).is_none()));
+    }
+
+    /// The effort changes between the second and third turns of the older
+    /// rollout too, written by 0.152.0.
+    #[test]
+    fn the_effort_of_each_turn_is_reported() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(FIXTURE.as_bytes());
+        let efforts: Vec<Option<&str>> = reported(&p).into_iter().map(|(_, effort)| effort).collect();
+        assert_eq!(efforts, [Some("low"), Some("low"), Some("low"), Some("medium"), Some("medium")]);
+        assert!(reported(&p).iter().all(|(model, _)| *model == Some("gpt-5.6-sol")));
+    }
+
+    #[test]
+    fn a_settings_record_that_names_nothing_reports_nothing() {
+        let mut out = Vec::new();
+        decode_line(r#"{"type":"turn_context","payload":{"turn_id":"t","model":null}}"#, &none(), &mut out);
+        decode_line(r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"approval_policy":"never"}}}"#, &none(), &mut out);
+        assert!(out.is_empty());
+        // A model with no effort named leaves the effort alone.
+        decode_line(r#"{"type":"turn_context","payload":{"model":"gpt-5.2","effort":null}}"#, &none(), &mut out);
+        assert_eq!(reported(&out), [(Some("gpt-5.2"), None)]);
     }
 
     /// The rollout read for what it says about its turns: `task_started`
@@ -341,7 +440,7 @@ mod tests {
         let mut s = Streamer::at(0, decode_line);
         let p = s.push(FIXTURE.as_bytes());
         assert_eq!(
-            kinds(&p),
+            drawn(&p),
             vec![
                 // "reply with the word ok"
                 "start", "user", "text", "usage",
@@ -351,8 +450,9 @@ mod tests {
                 "start", "user", "text", "tool", "result", "usage", "tool", "edits", "result", "usage", "text", "usage",
             ]
         );
-        assert!(matches!(&p[1], Payload::UserMessage { text, .. } if text == "reply with the word ok"));
-        assert!(matches!(&p[2], Payload::AssistantText { text, .. } if text == "ok"));
+        let p: Vec<&Payload> = p.iter().filter(|p| !matches!(p, Payload::ProviderSettings { .. })).collect();
+        assert!(matches!(p[1], Payload::UserMessage { text, .. } if text == "reply with the word ok"));
+        assert!(matches!(p[2], Payload::AssistantText { text, .. } if text == "ok"));
     }
 
     #[test]
@@ -365,7 +465,7 @@ mod tests {
         tail.retarget(&path);
 
         let payloads = tail.drain();
-        assert_eq!(kinds(&payloads), vec!["start", "user", "text"]);
+        assert_eq!(drawn(&payloads), vec!["start", "user", "text"]);
         assert!(matches!(&payloads[2], Payload::AssistantText { text, .. } if text == "ready"));
     }
 
@@ -479,7 +579,7 @@ mod tests {
             if v["type"] == "response_item" || v["type"] == "session_meta" || v["type"] == "turn_context" || v["type"] == "world_state" {
                 let mut out = Vec::new();
                 decode_line(line, &none(), &mut out);
-                assert!(out.is_empty(), "{} drew something", v["type"]);
+                assert!(drawn(&out).is_empty(), "{} drew something", v["type"]);
             }
         }
         // And nothing anywhere leaks the wrapper or the standing instructions.

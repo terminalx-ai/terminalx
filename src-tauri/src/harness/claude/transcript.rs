@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
+use crate::harness::settings::{Setting, Signal};
 use crate::harness::tui::TurnMark;
 
 /// Where a session's transcript actually is.
@@ -172,6 +173,52 @@ fn command_output(text: &str) -> bool {
     ["<local-command-stdout>", "<local-command-stderr>", "<local-command-caveat>"].iter().any(|tag| text.starts_with(tag))
 }
 
+/// What `/model` and `/effort` printed, as a word about the session's
+/// settings (#404). The status line is what names the model in use (see
+/// `status_settings`); this is the CLI's answer to the command itself, which
+/// is how a change the app typed is known to have been taken or turned down.
+///
+/// The wording is the CLI's (2.1.295):
+/// "Set model to `Sonnet 5.5` and saved as your default for new sessions",
+/// the same "… with `medium` effort" out of the `/model` picker, and
+/// "Set effort level to xhigh (this session only): …". `command` is which
+/// command printed it, where the record says; anything it printed that is
+/// not one of these is its reason for not doing as asked.
+fn command_result(command: Option<&str>, stdout: &str, out: &mut Vec<Payload>) {
+    let mut say = |signal| out.push(Payload::ProviderSettings { signal });
+    let ticked = |text: &str| text.split('`').nth(1).map(str::trim).filter(|word| !word.is_empty()).map(String::from);
+    if let Some(rest) = stdout.strip_prefix("Set model to ") {
+        say(Signal::Accepted { setting: Setting::Model });
+        // The picker sets both at once: "… with `medium` effort".
+        if let Some(effort) = rest.rsplit_once(" with ").filter(|(_, tail)| tail.trim_end().ends_with("effort")).and_then(|(_, tail)| ticked(tail)) {
+            say(Signal::Current { model: None, effort: Some(effort) });
+        }
+    } else if let Some(rest) = stdout.strip_prefix("Set effort level to ") {
+        let level: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        if !level.is_empty() {
+            say(Signal::Current { model: None, effort: Some(level) });
+        }
+        say(Signal::Accepted { setting: Setting::Effort });
+    } else {
+        let setting = match command {
+            Some("model") => Setting::Model,
+            Some("effort") => Setting::Effort,
+            _ => return,
+        };
+        say(Signal::Refused { setting, message: stdout.to_string() });
+    }
+}
+
+/// A command the CLI ran and kept out of the conversation: a `system` record
+/// that names the command beside what it printed. `/model` and `/effort` are
+/// written this way when they fail.
+fn decode_local_command(v: &Value, out: &mut Vec<Payload>) {
+    let Some(command) = v["commandRun"]["command"].as_str() else { return };
+    if let Some(stdout) = v["content"].as_str().and_then(|content| tagged(content, "local-command-stdout")) {
+        command_result(Some(command.trim_start_matches('/')), stdout, out);
+    }
+}
+
 /// The text of a prompt without the wrapper the CLI puts round a large
 /// paste: `<pasted_content id="7">`, the text, `</pasted_content id="7">`.
 /// The wrapper is the CLI's note to the model; the reader pasted the text.
@@ -290,6 +337,7 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             });
         }
         "system" if v["subtype"] == "turn_duration" => return Some(TurnMark::Ended),
+        "system" if v["subtype"] == "local_command" => decode_local_command(&v, out),
         _ => {}
     }
     None
@@ -323,10 +371,24 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
         return;
     }
     if command_output(&prompt) {
+        // Nobody said it, but `/model` and `/effort` say here what they did.
+        if let Some(stdout) = tagged(&prompt, "local-command-stdout") {
+            command_result(None, stdout, out);
+        }
         return;
     }
     let text = as_typed(prompt);
     out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+}
+
+/// The model and effort in a status line frame: the JSON the CLI hands its
+/// `statusLine` command, which it runs again whenever either changes — from
+/// `/model <name>`, from the `/model` picker, from `/effort`, or at startup
+/// with whatever it resolved its default to. `model.id` is the full id and
+/// `effort.level` the level in force (2.1.295); a CLI that sends neither
+/// reports nothing.
+pub fn status_settings(frame: &Value) -> Option<Signal> {
+    Signal::current(frame["model"]["id"].as_str(), frame["effort"]["level"].as_str())
 }
 
 /// A prompt typed while a turn was running. The CLI queues it, hands it to
@@ -590,9 +652,111 @@ mod tests {
         // Prose that merely mentions a tag is prose.
         assert_eq!(typed(user("what does <command-name> mean?")), "what does <command-name> mean?");
 
-        assert!(decode(user(r"<local-command-stdout>Set model to opus</local-command-stdout>")).is_empty());
+        assert!(decode(user(r"<local-command-stdout>Compacted the conversation</local-command-stdout>")).is_empty());
         assert!(decode(user(r"<local-command-stderr>no such model</local-command-stderr>")).is_empty());
         assert!(decode(user(r"<local-command-caveat>Caveat: the messages below were generated by the user while running local commands.</local-command-caveat>")).is_empty());
+    }
+
+    /// Everything Claude Code 2.1.295 wrote for `/model sonnet`, `/effort
+    /// high`, a pick in the `/model` picker, a move of the `/effort` slider,
+    /// `/model default`, and two `/model` commands it turned down — captured
+    /// from a real interactive session, whole, with only the working
+    /// directory replaced.
+    const COMMANDS: &str = include_str!("fixtures/model_and_effort_commands.jsonl");
+
+    fn signals(payloads: &[Payload]) -> Vec<Signal> {
+        payloads
+            .iter()
+            .filter_map(|p| match p {
+                Payload::ProviderSettings { signal } => Some(signal.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// #404. The commands read as typed, as before; what they printed is
+    /// still nobody's message, and now says what became of the change.
+    #[test]
+    fn what_model_and_effort_commands_printed_says_what_became_of_them() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(COMMANDS.as_bytes());
+        let typed: Vec<&str> = p.iter().filter_map(|p| match p { Payload::UserMessage { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(typed, ["/model sonnet", "/effort high", "/model", "/effort", "/model default"]);
+        assert_eq!(p.len(), typed.len() + signals(&p).len(), "nothing else is drawn");
+
+        let effort = |level: &str| Signal::Current { model: None, effort: Some(level.into()) };
+        let refused = |message: &str| Signal::Refused { setting: Setting::Model, message: message.into() };
+        assert_eq!(
+            signals(&p),
+            [
+                // /model sonnet
+                Signal::Accepted { setting: Setting::Model },
+                // /effort high
+                effort("high"),
+                Signal::Accepted { setting: Setting::Effort },
+                // The /model picker: Opus, and the effort chosen beside it.
+                Signal::Accepted { setting: Setting::Model },
+                effort("medium"),
+                // The /effort slider, with no argument typed.
+                effort("xhigh"),
+                Signal::Accepted { setting: Setting::Effort },
+                // /model default
+                Signal::Accepted { setting: Setting::Model },
+                // /model claude-haiku-5-5 and /model nonsense-model, both
+                // turned down (this capture had no working credentials).
+                refused("Authentication failed. Please check your API credentials."),
+                refused("Authentication failed. Please check your API credentials."),
+            ]
+        );
+        // None of it opens or ends a turn but the commands themselves.
+        let marks = COMMANDS.lines().filter_map(turn_mark).count();
+        assert_eq!(marks, typed.len());
+    }
+
+    #[test]
+    fn a_command_result_is_read_for_what_it_says_and_no_more() {
+        let result = |command: Option<&str>, stdout: &str| {
+            let mut out = Vec::new();
+            command_result(command, stdout, &mut out);
+            signals(&out)
+        };
+        // Another command's output is not about the settings, whoever ran it.
+        assert!(result(None, "Compacted the conversation").is_empty());
+        assert!(result(Some("compact"), "Compacted the conversation").is_empty());
+        // A failure only counts where the record says which command failed.
+        assert!(result(None, "Model 'x' not found").is_empty());
+        assert_eq!(result(Some("effort"), "Invalid effort level: ultra"), [Signal::Refused { setting: Setting::Effort, message: "Invalid effort level: ultra".into() }]);
+        // A level this app has no name for is reported as it is.
+        assert_eq!(
+            result(None, "Set effort level to ultra (this session only): More"),
+            [Signal::Current { model: None, effort: Some("ultra".into()) }, Signal::Accepted { setting: Setting::Effort }]
+        );
+        // "with" in a model's name is not an effort.
+        assert_eq!(result(None, "Set model to `Opus with tools`"), [Signal::Accepted { setting: Setting::Model }]);
+    }
+
+    /// The status line frames of the same session: the CLI ran its status
+    /// command again after each change, the picker's and the slider's
+    /// included, and at startup with the default it had resolved.
+    #[test]
+    fn a_status_line_frame_names_the_model_and_effort_in_force() {
+        const FRAMES: &str = include_str!("fixtures/status_line.jsonl");
+        let read: Vec<Signal> = FRAMES.lines().filter_map(|line| status_settings(&serde_json::from_str(line).unwrap())).collect();
+        let now = |model: &str, effort: &str| Signal::Current { model: Some(model.into()), effort: Some(effort.into()) };
+        assert_eq!(
+            read,
+            [
+                now("claude-opus-5-5", "medium"),
+                now("claude-sonnet-5-5", "medium"),
+                now("claude-sonnet-5-5", "high"),
+                now("claude-opus-5-5", "medium"),
+                now("claude-opus-5-5", "xhigh"),
+            ]
+        );
+        // An older CLI's frame carries no effort, and one with neither says nothing.
+        let old = serde_json::json!({"model": {"id": "claude-opus-5", "display_name": "Opus 5"}, "rate_limits": {}});
+        assert_eq!(status_settings(&old), Some(Signal::Current { model: Some("claude-opus-5".into()), effort: None }));
+        assert_eq!(status_settings(&serde_json::json!({"rate_limits": {}})), None);
     }
 
     /// #250. The CLI files a transcript under the folder the conversation

@@ -395,6 +395,8 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
       harness: p.harness,
       model: p.model,
       effort: p.effort,
+      requestedModel: p.requestedModel,
+      requestedEffort: p.requestedEffort,
       permissionMode: p.permissionMode,
       status: p.status,
       process: p.process,

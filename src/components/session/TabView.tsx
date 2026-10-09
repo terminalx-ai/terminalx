@@ -293,11 +293,12 @@ export function TabView({
           onSetModel={(m) => {
             if (gate && !gate.mayConfigure) return;
             if (recovery) { void retry(m); return; }
-            void backend.setModel(tab.id, m).then(() => backend.patchTab(tab.id, { model: m })).catch((e) => setError(local ? safeError(e) : commandError(e)));
+            // Not patched in here: the tab's model is what the agent is running, and the
+            // session's own update says when that has changed or is still on its way (#404).
+            void backend.setModel(tab.id, m).catch((e) => setError(local ? safeError(e) : commandError(e)));
           }}
           onSetEffort={(e) => {
             if (gate && !gate.mayConfigure) return;
-            backend.patchTab(tab.id, { effort: e });
             void backend.setEffort(tab.id, e).catch((err) => setError(local ? safeError(err) : commandError(err)));
           }}
           onSetMode={(m) => {

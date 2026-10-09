@@ -158,6 +158,9 @@ impl Rig {
                 pane_id: pane.clone(),
                 generation: 0,
                 restart_when_idle: false,
+                settings_asked_at: None,
+                launched_for: None,
+                status_names_model: false,
                 ready: Arc::new(tui::Ready::new(kind == CliKind::Claude)),
                 tail: tail.clone(),
                 echoed: Default::default(),
@@ -177,6 +180,7 @@ impl Rig {
             last_activity: now,
             recovery: None,
             stalled_at: None,
+            last_settings_report: None,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -731,4 +735,267 @@ impl Drop for Rig {
         // pane that was never there.
         self.manager.terminals.kill(&self.pane);
     }
+}
+
+// ---- #404: one model and effort, whichever side changed it
+
+const STATUS_FRAMES: &str = include_str!("harness/claude/fixtures/status_line.jsonl");
+const CLAUDE_COMMANDS: &str = include_str!("harness/claude/fixtures/model_and_effort_commands.jsonl");
+const CODEX_SETTINGS: &str = include_str!("harness/codex/fixtures/settings.jsonl");
+
+/// What a tab says it is on: the model and effort every view draws, then
+/// whatever was asked for and is still waiting.
+type Shown = (String, Option<String>, Option<String>, Option<String>);
+
+fn shown(model: &str, effort: Option<&str>, asked_model: Option<&str>, asked_effort: Option<&str>) -> Shown {
+    (model.into(), effort.map(String::from), asked_model.map(String::from), asked_effort.map(String::from))
+}
+
+impl Rig {
+    /// A running tab the index knows, on `model` and `effort`.
+    fn on(kind: CliKind, model: &str, effort: Option<&str>) -> Self {
+        let rig = Self::of(kind, "");
+        let harness = rig.rt.lock().unwrap().harness.clone();
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+            "title": "watched", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": harness, "model": model, "effort": effort, "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        rig
+    }
+
+    fn shown(&self) -> Shown {
+        let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
+        (tab.model, tab.effort, tab.requested_model, tab.requested_effort)
+    }
+
+    /// The `settings_changed` events in the tab's log, as (model, effort).
+    fn changes(&self) -> Vec<(Option<String>, Option<String>)> {
+        self.events().into_iter().filter_map(|e| match e.payload { Payload::SettingsChanged { model, effort, .. } => Some((model, effort)), _ => None }).collect()
+    }
+
+    fn notices(&self) -> Vec<String> {
+        self.events().into_iter().filter_map(|e| match e.payload { Payload::Status { text } => Some(text), _ => None }).collect()
+    }
+
+    fn status_line(&self, model: &str, effort: &str) {
+        self.hook("StatusLine", json!({ "model": { "id": model, "display_name": model }, "effort": { "level": effort } }));
+    }
+}
+
+/// The frames a real Claude Code sent as its model and effort were changed in
+/// the terminal — by `/model sonnet`, `/effort high`, the `/model` picker and
+/// the `/effort` slider — each move the tab, with nothing asked of the app.
+#[test]
+fn a_model_or_effort_changed_in_the_claude_terminal_reaches_the_tab() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    let (sent, updated) = std::sync::mpsc::channel();
+    rig.manager.sink.listen("session_updated", Box::new(move |payload| {
+        let session: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let _ = sent.send((session["tabs"][0]["model"].clone(), session["tabs"][0]["effort"].clone()));
+    }));
+    let mut seen = Vec::new();
+    for frame in STATUS_FRAMES.lines() {
+        rig.hook("StatusLine", serde_json::from_str(frame).unwrap());
+        seen.push(rig.shown());
+    }
+    assert_eq!(
+        seen,
+        [
+            // Startup: `opus` is what the tab was on, and stays an alias; the
+            // effort the CLI resolved is not the one the tab had stored.
+            shown("opus", Some("medium"), None, None),
+            shown("claude-sonnet-5-5", Some("medium"), None, None),
+            shown("claude-sonnet-5-5", Some("high"), None, None),
+            shown("claude-opus-5-5", Some("medium"), None, None),
+            shown("claude-opus-5-5", Some("xhigh"), None, None),
+        ]
+    );
+    // Each one is in the log, and went to every view of the session.
+    assert_eq!(rig.changes().len(), 5);
+    assert_eq!(rig.changes()[1], (Some("claude-sonnet-5-5".into()), None));
+    assert_eq!(rig.changes()[4], (None, Some("xhigh".into())));
+    let views: Vec<_> = updated.try_iter().collect();
+    assert_eq!(views.len(), 5);
+    assert_eq!(views[4], (json!("claude-opus-5-5"), json!("xhigh")));
+
+    // The same frame again — the CLI repeats itself after every reply — is not news.
+    rig.status_line("claude-opus-5-5", "xhigh");
+    assert_eq!(rig.changes().len(), 5);
+    assert!(updated.try_recv().is_err());
+}
+
+#[test]
+fn a_change_from_the_chat_is_pending_until_claude_says_it_is_running() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
+    rig.manager.set_effort(SESSION, TAB, Some("low")).unwrap();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), Some("sonnet"), Some("low")), "asked for, and not shown as current");
+    assert!(rig.changes().is_empty());
+
+    // A frame from before the commands landed.
+    rig.status_line("claude-opus-5-5", "high");
+    assert_eq!(rig.shown(), shown("opus", Some("high"), Some("sonnet"), Some("low")));
+
+    rig.status_line("claude-sonnet-5-5", "high");
+    assert_eq!(rig.shown(), shown("sonnet", Some("high"), None, Some("low")), "the alias that was asked for, not the id it runs");
+    rig.status_line("claude-sonnet-5-5", "low");
+    assert_eq!(rig.shown(), shown("sonnet", Some("low"), None, None));
+    assert_eq!(rig.changes(), [(Some("sonnet".into()), None), (None, Some("low".into()))]);
+}
+
+/// With no status line to go on, the command's own printed result settles it.
+#[test]
+fn claude_taking_the_command_settles_a_change_the_status_line_never_named() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.manager.set_model(SESSION, TAB, "sonnet").unwrap();
+    let taken = CLAUDE_COMMANDS.lines().find(|line| line.contains("Set model to `Sonnet 5.5`")).unwrap();
+    rig.append(&format!("{taken}\n"));
+    assert_eq!(rig.shown(), shown("sonnet", Some("high"), None, None));
+}
+
+#[test]
+fn a_change_claude_turns_down_reverts_with_its_reason() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.manager.set_model(SESSION, TAB, "claude-haiku-5-5").unwrap();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), Some("claude-haiku-5-5"), None));
+    // What the CLI really wrote when it refused that very command.
+    let refused: String = CLAUDE_COMMANDS.lines().filter(|line| line.contains("claude-haiku-5-5")).map(|line| format!("{line}\n")).collect();
+    assert!(refused.contains("commandRun"));
+    rig.append(&refused);
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, None));
+    assert!(rig.changes().is_empty(), "what was running never changed");
+    assert_eq!(rig.notices(), ["Claude Code did not change the model to claude-haiku-5-5: Authentication failed. Please check your API credentials."]);
+    // The command the app typed is not drawn as something the reader said.
+    assert!(!rig.kinds().iter().any(|k| k == "user_message"));
+}
+
+#[test]
+fn a_change_claude_never_answers_is_taken_back() {
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.status_line("claude-opus-5-5", "high");
+    rig.start_turn();
+    rig.manager.set_effort(SESSION, TAB, Some("max")).unwrap();
+    // A CLI mid-turn may hold the command until the turn is over.
+    rig.advance(SETTINGS_ANSWER_WAIT * 3);
+    rig.stamp();
+    rig.tick();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, Some("max")));
+
+    rig.hook("Stop", json!({}));
+    assert!(!rig.turn_open());
+    rig.advance(SETTINGS_ANSWER_WAIT - MOMENT);
+    rig.tick();
+    assert_eq!(rig.shown().3.as_deref(), Some("max"));
+    rig.advance(MOMENT);
+    rig.tick();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, None));
+    assert_eq!(rig.notices(), ["Claude Code did not change the effort to max: it did not confirm the change."]);
+}
+
+/// The recorded session answered on Haiku, and each assistant record says
+/// so. That is the tab's model when nothing better has spoken — and not once
+/// the status line has, since a record can name a fallback the session is
+/// not set to.
+#[test]
+fn the_model_an_assistant_record_names_stands_in_for_a_silent_status_line() {
+    let rig = Rig::on(CliKind::Claude, "", None);
+    rig.start_turn();
+    assert_eq!(rig.shown(), shown("claude-haiku-4-5-20251001", None, None, None));
+    // One rig at a time: each holds the test home.
+    drop(rig);
+
+    let rig = Rig::on(CliKind::Claude, "opus", Some("high"));
+    rig.status_line("claude-opus-5-5", "high");
+    rig.start_turn();
+    assert_eq!(rig.shown(), shown("opus", Some("high"), None, None));
+}
+
+/// What the `/model` picker of a real Codex wrote, and the turns either side.
+#[test]
+fn a_model_or_effort_changed_in_the_codex_terminal_reaches_the_tab() {
+    let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("high"));
+    let mut seen = Vec::new();
+    for record in CODEX_SETTINGS.lines() {
+        rig.append(&format!("{record}\n"));
+        seen.push(rig.shown());
+    }
+    let terra = |effort| shown("gpt-5.6-terra", Some(effort), None, None);
+    assert_eq!(seen, [shown("gpt-5.6-sol", Some("high"), None, None), terra("high"), terra("low"), terra("low"), terra("low")]);
+    assert_eq!(rig.changes(), [(Some("gpt-5.6-terra".into()), None), (None, Some("low".into()))]);
+
+    // A model and a level this app has never heard of are the ones in use.
+    rig.append("{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-9-nova\",\"effort\":\"ultra\"}}\n");
+    assert_eq!(rig.shown(), shown("gpt-9-nova", Some("ultra"), None, None));
+}
+
+/// Codex only reads its model at startup. Asked mid-turn, the change waits
+/// for the turn and is never shown as what the running turn is on.
+#[test]
+fn a_change_to_codex_mid_turn_is_pending_until_the_restart_that_applies_it() {
+    let rig = Rig::on(CliKind::Codex, "gpt-5.6-sol", Some("low"));
+    rig.rt.lock().unwrap().turn_open = true;
+    rig.manager.set_model(SESSION, TAB, "gpt-6-astra").unwrap();
+    rig.manager.set_effort(SESSION, TAB, Some("high")).unwrap();
+    assert_eq!(rig.shown(), shown("gpt-5.6-sol", Some("low"), Some("gpt-6-astra"), Some("high")));
+    assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.restart_when_idle));
+    assert!(rig.changes().is_empty());
+
+    // The turn in progress goes on saying what it is really running.
+    rig.append("{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\",\"effort\":\"low\"}}\n");
+    assert_eq!(rig.shown(), shown("gpt-5.6-sol", Some("low"), Some("gpt-6-astra"), Some("high")));
+
+    // The restart, as far as letting go of the old process: launching a
+    // real Codex is refused here.
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.turn_open = false;
+        rt.stopping = true;
+    }
+    assert!(rig.manager.restart_for_settings(SESSION, TAB).is_err());
+    assert_eq!(rig.shown(), shown("gpt-6-astra", Some("high"), None, None), "what the next launch is given");
+    assert_eq!(rig.changes(), [(Some("gpt-6-astra".into()), Some("high".into()))]);
+}
+
+#[test]
+fn a_restart_that_did_not_put_codex_on_the_model_asked_for_says_so() {
+    let rig = Rig::on(CliKind::Codex, "gpt-6-astra", Some("high"));
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.launched_for = Some(Settings { model: "gpt-6-astra".into(), effort: Some("high".into()), ..Default::default() });
+    }
+    rig.append(&format!("{}\n", CODEX_SETTINGS.lines().next().unwrap()));
+    assert_eq!(rig.shown(), shown("gpt-5.6-sol", Some("high"), None, None));
+    assert_eq!(rig.notices(), ["Codex is running model gpt-5.6-sol, not gpt-6-astra."]);
+    // Said once: the next report is only a report.
+    rig.append("{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-terra\",\"effort\":\"high\"}}\n");
+    assert_eq!(rig.notices().len(), 1);
+}
+
+/// A tab that is not running has nobody to wait for: the choice is what the
+/// next launch gets.
+#[test]
+fn a_change_to_a_tab_that_is_not_running_is_current_at_once() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::on(kind, "before", Some("low"));
+        rig.rt.lock().unwrap().engine = Engine::None;
+        rig.manager.set_model(SESSION, TAB, "after").unwrap();
+        rig.manager.set_effort(SESSION, TAB, Some("high")).unwrap();
+        assert_eq!(rig.shown(), shown("after", Some("high"), None, None));
+    }
+}
+
+#[test]
+fn an_agent_with_no_effort_setting_refuses_one() {
+    let rig = Rig::on(CliKind::Claude, "auto", None);
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = "cursor".into();
+        rt.engine = Engine::None;
+    }
+    let error = rig.manager.set_effort(SESSION, TAB, Some("high")).unwrap_err();
+    assert_eq!(error.to_string(), "Cursor has no effort setting.");
+    assert_eq!(rig.shown(), shown("auto", None, None, None));
 }

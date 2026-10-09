@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::events::*;
+use crate::harness::settings::{Setting, Signal};
 pub use crate::harness::Action;
 
 pub struct SpawnPlan {
@@ -32,7 +33,7 @@ pub fn spawn_plan(binary: &str) -> Option<SpawnPlan> {
     Some(SpawnPlan { program, args: vec!["acp".into()] })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
     Initialize,
     Authenticate,
@@ -40,7 +41,10 @@ enum Pending {
     SessionLoad,
     Prompt,
     SetMode,
-    SetModel,
+    /// The model asked for, so the reply says which one it is about;
+    /// `opening` when it is the tab's own model being put on a new session
+    /// rather than a change somebody just asked for.
+    SetModel { model: String, opening: bool },
     Other,
 }
 
@@ -53,6 +57,8 @@ pub struct Acp {
     stashed: Option<(String, Vec<(String, String)>)>,
     cwd: String,
     pub model: Option<String>,
+    /// The model the agent last said the session is on, when it says.
+    agent_model: Option<String>,
     pub mode: String,
     resume: Option<String>,
     load_supported: bool,
@@ -175,10 +181,37 @@ impl Acp {
         vec![Action::Write(self.request("session/set_mode", json!({"sessionId": sid, "modeId": id}), Pending::SetMode))]
     }
 
+    /// Ask the agent for another model. Its reply is the answer the tab
+    /// waits on (`harness::settings`): the model becomes current when it
+    /// agrees, and the request is dropped with its reason when it does not.
     pub fn set_model(&mut self, model: &str) -> Vec<Action> {
-        self.model = Some(model.into());
-        let Some(sid) = self.session_id.clone() else { return Vec::new() };
-        vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": model}), Pending::SetModel))]
+        let Some(sid) = self.session_id.clone() else {
+            // No session yet: it is asked for when one opens.
+            self.model = Some(model.into());
+            return Vec::new();
+        };
+        vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": model}), Pending::SetModel { model: model.into(), opening: false }))]
+    }
+
+    /// A session has opened on `agent_model`, the agent's own choice. The
+    /// tab's model is asked for if that is not it; a tab with none learns
+    /// what the agent chose.
+    fn settle_model(&mut self, agent_model: Option<&str>) -> Vec<Action> {
+        self.agent_model = agent_model.map(String::from);
+        match (self.model.clone(), self.session_id.clone()) {
+            (Some(wanted), Some(sid)) if agent_model != Some(wanted.as_str()) => {
+                vec![Action::Write(self.request("session/set_model", json!({"sessionId": sid, "modelId": wanted}), Pending::SetModel { model: wanted, opening: true }))]
+            }
+            _ => self.model_is(agent_model).into_iter().collect(),
+        }
+    }
+
+    /// The agent's own word on which model the session is on.
+    fn model_is(&mut self, model: Option<&str>) -> Option<Action> {
+        let signal = Signal::current(model, None)?;
+        self.model = model.map(String::from);
+        self.agent_model = self.model.clone();
+        Some(Action::Emit(Payload::ProviderSettings { signal }))
     }
 
     /// Answer a permission request with one of the agent's own options.
@@ -264,7 +297,17 @@ impl Acp {
                     ]
                 }
                 Pending::Initialize | Pending::Authenticate | Pending::SessionNew | Pending::Prompt => self.fail_turn(message),
-                Pending::SetMode | Pending::SetModel => vec![Action::Emit(Payload::Status { text: message })],
+                Pending::SetMode => vec![Action::Emit(Payload::Status { text: message })],
+                // A change somebody asked for is turned down in the agent's
+                // words. The tab's own model failing on a new session leaves
+                // the session on the agent's choice, and the tab says so.
+                Pending::SetModel { opening: false, .. } => vec![Action::Emit(Payload::ProviderSettings { signal: Signal::Refused { setting: Setting::Model, message } })],
+                Pending::SetModel { model, opening: true } => {
+                    let mut out = vec![Action::Emit(Payload::Status { text: format!("Could not use {model}: {message}") })];
+                    let agent_model = self.agent_model.clone();
+                    out.extend(self.model_is(agent_model.as_deref()));
+                    out
+                }
                 Pending::Other => vec![Action::Emit(Payload::Error { message, fatal: false })],
             };
         }
@@ -295,6 +338,8 @@ impl Acp {
                     .map(|a| a.iter().filter_map(|m| Some((m["id"].as_str()?.to_string(), m["name"].as_str().unwrap_or("").to_string()))).collect())
                     .unwrap_or_default();
                 self.current_mode = result["modes"]["currentModeId"].as_str().map(String::from);
+                // An agent that lists its models says which one the session opened on.
+                out.extend(self.settle_model(result["models"]["currentModelId"].as_str()));
                 self.ready = true;
                 let mode = self.mode.clone();
                 out.extend(self.set_mode(&mode));
@@ -320,7 +365,8 @@ impl Acp {
                 }
                 Vec::new()
             }
-            Pending::SetModel | Pending::Other => Vec::new(),
+            Pending::SetModel { model, .. } => self.model_is(Some(&model)).into_iter().collect(),
+            Pending::Other => Vec::new(),
         }
     }
 
@@ -440,6 +486,8 @@ impl Acp {
             "current_mode_update" => {
                 self.current_mode = u["currentModeId"].as_str().map(String::from);
             }
+            // The model changed on the agent's side.
+            "current_model_update" => out.extend(self.model_is(u["currentModelId"].as_str())),
             _ => {}
         }
         out
@@ -511,6 +559,69 @@ mod tests {
         let prompt = w.iter().find(|x| x["method"] == "session/prompt").expect("prompt sent");
         assert_eq!(prompt["params"]["prompt"][0]["text"], "hello");
         assert!(emits(&acts).iter().any(|p| matches!(p, Payload::TurnStarted { .. })));
+    }
+
+    fn signals(actions: &[Action]) -> Vec<Signal> {
+        emits(actions).into_iter().filter_map(|p| if let Payload::ProviderSettings { signal } = p { Some(signal.clone()) } else { None }).collect()
+    }
+
+    /// An agent with a session open on `currentModelId`, for a tab on `model`.
+    fn opened(model: Option<&str>, current: &str) -> (Acp, Vec<Action>) {
+        let mut a = Acp::new("/tmp/x", None, model.map(String::from), "auto");
+        a.start("hi".into(), vec![]);
+        a.handle(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#);
+        let acts = a.handle(&json!({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","models":{"currentModelId":current,"availableModels":[{"modelId":"auto"},{"modelId":"sonnet-4"}]}}}).to_string());
+        (a, acts)
+    }
+
+    fn now(model: &str) -> Signal {
+        Signal::Current { model: Some(model.into()), effort: None }
+    }
+
+    /// #404. The session opens on the agent's own model: a tab with none
+    /// learns which, and a tab on another has it asked for.
+    #[test]
+    fn a_new_session_is_put_on_the_tabs_model_or_says_its_own() {
+        let (_, acts) = opened(None, "auto");
+        assert_eq!(signals(&acts), [now("auto")]);
+        assert!(!writes(&acts).iter().any(|w| w["method"] == "session/set_model"));
+
+        let (_, acts) = opened(Some("auto"), "auto");
+        assert_eq!(signals(&acts), [now("auto")]);
+
+        let (mut a, acts) = opened(Some("sonnet-4"), "auto");
+        assert!(signals(&acts).is_empty(), "nothing is reported until the agent answers");
+        let asked = writes(&acts).into_iter().find(|w| w["method"] == "session/set_model").expect("the tab's model is asked for");
+        assert_eq!(asked["params"]["modelId"], "sonnet-4");
+        let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"result":{}}).to_string());
+        assert_eq!(signals(&acts), [now("sonnet-4")]);
+
+        // Turned down: the session stays on the agent's model, and the tab says so.
+        let (mut a, acts) = opened(Some("gone-1"), "auto");
+        let asked = writes(&acts).into_iter().find(|w| w["method"] == "session/set_model").unwrap();
+        let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"error":{"code":-32602,"message":"Unknown model"}}).to_string());
+        assert!(matches!(emits(&acts)[0], Payload::Status { text } if text == "Could not use gone-1: Unknown model"));
+        assert_eq!(signals(&acts), [now("auto")]);
+    }
+
+    #[test]
+    fn a_model_change_is_current_once_the_agent_agrees_and_dropped_when_it_does_not() {
+        let (mut a, _) = opened(None, "auto");
+        let asked = writes(&a.set_model("sonnet-4"))[0].clone();
+        assert_eq!((asked["method"].as_str(), asked["params"]["modelId"].as_str()), (Some("session/set_model"), Some("sonnet-4")));
+        assert_eq!(a.model.as_deref(), Some("auto"), "not the session's model until the agent says so");
+        let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"result":{}}).to_string());
+        assert_eq!(signals(&acts), [now("sonnet-4")]);
+        assert_eq!(a.model.as_deref(), Some("sonnet-4"));
+
+        let asked = writes(&a.set_model("gone-1"))[0].clone();
+        let acts = a.handle(&json!({"jsonrpc":"2.0","id":asked["id"],"error":{"code":-32602,"message":"Unknown model"}}).to_string());
+        assert_eq!(signals(&acts), [Signal::Refused { setting: Setting::Model, message: "Unknown model".into() }]);
+        assert_eq!(a.model.as_deref(), Some("sonnet-4"));
+
+        // A change made on the agent's side.
+        let acts = a.handle(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"current_model_update","currentModelId":"auto"}}}"#);
+        assert_eq!(signals(&acts), [now("auto")]);
     }
 
     #[test]

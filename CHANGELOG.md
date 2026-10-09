@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Model and effort
+
+- The chat's model and effort pickers now always show what the agent is
+  really running. A change made in the terminal — Claude Code's `/model`
+  (with a name or through its picker) and `/effort`, or Codex's `/model`
+  picker — shows in the chat straight away, and in the session header,
+  sidebar and dashboard with it. (#404)
+- A change made in the chat is shown as "Switching to …" until the agent
+  confirms it. For Codex mid-turn that is when the turn ends; the chat no
+  longer shows the new model while the old one is still answering. A change
+  the agent refuses goes back to what is running, with the reason. (#404)
+- A model or effort level TerminalX does not know is shown as the agent
+  reported it instead of as the default, and a tab on the agent's own default
+  shows which model that is. (#404)
+
 ### Floating chat window and quick chats
 
 - A floating chat window: a small TerminalX window for asking an agent

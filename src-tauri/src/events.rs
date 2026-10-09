@@ -243,6 +243,13 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_mode: Option<String>,
     },
+    /// What the provider says about its own model and effort (#404). A
+    /// decoder's or an engine's word to the session manager, which turns it
+    /// into the tab's settings and a `SettingsChanged`; it is never logged
+    /// or sent to a window itself.
+    ProviderSettings {
+        signal: crate::harness::settings::Signal,
+    },
 
     // ---- conversation
     UserMessage {
@@ -396,7 +403,7 @@ impl Payload {
     /// Previews and running counters are superseded by their committed event,
     /// so they are emitted but never written to the log.
     pub fn is_persisted(&self) -> bool {
-        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted)
+        !matches!(self, Payload::Delta(_) | Payload::UsageUpdate(_) | Payload::ModelRequestStarted | Payload::ProviderSettings { .. })
     }
 
     pub fn is_turn_boundary(&self) -> bool {

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::events::*;
+use crate::harness::settings::Signal;
 pub use crate::harness::Action;
 
 pub struct SpawnPlan {
@@ -253,6 +254,23 @@ impl OpenCode {
                     vec![Action::Emit(Payload::Delta(Delta::TextDelta { block: block(&key), text: delta }))]
                 }
             }
+            // Each reply says which model wrote it. That is the prompt's own
+            // model when one was named, and the server's choice when a tab
+            // has none, or after it was changed on the server's side (#404).
+            "message.updated" => {
+                let info = &p["info"];
+                if !mine(&info["sessionID"]) || info["role"].as_str() != Some("assistant") {
+                    return Vec::new();
+                }
+                let (Some(provider), Some(model)) = (info["providerID"].as_str(), info["modelID"].as_str()) else { return Vec::new() };
+                let model = format!("{provider}/{model}");
+                if self.model.as_deref() == Some(model.as_str()) {
+                    return Vec::new();
+                }
+                // Not adopted as the tab's choice here: the session manager
+                // decides what the tab is on, and `set_model` says so.
+                Signal::current(Some(&model), None).map(|signal| Action::Emit(Payload::ProviderSettings { signal })).into_iter().collect()
+            }
             "session.idle" => {
                 if !mine(&p["sessionID"]) {
                     return Vec::new();
@@ -473,6 +491,27 @@ mod tests {
         assert_eq!(body["agent"], "plan");
         assert_eq!(body["model"]["providerID"], "anthropic");
         assert_eq!(body["parts"][0]["text"], "hi");
+    }
+
+    /// #404. A reply names the model that wrote it: news for a tab that
+    /// named none, and nothing new for one whose prompt asked for it.
+    #[test]
+    fn a_reply_says_which_model_wrote_it() {
+        let reply = |session: &str, role: &str| json!({"type":"message.updated","properties":{"info":{"id":"m1","sessionID":session,"role":role,"providerID":"anthropic","modelID":"claude-sonnet-4"}}}).to_string();
+        let signals = |acts: &[Action]| -> Vec<Signal> { emits(acts).into_iter().filter_map(|p| if let Payload::ProviderSettings { signal } = p { Some(signal.clone()) } else { None }).collect() };
+
+        let mut o = OpenCode::new(1, "/tmp/x", None, None, "auto");
+        o.start("x".into(), vec![]);
+        o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s"}}}"#);
+        assert_eq!(signals(&o.handle(&reply("s", "assistant"))), [Signal::Current { model: Some("anthropic/claude-sonnet-4".into()), effort: None }]);
+        // The reader's own message and another session's reply say nothing.
+        assert!(o.handle(&reply("s", "user")).is_empty());
+        assert!(o.handle(&reply("other", "assistant")).is_empty());
+
+        let mut o = OpenCode::new(1, "/tmp/x", None, Some("anthropic/claude-sonnet-4".into()), "auto");
+        o.start("x".into(), vec![]);
+        o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s"}}}"#);
+        assert!(o.handle(&reply("s", "assistant")).is_empty());
     }
 
     #[test]

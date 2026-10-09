@@ -16,7 +16,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
-import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, prettyModelId, runningModelName, useModels } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, prettyModelId, runningModelName, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { chooseMode } from "@/lib/dialogs";
@@ -419,6 +419,10 @@ export function Composer({
   const modelName = model ? runningModelName(model, reportedModel) : tab.model ? prettyModelId(tab.model) : "Model";
   const runs = model ? aliasRuns(model, reportedModel) : null;
   const effortName = tab.effort && model?.efforts.length ? (EFFORT_LABEL[tab.effort] ?? tab.effort) : null;
+  // A level the agent reported that this model's list does not carry is still the one in use.
+  const efforts = model?.efforts.length && tab.effort && !model.efforts.includes(tab.effort) ? [...model.efforts, tab.effort] : (model?.efforts ?? []);
+  // The pickers show what the agent is running. A choice it has not confirmed yet is said beside them, not shown as made.
+  const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
@@ -533,7 +537,7 @@ export function Composer({
                     {group.title ? <DropdownMenuLabel className="pt-2">{group.title}</DropdownMenuLabel> : null}
                     {group.models.map((m) => {
                       // The ticked alias says what this session reported; the rest, what the CLI listed.
-                      const note = m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
+                      const note = m.id === tab.requestedModel ? "switching…" : m.id === model?.id && runs ? `latest · ${prettyModelId(runs)}` : modelNote(m, models);
                       return (
                         <DropdownMenuRadioItem key={m.id} value={m.id} disabled={!modelsAreLocal && !listed.some((choice) => choice.id === m.id)}>
                           {m.label}
@@ -544,14 +548,15 @@ export function Composer({
                   </Fragment>
                 ))}
               </DropdownMenuRadioGroup>
-              {model?.efforts.length ? (
+              {model && efforts.length ? (
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuLabel>Effort</DropdownMenuLabel>
                   <DropdownMenuRadioGroup value={tab.effort ?? model.defaultEffort ?? ""} onValueChange={(v) => onSetEffort(v)}>
-                    {model.efforts.map((e) => (
+                    {efforts.map((e) => (
                       <DropdownMenuRadioItem key={e} value={e}>
                         {EFFORT_LABEL[e] ?? e}
+                        {e === tab.requestedEffort ? <span className="ml-1.5 text-faint">switching…</span> : null}
                       </DropdownMenuRadioItem>
                     ))}
                   </DropdownMenuRadioGroup>
@@ -638,6 +643,11 @@ export function Composer({
           </div>
         </div>
       </div>
+      {pendingNote && (
+        <div className="mt-1.5 px-2 text-[11px] text-muted-foreground" role="status" data-testid="composer-settings-pending">
+          {pendingNote}
+        </div>
+      )}
       {settingsNote && (
         <div className={cn("mt-1.5 px-2 text-[11px]", settingsNoteWarning ? "text-warning" : "text-muted-foreground")} role="status" data-testid="composer-settings-note">
           {settingsNote}
