@@ -90,6 +90,59 @@
   Only one window sends a desktop notification. (#395)
 - Sessions can be renamed from their menu in the sidebar. (#395)
 
+## 0.2.9
+
+A start screen and floating quick chats, chat settings that follow the agent
+CLI, link sharing for local sessions, bulk worktree clean-up, a renamed
+computer-use helper, and mobile pairing and transcript fixes.
+
+### Start and chat
+
+- A first-run start screen offers Open local project, Open GitHub project and
+  Quick start. Its dialogs fit a short window, and a failed clone leaves a
+  tidy folder. (#405, #410)
+- A floating chat window and quick chats that need no project. (#408)
+- Chat prompts are submitted only after the CLI has read them, and
+  unacknowledged prompts are flagged. The chat's model, reasoning effort and
+  permission mode stay in step with the agent CLI. (#416, #418, #421)
+- A failed tool in a running turn no longer raises "Needs attention", and
+  Delete workspace appears in the chat once the session's pull request is
+  merged. (#413, #414)
+- The status bar's usage stays fresh, and the App resources popover is no
+  longer transparent. (#380, #415)
+
+### Sharing and organizations
+
+- Share a local session with signed-in guests by link. (#402)
+- Choose which organizations the sidebar shows. (#399)
+- A local mirror belongs to the account that made it, an unreadable session
+  removes nothing, and nothing syncs until the owner is confirmed. (#375)
+- The phone and the CLI ask before waking a workspace, and a viewer or a
+  phone no longer counts as attached. (#383)
+
+### Worktrees
+
+- Clean up safe worktrees in bulk across open local and cloud projects, and
+  remove what earlier deletes left on disk, with sizes shown. (#322, #406)
+
+### Computer use
+
+- The computer-use helper has a new identity and name, "TerminalX Computer
+  Use Helper". It serves only the app, never operates TerminalX's own
+  windows, and the old helper's grant is removed at every launch. macOS asks
+  for Accessibility and Screen Recording again for the new helper. (#382,
+  #409, #412)
+
+### Mobile companion
+
+These source changes require a separately updated mobile app.
+
+- A paired phone reconnects after the app restarts, and pairing works when
+  the direct port is busy. (#381, #390)
+- Transcripts load correctly, keep earlier history during catch-up, order
+  unfinished turns, and scroll long histories smoothly. Markdown renders and
+  chat links can be opened. (#389, #391, #392, #393, #394)
+
 ## 0.2.8
 
 Cloud workspaces gain a full composer, port previews, a local file mirror and
