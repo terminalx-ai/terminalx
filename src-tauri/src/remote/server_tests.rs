@@ -720,6 +720,7 @@ async fn only_a_client_that_can_type_counts_as_attached_for_idle_suspend() {
         { "userId": "alice", "role": "driver" },
         { "userId": "bob", "role": "viewer", "canApprove": true },
     ])));
+    assert!(!legacy.counts_as_attached(), "the first member list revalidates existing connections");
     let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
     let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
     let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
@@ -737,6 +738,46 @@ async fn only_a_client_that_can_type_counts_as_attached_for_idle_suspend() {
         let hello = json!({ "protocol": PROTOCOL, "client": { "app": "terminalx-mobile", "version": "1.0.0" }, "want": ALL });
         call(&f.rpc, &phone, "rpc.hello", hello).await.unwrap();
         assert!(!phone.counts_as_attached(), "{user}'s phone");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_suspend_attachment_follows_connected_role_changes() {
+    for (authority, initial_role, next_role) in [
+        (Authority::Participate, "driver", "viewer"),
+        (Authority::Participate, "viewer", "driver"),
+        (Authority::Manage, "manager", "viewer"),
+    ] {
+        let f = fixture();
+        let list = |role| members(json!([{ "userId": "bob", "role": role }]));
+        f.rpc.set_collaboration(list(initial_role));
+        let (desktop, _events, _) = person(&f.rpc, "desktop", authority, "bob").await;
+        let (phone, _phone_events) = Peer::for_user("phone".into(), authority, Some("bob".into()));
+        call(&f.rpc, &phone, "rpc.hello", json!({
+            "protocol": PROTOCOL, "want": ALL, "client": { "app": MOBILE_APP },
+        })).await.unwrap();
+        assert_eq!(desktop.counts_as_attached(), initial_role != "viewer");
+        assert!(!phone.counts_as_attached());
+
+        // No reconnect or new hello: the API refresh alone changes what holds compute.
+        f.rpc.set_collaboration(list(next_role));
+        assert_eq!(desktop.counts_as_attached(), next_role != "viewer", "{initial_role} -> {next_role}");
+        assert!(!phone.counts_as_attached(), "a promoted phone still does not hold compute");
+        f.rpc.set_collaboration(None);
+        f.rpc.set_collaboration(list(next_role));
+        assert_eq!(desktop.counts_as_attached(), next_role != "viewer");
+
+        f.rpc.set_collaboration(list(initial_role));
+        assert_eq!(desktop.counts_as_attached(), initial_role != "viewer");
+        assert!(!phone.counts_as_attached());
+        f.rpc.set_collaboration(list("driver"));
+        assert!(desktop.counts_as_attached());
+        f.rpc.set_collaboration(members(json!([])));
+        assert!(!desktop.counts_as_attached(), "revocation stops counting before the transport hangs up");
+        f.rpc.disconnect(&desktop);
+        f.rpc.set_collaboration(list("driver"));
+        assert!(!desktop.counts_as_attached(), "a retained disconnected peer never counts again");
+        assert!(!phone.counts_as_attached());
     }
 }
 

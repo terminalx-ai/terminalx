@@ -111,6 +111,9 @@ pub struct Peer {
     closed: tokio::sync::Notify,
     /// Set once the connection has been disconnected from the runtime.
     gone: std::sync::atomic::AtomicBool,
+    /// Remembered from `rpc.hello` so role refreshes still exclude phones
+    /// from activity that holds compute.
+    phone: std::sync::atomic::AtomicBool,
     /// Held while this connection counts as use of the workspace for idle
     /// suspend: only a client that can type does (contract 9.4.1).
     attached: Mutex<Option<crate::cloud_activity::Attached>>,
@@ -169,6 +172,7 @@ impl Peer {
             presence: Mutex::new(Presence { tab_id: None, activity: "viewing", since: crate::cloud_agents::now_ms() }),
             closed: tokio::sync::Notify::new(),
             gone: std::sync::atomic::AtomicBool::new(false),
+            phone: std::sync::atomic::AtomicBool::new(false),
             attached: Mutex::new(None),
         });
         (peer, Notifications { receiver, queued })
@@ -588,11 +592,12 @@ impl WorkspaceRpc {
     /// Typing and agent turns are reported whoever is attached. Before the
     /// API has listed who has access there are no roles to go by, and every
     /// connection but a phone counts, as before.
-    fn count_attachment(&self, peer: &Peer, hello: &Value) {
-        let phone = hello["client"]["app"].as_str() == Some(MOBILE_APP);
-        let types = !self.collab.known() || self.access(peer).can_drive();
+    fn count_attachment(&self, peer: &Peer) {
+        // Read access under the attachment lock: a concurrent hello must
+        // not overwrite a role refresh with a decision from the old list.
         let mut attached = peer.attached.lock().unwrap();
-        if phone || !types || peer.gone.load(Ordering::SeqCst) {
+        let types = !self.collab.known() || self.access(peer).can_drive();
+        if peer.phone.load(Ordering::SeqCst) || !types || peer.gone.load(Ordering::SeqCst) {
             *attached = None;
         } else if attached.is_none() {
             *attached = Some(crate::cloud_activity::attached());
@@ -641,6 +646,9 @@ impl WorkspaceRpc {
             return;
         }
         for peer in &self.live_peers() {
+            // Reconcile before any early return, including revoked access
+            // and old attachments without a person. Promotions count too.
+            self.count_attachment(peer);
             let Some(user) = peer.user_id.as_deref() else {
                 // A `manage` attachment that names no person (saved before
                 // attachments carried one) cannot be matched to the list, so
@@ -806,12 +814,15 @@ impl WorkspaceRpc {
         if method == "rpc.hello" {
             let granted = protocol::negotiate(&params)?;
             *peer.granted.lock().unwrap() = Some(granted.iter().cloned().collect());
-            self.count_attachment(peer, &params);
+            peer.phone.store(params["client"]["app"].as_str() == Some(MOBILE_APP), Ordering::SeqCst);
             if self.peers.lock().unwrap().insert(peer.id, Arc::downgrade(peer)).is_none() {
                 if let Some(agents) = self.agents.get() {
                     agents.client_attached();
                 }
             }
+            // Register first so a concurrent role refresh either sees this
+            // peer, or finishes before we read its current access here.
+            self.count_attachment(peer);
             let collab = granted.iter().any(|capability| capability == "collab/1");
             if collab {
                 self.broadcast_presence();
