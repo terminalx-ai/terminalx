@@ -112,6 +112,21 @@ impl Rig {
         Self::of(CliKind::Claude, "")
     }
 
+    fn with_live_pane() -> Self {
+        let rig = Self::new();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let spec = pty::PaneSpec {
+            cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24,
+            command: Some("sh -c 'read line'"), env: &[],
+        };
+        rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
+        rig
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        self.manager.turn_counts_at(self.now.get())
+    }
+
     /// A tab on either CLI, opened on a transcript that already holds
     /// `history`: a conversation the tab is resuming.
     fn of(kind: CliKind, history: &str) -> Self {
@@ -474,6 +489,91 @@ fn a_hung_agent_with_no_output_and_no_events_still_raises_the_warning() {
     assert_eq!(rig.banner(), Some(RecoveryKind::Timeout));
 }
 
+/// A silence warning is not a turn boundary: cloud idle suspension must
+/// still see the live turn after the five-minute UI warning (#419).
+#[test]
+fn a_silent_live_turn_keeps_counting_after_the_warning() {
+    let rig = Rig::with_live_pane();
+    rig.start_turn();
+    assert_eq!(rig.manager.turn_counts(), (1, 0));
+    let start = rig.now.get();
+    for seconds in [299, 300, 400, 600] {
+        rig.now.set(start + Duration::from_secs(seconds));
+        rig.tick();
+        assert!(rig.manager.terminals.is_running(&rig.pane));
+        assert!(rig.turn_open());
+        assert_eq!(rig.counts(), (1, 0), "a quiet live turn must keep the workspace awake at {seconds}s");
+    }
+    assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+    rig.end_turn_in_transcript();
+    rig.advance(PATIENCE.settle);
+    rig.tick();
+    assert_eq!(rig.counts(), (0, 0), "completion releases compute even though the CLI stays alive");
+}
+
+#[test]
+fn a_silent_live_turn_has_a_separate_one_hour_cloud_budget() {
+    let rig = Rig::with_live_pane();
+    rig.start_turn();
+    rig.advance(crate::cloud_activity::MAX_TURN_SILENCE - MOMENT);
+    rig.tick();
+    assert_eq!(rig.counts(), (1, 0));
+    rig.advance(MOMENT);
+    assert_eq!(rig.counts(), (0, 0), "a hung process cannot hold compute forever");
+    assert!(rig.turn_open());
+    assert!(rig.manager.terminals.is_running(&rig.pane), "the budget does not kill the process");
+
+    rig.hook("PreToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }));
+    assert_eq!(rig.counts(), (1, 0), "real activity renews the silence budget");
+    rig.advance(crate::cloud_activity::MAX_TURN_SILENCE);
+    assert_eq!(rig.counts(), (0, 0), "the budget applies even before the watcher next runs");
+}
+
+#[test]
+fn a_silence_warning_does_not_keep_a_dead_process_awake() {
+    let rig = Rig::with_live_pane();
+    rig.start_turn();
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    assert_eq!(rig.counts(), (1, 0));
+    rig.manager.terminals.kill(&rig.pane);
+    assert!(rig.turn_open());
+    assert_eq!(rig.counts(), (0, 0));
+}
+
+#[test]
+fn cloud_counts_distinguish_silence_from_errors_and_unconfirmed_delivery() {
+    for kind in [RecoveryKind::Timeout, RecoveryKind::DeliveryUnconfirmed, RecoveryKind::Disconnected] {
+        let rig = Rig::with_live_pane();
+        rig.start_turn();
+        rig.manager.needs_recovery(&mut rig.rt.lock().unwrap(), kind);
+        assert_eq!(rig.counts(), (0, 0), "a reported {kind:?} is not a silence guess");
+        if kind == RecoveryKind::DeliveryUnconfirmed {
+            rig.rt.lock().unwrap().stalled_at = Some(rig.now.get());
+            assert_eq!(rig.counts(), (0, 0), "a watcher delivery warning does not hold compute either");
+        }
+    }
+}
+
+#[test]
+fn a_silent_turn_waiting_for_approval_is_counted_separately() {
+    let rig = Rig::with_live_pane();
+    rig.start_turn();
+    rig.advance(PATIENCE.stall);
+    rig.tick();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(),
+            input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
+        }, None);
+    }
+    assert_eq!(rig.counts(), (0, 1));
+    rig.advance(crate::cloud_activity::MAX_TURN_SILENCE);
+    rig.tick();
+    assert_eq!(rig.counts(), (0, 1), "the silence budget does not expire approvals");
+}
+
 /// A pane that has never drawn is judged on the events alone.
 #[test]
 fn a_pane_that_never_drew_does_not_hold_the_warning_back() {
@@ -707,7 +807,7 @@ fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
     let sent = Mutex::new(sent);
     sink.listen("pty_data", Box::new(move |_| { let _ = sent.lock().unwrap().send(()); }));
     assert_eq!(rig.manager.terminals.last_output(&rig.pane), None, "no pane yet");
-    let spec = pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'while :; do echo working; sleep 0.1; done'"), env: &[] };
+    let spec = pty::PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'echo working; read line'"), env: &[] };
     rig.manager.terminals.spawn(sink, &rig.pane, spec).unwrap();
     drawn.recv_timeout(Duration::from_secs(300)).expect("the pane never drew");
     // Stamped before the event was sent, and after the turn's last event:
@@ -726,6 +826,12 @@ fn what_a_real_pane_draws_is_what_holds_the_warning_back() {
     // The same moment with the pane left out of it is a stall.
     rig.manager.watch_tabs(PATIENCE, now, |_| None);
     assert_eq!(rig.recovery(), Some(RecoveryKind::Timeout));
+
+    // The cloud budget also sees actual PTY output, even if no hook or
+    // transcript event arrived for an hour and the warning is still shown.
+    rig.rt.lock().unwrap().last_activity = drew - crate::cloud_activity::MAX_TURN_SILENCE;
+    assert_eq!(rig.manager.turn_counts_at(drew), (1, 0));
+    assert_eq!(rig.manager.turn_counts_at(drew + crate::cloud_activity::MAX_TURN_SILENCE), (0, 0));
 }
 
 /// What a prompt typed into the terminal, and one sent from the composer,
@@ -735,8 +841,8 @@ mod prompts;
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        // Only one test gives the tab a real pane; for the rest this is a
-        // pane that was never there.
+        // Most tests use a pane that was never there; those with a real
+        // process must release it even when an assertion fails.
         self.manager.terminals.kill(&self.pane);
     }
 }

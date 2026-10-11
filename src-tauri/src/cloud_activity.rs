@@ -31,6 +31,10 @@ pub const MIN_INTERVAL: Duration = Duration::from_secs(15);
 /// The API wants a report at least every 60 s while something keeps the
 /// workspace awake; this leaves room for a slow request.
 pub const KEEPALIVE: Duration = Duration::from_secs(45);
+/// A live turn with no events or terminal output stops holding compute after
+/// an hour. This is separate from the five-minute recovery warning: silence
+/// does not prove a turn ended, but a hung agent must not hold a VM forever.
+pub const MAX_TURN_SILENCE: Duration = Duration::from_secs(60 * 60);
 const TICK: Duration = Duration::from_secs(1);
 /// The API rejects larger counts.
 const MAX_COUNT: usize = 10_000;
@@ -337,13 +341,15 @@ mod tests {
         let report = step(&mut schedule, secs(start, 20), observed(&[], 0, 1, busy)).unwrap();
         assert_eq!((report["activeTurns"].as_u64(), report["pendingApprovals"].as_u64()), (Some(1), Some(2)));
         let mut sent = vec![];
-        for s in 21..200 {
+        // No activity notes or attached clients for longer than both the
+        // five-minute warning and the default ten-minute idle timeout.
+        for s in 21..1800 {
             if step(&mut schedule, secs(start, s), observed(&[], 0, 1, busy)).is_some() {
                 sent.push(s);
             }
         }
-        assert_eq!(sent, vec![65, 110, 155], "a keep-alive every {}s", KEEPALIVE.as_secs());
-        let done = step(&mut schedule, secs(start, 200), idle(1)).expect("the end of the turn is reported");
+        assert_eq!(sent, (65..1800).step_by(45).collect::<Vec<_>>(), "a keep-alive every {}s", KEEPALIVE.as_secs());
+        let done = step(&mut schedule, secs(start, 1815), idle(1)).expect("the end of the turn is reported");
         assert_eq!(done["activeTurns"], 0);
     }
 

@@ -1061,15 +1061,33 @@ impl SessionManager {
     /// Turns in progress and permission prompts waiting, counted without
     /// copying either (the cloud activity report polls this every second).
     pub fn turn_counts(&self) -> (usize, usize) {
+        self.turn_counts_at(Instant::now())
+    }
+
+    fn turn_counts_at(&self, now: Instant) -> (usize, usize) {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         runtimes.into_iter().fold((0, 0), |(active, pending), runtime| {
             let runtime = runtime.lock().unwrap();
             let running = runtime.child.is_some()
                 || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id));
+            let last_activity = match &runtime.engine {
+                Engine::Cli(cli) => self.terminals.last_output(&cli.pane_id).map_or(runtime.last_activity, |drawn| drawn.max(runtime.last_activity)),
+                _ => runtime.last_activity,
+            };
+            // The watcher changes the display status to Waiting after five
+            // quiet minutes, without closing the turn. That guess is not a
+            // reason to suspend live work (#419). Real errors and prompts
+            // whose delivery is unconfirmed do not get this extension.
+            let silence_warning = runtime.status == TabStatus::Waiting
+                && runtime.turn_open
+                && runtime.pending.is_empty()
+                && runtime.stalled_at.is_some()
+                && runtime.recovery == Some(RecoveryKind::Timeout);
             // An agent sitting at its sign-in screen is not working, whatever
             // its tab says (PRO-78): it must not hold off the idle suspend.
             let turn = running
-                && runtime.status == TabStatus::InProgress
+                && (runtime.status == TabStatus::InProgress || silence_warning)
+                && now.saturating_duration_since(last_activity) < crate::cloud_activity::MAX_TURN_SILENCE
                 && crate::cloud_grants::sign_in_required_for_launch(&runtime.harness, &runtime.key()).is_none();
             (active + usize::from(turn), pending + runtime.pending.len())
         })

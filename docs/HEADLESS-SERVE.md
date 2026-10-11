@@ -60,6 +60,28 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 - **Socket path length:** keep `--data-dir` short. A Unix socket path must fit in about
   104 bytes.
 
+## Cloud idle activity
+
+The activity reporter sends `activeTurns` and `pendingApprovals` at least every
+45 seconds while either is nonzero, including when no client is attached or only
+a viewer is watching. A turn's five-minute silence warning changes its displayed
+status to "Needs attention", but does not end the turn or remove its cloud activity
+protection (#419).
+
+A live turn keeps counting through that warning for up to **one hour without
+agent events or terminal output** (`cloud_activity::MAX_TURN_SILENCE`). This is a
+separate budget from the UI warning and the workspace's configured idle timeout.
+New events or terminal output renew the budget. Completion, process exit, an
+actual provider error, or unconfirmed prompt delivery do not get this extension.
+Permission requests remain in `pendingApprovals` under the existing policy.
+
+At the one-hour limit the runtime reports the silent turn as inactive; it does
+not kill the agent or claim the turn completed. The server may then suspend the
+workspace under its idle policy, potentially immediately if its idle timeout has
+already elapsed. A legitimate command silent for an hour has the same limit.
+Process liveness is required, but neither a live agent nor a live child is proof
+of progress: both can hang, so neither grants an unlimited exemption.
+
 ## Cloud workspace bootstrap
 
 With `--runtime-kind cloud-workspace`, the runtime establishes its identity before it
