@@ -262,6 +262,20 @@ mod tests {
         assert_eq!(agent_in(&table, 501), None);
     }
 
+    /// An editor's plugin, `watch` and a spinner all hold the terminal the
+    /// way a session does, and run an agent's binary with no screen under
+    /// them. That is not somebody's session, and the tab stays a terminal.
+    #[test]
+    fn a_headless_run_under_a_program_that_holds_the_terminal_is_not_a_session() {
+        let table = [process(501, 400, 501, "-zsh"), process(700, 501, 700, "nvim notes.md"), process(710, 700, 700, "claude -p --output-format stream-json")];
+        assert_eq!(agent_in(&table, 700), None);
+        let table = [process(501, 400, 501, "-zsh"), process(700, 501, 700, "watch -n5 codex exec status"), process(710, 700, 700, "sh -c codex exec status"), process(711, 710, 700, "codex exec status")];
+        assert_eq!(agent_in(&table, 700), None);
+        // Under a program that is no agent, a session is still one: a script of the reader's that runs the CLI.
+        let table = [process(501, 400, 501, "-zsh"), process(700, 501, 700, "/bin/sh /Users/me/bin/work"), process(710, 700, 700, "claude --resume")];
+        assert_eq!(agent_in(&table, 700), Some(Agent { harness: "claude", pid: 710, pids: vec![710], job: 700 }));
+    }
+
     #[test]
     fn an_agent_that_starts_another_agent_is_still_the_one_in_front() {
         let table = [process(501, 400, 501, "-zsh"), process(700, 501, 700, "claude"), process(720, 700, 700, "/bin/zsh -c codex exec fix"), process(721, 720, 700, "codex exec fix")];

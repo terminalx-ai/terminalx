@@ -127,9 +127,19 @@ struct Spec {
     /// (`node …/node_modules/@openai/codex/bin/codex.js`), so the binary's
     /// name alone would miss it.
     packages: &'static [&'static str],
+    /// How a run of the CLI is asked to have no screen of its own: a
+    /// subcommand as its first word, or a flag anywhere after it
+    /// (`codex exec`, `claude -p`). Such a run is a script's or another
+    /// program's, and is nobody's session.
+    headless: Headless,
     install_hint: &'static str,
     install_url: &'static str,
     caps: Capabilities,
+}
+
+struct Headless {
+    commands: &'static [&'static str],
+    flags: &'static [&'static str],
 }
 
 const REGISTRY: &[Spec] = &[
@@ -138,6 +148,7 @@ const REGISTRY: &[Spec] = &[
         name: "Claude Code",
         binary: "claude",
         packages: &["@anthropic-ai/claude-code"],
+        headless: Headless { commands: &["mcp", "doctor", "update", "install", "config", "setup-token"], flags: &["-p", "--print"] },
         install_hint: "npm install -g @anthropic-ai/claude-code && claude auth login",
         install_url: "https://claude.com/product/claude-code",
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
@@ -147,6 +158,7 @@ const REGISTRY: &[Spec] = &[
         name: "Codex",
         binary: "codex",
         packages: &["@openai/codex"],
+        headless: Headless { commands: &["exec", "e", "mcp", "mcp-server", "app-server", "login", "logout", "completion"], flags: &[] },
         install_hint: "npm install -g @openai/codex && codex login",
         install_url: "https://developers.openai.com/codex/cli",
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
@@ -156,6 +168,7 @@ const REGISTRY: &[Spec] = &[
         name: "Cursor",
         binary: "cursor-agent",
         packages: &["cursor-agent"],
+        headless: Headless { commands: &[], flags: &["-p", "--print"] },
         install_hint: "curl https://cursor.com/install -fsS | bash && agent login",
         install_url: "https://cursor.com/cli",
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
@@ -165,6 +178,7 @@ const REGISTRY: &[Spec] = &[
         name: "OpenCode",
         binary: "opencode",
         packages: &["opencode-ai"],
+        headless: Headless { commands: &["run", "serve"], flags: &[] },
         install_hint: "curl -fsSL https://opencode.ai/install | bash && opencode auth login",
         install_url: "https://opencode.ai",
         caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
@@ -216,8 +230,17 @@ fn program_stem(path: &str) -> &str {
 /// by name, wherever it lives (a version manager's shim, an alias the shell
 /// expanded, an absolute path), or it is an interpreter running the agent's
 /// binary or a file inside the agent's package (`npx`, a global `npm`
-/// install). Only the program and its script are read, never the rest of the
-/// arguments: `vim claude.md` and `grep codex` are not agents.
+/// install). Which agent it is comes from the program and its script alone,
+/// never from the rest of the arguments: `vim claude.md` and `grep codex`
+/// are not agents.
+///
+/// The rest is read for one thing, which is whether the run was asked to
+/// have no screen (`Spec::headless`). `claude -p` and `codex exec` are the
+/// agent's binary and nobody's session, and they are started by programs
+/// that do hold a terminal the way a session does: an editor's plugin,
+/// `watch`, a spinner. A command line is only known as words, so a prompt
+/// given as an argument with a bare `-p` in it reads as such a run too; the
+/// tab then stays a terminal, which is the lesser mistake.
 ///
 /// `argv` is the command line split into words, as far as that is known; a
 /// path with a space in it is simply not recognised.
@@ -225,11 +248,15 @@ pub fn recognise<'a>(argv: impl IntoIterator<Item = &'a str>) -> Option<&'static
     let mut argv = argv.into_iter();
     let program = argv.next()?;
     let script = INTERPRETERS.contains(&program_stem(program)).then(|| argv.find(|arg| !arg.starts_with('-'))).flatten();
-    REGISTRY.iter().find_map(|spec| {
+    let spec = REGISTRY.iter().find(|spec| {
         let named = |word: &str| program_stem(word) == spec.binary;
         let packaged = |word: &str| spec.packages.iter().any(|package| word.contains(&format!("/{package}/")));
-        (named(program) || script.is_some_and(|script| named(script) || packaged(script))).then_some(spec.id)
-    })
+        named(program) || script.is_some_and(|script| named(script) || packaged(script))
+    })?;
+    // What is left of the command line is the CLI's own.
+    let mut own = argv.peekable();
+    let headless = own.peek().is_some_and(|first| spec.headless.commands.contains(first)) || own.any(|word| spec.headless.flags.contains(&word));
+    (!headless).then_some(spec.id)
 }
 
 /// The agents the UI lists. `catalog` keeps the hidden ones so a tab already
@@ -274,6 +301,39 @@ mod tests {
         assert_eq!(words("node /Users/me/.npm/_npx/0ab1/node_modules/.bin/claude"), Some("claude"));
         assert_eq!(words("bun /Users/me/.bun/install/global/node_modules/opencode-ai/bin/opencode"), Some("opencode"));
         assert_eq!(words("node /Users/me/.local/share/cursor-agent/versions/1.2/index.js"), Some("cursor"));
+    }
+
+    /// The agent's binary run with no screen is a script's or another
+    /// program's, and nobody's session, whatever holds the terminal around
+    /// it: an editor's plugin runs `claude -p` with the terminal as a
+    /// session has it.
+    #[test]
+    fn a_run_asked_to_have_no_screen_is_not_a_session() {
+        for command in [
+            "claude -p summarise",
+            "claude --model opus --print hi",
+            "/opt/homebrew/bin/claude mcp serve",
+            "codex exec fix",
+            "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js exec fix",
+            "/usr/local/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex e fix",
+            "codex mcp-server",
+            "cursor-agent -p hi",
+            "opencode run hi",
+        ] {
+            assert_eq!(words(command), None, "{command}");
+        }
+        // A session, with whatever else it was given. A subcommand is the first word and nothing after it.
+        for (command, harness) in [
+            ("claude", "claude"),
+            ("claude --resume 0a8b6f2e --fork-session", "claude"),
+            ("claude fix the mcp config", "claude"),
+            ("codex resume 01a0814c", "codex"),
+            ("codex --model gpt-5 look at the exec path", "codex"),
+            ("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js", "codex"),
+            ("opencode", "opencode"),
+        ] {
+            assert_eq!(words(command), Some(harness), "{command}");
+        }
     }
 
     #[test]

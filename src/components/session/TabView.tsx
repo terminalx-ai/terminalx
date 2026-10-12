@@ -169,12 +169,14 @@ export function TabView({
     if (active && ptyFirst) void startTabAgent(session, tab);
   }, [active, ptyFirst, session.id, tab.id, front]);
 
-  // The face picked for what was in the terminal before does not stand for what is there now.
+  // The face picked for what was in the terminal before does not stand for what is there now. Neither
+  // does "Session closed": that was said of the agent Stop ended, not of the one there since.
   const shownFront = useRef(front);
   useEffect(() => {
     if (shownFront.current === front) return;
     shownFront.current = front;
     forgetTabView(tab.id);
+    setStopped(false);
   }, [front, tab.id]);
 
   // An earlier conversation is read until the tab moves on, or it is no longer one of the tab's.

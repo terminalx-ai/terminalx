@@ -71,7 +71,7 @@ into an interactive zsh in a PTY:
   0.43 s after they start;
 - `claude --version`, `claude -p`, `claude doctor`, `codex --version` and
   `codex exec` leave it as the shell had it for their whole run. They are
-  the same binaries, and are never taken for a session;
+  the same binaries, and typed at a prompt they are never looked at;
 - Claude Code is one process and the leader of the job. The npm `codex` is a
   node launcher and the native program it starts, in one job;
 - the shells an agent runs for its tools are in a session of their own with
@@ -83,8 +83,21 @@ One rule, for every row of the registry (`harness::recognise`): the program
 is an agent's binary by name, wherever it is (a version manager's shim, an
 alias the shell expanded, an absolute path), or it is an interpreter running
 that binary or a file inside the agent's package (`npx`, a global install).
-Only the program and its script are read, never the other arguments, so
-`vim claude.md` is not an agent.
+Which agent it is comes from the program and its script alone, never from
+the other arguments, so `vim claude.md` is not an agent.
+
+The rest of the command line is read for one thing: whether the run was
+asked to have no screen of its own. Each row of the registry lists how that
+is asked of its CLI (`headless`): a subcommand as the first word
+(`codex exec`, `claude mcp`, `opencode run`) or a flag anywhere after it
+(`claude -p`, `cursor-agent --print`). Such a run is a script's or another
+program's and nobody's session, and it is often started by a program that
+does hold the terminal the way a session does: an editor's plugin, `watch`,
+a spinner. Without this, `claude -p` under `nvim` made the shell's tab a
+Claude Code tab. A command line is only known as words, so a prompt passed
+as an argument with a bare `-p` in it reads as such a run too; the tab then
+stays a terminal, which is the lesser mistake. Claude Code's own file is a
+second check: one whose `kind` is not `interactive` is not followed.
 
 The registry is one table (`REGISTRY` in `harness/mod.rs`) that also lists
 what the app offers and drives. An agent added there is recognised in a
@@ -124,11 +137,23 @@ Details that matter, all from the same probe:
 - Both write to the reader's own home (`~/.claude`, `~/.codex`), not to the
   Codex home the app manages for the tabs it launches.
 
+A CLI is looked at five times a second for as long as it runs, so a look is
+kept cheap (`Locator`). Claude Code's file is read once a look, for the
+conversation's id and what the CLI is doing. Where a conversation is written
+is only worked out again when that id changes, or now and again. Codex has
+nothing as cheap, and listing a process's open files means starting `lsof`.
+So once its conversation and rollout are known, the files are listed again
+only when the folder its locks are taken in has changed (a conversation
+started or switched to takes a lock), or after thirty seconds.
+
 The transcript is then tailed with the same decoders an app-launched tab
 uses. Where it is read from depends on what it is:
 
 - a file that does not exist yet, or was made since the CLI was first seen,
-  is the one it is writing now: read from its start, as it is written;
+  is the one it is writing now: read from its start, as it is written. A
+  fork (`claude --resume <id> --fork-session`) is such a file, and arrives
+  holding a copy of its parent's turns: everything before the prompt it is
+  on is brought in as history;
 - an older file the tab already holds is read on from where the tab had got
   to, or from its end;
 - an older file the tab has never seen (`claude --resume` on a conversation
@@ -136,9 +161,22 @@ uses. Where it is read from depends on what it is:
   shows the conversation from its first turn. Nothing in it is work
   happening now: no status moves and nobody is notified.
 
+A CLI may name its conversation before it says where that is written
+(`codex resume <id>` takes the lock before it opens the rollout). The tab is
+then on the conversation by name, and it still counts as never seen until
+its transcript has been read.
+
+History is read by the thread that follows the tab's transcript, a couple of
+hundred records at a time, so a long conversation holds up neither the
+watcher that looks at every pane nor the tab itself.
+
 A turn is opened by its prompt in the transcript, or by Claude Code saying it
 is busy. With no `Stop` hook to close it, it is closed by the transcript's
-own record that it ended, or by Claude Code saying it is idle. The silence
+own record that it ended, or by Claude Code saying it is idle. Each record is
+acted on where it stands, so a turn that ended and a queued prompt after it
+are two turns even when they are read together, and a turn the reader
+interrupted in the CLI's own screen (Codex's `turn_aborted`) ends as
+interrupted, not as done. The silence
 watcher does not call a stall on such a tab: the CLI may be waiting on a
 question in its own screen, and only Claude Code says so. Its `waiting` is
 shown as "Needs attention", with the notice that says to look at the
@@ -149,6 +187,11 @@ terminal; nothing is raised to recover from.
 - **Sending works.** A prompt from the chat is typed into the CLI as it is
   for any tab, and the CLI's own record of it is matched so it is drawn once.
   Interrupt is Escape.
+- **Nothing is typed once the CLI has left.** It shares its pane with the
+  shell it was started from, and the watcher is up to a quarter of a second
+  behind an exit. So the terminal is asked which job has it when a prompt is
+  sent and again before each write, the Enter above all; if it is no longer
+  the CLI's, the prompt is refused with the reason and nothing is raised.
 - **Stop ends the CLI's own job** and leaves the shell it was started from.
 - **Claude Code's model and effort work**: they are its own `/model` and
   `/effort`, typed.
@@ -160,7 +203,10 @@ terminal; nothing is raised to recover from.
 - **A guest of a shared session cannot send to it.** It runs with whatever
   permissions the host gave it by hand.
 - The permission mode is shown as "Set in the terminal" until the CLI says
-  what it is in (Codex does, in its rollout).
+  what it is in (Codex does, in its rollout). When the app later launches
+  that conversation itself (**Resume here**, or the tab opened after a
+  restart) and the mode is still not known, it runs in "Ask every time", and
+  that is then the tab's mode, shown in the picker and changed from it.
 
 ## Several conversations, one tab
 
@@ -194,6 +240,7 @@ An agent leaving the front of its terminal is not an error.
   above its prompt.
 - A turn it was in the middle of is closed as interrupted, and the log says
   what happened in one line ("Claude Code exited before the turn finished.").
+- A permission request it left unanswered is cancelled with it.
 - No recovery is raised and none is restored when the log is opened again.
 - An automation waiting on the turn is told it failed.
 
@@ -221,6 +268,8 @@ shell is running something of the reader's.
   process, and is not noticed.
 - **A path with a space in it** is not recognised: the command line is read
   as `ps` prints it.
+- **A subcommand after an option's value** (`codex -m gpt-5 exec …`) is not
+  read as a headless run: only the first word is taken for a subcommand.
 - **A hand-started Claude Code's permission mode** is not known; nothing it
   writes says it before a hook would.
 - **Windows** has no foreground process group to ask. Tabs become terminals

@@ -20,12 +20,50 @@
 //!   while the files of the conversation before stay open. So the newest
 //!   lock is the conversation the process is in now.
 //!
-//! `codex exec` holds a lock and a rollout too; it never has the terminal
-//! raw, so it is never looked at here (`crate::foreground`).
+//! `codex exec` holds a lock and a rollout too. It is never looked at here:
+//! a run with no screen is not taken for a session (`crate::foreground`).
+//!
+//! Listing a process's open files means starting `lsof`, a fifth of a second
+//! or more each time, so it is not done on every look. Whatever moves a
+//! process to another conversation takes a lock, and a lock is a file made
+//! in the locks folder, which changes that folder's date. Once a
+//! conversation and its rollout are known, the files are listed again only
+//! when that date has moved, or after `ASK_AGAIN` in case something moved
+//! without it.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::session::follow::Located;
+
+/// How long what was found is trusted with no sign of a change.
+const ASK_AGAIN: Duration = Duration::from_secs(30);
+
+/// What a Codex was last found in, and what would show it has moved on.
+#[derive(Debug, Clone)]
+pub struct Seen {
+    pub found: Located,
+    /// The folder its locks are taken in, and when that folder last changed.
+    locks: Option<(PathBuf, Option<SystemTime>)>,
+    asked: Instant,
+}
+
+fn changed(folder: &Path) -> Option<SystemTime> {
+    std::fs::metadata(folder).and_then(|meta| meta.modified()).ok()
+}
+
+impl Seen {
+    /// Whether nothing says the process has moved on since it was asked.
+    fn stands(&self) -> bool {
+        let unmoved = self.locks.as_ref().is_some_and(|(folder, at)| changed(folder) == *at);
+        self.found.transcript.is_some() && unmoved && self.asked.elapsed() < ASK_AGAIN
+    }
+}
+
+/// The folder a set of open files has its locks in.
+fn locks_folder(open: &[PathBuf]) -> Option<PathBuf> {
+    open.iter().find(|path| locked(path).is_some()).and_then(|lock| lock.parent()).map(Path::to_path_buf)
+}
 
 /// The conversation id a rollout is named for: the 36 characters before `.jsonl`.
 fn rollout_id(path: &Path) -> Option<&str> {
@@ -63,8 +101,37 @@ fn located_among(open: &[PathBuf]) -> Option<Located> {
     }
 }
 
-pub fn locate(pid: u32) -> Option<Located> {
-    located_among(&crate::harness::host::open_files(pid))
+/// [`look`], with the listing of a process's open files given.
+fn look_with(pids: &[u32], last: Option<Seen>, open_files: impl Fn(u32) -> Vec<PathBuf>) -> Option<Seen> {
+    if let Some(last) = last.as_ref().filter(|last| last.stands()) {
+        return Some(last.clone());
+    }
+    // Read before the files are listed: a lock taken while they are being
+    // listed then shows as a change the next time, and is asked about.
+    let before = last.and_then(|last| last.locks).map(|(folder, _)| {
+        let at = changed(&folder);
+        (folder, at)
+    });
+    // The package's launcher holds nothing; the program it starts does.
+    pids.iter().rev().find_map(|pid| {
+        let open = open_files(*pid);
+        let found = located_among(&open)?;
+        let locks = locks_folder(&open).map(|folder| match &before {
+            Some((known, at)) if *known == folder => (folder, *at),
+            _ => {
+                let at = changed(&folder);
+                (folder, at)
+            }
+        });
+        Some(Seen { found, locks, asked: Instant::now() })
+    })
+}
+
+/// The conversation the Codex running as `pids` is in. `last` is what it was
+/// found in the time before: while nothing says it has moved on, that is
+/// the answer and no process is started to find it.
+pub fn look(pids: &[u32], last: Option<Seen>) -> Option<Seen> {
+    look_with(pids, last, crate::harness::host::open_files)
 }
 
 #[cfg(test)]
@@ -121,6 +188,35 @@ mod tests {
         assert_eq!(located_among(&open), Some(Located { provider_session_id: SECOND.into(), transcript: Some(second_rollout.clone()) }));
         // With no lock to go by, the rollout of the conversation that started last.
         assert_eq!(located_among(&[second_rollout.clone(), first_rollout]), Some(Located { provider_session_id: SECOND.into(), transcript: Some(second_rollout) }));
+    }
+
+    /// A Codex left at its prompt is looked at for as long as it runs. Its
+    /// open files are only listed again when a lock has been taken.
+    #[test]
+    fn a_settled_conversation_is_not_asked_about_again_until_a_lock_is_taken() {
+        let home = Home::new();
+        let (lock, rollout) = (home.lock(FIRST), home.rollout("2026-10-12T17-57-34", FIRST));
+        let asked = std::cell::Cell::new(0);
+        let open = std::cell::RefCell::new(vec![lock]);
+        let list = |_pid: u32| {
+            asked.set(asked.get() + 1);
+            open.borrow().clone()
+        };
+        // With no rollout yet it is asked every time: the first prompt takes no lock.
+        let seen = look_with(&[7], None, list).unwrap();
+        assert_eq!(seen.found.transcript, None);
+        let seen = look_with(&[7], Some(seen), list).unwrap();
+        assert_eq!(asked.get(), 2);
+        open.borrow_mut().push(rollout.clone());
+        let seen = look_with(&[7], Some(seen), list).unwrap();
+        assert_eq!((asked.get(), seen.found.transcript.clone()), (3, Some(rollout.clone())));
+        // Settled: looked at again and again, and nothing is listed.
+        let seen = (0..5).fold(seen, |seen, _| look_with(&[7], Some(seen), list).unwrap());
+        assert_eq!(asked.get(), 3);
+        // `/new` takes a lock, and that is seen at the next look.
+        open.borrow_mut().push(home.lock(SECOND));
+        let seen = look_with(&[7], Some(seen), list).unwrap();
+        assert_eq!((asked.get(), seen.found), (4, Located { provider_session_id: SECOND.into(), transcript: None }));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::json;
 
-use super::follow::{conversation_is_blank, Activity, Located, Locator};
+use super::follow::{conversation_is_blank, Activity, Glance, Located, Locator};
 use super::*;
 use crate::foreground::Agent;
 use crate::store::index::Front;
@@ -54,11 +54,16 @@ impl Locator for Told {
     fn locate(&self, agent: &Agent) -> Option<Located> {
         self.by_pid.lock().unwrap().get(&agent.pid)?.0.clone()
     }
-    fn activity(&self, agent: &Agent) -> Option<Activity> {
-        self.by_pid.lock().unwrap().get(&agent.pid)?.1
+    fn glance(&self, agent: &Agent) -> Glance {
+        let told = self.by_pid.lock().unwrap();
+        let Some((located, activity)) = told.get(&agent.pid) else { return Glance::default() };
+        Glance { conversation: located.as_ref().map(|at| at.provider_session_id.clone()), activity: *activity }
     }
     fn locate_every(&self, _agent: &Agent, _settled: bool) -> Duration {
         Duration::ZERO
+    }
+    fn at_once(&self, _agent: &Agent) -> bool {
+        true
     }
 }
 
@@ -271,6 +276,20 @@ impl Rig {
     fn exit(&self, pane: &str) {
         self.manager.terminals.write(pane, b"bye\n").unwrap();
     }
+
+    /// `agent` as the watcher reports one that has `pane`'s terminal: its
+    /// job is the one the terminal gives its input to. Here that is whatever
+    /// the pane runs, which stands for the CLI.
+    fn in_front(&self, pane: &str, agent: Agent) -> Agent {
+        let front = || self.manager.terminals.fronts().into_iter().find(|front| front.id == pane && front.foreground == front.pid);
+        self.wait("the pane's program to have its terminal", || front().is_some());
+        Agent { job: front().unwrap().foreground, ..agent }
+    }
+
+    /// What has been typed into `pane`, as its terminal echoed it.
+    fn typed(&self, pane: &str) -> String {
+        String::from_utf8_lossy(&self.manager.terminals.read_output(pane).unwrap_or_default()).into_owned()
+    }
 }
 
 fn agent_tab(id: &str, harness: &str, conversation: &str) -> serde_json::Value {
@@ -471,12 +490,13 @@ fn a_conversation_the_app_has_never_seen_is_brought_in_from_its_first_turn() {
 
     rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
     let tab = rig.tab();
-    // All of it is there when the agent is first seen, as turns that are over.
+    // All of it is brought in, as turns that are over.
+    rig.wait("the conversation's earlier turns", || rig.said(&tab.id).len() == 6);
     assert_eq!(rig.said(&tab.id), ["user: Reply with exactly: pong", "claude: pong", "turn Ok", "user: Reply with exactly: second", "claude: second", "turn Ok"]);
     // History is not work: the tab was never "working" or "completed" for it.
     assert_eq!(rig.status(&tab.id), TabStatus::Idle);
     assert!(statuses.lock().unwrap().is_empty(), "{:?}", statuses.lock().unwrap());
-    assert_eq!(tab.title.as_deref(), Some("Reply with exactly: pong"));
+    assert_eq!(rig.tab().title.as_deref(), Some("Reply with exactly: pong"));
 
     // What is said from here on is followed as it happens.
     rig.told.doing(CLAUDE_PID, Activity::Busy);
@@ -549,13 +569,13 @@ fn a_prompt_sent_from_the_chat_is_typed_into_the_hand_started_cli_and_drawn_once
     let pane = rig.shell(1);
     let transcript = rig.dir.path().join("claude.jsonl");
     rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &transcript)), Some(Activity::Idle));
-    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+    rig.manager.pane_foreground(&pane, Some(rig.in_front(&pane, agent("claude", CLAUDE_PID))));
     let tab = rig.tab();
 
     let sent = rig.manager.send(SESSION, &tab.id, "hello from the chat".into(), Vec::new()).unwrap();
     assert!(!sent.queued);
     // It reaches the terminal the CLI is in: `cat` echoes what was typed at it.
-    rig.wait("the prompt in the terminal", || String::from_utf8_lossy(&rig.manager.terminals.read_output(&pane).unwrap_or_default()).contains("hello from the chat"));
+    rig.wait("the prompt in the terminal", || rig.typed(&pane).contains("hello from the chat"));
     // The CLI records the prompt and answers; the chat shows each once. It
     // is quicker than the app looks: it is never seen busy, and the turn is
     // still closed once it has been idle a moment.
@@ -567,13 +587,196 @@ fn a_prompt_sent_from_the_chat_is_typed_into_the_hand_started_cli_and_drawn_once
     assert!(rig.runtime(&tab.id).lock().unwrap().recovery.is_none());
 }
 
+/// A CLI started by hand shares its pane with the shell it was started from.
+/// When it exits, the watcher says so within a quarter of a second, and
+/// until then the tab still holds it. A prompt that arrives in between is
+/// not typed: the shell would run it as a command.
+#[test]
+fn a_prompt_is_never_typed_into_the_shell_a_hand_started_cli_has_left() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &rig.dir.path().join("claude.jsonl"))), Some(Activity::Idle));
+    rig.manager.pane_foreground(&pane, Some(rig.in_front(&pane, agent("claude", CLAUDE_PID))));
+    let tab = rig.tab();
+    // The terminal gives its input to another job now, and nothing has told the tab.
+    let leave = || {
+        if let Engine::Cli(CliTab { by_hand: Some(by), .. }) = &mut rig.runtime(&tab.id).lock().unwrap().engine {
+            by.agent.job = CLAUDE_PID;
+        }
+    };
+
+    // It leaves while a prompt is on its way: sent while it was there, and typed after.
+    let writer = rig.manager.writers.lock().unwrap().entry(pane.clone()).or_default().clone();
+    let typing = writer.lock().unwrap();
+    rig.manager.send(SESSION, &tab.id, "rm -rf build".into(), Vec::new()).unwrap();
+    leave();
+    drop(typing);
+    // The thread that types holds the pane's writer for as long as it runs.
+    rig.wait("the prompt's delivery to be over", || Arc::strong_count(&writer) == 2);
+    assert!(!rig.typed(&pane).contains("rm -rf"), "{:?}", rig.typed(&pane));
+    // Nothing went wrong that the reader has to recover from: the tab is about to be a terminal.
+    assert!(rig.runtime(&tab.id).lock().unwrap().recovery.is_none());
+    assert!(!rig.said(&tab.id).iter().any(|line| line.starts_with("recovery")));
+
+    // One sent after it left is refused outright, and says why.
+    let refused = rig.manager.send(SESSION, &tab.id, "make clean".into(), Vec::new()).unwrap_err();
+    assert!(format!("{refused:#}").contains("no longer running in this tab's terminal"), "{refused:#}");
+    rig.manager.interrupt(SESSION, &tab.id).unwrap();
+    assert_eq!(rig.typed(&pane), "");
+}
+
+/// No hook closes the turn of a CLI started by hand: the transcript does.
+/// Its record of a turn's end is acted on where it stands, so a turn that
+/// ended and the prompt after it are two turns however they were read.
+#[test]
+fn a_turn_that_ends_and_the_prompt_after_it_are_two_turns_when_read_together() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let transcript = rig.dir.path().join("claude.jsonl");
+    // It says it is busy throughout: only the transcript says where one turn ends.
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &transcript)), Some(Activity::Busy));
+    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+    let tab = rig.tab();
+    let turn: Vec<String> = claude_turns(1).lines().map(|line| format!("{line}\n")).collect();
+    append(&transcript, &turn[..10].concat());
+    rig.wait("the first prompt", || rig.said(&tab.id) == ["user: Reply with exactly: pong"]);
+
+    // The reply, the turn's end and a prompt that was waiting, in one write.
+    append(&transcript, &format!("{}{}", turn[10..].concat(), claude_user_record("and then this")));
+    rig.wait("the queued prompt", || rig.said(&tab.id).last().is_some_and(|last| last == "user: and then this"));
+    assert_eq!(rig.said(&tab.id), ["user: Reply with exactly: pong", "claude: pong", "turn Ok", "user: and then this"]);
+    rig.wait("the second turn to be open", || rig.runtime(&tab.id).lock().unwrap().turn_open && rig.status(&tab.id) == TabStatus::InProgress);
+}
+
+/// Esc in a hand-started Codex: the rollout says the turn was interrupted,
+/// and it is not drawn, or reported to an automation, as one that finished.
+#[test]
+fn a_turn_interrupted_in_the_clis_own_screen_ends_as_interrupted() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let rollout = rig.dir.path().join("rollout.jsonl");
+    rig.told.set(CODEX_PID, Some(located(CODEX_ID, &rollout)), None);
+    rig.manager.pane_foreground(&pane, Some(agent("codex", CODEX_PID)));
+    let tab = rig.tab();
+    let turn = codex_first_turn();
+    let unfinished: String = turn.lines().take(turn.lines().count() - 1).map(|line| format!("{line}\n")).collect();
+    append(&rollout, &unfinished);
+    rig.wait("working", || rig.status(&tab.id) == TabStatus::InProgress);
+    append(&rollout, &format!("{}\n", json!({ "timestamp": "2026-09-04T10:52:02.106Z", "type": "event_msg", "payload": { "type": "turn_aborted", "turn_id": "turn-1", "reason": "interrupted" } })));
+    rig.wait("the turn's end", || !rig.runtime(&tab.id).lock().unwrap().turn_open);
+    assert_eq!(rig.said(&tab.id).last().unwrap(), "turn Aborted");
+    assert_ne!(rig.status(&tab.id), TabStatus::Completed);
+    assert!(rig.runtime(&tab.id).lock().unwrap().recovery.is_none());
+}
+
+/// `codex resume <id>`: Codex takes the conversation's lock before it opens
+/// its rollout, so the tab is on the conversation by name before there is
+/// anything to read. Being on it by name is not having read it.
+#[test]
+fn a_conversation_named_before_it_says_where_it_is_written_is_still_brought_in_whole() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let rollout = rig.dir.path().join("rollout.jsonl");
+    append(&rollout, &codex_first_turn());
+    std::fs::File::options().write(true).open(&rollout).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+    rig.told.set(CODEX_PID, Some(Located { provider_session_id: CODEX_ID.into(), transcript: None }), None);
+    rig.manager.pane_foreground(&pane, Some(agent("codex", CODEX_PID)));
+    let tab = rig.tab();
+    assert_eq!(tab.provider_session_id.as_deref(), Some(CODEX_ID));
+    assert!(rig.said(&tab.id).is_empty());
+
+    rig.told.set(CODEX_PID, Some(located(CODEX_ID, &rollout)), None);
+    rig.wait("the conversation's earlier turn", || rig.said(&tab.id).last().is_some_and(|last| last == "turn Ok"));
+    let said = rig.said(&tab.id);
+    assert!(said[0].starts_with("user: ") && said.iter().any(|line| line.starts_with("codex: ")), "{said:?}");
+    // It is the tab's first conversation and history, not work: nothing was started for it.
+    assert_eq!((rig.tab().follow.conversation, rig.tab().follow.history.len(), rig.status(&tab.id)), (None, 0, TabStatus::Idle));
+}
+
+/// `claude --resume <id> --fork-session`: the fork's file is made by its
+/// first prompt, and arrives holding a copy of the parent's turns. They are
+/// the conversation's history, not turns happening now.
+#[test]
+fn a_fork_arrives_holding_its_parents_turns_and_they_are_history() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let fork = rig.dir.path().join("fork.jsonl");
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &fork)), Some(Activity::Idle));
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let heard = statuses.clone();
+    rig.sink.listen("tab_status", Box::new(move |payload| heard.lock().unwrap().push(payload.to_string())));
+    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+    let tab = rig.tab();
+
+    rig.told.doing(CLAUDE_PID, Activity::Busy);
+    append(&fork, &format!("{}{}", claude_turns(2), claude_user_record("and now this")));
+    rig.wait("the prompt it is on", || rig.said(&tab.id).last().is_some_and(|last| last == "user: and now this"));
+    assert_eq!(rig.said(&tab.id), ["user: Reply with exactly: pong", "claude: pong", "turn Ok", "user: Reply with exactly: second", "claude: second", "turn Ok", "user: and now this"]);
+    rig.wait("working on it", || rig.status(&tab.id) == TabStatus::InProgress);
+    // The parent's turns never made the tab "completed": only the one it is on is work.
+    assert!(!statuses.lock().unwrap().iter().any(|status| status.contains("completed")), "{:?}", statuses.lock().unwrap());
+}
+
+/// An agent exited while it was asking for permission. What it asked went
+/// with it, and reading the log again raises nothing for a tab that has
+/// nothing wrong with it.
+#[test]
+fn an_ask_left_unanswered_when_the_agent_exited_is_nothing_to_recover_from() {
+    let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
+    let transcript = rig.dir.path().join("claude.jsonl");
+    let pane = rig.launched("t1", CliKind::Claude, &transcript);
+    append(&transcript, &claude_turns(1).lines().take(10).map(|line| format!("{line}\n")).collect::<String>());
+    rig.wait("the prompt", || rig.said("t1") == ["user: Reply with exactly: pong"]);
+    rig.runtime("t1").lock().unwrap().pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: json!({}), suggestions: Vec::new() });
+
+    rig.exit(&pane);
+    rig.wait("the tab to become a terminal", || rig.tab().follow.front == Front::Terminal);
+    assert!(rig.settled_as_terminal("t1"));
+    let events = rig.events("t1");
+    let decided: Vec<&str> = events.iter().filter_map(|event| match &event.payload { Payload::PermissionDecided { label, .. } => Some(label.as_str()), _ => None }).collect();
+    assert_eq!(decided, ["Cancelled"]);
+    // As the next window, or the next launch, reads it.
+    assert_eq!(recovery::from_history(&events), None);
+}
+
+/// The exit that makes a tab a terminal and the window that then opens it
+/// both ask for the tab's shell. It is given one, whoever asks and however
+/// many ask at once.
+#[test]
+fn a_tab_opened_from_several_places_at_once_is_given_one_shell() {
+    let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
+    index::update_tab(SESSION, "t1", |tab| {
+        tab.follow.front = Front::Terminal;
+        Ok(())
+    })
+    .unwrap();
+    let pane = SessionManager::pane_id("t1");
+    let shell = |manager: &SessionManager| manager.terminals.fronts().into_iter().find(|front| front.id == pane).map(|front| front.pid);
+    let seen: Vec<Option<u32>> = std::thread::scope(|scope| {
+        let asking: Vec<_> = (0..8)
+            .map(|_| {
+                let manager = rig.manager.clone();
+                let shell = &shell;
+                scope.spawn(move || {
+                    manager.ensure_started(SESSION, "t1").unwrap();
+                    shell(&manager)
+                })
+            })
+            .collect();
+        asking.into_iter().map(|asked| asked.join().unwrap()).collect()
+    });
+    let now = shell(&rig.manager);
+    assert!(now.is_some() && seen.iter().all(|pid| *pid == now), "{seen:?} then {now:?}");
+    assert!(rig.manager.terminals.is_running(&pane));
+}
+
 #[test]
 fn what_needs_the_cli_restarted_is_refused_for_one_started_by_hand_and_says_why() {
     let rig = Rig::new(json!([]));
     let (claude, codex) = (rig.shell(1), rig.shell(2));
     rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &rig.dir.path().join("claude.jsonl"))), Some(Activity::Idle));
     rig.told.set(CODEX_PID, Some(Located { provider_session_id: CODEX_ID.into(), transcript: None }), None);
-    rig.manager.pane_foreground(&claude, Some(agent("claude", CLAUDE_PID)));
+    rig.manager.pane_foreground(&claude, Some(rig.in_front(&claude, agent("claude", CLAUDE_PID))));
     rig.manager.pane_foreground(&codex, Some(agent("codex", CODEX_PID)));
     let tabs = rig.tabs();
     let tab = |harness: &str| tabs.iter().find(|tab| tab.harness == harness).unwrap().id.clone();
@@ -590,7 +793,7 @@ fn what_needs_the_cli_restarted_is_refused_for_one_started_by_hand_and_says_why(
     refused(rig.manager.set_effort(SESSION, &tab("codex"), Some("high")));
     // Claude Code takes them while it runs, typed into it like any command.
     rig.manager.set_model(SESSION, &tab("claude"), "opus").unwrap();
-    rig.wait("the command in the terminal", || String::from_utf8_lossy(&rig.manager.terminals.read_output(&claude).unwrap_or_default()).contains("/model opus"));
+    rig.wait("the command in the terminal", || rig.typed(&claude).contains("/model opus"));
     // Nothing was changed for the ones refused.
     assert!(rig.tabs().iter().all(|tab| tab.requested_permission_mode.is_none() && tab.permission_mode == follow::MODE_SET_IN_TERMINAL));
     // A guest of a shared session cannot drive a CLI the host started by hand.

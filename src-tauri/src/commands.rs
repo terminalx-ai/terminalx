@@ -1602,7 +1602,8 @@ fn sweep_quick_chats(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
     // A shell the reader left running in it is a use of it, whatever its date.
     let shells = state.terminals.shells();
-    let busy = |session: &SessionEntry| shells.iter().any(|shell| shell.session_id == session.id && !shell.exited);
+    let live: Vec<&str> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();
+    let busy = |session: &SessionEntry| crate::session_ops::has_shell_in_use(session, &live, |pane| state.terminals.is_running(pane));
     let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
     match crate::session_ops::sweep_idle_quick_chats(app, days, &busy, &stop) {
         Ok(removed) if !removed.is_empty() => log::info!("removed {} quick chat(s) idle for more than {days} day(s)", removed.len()),
@@ -2402,21 +2403,6 @@ pub fn pane_agents(state: State<'_, AppState>) -> Vec<crate::session::follow::Pa
 pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
     let manager = app.state::<AppState>().manager().ok_or("not ready")?;
     tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
-}
-
-/// Name a tab. A name the reader gives is the tab's whatever runs in it, and
-/// no conversation replaces it (#437); an empty one gives the naming back.
-#[tauri::command]
-pub fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: String) -> CmdResult<()> {
-    let title = title.trim().to_string();
-    index::update_tab(&session_id, &tab_id, |tab| {
-        tab.follow.title_pinned = !title.is_empty();
-        tab.title = (!title.is_empty()).then_some(title);
-        Ok(())
-    })
-    .map_err(err)?;
-    announce_session(&app, &session_id);
-    Ok(())
 }
 
 #[tauri::command]

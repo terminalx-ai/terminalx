@@ -692,7 +692,7 @@ impl SessionManager {
         for rt_arc in tabs {
             let mut rt = rt_arc.lock().unwrap();
             let (pane, ended) = match &rt.engine {
-                Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn == Some(tui::TurnMark::Ended)),
+                Engine::Cli(p) => (Some(p.pane_id.clone()), p.transcript_turn.is_some_and(tui::TurnMark::ends)),
                 _ => (None, false),
             };
             self.give_up_on_unanswered_settings(&mut rt, now);
@@ -1256,6 +1256,11 @@ impl SessionManager {
         images: Vec<ImageInput>,
     ) -> Result<SendOutcome> {
         let outcome = self.send_impl(session_id, tab_id, PromptText { agent: text, display: display_text, author: None, shared_connection: None }, images, None);
+        // The app declining to type into the tab's terminal is no error of
+        // the agent's: nothing is raised in the tab, and the reason is said.
+        if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
+            return outcome;
+        }
         if let Err(error) = &outcome {
             if let Ok(rt) = self.runtime(session_id, tab_id) {
                 self.apply(&mut rt.lock().unwrap(), Payload::Error { message: format!("{error:#}"), fatal: false }, None);
@@ -1293,6 +1298,11 @@ impl SessionManager {
             self.wake(&mut rt, &tab)?;
             entry = index::get(session_id)?;
             tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
+        }
+        // What is typed for a CLI the reader started by hand lands in their
+        // shell once that CLI is gone, and the watcher may be a moment behind.
+        if let Some(left) = self.left_the_terminal(&rt) {
+            return Err(follow::Refusal(left).into());
         }
         let (refs, wire_images) = Self::archive_images(session_id, &images)?;
 
@@ -1479,8 +1489,13 @@ impl SessionManager {
         self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
         match &mut rt.engine {
             // The TUI reads a bare Escape as "stop"; nothing else can reach it.
+            // One the reader started by hand that has left its terminal is
+            // not there to read it, and its shell is not sent it.
             Engine::Cli(p) => {
-                let _ = self.terminals.write(&p.pane_id, tui::ESCAPE);
+                let pane = p.pane_id.clone();
+                if self.left_the_terminal(&rt).is_none() {
+                    let _ = self.terminals.write(&pane, tui::ESCAPE);
+                }
             }
             Engine::Acp(a) => {
                 let actions = a.interrupt();
@@ -2117,6 +2132,14 @@ impl SessionManager {
             }
         }
         self.terminals.kill_and_wait(&pane, RESTART_WAIT);
+        // A conversation the reader started by hand comes with no mode the
+        // app knows (#437). Launched by the app it runs in the one that asks:
+        // not the app's default, which would hand it more than the reader
+        // may have, and from here on a mode the picker shows and can change.
+        if tab.permission_mode == follow::MODE_SET_IN_TERMINAL {
+            self.update_settings(rt, |s| s.permission_mode = follow::MODE_WHEN_RESUMED.into())?;
+        }
+        let tab = &index::get(&rt.session_id)?.tab(&rt.tab_id).cloned().unwrap_or_else(|| tab.clone());
         // A model, effort or mode that was waiting for the process to be
         // replaced rides with this launch, and is what the tab runs from
         // here on.
@@ -2442,7 +2465,19 @@ impl SessionManager {
     /// tail's own lock orders this against the poll loop, so a `Stop` hook
     /// flushing before it closes the turn cannot overtake it.
     fn pump(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>) {
+        // A CLI the reader started by hand has no hook to close its turns:
+        // the transcript does, so each record's word about the turn is acted
+        // on where it stands, not only the last of a read (#437).
+        if matches!(&rt_arc.lock().unwrap().engine, Engine::Cli(p) if p.by_hand.is_some()) {
+            return self.pump_by_hand(rt_arc, tail);
+        }
         let (payloads, mark) = tail.drain_marked();
+        self.pump_read(rt_arc, payloads, mark);
+    }
+
+    /// One read of the transcript: its payloads, and what it last said about
+    /// the turn.
+    fn pump_read(&self, rt_arc: &Arc<Mutex<TabRuntime>>, payloads: Vec<Payload>, mark: Option<tui::TurnMark>) {
         if payloads.is_empty() && mark.is_none() {
             return;
         }
@@ -2536,13 +2571,22 @@ impl SessionManager {
         // No hook closes the turn of a CLI the reader started by hand (#437),
         // so the transcript's own word that it ended is taken at once. It is
         // read after the payloads, so the turn's reply is in it.
-        if mark == Some(tui::TurnMark::Ended) && rt.turn_open && matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
+        if mark.is_some_and(tui::TurnMark::ends) && rt.turn_open && matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
             let said = match &rt.engine {
                 Engine::Cli(p) => p.turn_tail.last_assistant_message().map(str::to_owned),
                 _ => None,
             };
-            self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-            self.after_turn_completed(rt_arc, rt, said);
+            if mark == Some(tui::TurnMark::Aborted) {
+                // Interrupted in its own screen: not a turn that finished.
+                self.forget_tool_answers(&mut rt);
+                self.end_open_turn(&mut rt, TurnStatus::Aborted, None);
+                let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                drop(rt);
+                self.observer.automation_failed(&session, &tab, "The automation turn was interrupted.");
+            } else {
+                self.end_open_turn(&mut rt, TurnStatus::Ok, None);
+                self.after_turn_completed(rt_arc, rt, said);
+            }
             self.judge_reported_mode(rt_arc);
             return;
         }
@@ -2555,7 +2599,7 @@ impl SessionManager {
         let open = rt.turn_open;
         if let (Some(mark), Engine::Cli(p)) = (mark, &mut rt.engine) {
             let owed = std::mem::take(&mut p.transcript_end_owed);
-            if !(owed && mark == tui::TurnMark::Ended) {
+            if !(owed && mark.ends()) {
                 p.transcript_turn = open.then_some(mark);
             }
         }
@@ -2711,6 +2755,16 @@ impl SessionManager {
                 }
             };
             let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // A CLI the reader started by hand shares its pane with the shell
+            // it was started from (#437). Once it has exited or been
+            // suspended, anything typed here is typed at that shell, and the
+            // Enter would run a prompt as a command. So the pane is asked who
+            // has it before every write, the Enter above all; the watcher
+            // that turns the tab into a terminal may be a moment behind.
+            let still_there = || match manager.left_the_terminal(&rt_arc.lock().unwrap()) {
+                Some(left) => Err(anyhow::Error::new(follow::Refusal(left))),
+                None => Ok(()),
+            };
             if let Some(ready) = &ready {
                 let readiness = manager.wait_ready(&pane, ready, shared.as_ref());
                 stage("ready", serde_json::json!({ "readiness": readiness.as_str() }));
@@ -2740,6 +2794,7 @@ impl SessionManager {
                     }
                 }
                 admitted_to_writer = true;
+                still_there()?;
                 terminals.write(&pane, tui::CLEAR_LINE)?;
                 for path in &attachments {
                     terminals.write(&pane, &tui::attachment_bytes(path))?;
@@ -2750,6 +2805,7 @@ impl SessionManager {
                     std::thread::sleep(std::time::Duration::from_millis(300));
                 }
                 let body = tui::body_bytes(&text);
+                still_there()?;
                 terminals.write(&pane, &body)?;
                 stage("body_written", serde_json::json!({ "bytes": body.len(), "attachments": attachments.len() }));
                 let read = tui::await_read(unread, tui::PASTE_READ_TIMEOUT);
@@ -2757,6 +2813,7 @@ impl SessionManager {
                     log::warn!("[{pane}] the CLI has not read the prompt; submitting anyway and watching for acceptance");
                 }
                 std::thread::sleep(tui::submit_delay(body.len()));
+                still_there()?;
                 if let Some((seq, _)) = &receipt {
                     // Hold the runtime lock across Enter and arming so a fast
                     // submit hook/echo cannot arrive between the two.
@@ -2799,6 +2856,10 @@ impl SessionManager {
                     rt.turn_open = false;
                     manager.set_status(&mut rt, TabStatus::Idle);
                     let _ = receipt.send(Err(format!("The new session opened, but writing its continuation prompt failed: {e}. The prepared prompt is retained.")));
+                } else if e.is::<follow::Refusal>() {
+                    // Nothing to recover: the tab is becoming a terminal, and
+                    // the watcher closes the turn this prompt opened and
+                    // says the agent went.
                 } else if ready.is_some() && matches!(&rt.engine, Engine::Cli(p) if p.awaiting_delivery.is_some()) {
                     manager.needs_recovery(&mut rt, RecoveryKind::DeliveryUnconfirmed);
                     rt.stalled_at = Some(Instant::now());
@@ -3419,7 +3480,7 @@ impl SessionManager {
             rt.turn_open = false;
             if let Engine::Cli(p) = &mut rt.engine {
                 p.awaiting_delivery = None;
-                p.transcript_end_owed = p.transcript_turn.take() != Some(tui::TurnMark::Ended);
+                p.transcript_end_owed = !p.transcript_turn.take().is_some_and(tui::TurnMark::ends);
                 // An interrupted CLI hands what was queued back to its own
                 // input rather than sending it. If it does send one after
                 // all, that is a second message — which is better than the

@@ -178,6 +178,20 @@ describe("a tab whose agent was started by hand", () => {
     expect(screen.getByTestId("composer-settings-note").textContent).toContain("Its model, effort and permission mode are changed there");
   });
 
+  it("is not called closed once an agent is in its terminal again after Stop", async () => {
+    open({ front: "by_hand", pane: "session1:abc", status: "in_progress" });
+    mouseClick(await screen.findByRole("button", { name: "Stop session" }));
+    await waitFor(() => expect(calls("stop_tab")).toHaveLength(1));
+    // Stop ended the CLI and left its shell: the tab is a terminal.
+    become({ front: "terminal", status: "idle" });
+    await waitFor(() => expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal"));
+    // The reader starts the agent there again. "Session closed" was said of the one Stop ended.
+    become({ front: "by_hand", status: "idle" });
+    expect(screen.getByTestId("terminal-view-title").textContent).toBe("Terminal view · Idle");
+    expect(screen.queryByText(/Session closed/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume safely" })).toBeNull();
+  });
+
   it("locks nothing for an agent the app runs", async () => {
     open({});
     expect(((await screen.findByTestId("permission-mode")) as HTMLButtonElement).disabled).toBe(false);

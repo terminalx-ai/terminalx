@@ -194,6 +194,17 @@ pub type Decoder = fn(&str, &HashSet<String>, &mut Vec<Payload>);
 pub enum TurnMark {
     Opened,
     Ended,
+    /// Ended by being interrupted, where the record says so and draws
+    /// nothing of its own (Codex's `turn_aborted`). To whoever only asks
+    /// whether the turn is over, it is.
+    Aborted,
+}
+
+impl TurnMark {
+    /// Whether the record says the turn is over, however it ended.
+    pub fn ends(self) -> bool {
+        matches!(self, Self::Ended | Self::Aborted)
+    }
 }
 
 /// A [`Decoder`] that also reads the record for a [`TurnMark`], from the one
@@ -397,30 +408,39 @@ impl Tail {
     /// applies the payloads and then records the mark never records an end
     /// ahead of the reply that came before it.
     pub fn drain_marked(&self) -> (Vec<Payload>, Option<TurnMark>) {
+        let path = self.following();
         let mut stream = self.stream.lock().unwrap();
-        let Some(appended) = self.appended(&mut stream) else { return (Vec::new(), None) };
+        let Some(appended) = self.appended(&path, &mut stream) else { return (Vec::new(), None) };
         let payloads = stream.push(&appended);
         (payloads, stream.take_mark())
     }
 
     /// [`Self::drain_marked`], record by record.
     pub fn drain_records(&self) -> Vec<Record> {
+        let path = self.following();
         let mut stream = self.stream.lock().unwrap();
-        match self.appended(&mut stream) {
+        match self.appended(&path, &mut stream) {
             Some(appended) => stream.push_records(&appended),
             None => Vec::new(),
         }
     }
 
-    /// The bytes the file has gained since `stream` last read it.
-    fn appended(&self, stream: &mut Streamer) -> Option<Vec<u8>> {
+    /// The file being followed, read and let go of before the cursor is
+    /// taken. `retarget` and `follow` hold the path while they take the
+    /// cursor, so a reader that held the cursor while it asked for the path
+    /// would wait on them for good, and they on it.
+    fn following(&self) -> PathBuf {
+        self.path.lock().unwrap().clone()
+    }
+
+    /// The bytes `path` has gained since `stream` last read it.
+    fn appended(&self, path: &Path, stream: &mut Streamer) -> Option<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let path = self.path.lock().unwrap().clone();
         if path.as_os_str().is_empty() {
             return None;
         }
-        let size = std::fs::metadata(&path).ok()?.len();
+        let size = std::fs::metadata(path).ok()?.len();
         let offset = stream.offset();
         if size == offset {
             return None;
@@ -433,7 +453,7 @@ impl Tail {
             *stream = Streamer::skipping(size, self.decode, stream.carried().clone()).marking(self.marker);
             return None;
         }
-        let mut file = match std::fs::File::open(&path) {
+        let mut file = match std::fs::File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("transcript {}: {e}", path.display());
@@ -550,6 +570,45 @@ mod tests {
             return;
         }
         out.push(Payload::Status { text: line.to_string() });
+    }
+
+    /// A hook that points the tail at another file and the thread that reads
+    /// it take the tail's two locks in the same order. They once did not, and
+    /// then each waited on the other for good: the tab's transcript was never
+    /// read again, and everything that reads it before acting hung with it.
+    #[test]
+    fn reading_a_tail_and_pointing_it_elsewhere_at_once_never_wait_on_each_other() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let files = [dir.path().join("a.jsonl"), dir.path().join("b.jsonl")];
+        for file in &files {
+            std::fs::write(file, "one\ntwo\n").unwrap();
+        }
+        let tail = Arc::new(Tail::from_offset(files[0].clone(), 0, echo));
+        let (done, finished) = std::sync::mpsc::channel();
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                let (tail, files, done) = (tail.clone(), files.clone(), done.clone());
+                std::thread::spawn(move || {
+                    for round in 0..4000 {
+                        match worker % 4 {
+                            0 => drop(tail.drain_marked()),
+                            1 => drop(tail.drain_records()),
+                            2 => tail.retarget(&files[round % 2]),
+                            _ => tail.follow(&files[round % 2], 0),
+                        }
+                    }
+                    let _ = done.send(());
+                })
+            })
+            .collect();
+        for _ in &workers {
+            finished.recv_timeout(Duration::from_secs(60)).expect("a reader and a writer of the tail are waiting on each other");
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     /// The `Stop` hook and the assistant record race, and the reply must be

@@ -24,14 +24,19 @@
 //!   sweeps it.
 //!
 //! A CLI that keeps no such file is simply not located: its tab is that
-//! agent's, with a terminal and nothing in the chat.
+//! agent's, with a terminal and nothing in the chat. Neither is one whose
+//! file says it is not a session with a screen (`kind`): a run started by a
+//! script or another program, which nobody is typing into.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use super::transcript::{locate_in, projects_root};
-use crate::session::follow::{Activity, Located};
+use crate::session::follow::{Activity, Glance, Located};
+
+/// The `kind` of a session the reader is in front of.
+const INTERACTIVE: &str = "interactive";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +46,9 @@ struct Session {
     cwd: String,
     #[serde(default)]
     status: Option<String>,
+    /// What sort of run it is. Absent in a CLI that does not say.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -52,7 +60,10 @@ fn sessions_dir() -> Option<PathBuf> {
 /// its own pid, and that has to be this one.
 fn read_in(sessions: &Path, pid: u32) -> Option<Session> {
     let text = std::fs::read_to_string(sessions.join(format!("{pid}.json"))).ok()?;
-    serde_json::from_str::<Session>(&text).ok().filter(|session| session.pid == pid && uuid::Uuid::parse_str(&session.session_id).is_ok())
+    serde_json::from_str::<Session>(&text)
+        .ok()
+        .filter(|session| session.pid == pid && uuid::Uuid::parse_str(&session.session_id).is_ok())
+        .filter(|session| session.kind.as_deref().is_none_or(|kind| kind == INTERACTIVE))
 }
 
 fn located(projects: &Path, session: &Session) -> Located {
@@ -74,8 +85,15 @@ fn activity_of(status: &str) -> Activity {
     }
 }
 
-pub fn activity(pid: u32) -> Option<Activity> {
-    read_in(&sessions_dir()?, pid)?.status.as_deref().map(activity_of)
+fn glance_in(sessions: &Path, pid: u32) -> Option<Glance> {
+    let session = read_in(sessions, pid)?;
+    Some(Glance { activity: session.status.as_deref().map(activity_of), conversation: Some(session.session_id) })
+}
+
+/// Which conversation it says it is in and what it says it is doing, from
+/// the one read of its file.
+pub fn glance(pid: u32) -> Option<Glance> {
+    glance_in(&sessions_dir()?, pid)
 }
 
 #[cfg(test)]
@@ -105,6 +123,25 @@ mod tests {
         assert!(read_in(&sessions, 4103).is_none());
         std::fs::write(sessions.join("4104.json"), "{ not json").unwrap();
         assert!(read_in(&sessions, 4104).is_none());
+        // A run with no screen keeps a file too, and is nobody's session. A CLI that does not say what it is, is taken as one.
+        file(4105, serde_json::json!({ "pid": 4105, "sessionId": ID, "cwd": "/work/app", "status": "busy", "kind": "sdk" }));
+        assert!(read_in(&sessions, 4105).is_none());
+        file(4106, serde_json::json!({ "pid": 4106, "sessionId": ID, "cwd": "/work/app", "status": "idle" }));
+        assert!(read_in(&sessions, 4106).is_some());
+    }
+
+    /// The CLI is looked at five times a second: its conversation and what
+    /// it is doing come from the one read, and where the conversation is
+    /// written is only worked out when the first of those changes.
+    #[test]
+    fn one_read_says_which_conversation_and_what_it_is_doing() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("4100.json"), serde_json::json!({ "pid": 4100, "sessionId": ID, "cwd": "/work/app", "status": "waiting", "kind": "interactive" }).to_string()).unwrap();
+        assert_eq!(glance_in(home.path(), 4100), Some(Glance { conversation: Some(ID.into()), activity: Some(Activity::Waiting) }));
+        // Its first write has no status yet.
+        std::fs::write(home.path().join("4101.json"), serde_json::json!({ "pid": 4101, "sessionId": ID, "cwd": "/work/app" }).to_string()).unwrap();
+        assert_eq!(glance_in(home.path(), 4101), Some(Glance { conversation: Some(ID.into()), activity: None }));
+        assert_eq!(glance_in(home.path(), 4102), None);
     }
 
     #[test]

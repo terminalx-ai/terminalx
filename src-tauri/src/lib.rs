@@ -476,7 +476,6 @@ pub fn run() {
             floating::floating_open_in_main,
             commands::add_tab,
             commands::remove_tab,
-            commands::rename_tab,
             commands::tab_resume_conversation,
             commands::pane_agents,
             commands::rename_session,

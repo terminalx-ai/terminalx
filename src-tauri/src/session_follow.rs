@@ -44,6 +44,25 @@ use crate::store::index::Front;
 /// The permission mode of an agent the app did not launch, until the agent
 /// says what it is in: not one the app chose, and not one it may assume.
 pub const MODE_SET_IN_TERMINAL: &str = "terminal";
+/// The mode such a conversation is in once the app launches it itself (a
+/// resume, or the tab opened after a restart): the one that asks. It is then
+/// a mode like any other, shown in the picker and changed from it.
+pub const MODE_WHEN_RESUMED: &str = "manual";
+
+/// The app's own reason for not typing a prompt into a tab's terminal: the
+/// CLI it was for has left it, or the reader is running something there.
+/// Nothing happened to an agent, so nothing is raised in the tab for it, and
+/// the reason is the app's own words, said to the sender as written.
+#[derive(Debug)]
+pub struct Refusal(pub String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
 
 /// How often a CLI started by hand is asked which conversation it is in,
 /// where asking costs something: often until its transcript is known, then
@@ -51,6 +70,10 @@ pub const MODE_SET_IN_TERMINAL: &str = "terminal";
 /// from inside the CLI.
 pub const LOCATE_UNKNOWN: Duration = Duration::from_secs(1);
 pub const LOCATE_KNOWN: Duration = Duration::from_secs(3);
+/// How many records of a conversation's history are brought in at a time
+/// with the tab's lock held, so a long one does not keep the tab from
+/// answering anything else until it is all in.
+const IMPORT_BATCH: usize = 200;
 /// How long before the app first saw a CLI its transcript may have been made
 /// and still be the one that CLI is writing now, rather than an older
 /// conversation it was started on. The CLI is seen within a moment of
@@ -88,21 +111,42 @@ pub enum Activity {
     Waiting,
 }
 
+/// What a CLI started by hand says of itself that costs next to nothing to
+/// read, where it says anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Glance {
+    /// The id of the conversation it is in. One that is not the id it was
+    /// last found under is a reason to find it again at once.
+    pub conversation: Option<String>,
+    pub activity: Option<Activity>,
+}
+
 /// Finds the conversation of a CLI the app did not launch. Each harness
 /// answers in its own way (`harness::by_hand`); a test answers as it likes.
 pub trait Locator: Send + Sync {
+    /// Which conversation it is in, and where that is written. This may cost
+    /// something (a folder listed, the process's open files), so it is asked
+    /// every `locate_every`, or when a glance says the conversation changed.
     fn locate(&self, agent: &Agent) -> Option<Located>;
-    fn activity(&self, _agent: &Agent) -> Option<Activity> {
-        None
+    /// Asked on every look, five times a second for as long as the CLI
+    /// runs: one small read at most.
+    fn glance(&self, _agent: &Agent) -> Glance {
+        Glance::default()
     }
     /// How long to leave between two `locate`s of the same CLI. `settled` is
-    /// whether its transcript has been found.
+    /// whether its transcript is on disk.
     fn locate_every(&self, _agent: &Agent, settled: bool) -> Duration {
         if settled {
             LOCATE_KNOWN
         } else {
             LOCATE_UNKNOWN
         }
+    }
+    /// Whether `locate` is cheap enough for the thread that watches every
+    /// pane, so the tab can be on the right conversation the moment the CLI
+    /// is seen.
+    fn at_once(&self, _agent: &Agent) -> bool {
+        false
     }
 }
 
@@ -118,7 +162,7 @@ pub struct Following {
 
 impl Default for Following {
     fn default() -> Self {
-        Self { enabled: AtomicBool::new(false), closing: AtomicBool::new(false), locator: Mutex::new(Arc::new(crate::harness::by_hand::Installed)), fronts: Mutex::default() }
+        Self { enabled: AtomicBool::new(false), closing: AtomicBool::new(false), locator: Mutex::new(Arc::new(crate::harness::by_hand::Installed::default())), fronts: Mutex::default() }
     }
 }
 
@@ -141,6 +185,26 @@ pub struct ByHand {
     seen_at: SystemTime,
     /// When it was last asked which conversation it is in, if it has been.
     looked: Option<Instant>,
+    /// A conversation it named that the tab's log holds nothing of, until
+    /// its transcript is first read. A CLI may name its conversation before
+    /// it says where that is written (Codex takes its lock first), and by
+    /// then the tab is on that conversation by name alone.
+    unread: Option<String>,
+    /// Set when the tail has just been pointed at a transcript that may
+    /// already hold turns: the next read of it sorts history from what is
+    /// happening now.
+    first: Option<First>,
+}
+
+/// What a transcript holds when it is first read for a tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum First {
+    /// An older conversation the CLI was started on: all of it is history.
+    History,
+    /// One the CLI is writing now. It is nearly always just the prompt that
+    /// made it; a fork arrives holding a copy of its parent's turns, and
+    /// those are history up to the prompt it is on.
+    Live,
 }
 
 /// The agent in front of a pane, for a window to draw the pane's tab with.
@@ -314,9 +378,8 @@ impl SessionManager {
         // only asked here when asking is a file read. One whose answer takes
         // listing its open files is asked by the thread that follows it, a
         // moment from now.
-        let asked = locator.locate_every(&agent, false).is_zero();
+        let asked = locator.at_once(&agent);
         let found = asked.then(|| locator.locate(&agent)).flatten();
-        let busy = locator.activity(&agent) == Some(Activity::Busy);
         let mut rt = rt_arc.lock().unwrap();
         if rt.stopping {
             return Ok(());
@@ -334,9 +397,12 @@ impl SessionManager {
         let seen_at = SystemTime::now();
         let settled = self.settle_conversation(&mut rt, agent.harness, found.as_ref(), true)?;
         let (decode, marker) = decoders(kind);
-        let (tail, import) = match found.as_ref().and_then(|at| Self::reading_from(&rt, at, settled, seen_at)) {
-            Some((path, offset, import)) => (tui::Tail::from_offset(path, offset, decode), import),
-            None => (tui::Tail::unknown(decode), false),
+        let reading = found.as_ref().and_then(|at| Self::reading_from(&rt, at, settled, seen_at));
+        // Named, with nowhere to read it yet and nothing of it in the log.
+        let unread = found.as_ref().filter(|_| reading.is_none() && !settled.known).map(|at| at.provider_session_id.clone());
+        let (tail, first) = match reading {
+            Some((path, offset, first)) => (tui::Tail::from_offset(path, offset, decode), first),
+            None => (tui::Tail::unknown(decode), None),
         };
         let tail = Arc::new(tail.marking(marker));
         let generation = self.starts.fetch_add(1, Ordering::Relaxed);
@@ -370,40 +436,40 @@ impl SessionManager {
             // No hook of the app's was given to this CLI, so no frame can be
             // its: the token is one nobody holds, and no path is under the root.
             origin: Origin { token: crate::hooks::mint_token(), transcript_root: store::root()?.join("run").join("no-hooks"), conversation: None },
-            by_hand: Some(Box::new(ByHand { agent, located: found, activity: None, idle_since: None, seen_at, looked: asked.then(Instant::now) })),
+            by_hand: Some(Box::new(ByHand { agent, located: found, activity: None, idle_since: None, seen_at, looked: asked.then(Instant::now), unread, first })),
         });
         rt.turn_open = false;
         rt.left_at = None;
         self.set_front(&rt, Front::ByHand);
-        if import {
-            self.import(&mut rt, &tail, busy);
-        }
         self.announce_pane(&rt);
         self.announce_tab(&rt);
         drop(rt);
+        // What the transcript already holds is read by the thread that
+        // follows it, not here: this is the watcher's, and a long
+        // conversation would keep every other pane waiting.
         self.follow_transcript(&rt_arc, tail, pane.to_string(), generation);
         Ok(())
     }
 
-    /// The transcript to read, where to start, and whether what it holds
-    /// already is history to bring in quietly rather than turns happening
-    /// now. `None` while the CLI has yet to say where it writes.
+    /// The transcript to read, where to start, and how to take what it
+    /// already holds. `None` while the CLI has yet to say where it writes.
     ///
     /// - A file the tab was following when it last let go is read on from
     ///   where it had got to.
     /// - A file that does not exist yet, or was made since this CLI was first
-    ///   seen, is the one it is writing now: read from its start, as it is
-    ///   written.
+    ///   seen, is the one it is writing now: read from its start. A fork is
+    ///   made that way too, and arrives holding its parent's turns, which
+    ///   the first read sets apart (`First::Live`).
     /// - An older file is a conversation the CLI was started on. If it is one
     ///   the tab holds, what it has in it is in the log from before, and only
     ///   what is added counts. If the tab has never seen it, all of it is
     ///   brought in, so the chat shows the conversation from its first turn.
-    fn reading_from(rt: &TabRuntime, at: &Located, settled: Settled, seen_at: SystemTime) -> Option<(PathBuf, u64, bool)> {
+    fn reading_from(rt: &TabRuntime, at: &Located, settled: Settled, seen_at: SystemTime) -> Option<(PathBuf, u64, Option<First>)> {
         let path = at.transcript.clone()?;
         let meta = std::fs::metadata(&path).ok();
         let len = meta.as_ref().map_or(0, |meta| meta.len());
         if let Some((_, offset)) = rt.left_at.as_ref().filter(|(left, offset)| *left == path && *offset <= len) {
-            return Some((path, *offset, false));
+            return Some((path, *offset, None));
         }
         // The earlier of when it was made and when it was last written: a
         // file copied in with its dates kept is as old as what is in it, and
@@ -413,9 +479,9 @@ impl SessionManager {
             Some(meta.created().map_or(written, |made| made.min(written)))
         });
         if made.is_none_or(|made| made + SEEN_SLACK >= seen_at) {
-            return Some((path, 0, false));
+            return Some((path, 0, Some(First::Live)));
         }
-        Some(if settled.known { (path, len, false) } else { (path, 0, len > 0) })
+        Some(if settled.known { (path, len, None) } else { (path, 0, (len > 0).then_some(First::History)) })
     }
 
     /// Match the tab's conversation to the one an agent in its terminal is
@@ -506,56 +572,116 @@ impl SessionManager {
         Ok(Settled { known: resumed })
     }
 
-    /// Bring a conversation's history into the tab's log: everything the
-    /// transcript holds now, as turns that are over. Nothing here is work
-    /// happening, so no status moves and nobody is notified; only a last turn
-    /// the CLI is still on (`busy`) is left open.
-    fn import(&self, rt: &mut TabRuntime, tail: &tui::Tail, busy: bool) {
+    /// Read the transcript of a CLI the reader started by hand: each record
+    /// as it stands, since its word that a turn ended is what ends the turn.
+    ///
+    /// The first read of a transcript that already held something sorts what
+    /// is history from what is happening now.
+    pub(super) fn pump_by_hand(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>) {
+        let (first, agent) = match &mut rt_arc.lock().unwrap().engine {
+            Engine::Cli(CliTab { by_hand: Some(by), .. }) => (by.first.take(), by.agent.clone()),
+            _ => return,
+        };
+        let mut records = tail.drain_records();
+        let prompts: Vec<usize> = records.iter().enumerate().filter(|(_, (payloads, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. }))).map(|(at, _)| at).collect();
+        // Still the first read until there is something to sort.
+        let wait = |first: First| {
+            if let Engine::Cli(CliTab { by_hand: Some(by), .. }) = &mut rt_arc.lock().unwrap().engine {
+                by.first.get_or_insert(first);
+            }
+        };
+        let history = match first {
+            None => 0,
+            Some(first) if records.is_empty() => return wait(first),
+            Some(First::History) => records.len(),
+            // A conversation being written now starts with the prompt that
+            // made it. One that arrives holding several prompts was handed
+            // its history (a fork): everything before the prompt it is on.
+            Some(First::Live) => match prompts.as_slice() {
+                [] => {
+                    wait(First::Live);
+                    0
+                }
+                [.., last] => *last * usize::from(prompts.len() > 1),
+            },
+        };
+        let live = records.split_off(history);
+        if !records.is_empty() {
+            let busy = live.is_empty() && self.follow.locator().glance(&agent).activity == Some(Activity::Busy);
+            self.import(rt_arc, records, live.is_empty(), busy);
+        }
+        for (payloads, mark) in live {
+            self.pump_read(rt_arc, payloads, mark);
+        }
+    }
+
+    /// Bring a conversation's history into the tab's log, as turns that are
+    /// over. Nothing here is work happening, so no status moves and nobody
+    /// is notified. `whole` is whether this is all the transcript holds: a
+    /// last turn left open is then one the CLI is still on (`busy`) or one
+    /// that was cut short; otherwise the prompt that follows closes it.
+    ///
+    /// The tab's lock is taken a batch at a time, so a long conversation
+    /// does not keep the tab from answering anything else until it is in.
+    fn import(&self, rt_arc: &Arc<Mutex<TabRuntime>>, records: Vec<tui::Record>, whole: bool, busy: bool) {
         let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false };
         let mut open = false;
-        for (payloads, mark) in tail.drain_records() {
-            for payload in payloads {
-                match payload {
-                    Payload::ProviderSettings { signal } => self.provider_settings(rt, signal),
-                    Payload::UserMessage { .. } => {
-                        if open {
-                            self.publish(rt, ended(TurnStatus::Ok), None);
+        let mut records = records.into_iter().peekable();
+        while records.peek().is_some() {
+            let mut rt = rt_arc.lock().unwrap();
+            if !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
+                return;
+            }
+            for (payloads, mark) in records.by_ref().take(IMPORT_BATCH) {
+                for payload in payloads {
+                    match payload {
+                        Payload::ProviderSettings { signal } => self.provider_settings(&mut rt, signal),
+                        Payload::UserMessage { .. } => {
+                            if open {
+                                self.publish(&mut rt, ended(TurnStatus::Ok), None);
+                            }
+                            self.publish(&mut rt, payload, None);
+                            open = true;
                         }
-                        self.publish(rt, payload, None);
-                        open = true;
-                    }
-                    // An interruption closes the turn it interrupted, once.
-                    Payload::TurnCompleted { .. } => {
-                        if open {
-                            self.publish(rt, payload, None);
-                            open = false;
+                        // An interruption closes the turn it interrupted, once.
+                        Payload::TurnCompleted { .. } => {
+                            if open {
+                                self.publish(&mut rt, payload, None);
+                                open = false;
+                            }
                         }
-                    }
-                    other => {
-                        if let Payload::UsageUpdate(Usage { model: Some(model), .. }) = &other {
-                            self.provider_settings(rt, Signal::Current { model: Some(model.clone()), effort: None });
+                        other => {
+                            if let Payload::UsageUpdate(Usage { model: Some(model), .. }) = &other {
+                                self.provider_settings(&mut rt, Signal::Current { model: Some(model.clone()), effort: None });
+                            }
+                            self.publish(&mut rt, other, None);
                         }
-                        self.publish(rt, other, None);
                     }
                 }
-            }
-            if mark == Some(tui::TurnMark::Ended) && open {
-                self.publish(rt, ended(TurnStatus::Ok), None);
-                open = false;
+                if let (Some(mark), true) = (mark.filter(|mark| mark.ends()), open) {
+                    self.publish(&mut rt, ended(if mark == tui::TurnMark::Aborted { TurnStatus::Aborted } else { TurnStatus::Ok }), None);
+                    open = false;
+                }
             }
         }
         if !open {
             return;
         }
-        if busy {
+        let mut rt = rt_arc.lock().unwrap();
+        if !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
+            return;
+        }
+        if !whole {
+            self.publish(&mut rt, ended(TurnStatus::Ok), None);
+        } else if busy {
             rt.open_turn();
             rt.turn_started_at = Some(Instant::now());
             if let Engine::Cli(p) = &mut rt.engine {
                 p.turn_tail.opened();
             }
-            self.set_status(rt, TabStatus::InProgress);
+            self.set_status(&mut rt, TabStatus::InProgress);
         } else {
-            self.publish(rt, ended(TurnStatus::Aborted), None);
+            self.publish(&mut rt, ended(TurnStatus::Aborted), None);
         }
     }
 
@@ -563,32 +689,33 @@ impl SessionManager {
     /// transcript: is it still in the conversation it was in, and what does
     /// it say it is doing.
     pub(super) fn follow_by_hand(&self, rt_arc: &Arc<Mutex<TabRuntime>>) {
-        let (agent, located, due) = {
-            let mut rt = rt_arc.lock().unwrap();
-            let Engine::Cli(CliTab { by_hand: Some(by), .. }) = &mut rt.engine else { return };
-            let settled = by.located.as_ref().is_some_and(|at| at.transcript.is_some());
-            let every = self.follow.locator().locate_every(&by.agent, settled);
-            let due = by.looked.is_none_or(|looked| looked.elapsed() >= every);
-            if due {
-                by.looked = Some(Instant::now());
-            }
-            (by.agent.clone(), by.located.clone(), due)
+        let (agent, located, looked) = match &rt_arc.lock().unwrap().engine {
+            Engine::Cli(CliTab { by_hand: Some(by), .. }) => (by.agent.clone(), by.located.clone(), by.looked),
+            _ => return,
         };
         let locator = self.follow.locator();
-        let activity = locator.activity(&agent);
+        let Glance { conversation, activity } = locator.glance(&agent);
+        // Finding it again is for when something may have changed: it says
+        // it is in another conversation, or it has been a while.
+        let renamed = conversation.is_some() && conversation.as_deref() != located.as_ref().map(|at| at.provider_session_id.as_str());
+        let settled = located.as_ref().and_then(|at| at.transcript.as_deref()).is_some_and(Path::exists);
+        let due = renamed || looked.is_none_or(|looked| looked.elapsed() >= locator.locate_every(&agent, settled));
         // A CLI between conversations names none for a moment: the last one
         // found stands until another is.
         let moved = due.then(|| locator.locate(&agent)).flatten().filter(|found| Some(found) != located.as_ref());
         let mut rt = rt_arc.lock().unwrap();
         let (before, idle_for) = match &mut rt.engine {
             Engine::Cli(CliTab { by_hand: Some(by), .. }) if by.agent.pid == agent.pid => {
+                if due {
+                    by.looked = Some(Instant::now());
+                }
                 by.idle_since = (activity == Some(Activity::Idle)).then(|| by.idle_since.unwrap_or_else(Instant::now));
                 (std::mem::replace(&mut by.activity, activity), by.idle_since.map_or(Duration::ZERO, |since| since.elapsed()))
             }
             _ => return,
         };
         if let Some(found) = moved {
-            if let Err(error) = self.moved_conversation(&mut rt, &agent, found, activity == Some(Activity::Busy)) {
+            if let Err(error) = self.moved_conversation(&mut rt, &agent, found) {
                 log::warn!("follow {}/{} to another conversation: {error:#}", rt.session_id, rt.tab_id);
             }
         }
@@ -638,32 +765,29 @@ impl SessionManager {
 
     /// The CLI is in another conversation than the one it was found in: it
     /// was cleared, switched from inside, or has only now named the one it
-    /// started.
-    fn moved_conversation(&self, rt: &mut TabRuntime, agent: &Agent, found: Located, busy: bool) -> Result<()> {
-        let seen_at = match &rt.engine {
-            Engine::Cli(CliTab { by_hand: Some(by), .. }) => by.seen_at,
+    /// started or said where it writes it.
+    fn moved_conversation(&self, rt: &mut TabRuntime, agent: &Agent, found: Located) -> Result<()> {
+        let (seen_at, unread) = match &rt.engine {
+            Engine::Cli(CliTab { by_hand: Some(by), .. }) => (by.seen_at, by.unread.clone()),
             _ => return Ok(()),
         };
         let settled = self.settle_conversation(rt, agent.harness, Some(&found), false)?;
+        // On it by name, and the log still has nothing of it: not known yet.
+        let settled = Settled { known: settled.known && unread.as_deref() != Some(found.provider_session_id.as_str()) };
         let reading = Self::reading_from(rt, &found, settled, seen_at);
-        let (tail, import) = match &mut rt.engine {
-            Engine::Cli(p) => {
-                let import = match reading {
-                    Some((path, offset, import)) => {
-                        p.tail.follow(&path, offset);
-                        import
-                    }
-                    None => false,
-                };
-                if let Some(by) = &mut p.by_hand {
-                    by.located = Some(found);
+        if let Engine::Cli(p) = &mut rt.engine {
+            let first = match &reading {
+                Some((path, offset, first)) => {
+                    p.tail.follow(path, *offset);
+                    *first
                 }
-                (p.tail.clone(), import)
+                None => None,
+            };
+            if let Some(by) = &mut p.by_hand {
+                by.unread = (reading.is_none() && !settled.known).then(|| found.provider_session_id.clone());
+                by.first = first;
+                by.located = Some(found);
             }
-            _ => return Ok(()),
-        };
-        if import {
-            self.import(rt, &tail, busy);
         }
         self.announce_tab(rt);
         Ok(())
@@ -769,6 +893,13 @@ impl SessionManager {
         }
         let agent = crate::harness::display_name(&rt.harness);
         let mid_turn = rt.turn_open;
+        // What it was asking went with it. Cancelled, as Stop says it, and
+        // not lapsed: a lapsed request is one the reader is owed a look at,
+        // and reading the log again would raise that for a tab with nothing
+        // wrong with it.
+        for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
+            self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
+        }
         self.end_open_turn(rt, TurnStatus::Aborted, None);
         self.release_cli(rt);
         let text = match (gone, mid_turn) {
@@ -808,6 +939,16 @@ impl SessionManager {
     /// Make sure a tab that is a terminal has a shell in its pane, and say
     /// which pane that is.
     pub(super) fn shell_for(&self, session_id: &str, tab_id: &str) -> Result<()> {
+        // One at a time for a tab, under its lock: the exit that makes a tab
+        // a terminal and the window that then opens it both come here, and
+        // two shells started at once for one pane would each end the other.
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let rt = rt_arc.lock().unwrap();
+        // An agent took the tab in the meantime: its pane is that agent's.
+        if matches!(rt.engine, Engine::Cli(_)) {
+            self.announce_pane(&rt);
+            return Ok(());
+        }
         let mut entry = index::get(session_id)?;
         // Its hand-started agent is gone and nothing said so (the app closed
         // its pane): it is a terminal.
@@ -843,7 +984,7 @@ impl SessionManager {
     fn shell_is_idle(&self, tab: &TabEntry) -> Result<()> {
         let pane = tab.pane_id();
         if self.terminals.fronts().iter().any(|front| front.id == pane && front.foreground != front.pid) {
-            bail!("This tab's terminal is running something. Stop it there first, or use another tab.");
+            return Err(Refusal("This tab's terminal is running something. Stop it there first, or use another tab.".into()).into());
         }
         Ok(())
     }
@@ -887,6 +1028,17 @@ impl SessionManager {
         }
         self.announce_tab(&rt);
         started.map(|_| ())
+    }
+
+    /// Why nothing may be typed for the tab's CLI, when it is one the reader
+    /// started by hand and it no longer has the terminal: it exited or was
+    /// suspended, and its shell is what would read the keys. `None` while it
+    /// is in front, and for a CLI the app runs, which is its pane's own
+    /// process.
+    pub(super) fn left_the_terminal(&self, rt: &TabRuntime) -> Option<String> {
+        let Engine::Cli(CliTab { by_hand: Some(by), pane_id, .. }) = &rt.engine else { return None };
+        let in_front = self.terminals.fronts().iter().any(|front| &front.id == pane_id && front.foreground == by.agent.job);
+        (!in_front).then(|| format!("{} is no longer running in this tab's terminal.", crate::harness::display_name(&rt.harness)))
     }
 
     /// Why a change that needs the CLI restarted cannot be made to one the

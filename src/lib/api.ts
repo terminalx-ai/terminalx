@@ -432,7 +432,6 @@ export const api = {
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
   /** Name a tab. The name stays whatever runs in the tab; an empty one gives the naming back (#437). */
-  renameTab: (sessionId: string, tabId: string, title: string) => invoke<void>("rename_tab", { sessionId, tabId, title }),
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
