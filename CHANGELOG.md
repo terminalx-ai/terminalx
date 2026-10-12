@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Tabs follow their terminal
+
+- A tab is now what runs in its terminal. Type `claude` or `codex` into a
+  plain terminal and its sidebar row becomes that agent's tab, with its
+  status and a chat that shows the conversation from its first turn. Exit
+  the agent and the row is a terminal again. Start another agent there and
+  the same tab is that agent's. The tab keeps its place, its selection and
+  any name you gave it throughout. (#437)
+- The same goes for a tab created as an agent tab: exiting its CLI from the
+  terminal view leaves a shell in the same terminal, and the tab is a
+  terminal until an agent is started in it. (#437)
+- Exiting an agent is not an error. There is no "needs attention", no
+  recovery banner and no "Resume safely"; a turn that was cut short is
+  marked as interrupted, with one line saying so. (#437)
+- A tab keeps every conversation it has held. The chat shows the current
+  one; earlier ones are under **Conversations**, and a terminal's last
+  conversation can be resumed in place with **Resume here**. Starting an
+  agent by hand on a conversation the tab already holds (`claude --resume`,
+  `claude -c`, `codex resume`) picks it up instead of opening a second copy.
+  (#437)
+- Sending from the chat types into an agent you started by hand, as it does
+  for one the app started. What would need that agent restarted (its
+  permission mode, and for Codex its model and effort) is disabled there and
+  says why. (#437)
+- Cursor and OpenCode started in a terminal are shown on the terminal's row
+  by their mark; they have no chat. Cloud workspaces do not follow their
+  terminals yet. See [docs/TABS-FOLLOW-TERMINAL.md](docs/TABS-FOLLOW-TERMINAL.md).
+  (#437)
+
 ### Dictation
 
 - Text deleted from the composer while dictating stays deleted. Selecting

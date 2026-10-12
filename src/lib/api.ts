@@ -193,8 +193,18 @@ export interface ShellPane {
   id: string;
   sessionId: string;
   title: string | null;
+  /** The reader named it; `title` is otherwise the name it was opened with. */
+  renamed?: boolean;
   cwd: string;
   exited: boolean;
+  /** When it was opened, so every window lists it in the same place. */
+  created?: string;
+}
+
+/** The agent in front of a pane's terminal (#437), or none once it has left. */
+export interface PaneAgent {
+  paneId: string;
+  harness: string | null;
 }
 
 /** How a workspace is removed. */
@@ -421,6 +431,8 @@ export const api = {
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
+  /** Name a tab. The name stays whatever runs in the tab; an empty one gives the naming back (#437). */
+  renameTab: (sessionId: string, tabId: string, title: string) => invoke<void>("rename_tab", { sessionId, tabId, title }),
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
@@ -1393,6 +1405,10 @@ export interface TabPtyEvent {
   paneId: string;
   command: string;
   harness: string;
+  /** The CLI in the pane was started by hand in it (#437). */
+  byHand?: boolean;
+  /** The pane holds a shell and no agent: the tab is a terminal (#437). */
+  terminal?: boolean;
 }
 
 export const agent = {
@@ -1406,6 +1422,9 @@ export const agent = {
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
   tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
+  /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
+  resumeConversation: (sessionId: string, tabId: string, harness: string, providerSessionId: string) =>
+    invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
@@ -1564,6 +1583,8 @@ export const pty = {
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
   /** The shell tabs open in every session, for a window that was not there when they were opened. */
   shells: () => invoke<ShellPane[]>("pty_shells"),
+  /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
+  agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
   /**

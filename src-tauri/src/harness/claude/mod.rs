@@ -3,6 +3,7 @@
 //! here are what both halves share, plus the one-shot control line the slash
 //! command listing sends to a short-lived headless child (`commands.rs`).
 
+pub mod by_hand;
 pub mod commands;
 pub mod mapper;
 pub mod models;

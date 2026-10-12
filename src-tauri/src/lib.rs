@@ -70,6 +70,7 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;
 #[cfg(feature = "desktop")]
@@ -311,6 +312,9 @@ pub fn run() {
             });
             manager.follow_pane_exits();
             session::idle_orphaned_tabs();
+            // Tabs follow what runs in their terminal (#437). Only here: a
+            // cloud workspace's runtime does not.
+            manager.follow_terminals();
             automations::start_scheduler(app.handle().clone());
             // The built-in browser: sweep daemons a crashed run left behind,
             // then keep this run's own daemons warm and its page list honest.
@@ -472,6 +476,9 @@ pub fn run() {
             floating::floating_open_in_main,
             commands::add_tab,
             commands::remove_tab,
+            commands::rename_tab,
+            commands::tab_resume_conversation,
+            commands::pane_agents,
             commands::rename_session,
             commands::set_session_archived,
             commands::set_session_pinned,
@@ -659,6 +666,11 @@ pub fn run() {
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) {
                             let _ = floating.destroy();
                         }
+                    }
+                    // The panes that exit from here on were closed by the
+                    // app, and no tab is turned into a terminal for that.
+                    if let Some(manager) = state.manager() {
+                        manager.closing();
                     }
                     state.host.kill_all();
                     state.terminals.kill_all();

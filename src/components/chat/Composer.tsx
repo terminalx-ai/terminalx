@@ -108,6 +108,8 @@ export function Composer({
   disabledReason,
   disabled = false,
   settingsLockedReason = null,
+  modelLockedReason = null,
+  modeLockedReason = null,
   settingsNote = null,
   settingsNoteWarning = false,
   canStop = true,
@@ -146,6 +148,10 @@ export function Composer({
   disabled?: boolean;
   /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
   settingsLockedReason?: string | null;
+  /** Set when the model and effort cannot be changed from here whoever asks (an agent started by hand that takes them only at startup, #437). */
+  modelLockedReason?: string | null;
+  /** The same for the permission mode. */
+  modeLockedReason?: string | null;
   /** Said under the pickers when a chosen model, effort or mode has not reached the agent yet (a cloud tab: it rides with the next message). */
   settingsNote?: string | null;
   /** The note reports a change that was not applied, rather than one on its way. */
@@ -428,6 +434,8 @@ export function Composer({
   const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
+  const modelLock = settingsLockedReason ?? modelLockedReason;
+  const modeLock = settingsLockedReason ?? modeLockedReason;
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
@@ -526,7 +534,7 @@ export function Composer({
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
-              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
+              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
                 {/* An alias and the same version pinned read alike otherwise. */}
@@ -578,7 +586,7 @@ export function Composer({
                 single letter: with no room for that it wraps out of sight below the button's one
                 line, leaving the mode's dot and the chevron. The tooltip names the mode either way.
               */}
-              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${permissionLabel}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined} data-testid="permission-mode">
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modeLock} title={modeLock ?? `Permission mode: ${permissionLabel}`} aria-label={modeLock ? `Permission mode: ${modeLock}` : undefined} data-testid="permission-mode">
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",

@@ -114,6 +114,30 @@ function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
   return undefined;
 }
 
+/**
+ * The events of one of a tab's conversations (#437).
+ *
+ * A tab follows its terminal: when another agent is started there, or the
+ * same agent on something new, the tab moves on to another conversation and
+ * keeps the ones before. They share the tab's log, each after its own
+ * `conversation` marker; `conversation` is the marker wanted, `null` for the
+ * one the tab began with (whose events come before any marker). A
+ * conversation that was left and picked up again is all of its stretches.
+ *
+ * A log with no marker is one conversation and is returned as it is, so a
+ * tab that never changed hands costs nothing here.
+ */
+export function conversationEvents(events: AgentEvent[], conversation: string | null): AgentEvent[] {
+  if (!events.some((event) => event.payload.type === "conversation")) return conversation === null ? events : [];
+  const own: AgentEvent[] = [];
+  let under: string | null = null;
+  for (const event of events) {
+    if (event.payload.type === "conversation") under = event.payload.id ?? null;
+    else if (under === conversation) own.push(event);
+  }
+  return own;
+}
+
 export function buildTranscript(events: AgentEvent[], live: boolean): Transcript {
   const turns: Turn[] = [];
   const asks = new Map<string, PendingAsk>();
@@ -347,6 +371,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         break;
       }
       case "settings_changed":
+      case "conversation":
       case "delta":
       case "unknown":
         break;

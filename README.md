@@ -261,6 +261,9 @@ are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [docs/PTY-FIRST.md](docs/PTY-FIRST.md) — one process per tab: the CLI, its
   transcript, its hooks, and the two views onto it.
+- [docs/TABS-FOLLOW-TERMINAL.md](docs/TABS-FOLLOW-TERMINAL.md) — a tab is what
+  runs in its terminal: an agent started or exited by hand, and how it is
+  noticed and followed.
 - [docs/PLAN.md](docs/PLAN.md) — the build plan and the principles the code is
   held to.
 - [docs/RELEASING.md](docs/RELEASING.md) — dev and release builds, signing, and

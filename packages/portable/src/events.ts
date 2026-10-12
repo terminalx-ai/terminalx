@@ -177,6 +177,12 @@ export type Payload =
   | { type: "api_retry"; attempt: number; maxRetries: number; reason?: string }
   | { type: "rate_limited"; status?: string; resetsAt?: number; message?: string }
   | { type: "status"; text: string }
+  /**
+   * The tab's terminal changed hands (#437): the events from here to the next
+   * marker belong to another of the tab's conversations. `id` is absent for
+   * the conversation the tab began with.
+   */
+  | { type: "conversation"; id?: string; harness: string; resumed?: boolean }
   | { type: "error"; message: string; fatal: boolean }
   | { type: "unknown"; kind: string };
 

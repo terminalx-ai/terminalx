@@ -15,7 +15,7 @@ vi.mock("@/lib/quickChats", () => ({ useSessionIsGit: () => true }));
 vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => mocks.changed }));
 vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => false, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
-  clearTabViewError: vi.fn(), leaveTerminalView: vi.fn(),
+  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 // The transcript is not under test; the real composer in its footer is.

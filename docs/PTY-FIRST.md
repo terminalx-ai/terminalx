@@ -392,6 +392,12 @@ itself to.) The backend names the pane it spawned in a `tab_pty` event and the
 frontend adopts it, which is what routes the CLI's output into this window's
 xterm instance.
 
+A tab is no longer only the CLI the app launched for it. It follows what runs
+in its terminal: its CLI exited by hand leaves a shell there and the tab is a
+terminal, and an agent typed into a terminal makes that terminal the agent's
+tab, followed without any of the hooks described above. That is
+[TABS-FOLLOW-TERMINAL.md](TABS-FOLLOW-TERMINAL.md).
+
 `tab_handoff` still exists for ACP and OpenCode, which are the only tabs that
 can reach it — the backend refuses it for a PTY-first tab, and no button asks
 for it. `tab_reconcile` is gone: nothing used it once Claude stopped handing

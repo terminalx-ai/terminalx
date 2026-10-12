@@ -26,6 +26,36 @@ export interface TabEntry {
   modified: string;
   contextUsed?: number | null;
   contextMax?: number | null;
+  /**
+   * What is in the tab's terminal (#437). Absent, or `agent`, is the tab's
+   * agent run by the app. `by_hand` is that agent started by hand in the
+   * tab's terminal, which the app follows and never restarts. `terminal` is
+   * no agent at all: a shell.
+   */
+  front?: TabFront;
+  /** The pane the tab lives in when that is not its own: the shell an agent was first started in. */
+  pane?: string | null;
+  /** What the tab is called while it is a terminal. */
+  terminalTitle?: string | null;
+  /** The reader chose `title`: it is the tab's name whatever runs in it. */
+  titlePinned?: boolean;
+  /** Which of the tab's conversations its events belong to now; absent for the one it began with. */
+  conversation?: string | null;
+  /** The conversations the tab held before, oldest first. */
+  history?: PastConversation[];
+}
+
+export type TabFront = "agent" | "by_hand" | "terminal";
+
+/** A conversation a tab held before the one it holds now. Its events are in the tab's log, under `id`. */
+export interface PastConversation {
+  /** The marker its events come under; absent for the conversation the tab began with. */
+  id?: string | null;
+  harness: string;
+  providerSessionId?: string | null;
+  title?: string | null;
+  model?: string;
+  ended?: string;
 }
 
 export interface IssueRef {

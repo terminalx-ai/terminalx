@@ -476,12 +476,12 @@ describe("which view a tab shows", () => {
   it("a cloud tab's switch is only a flag, remembered per tab: nothing local is started or adopted", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     await toggleTabView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("terminal");
-    expect(tabViewOf("t-2")).toBe("chat");
+    expect(tabViewOf({ id: "t-1" })).toBe("terminal");
+    expect(tabViewOf({ id: "t-2" })).toBe("chat");
     await enterTerminalView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("terminal");
+    expect(tabViewOf({ id: "t-1" })).toBe("terminal");
     await toggleTabView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("chat");
+    expect(tabViewOf({ id: "t-1" })).toBe("chat");
     expect(invoke).not.toHaveBeenCalled();
   });
 });

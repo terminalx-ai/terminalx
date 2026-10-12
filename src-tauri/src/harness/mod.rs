@@ -10,6 +10,7 @@
 //! Only the PTY-first two are offered to the reader; see `HIDDEN_HARNESSES`.
 
 pub mod acp;
+pub mod by_hand;
 pub mod claude;
 pub mod codex;
 pub mod host;
@@ -113,92 +114,122 @@ pub struct Capabilities {
     pub resume: bool,
 }
 
+/// One agent CLI as this build knows it: what it is called, what it can do,
+/// and how to tell that a process is it. `catalog` and `recognise` both read
+/// this table and nothing else, so an agent added here is offered, driven and
+/// recognised in a terminal by the same row.
+struct Spec {
+    id: &'static str,
+    name: &'static str,
+    binary: &'static str,
+    /// Packages the CLI is published as. A CLI installed through a package
+    /// manager runs as an interpreter with a script inside the package
+    /// (`node …/node_modules/@openai/codex/bin/codex.js`), so the binary's
+    /// name alone would miss it.
+    packages: &'static [&'static str],
+    install_hint: &'static str,
+    install_url: &'static str,
+    caps: Capabilities,
+}
+
+const REGISTRY: &[Spec] = &[
+    Spec {
+        id: "claude",
+        name: "Claude Code",
+        binary: "claude",
+        packages: &["@anthropic-ai/claude-code"],
+        install_hint: "npm install -g @anthropic-ai/claude-code && claude auth login",
+        install_url: "https://claude.com/product/claude-code",
+        caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
+    },
+    Spec {
+        id: "codex",
+        name: "Codex",
+        binary: "codex",
+        packages: &["@openai/codex"],
+        install_hint: "npm install -g @openai/codex && codex login",
+        install_url: "https://developers.openai.com/codex/cli",
+        caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
+    },
+    Spec {
+        id: "cursor",
+        name: "Cursor",
+        binary: "cursor-agent",
+        packages: &["cursor-agent"],
+        install_hint: "curl https://cursor.com/install -fsS | bash && agent login",
+        install_url: "https://cursor.com/cli",
+        caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
+    },
+    Spec {
+        id: "opencode",
+        name: "OpenCode",
+        binary: "opencode",
+        packages: &["opencode-ai"],
+        install_hint: "curl -fsSL https://opencode.ai/install | bash && opencode auth login",
+        install_url: "https://opencode.ai",
+        caps: Capabilities { images: true, steer: false, permission_modes: true, effort: false, slash_commands: false, at_mentions: false, fork: false, resume: true },
+    },
+];
+
 pub fn catalog() -> Vec<HarnessInfo> {
-    let mut v = vec![
-        HarnessInfo {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            binary: "claude".into(),
-            available: false,
-            path: None,
-            install_hint: "npm install -g @anthropic-ai/claude-code && claude auth login".into(),
-            install_url: "https://claude.com/product/claude-code".into(),
-            caps: Capabilities {
-                images: true,
-                steer: true,
-                permission_modes: true,
-                effort: true,
-                slash_commands: true,
-                at_mentions: true,
-                fork: true,
-                resume: true,
-            },
-        },
-        HarnessInfo {
-            id: "codex".into(),
-            name: "Codex".into(),
-            binary: "codex".into(),
-            available: false,
-            path: None,
-            install_hint: "npm install -g @openai/codex && codex login".into(),
-            install_url: "https://developers.openai.com/codex/cli".into(),
-            caps: Capabilities {
-                images: true,
-                steer: true,
-                permission_modes: true,
-                effort: true,
-                slash_commands: false,
-                at_mentions: false,
-                fork: false,
-                resume: true,
-            },
-        },
-        HarnessInfo {
-            id: "cursor".into(),
-            name: "Cursor".into(),
-            binary: "cursor-agent".into(),
-            available: false,
-            path: None,
-            install_hint: "curl https://cursor.com/install -fsS | bash && agent login".into(),
-            install_url: "https://cursor.com/cli".into(),
-            caps: Capabilities {
-                images: true,
-                steer: false,
-                permission_modes: true,
-                effort: false,
-                slash_commands: false,
-                at_mentions: false,
-                fork: false,
-                resume: true,
-            },
-        },
-        HarnessInfo {
-            id: "opencode".into(),
-            name: "OpenCode".into(),
-            binary: "opencode".into(),
-            available: false,
-            path: None,
-            install_hint: "curl -fsSL https://opencode.ai/install | bash && opencode auth login".into(),
-            install_url: "https://opencode.ai".into(),
-            caps: Capabilities {
-                images: true,
-                steer: false,
-                permission_modes: true,
-                effort: false,
-                slash_commands: false,
-                at_mentions: false,
-                fork: false,
-                resume: true,
-            },
-        },
-    ];
-    for h in &mut v {
-        if let Some(p) = crate::binpath::resolve(&h.binary) {
-            h.available = true;
-            h.path = Some(p.to_string_lossy().into_owned());
-        }
-    }
-    v
+    REGISTRY
+        .iter()
+        .map(|spec| {
+            let path = crate::binpath::resolve(spec.binary);
+            HarnessInfo {
+                id: spec.id.into(),
+                name: spec.name.into(),
+                binary: spec.binary.into(),
+                available: path.is_some(),
+                path: path.map(|p| p.to_string_lossy().into_owned()),
+                install_hint: spec.install_hint.into(),
+                install_url: spec.install_url.into(),
+                caps: spec.caps,
+            }
+        })
+        .collect()
+}
+
+/// What an agent is called in a sentence the reader is shown.
+pub fn display_name(harness: &str) -> &'static str {
+    REGISTRY.iter().find(|spec| spec.id == harness).map_or("The agent", |spec| spec.name)
+}
+
+/// Programs that run a script named by their first argument that is not an
+/// option. A CLI installed with a package manager is one of these running the
+/// package's entry file.
+const INTERPRETERS: &[&str] = &["node", "nodejs", "bun", "deno", "tsx"];
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// A program's name without the extension a script or a Windows binary has.
+fn program_stem(path: &str) -> &str {
+    let name = file_name(path);
+    [".js", ".mjs", ".cjs", ".exe", ".cmd"].iter().find_map(|ext| name.strip_suffix(ext)).unwrap_or(name)
+}
+
+/// Which agent's CLI a process is, from its command line (#437).
+///
+/// One rule for every row of the registry: the program is the agent's binary
+/// by name, wherever it lives (a version manager's shim, an alias the shell
+/// expanded, an absolute path), or it is an interpreter running the agent's
+/// binary or a file inside the agent's package (`npx`, a global `npm`
+/// install). Only the program and its script are read, never the rest of the
+/// arguments: `vim claude.md` and `grep codex` are not agents.
+///
+/// `argv` is the command line split into words, as far as that is known; a
+/// path with a space in it is simply not recognised.
+pub fn recognise<'a>(argv: impl IntoIterator<Item = &'a str>) -> Option<&'static str> {
+    let mut argv = argv.into_iter();
+    let program = argv.next()?;
+    let script = INTERPRETERS.contains(&program_stem(program)).then(|| argv.find(|arg| !arg.starts_with('-'))).flatten();
+    REGISTRY.iter().find_map(|spec| {
+        let named = |word: &str| program_stem(word) == spec.binary;
+        let packaged = |word: &str| spec.packages.iter().any(|package| word.contains(&format!("/{package}/")));
+        (named(program) || script.is_some_and(|script| named(script) || packaged(script))).then_some(spec.id)
+    })
 }
 
 /// The agents the UI lists. `catalog` keeps the hidden ones so a tab already
@@ -219,5 +250,36 @@ mod tests {
         }
         let offered: Vec<String> = offered().into_iter().map(|h| h.id).collect();
         assert_eq!(offered, ["claude", "codex"]);
+    }
+
+    fn words(command: &str) -> Option<&'static str> {
+        recognise(command.split_whitespace())
+    }
+
+    #[test]
+    fn every_registered_cli_is_recognised_by_its_binary_wherever_it_lives() {
+        for spec in REGISTRY {
+            assert_eq!(words(spec.binary), Some(spec.id));
+            assert_eq!(words(&format!("/Users/me/.local/bin/{} --resume abc", spec.binary)), Some(spec.id));
+            assert_eq!(words(&format!("/Users/me/.asdf/shims/{}", spec.binary)), Some(spec.id));
+            assert!(!matches!(HarnessId::parse(spec.id), HarnessId::Other(_)), "{} is in the registry but is not a harness", spec.id);
+        }
+    }
+
+    #[test]
+    fn a_cli_run_by_an_interpreter_is_recognised_by_its_script_or_its_package() {
+        assert_eq!(words("node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js --continue"), Some("claude"));
+        assert_eq!(words("node --no-warnings /Users/me/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/bin/codex.js"), Some("codex"));
+        // What `npx` leaves running: the package's own bin link.
+        assert_eq!(words("node /Users/me/.npm/_npx/0ab1/node_modules/.bin/claude"), Some("claude"));
+        assert_eq!(words("bun /Users/me/.bun/install/global/node_modules/opencode-ai/bin/opencode"), Some("opencode"));
+        assert_eq!(words("node /Users/me/.local/share/cursor-agent/versions/1.2/index.js"), Some("cursor"));
+    }
+
+    #[test]
+    fn a_program_that_only_mentions_an_agent_is_not_one() {
+        for command in ["vim claude.md", "grep -r codex .", "node server.js claude", "npm exec @anthropic-ai/claude-code", "node /usr/lib/node_modules/npm/bin/npx-cli.js @openai/codex", "cat /tmp/claude", "claude-squad", "zsh -l", "git log --author codex", ""] {
+            assert_eq!(words(command), None, "{command}");
+        }
     }
 }

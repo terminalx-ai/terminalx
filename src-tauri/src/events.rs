@@ -351,6 +351,22 @@ pub enum Payload {
 
     Recovery { kind: Option<crate::recovery::RecoveryKind> },
 
+    /// The tab's terminal changed hands (#437): the events from here to the
+    /// next one of these belong to another of the tab's conversations.
+    /// Another agent was started in the tab's terminal, or the same agent on
+    /// something else. A tab's log is one file for all it ever held, and this
+    /// is what keeps one conversation from running into the next.
+    Conversation {
+        /// Which conversation: `Follow::conversation` at the time. Absent for
+        /// the one the tab began with, whose events come before any marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        harness: String,
+        /// Picked up again, having been one of the tab's before.
+        #[serde(default)]
+        resumed: bool,
+    },
+
     // ---- indicators
     ModelRequestStarted,
     UsageUpdate(Usage),
