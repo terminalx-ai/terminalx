@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { BYPASS_MODE } from "./models";
 import { getPrefs } from "./prefs";
+import type { BulkClose } from "./tabActions";
 import type { WorkspaceHost } from "./workspaceRemoval";
 
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
@@ -28,9 +29,20 @@ interface State {
   moveToProject: string | null;
   /** The bulk worktree clean-up is open. */
   worktreeCleanup: boolean;
+  /** The tab being renamed. */
+  renameTab: TabRequest | null;
+  /** Several tabs about to be closed: the dialog says how many, and what is still going on in them. */
+  closeTabs: (TabRequest & { action: BulkClose }) | null;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, worktreeCleanup: false };
+/** A tab of a workspace, named from one of that workspace's sessions (the open one). */
+export interface TabRequest {
+  sessionId: string;
+  /** The tab's key (`tabKey`); for a bulk close, the tab its menu was opened on, if any. */
+  tab: string | null;
+}
+
+let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -95,6 +107,24 @@ export function openRenameSession(sessionId: string) {
 
 export function closeRenameSession() {
   set({ renameSession: null });
+}
+
+/** Rename a tab: the reader's own title for it. */
+export function openRenameTab(sessionId: string, tab: string) {
+  set({ renameTab: { sessionId, tab } });
+}
+
+export function closeRenameTab() {
+  set({ renameTab: null });
+}
+
+/** Ask before closing several tabs of a workspace at once. */
+export function openCloseTabs(sessionId: string, action: BulkClose, tab: string | null) {
+  set({ closeTabs: { sessionId, action, tab } });
+}
+
+export function closeCloseTabs() {
+  set({ closeTabs: null });
 }
 
 /** Move a quick chat into a project. */
