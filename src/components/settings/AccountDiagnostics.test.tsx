@@ -22,6 +22,7 @@ vi.mock("./OrganizationMembers", () => ({ OrganizationMembers: () => null }));
 vi.mock("./OrganizationCompute", () => ({ OrganizationCompute: () => null }));
 vi.mock("./OrganizationGithubApp", () => ({ OrganizationGithubApp: () => null }));
 vi.mock("./OrganizationWorkspaceConfig", () => ({ OrganizationWorkspaceConfig: () => null }));
+vi.mock("./OrganizationEnvironment", () => ({ OrganizationEnvironment: () => null }));
 
 const { AccountTab } = await import("./AccountTab");
 

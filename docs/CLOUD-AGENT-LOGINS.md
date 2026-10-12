@@ -30,9 +30,44 @@ included, to anyone else (`organization_admin_required`), so a member sees a
 sentence saying who connects logins and no controls. The desktop does not
 decide this itself and cannot widen it.
 
-A stored login is organization-wide: agents in every member's workspaces may
-run on it. A login that only its owner's workspaces use does not exist on the
-service yet, so the desktop does not offer one.
+## Who a stored login reaches (`sharedUse`)
+
+The account service keeps a scope on each login: `organization` (agents in
+every member's workspaces may run on it) or `managers` (only workspaces that
+nobody but owners and admins can drive). The desktop **does not offer a
+choice of scope, and so never sends one**: no request it makes carries
+`sharedUse` (the API-key and lend `PUT`, and `…/claude/login-complete`).
+The service then decides:
+
+- **A first login** takes the service's default. That is `organization`,
+  unless the operator turned on the narrow default for subscription logins.
+  The desktop cannot see that switch, so it says "by default, agents in
+  every member's cloud workspaces" and points at the row, which shows what
+  the service stored.
+- **A login that replaces one of the same kind** (a sign-in or a lent
+  sign-in over a subscription login, an API key over an API key) keeps the
+  stored scope. Logging in again never widens a login someone narrowed to
+  `managers`. The page and the native dialogs say "this keeps who can use
+  the login now: …" with the stored scope, read from the list at that
+  moment.
+- **A login that replaces one of another kind** (a sign-in over an API
+  key, or the reverse) is never wider than the stored login: the service
+  gives it the narrower of the stored scope and the default for its kind
+  (terminalx-saas #187; a server without it keeps the stored scope, which
+  fits the same words). It is not described as a first login. The page and
+  the native dialogs say "this keeps who can use the login now, or fewer:
+  at most …" with the stored scope, and point at the row for what was
+  stored, because the desktop cannot see the service's default.
+
+In no case does a replacement from the desktop widen who can use a login.
+
+No client has a control for the scope yet; the service's routes accept
+`sharedUse`. If the desktop gets one, the value is sent only when the person
+picked it.
+
+Until #429's follow-up the desktop sent `sharedUse: "organization"` with
+every sign-in, which widened a `managers` login each time an admin logged in
+again.
 
 ## What never happens
 
@@ -70,9 +105,9 @@ A server that does not offer the routes (older, or with the feature off)
 answers 404 to the start, and the page says the sign-in is not available
 there.
 
-Defaults, as the owner chose them: a new login is usable by the whole
-organization (`sharedUse: "organization"` is sent); Disconnect removes the
-stored login and does not sign the account out at the provider, and the page
+Defaults, as the owner chose them: who a login reaches is the service's
+decision (no `sharedUse` is sent; see "Who a stored login reaches");
+Disconnect removes the stored login and does not sign the account out at the provider, and the page
 says so; a login stays when the admin who made it leaves, until an owner or
 admin disconnects it (flagging it to owners is the service's part).
 
@@ -125,7 +160,8 @@ token.
 
 - Which organization and which account.
 - That only the access token is uploaded, and when it expires.
-- That agents in every member's workspaces may run on their subscription.
+- Who may run on their subscription: every member's workspaces by default
+  for a first login, or the scope the replaced login has.
 - That anyone who can drive a workspace can read the short-lived token off
   its machine (it is in the agent's environment there).
 - How it ends: Disconnect, which the service refuses (409) while a workspace

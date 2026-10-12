@@ -278,6 +278,17 @@ export interface LeftoverRemoval {
   freedBytes: number;
 }
 
+/**
+ * How far a removal of leftovers is, as the backend reports it while it runs
+ * (`cleanup.rs`). Everything is scanned again first (`checking`); then each
+ * leftover in turn, `index` counting from 0 over `total`. `error` says why one
+ * was kept; null when it was deleted.
+ */
+export type LeftoverProgress =
+  | { kind: "checking"; total: number }
+  | { kind: "started"; index: number; total: number; id: string }
+  | { kind: "finished"; index: number; total: number; id: string; freedBytes: number; error: string | null };
+
 export function sessionStatus(s: SessionEntry): TabStatus {
   let out: TabStatus = "idle";
   for (const t of s.tabs) {

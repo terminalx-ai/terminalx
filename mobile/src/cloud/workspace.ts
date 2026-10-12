@@ -270,7 +270,7 @@ export class CloudWorkspaceSession {
   async deliverHeld(options: { allowWake?: boolean } = {}): Promise<void> {
     const verdict = await this.mayPost(!!options.allowWake);
     if (verdict === "would-wake" || verdict === "unavailable") throw new CloudSendError(verdict);
-    if (verdict === "post" || verdict === "post-no-wake") await this.outbox.sync({ deliver: true, wake: verdict === "post" });
+    if (verdict === "post" || verdict === "post-no-wake") await this.outbox.sync({ deliver: true, wake: verdict === "post", rouse: !!options.allowWake });
     if (verdict === "post-no-wake" && this.outbox.stopped) throw this.stoppedMeanwhile();
     if (this.followable()) this.startPolling();
   }

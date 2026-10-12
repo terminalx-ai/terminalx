@@ -302,16 +302,33 @@ fn a_do_not_wake_command_is_posted_with_wake_false_and_dropped_when_the_workspac
     assert!(fixture.client.outbox_sync(ORG, WS).unwrap().is_empty());
     assert_eq!(received.lock().unwrap().len(), 1, "nothing is resent");
 
-    // The person agreed: the ordinary post, without the key an older API would reject.
+    // The person agreed: the ordinary post, without the key an older API would reject,
+    // and the very envelope that was refused (one command id, contract 11.2.1).
     let woke = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "are you up?" }), true).unwrap();
     assert_eq!((woke.state.as_str(), woke.wake.as_deref()), ("queued", Some("queued")));
-    assert!(received.lock().unwrap()[1].get("wake").is_none());
+    {
+        let received = received.lock().unwrap();
+        assert!(received[1].get("wake").is_none());
+        let mut first = received[0].clone();
+        first.as_object_mut().unwrap().remove("wake");
+        assert_eq!(first, received[1], "same id, iv and ciphertext");
+        assert_eq!(received[1]["clientCommandId"], json!(woke.client_command_id));
+    }
+    // A different message after a refusal is its own command.
+    *running.lock().unwrap() = false;
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "one" }), false).unwrap_err(), WORKSPACE_STOPPED);
+    let other = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "two" }), true).unwrap();
+    {
+        let received = received.lock().unwrap();
+        assert_ne!(received[2]["clientCommandId"], received[3]["clientCommandId"]);
+        assert_eq!(received[3]["clientCommandId"], json!(other.client_command_id));
+    }
 
     // Running: stored like any other.
     *running.lock().unwrap() = true;
     let stored = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hello" }), false).unwrap();
     assert_eq!((stored.state.as_str(), stored.wake.as_deref()), ("queued", Some("not-needed")));
-    assert_eq!(received.lock().unwrap()[2]["wake"], json!(false));
+    assert_eq!(received.lock().unwrap()[4]["wake"], json!(false));
 }
 
 #[test]

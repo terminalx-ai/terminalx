@@ -3,7 +3,7 @@ import { codeText, leaseLine, outboxLine, presenceLine } from "./words";
 
 const nameOf = (userId: string | null | undefined) => ({ "u-alice": "Alice", "u-bob": "Bob" })[userId ?? ""] ?? "Someone";
 const lease = (holderId: string, expiresAt = 2_000) => ({ tabId: "t1", holderId, acquiredAt: 0, expiresAt });
-const entry = (fields: Record<string, unknown>) => ({ clientCommandId: "c", tabId: "t1", kind: "send" as const, text: "hi", requestId: null, state: "rejected" as const, wake: null, category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, ...fields });
+const entry = (fields: Record<string, unknown>) => ({ clientCommandId: "c", tabId: "t1", kind: "send" as const, text: "hi", requestId: null, state: "rejected" as const, wake: null, category: null, receipt: null, createdAt: 1, updatedAt: 1, error: null, asleep: false, ...fields });
 
 describe("sharing, in words", () => {
   it("says who drives and what this person may do about it", () => {
@@ -41,5 +41,10 @@ describe("sharing, in words", () => {
     expect(outboxLine(entry({ category: "lease-held", receipt: { outcome: "rejected", holderId: "u-alice" } }), false, nameOf)).toEqual({ tone: "warn", text: "Alice is driving. Your message was not sent." });
     expect(outboxLine(entry({ category: "lease-held" }), false, nameOf)?.text).toBe("Someone else is driving. Your message was not sent.");
     expect(outboxLine(entry({ category: "access-revoked" }), false, nameOf)?.text).toBe("Not sent: your access changed.");
+  });
+
+  it("says a message the server holds for a stopped workspace has not started it", () => {
+    expect(outboxLine(entry({ state: "queued", wake: "not-requested", asleep: true }), true, nameOf)).toEqual({ tone: "warn", text: "Not started. This workspace is stopped, and sending starts it." });
+    expect(outboxLine(entry({ state: "queued", wake: "not-needed" }), false, nameOf)?.text).toBe("Sent. Waiting for the agent.");
   });
 });

@@ -420,6 +420,38 @@ pub(crate) struct AgentLoginAuthorization {
     context: AccountContext,
     /// The kind of login stored for the agent now, which saving replaces.
     replaces: Option<AgentLoginKind>,
+    /// That login's kind and scope as the service names them, for `reach`.
+    stored: Option<(String, Option<String>)>,
+}
+
+/// Who may use a login once it is stored. The desktop offers no choice of
+/// scope and so sends none (`sharedUse` is left out of every request): the
+/// account service decides, and this is what it will decide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgentLoginReach {
+    /// Nothing of this kind is stored: the service's default for a new login.
+    ServiceDefault,
+    /// A login of the same kind is replaced, and its scope stays as it is
+    /// (`organization`, `managers`, or one this app does not know).
+    Kept(String),
+    /// A login of another kind is replaced: the service never widens, so
+    /// the new login gets the stored scope or its kind's narrower default.
+    NoWider(String),
+}
+
+impl AgentLoginReach {
+    /// One sentence for a native dialog.
+    pub(crate) fn sentence(&self) -> &'static str {
+        match self {
+            Self::ServiceDefault => "By default, agents in every member's cloud workspaces of the organization may run on it; the account service decides this, and Settings shows who the login reaches once it is stored.",
+            Self::Kept(scope) if scope == "managers" => "This keeps who can use the login now: only workspaces that nobody but owners and admins can drive.",
+            Self::Kept(scope) if scope == "organization" => "This keeps who can use the login now: agents in every member's cloud workspaces of the organization.",
+            Self::Kept(_) => "This keeps who can use the login now, as the account service has it.",
+            Self::NoWider(scope) if scope == "managers" => "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(scope) if scope == "organization" => "This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces of the organization. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(_) => "This keeps who can use the login now, or fewer. Settings shows who the login reaches once it is stored.",
+        }
+    }
 }
 
 impl AgentLoginAuthorization {
@@ -429,6 +461,30 @@ impl AgentLoginAuthorization {
 
     pub(crate) fn replaces(&self) -> Option<AgentLoginKind> {
         self.replaces
+    }
+
+    /// Who may use a login of `kind` stored under this authorization. A
+    /// replacement never widens: the same kind keeps the stored scope, and
+    /// another kind gets it or the narrower default of its own kind.
+    pub(crate) fn reach(&self, kind: AgentLoginKind) -> AgentLoginReach {
+        match &self.stored {
+            None => AgentLoginReach::ServiceDefault,
+            Some((stored_kind, scope)) => {
+                // A server from before the scope existed says nothing, and shared every login with the organization.
+                let scope = scope.clone().unwrap_or_else(|| "organization".into());
+                if stored_kind == kind.as_str() {
+                    AgentLoginReach::Kept(scope)
+                } else {
+                    AgentLoginReach::NoWider(scope)
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(context: AccountContext, stored: Option<(&str, Option<&str>)>) -> Self {
+        let replaces = stored.map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+        Self { context, replaces, stored: stored.map(|(kind, scope)| (kind.to_owned(), scope.map(str::to_owned))) }
     }
 }
 
@@ -1876,20 +1932,23 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
-        let replaces = stored
+        let stored = stored
             .credentials
             .into_iter()
             .find(|login| login.provider == provider.as_str() && login.state.as_deref() != Some("disconnected"))
-            .map(|login| if login.auth_kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+            .map(|login| (login.auth_kind, login.shared_use));
+        let replaces = stored.as_ref().map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
         if replaces.is_some() && !consent.replace_existing {
             return Err(CloudWorkspaceClientError::local("cloud_agent_login_replace_unconfirmed", false));
         }
-        Ok(AgentLoginAuthorization { context, replaces })
+        Ok(AgentLoginAuthorization { context, replaces, stored })
     }
 
     /// Store a login for an agent. `secret` is sent once, to the service
     /// that validates and encrypts it, and cleared; the answer carries the
-    /// login's public fields only.
+    /// login's public fields only. No `sharedUse` is sent: nobody chose one
+    /// here, so the service applies its default to a new login and never
+    /// widens one it replaces (`AgentLoginAuthorization::reach`).
     pub(crate) fn save_agent_login(
         &self,
         authorization: AgentLoginAuthorization,
@@ -1950,8 +2009,11 @@ impl CloudWorkspaceService {
         Ok(started)
     }
 
-    /// Finish a sign-in with the code the provider's page showed. A new
-    /// login is usable by the whole organization (the owner's default).
+    /// Finish a sign-in with the code the provider's page showed. No
+    /// `sharedUse` is sent, as nobody chose one here: sending the default
+    /// would widen a login an admin had narrowed to `managers` every time
+    /// someone logged in again. The service applies its default to a new
+    /// login and keeps the scope of a subscription login it replaces.
     pub(crate) fn complete_claude_login(
         &self,
         authorization: AgentLoginAuthorization,
@@ -1968,7 +2030,7 @@ impl CloudWorkspaceService {
         let escaped = zeroize::Zeroizing::new(serde_json::to_string(code.trim()).map_err(invalid)?);
         drop(code);
         let body = zeroize::Zeroizing::new(format!(
-            r#"{{"attemptId":{},"code":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true,"sharedUse":"organization"}}"#,
+            r#"{{"attemptId":{},"code":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true}}"#,
             serde_json::to_string(attempt_id).map_err(invalid)?,
             escaped.as_str()
         ));
@@ -3580,7 +3642,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let login = service
             .save_agent_login(
-                AgentLoginAuthorization { context: context(), replaces: None },
+                AgentLoginAuthorization::for_test(context(), None),
                 AgentLoginProvider::Claude,
                 AgentLoginKind::LoginDocument,
                 zeroize::Zeroizing::new(r#"{"claudeAiOauth":{"accessToken":"at-1"}}"#.to_string()),
@@ -3607,16 +3669,76 @@ mod tests {
         // An empty login is refused here, and an answer about another agent is not accepted.
         let (base, _, _request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let empty = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
+        let empty = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
-        let other = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
+        let other = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
+    }
+
+    // Review of #429: the desktop sent `sharedUse: organization` with every sign-in, which widened a
+    // login an admin had narrowed to managers whenever someone logged in again.
+    #[test]
+    fn replacing_a_login_sends_no_scope_so_the_service_keeps_the_one_it_has() {
+        let narrowed = || AgentLoginAuthorization::for_test(context(), Some(("oauth-credentials-json", Some("managers"))));
+        let body_of = |text: &str| serde_json::from_str::<Value>(text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+
+        let done = r#"{"status":"complete","credential":{"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","version":2,"updatedAt":9,"state":"connected","sharedUse":"managers"}}"#;
+        let (base, _, request) = serve_once(response("200 OK", done, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let outcome = service.complete_claude_login(narrowed(), "attempt_1", zeroize::Zeroizing::new("the-code#the-state".to_string())).unwrap();
+        let sent = body_of(&request.join().unwrap().text);
+        assert!(sent.get("sharedUse").is_none(), "a sign-in that replaces a login must not name a scope: {sent}");
+        assert_eq!(sent.as_object().unwrap().len(), 4);
+        // What the service kept comes back, and is what the page shows.
+        assert_eq!(outcome.credential.unwrap().shared_use.as_deref(), Some("managers"));
+
+        // The same for a login that is PUT (an API key, a lent sign-in), replacing or new.
+        let stored = r#"{"id":"c1","provider":"claude","authKind":"api-key","fingerprint":"sha256:ab","version":3,"updatedAt":9,"state":"connected","sharedUse":"managers"}"#;
+        for authorization in [AgentLoginAuthorization::for_test(context(), Some(("api-key", Some("managers")))), AgentLoginAuthorization::for_test(context(), None)] {
+            let (base, _, request) = serve_once(response("200 OK", stored, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            service.save_agent_login(authorization, AgentLoginProvider::Claude, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None).unwrap();
+            assert!(body_of(&request.join().unwrap().text).get("sharedUse").is_none());
+        }
+    }
+
+    #[test]
+    fn a_dialog_is_told_who_the_login_will_reach_new_or_kept() {
+        let reach = |stored, kind| AgentLoginAuthorization::for_test(context(), stored).reach(kind);
+        // Nothing stored: the service's default, said as a default.
+        assert_eq!(reach(None, AgentLoginKind::LoginDocument), AgentLoginReach::ServiceDefault);
+        assert!(AgentLoginReach::ServiceDefault.sentence().starts_with("By default, agents in every member's cloud workspaces"));
+        // The same kind is replaced: its scope stays, and a narrowed one is not described as everyone.
+        let kept = reach(Some(("oauth-credentials-json", Some("managers"))), AgentLoginKind::LoginDocument);
+        assert_eq!(kept, AgentLoginReach::Kept("managers".into()));
+        assert_eq!(kept.sentence(), "This keeps who can use the login now: only workspaces that nobody but owners and admins can drive.");
+        assert!(!kept.sentence().contains("every member"));
+        assert!(reach(Some(("api-key", Some("organization"))), AgentLoginKind::ApiKey).sentence().contains("keeps who can use the login now: agents in every member's"));
+        // An older server names no scope: it shared every login with the organization.
+        assert_eq!(reach(Some(("api-key", None)), AgentLoginKind::ApiKey), AgentLoginReach::Kept("organization".into()));
+        // A scope this app does not know is kept without being described.
+        assert!(!reach(Some(("api-key", Some("teams"))), AgentLoginKind::ApiKey).sentence().contains("every member"));
+        // Another kind of login never reaches more than the stored one and may reach fewer: not a first login, and
+        // not described as every member when the stored login is for managers.
+        for (was, becomes) in [("api-key", AgentLoginKind::LoginDocument), ("oauth-credentials-json", AgentLoginKind::ApiKey)] {
+            let narrowed = reach(Some((was, Some("managers"))), becomes);
+            assert_eq!(narrowed, AgentLoginReach::NoWider("managers".into()));
+            assert_eq!(
+                narrowed.sentence(),
+                "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored."
+            );
+            assert!(!narrowed.sentence().contains("every member") && !narrowed.sentence().contains("By default"));
+            let wide = reach(Some((was, Some("organization"))), becomes);
+            assert!(wide.sentence().starts_with("This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces"));
+            assert!(!wide.sentence().contains("By default"));
+            assert!(!reach(Some((was, Some("teams"))), becomes).sentence().contains("every member"));
+        }
     }
 
     // PRO-82 on the desktop: the account service's own sign-in for Claude.
     #[test]
     fn a_claude_sign_in_starts_completes_and_cancels_on_its_routes_and_opens_only_the_providers_page() {
-        let authorization = || AgentLoginAuthorization { context: context(), replaces: None };
+        let authorization = || AgentLoginAuthorization::for_test(context(), None);
         let (base, _, request) = serve_once(response("200 OK", r#"{"attemptId":"attempt_1","authorizeUrl":"https://claude.com/cai/oauth/authorize?state=s","expiresInSeconds":600,"mode":"paste"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let started = service.start_claude_login(&authorization()).unwrap();
@@ -3642,10 +3764,10 @@ mod tests {
         let outcome = service.complete_claude_login(authorization(), "attempt_1", zeroize::Zeroizing::new("  the-code#the-state \n".to_string())).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-complete HTTP/1.1"));
-        // The whole organization may use a new login; both confirmations are sent; the code is trimmed and sent once.
+        // Both confirmations are sent; the code is trimmed and sent once. No scope is sent: nobody chose one.
         assert_eq!(
             serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
-            json!({ "attemptId": "attempt_1", "code": "the-code#the-state", "confirmOrganizationSharing": true, "confirmMachineInstallation": true, "sharedUse": "organization" })
+            json!({ "attemptId": "attempt_1", "code": "the-code#the-state", "confirmOrganizationSharing": true, "confirmMachineInstallation": true })
         );
         assert!(!captured.extra_request);
         let sent = serde_json::to_value(&outcome).unwrap();
@@ -3703,7 +3825,7 @@ mod tests {
         let (_, service) = test_service(&base);
         // Asked for another organization than the active one: nothing is sent.
         assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into()).err().unwrap().code, "account_context_changed");
-        let refused = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
+        let refused = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
         assert_eq!(refused.err().unwrap().code, "cloud_workspace_credential_invalid");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("PUT ") && !captured.extra_request);

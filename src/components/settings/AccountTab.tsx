@@ -3,6 +3,7 @@ import { Check, Loader2, Pencil } from "lucide-react";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
+import { OrganizationEnvironment } from "./OrganizationEnvironment";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
@@ -60,6 +61,7 @@ export function AccountTab() {
         {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} />}
         {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
+        {identity.organization && <OrganizationEnvironment contextRevision={status.context?.revision ?? ""} />}
         {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}
         {identity.organization && <OrganizationCloudTeardown contextRevision={status.context?.revision ?? ""} organizationId={identity.organizationId ?? null} organizationName={identity.organization} member={activeRole === "member"} />}
         {pairing.status.host && (

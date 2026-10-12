@@ -26,6 +26,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -511,6 +512,12 @@ pub struct CloudAgentClient {
     /// The identity last observed (the user and the Organizations whose data
     /// is kept), so a change drops what no longer belongs to it.
     observed: Mutex<Option<KeptIdentity>>,
+    /// Per workspace directory: the last command the API refused to a
+    /// `wake: false` post (it stored nothing), with a digest of what it
+    /// says. When the same message is sent again, with the person's word,
+    /// this very envelope goes out: one command id from the first attempt to
+    /// the last (contract 11.2.1). In memory only: nothing was sent.
+    refused: Mutex<HashMap<PathBuf, (Stored, [u8; 32])>>,
 }
 
 impl CloudAgentClient {
@@ -521,7 +528,7 @@ impl CloudAgentClient {
 
     pub fn with(accounts: Arc<dyn AccountSource>, keys: Arc<dyn KeyStore>, base: Url, root: PathBuf) -> Self {
         let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).redirects(0).build();
-        Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None) }
+        Self { accounts, keys, base, root, lock: Mutex::new(()), send_locks: Mutex::new(HashMap::new()), agent, observed: Mutex::new(None), refused: Mutex::new(HashMap::new()) }
     }
 
     /// The current account, allowed in `organization_id` (CS-18: by
@@ -662,8 +669,9 @@ impl CloudAgentClient {
     /// With `wake` false (the CLI, which must ask the person before starting
     /// compute; only against an API that knows the option) nothing is
     /// started: for a workspace that is not running the API stores nothing,
-    /// the entry is dropped here too and the error is [`WORKSPACE_STOPPED`],
-    /// so the caller can ask and send again.
+    /// the entry is dropped here too and the error is [`WORKSPACE_STOPPED`], so the caller can ask and send again.
+    /// Sending the same message to the same tab again then posts the very
+    /// envelope that was refused, under its command id.
     pub fn enqueue(&self, organization_id: &str, workspace_id: &str, tab_id: &str, kind: &str, payload: Value, wake: bool) -> Result<OutboxEntry, String> {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
@@ -688,11 +696,19 @@ impl CloudAgentClient {
             return Err("cloud_agent_request_invalid".into());
         }
         plaintext.insert("v".into(), json!(1));
+        let bytes = Zeroizing::new(serde_json::to_vec(&Value::Object(plaintext)).map_err(|_| "cloud_agent_request_invalid".to_string())?);
+        let digest: [u8; 32] = Sha256::new().chain_update(tab_id).chain_update([0]).chain_update(kind).chain_update([0]).chain_update(&*bytes).finalize().into();
+        // What was just refused to a `wake: false` post, sent again: the same envelope. Anything else replaces it.
+        let again = self.refused.lock().unwrap().remove(&dir).filter(|(_, refused)| *refused == digest);
+        if let Some((mut stored, _)) = again {
+            stored.no_wake = !wake;
+            stored.updated_at = now_ms();
+            return self.post_new(&ctx, workspace_id, &dir, stored, digest);
+        }
         let key_id = self.index(&dir)?.current_key_id.ok_or("cloud_agent_key_missing")?;
         let key = Zeroizing::new(self.key(organization_id, workspace_id, &key_id)?);
         let client_command_id = uuid::Uuid::new_v4().to_string();
         let aad = crypto::command_aad(organization_id, workspace_id, tab_id, &client_command_id, kind, &key_id);
-        let bytes = Zeroizing::new(serde_json::to_vec(&Value::Object(plaintext)).map_err(|_| "cloud_agent_request_invalid".to_string())?);
         let (iv, ciphertext) = crypto::seal(&key, &bytes, &aad).map_err(|_| "cloud_agent_encrypt_failed".to_string())?;
         if ciphertext.len() > crypto::MAX_COMMAND_CIPHERTEXT {
             return Err("cloud_agent_command_too_large".into());
@@ -719,13 +735,20 @@ impl CloudAgentClient {
             error: None,
             no_wake: !wake,
         };
+        self.post_new(&ctx, workspace_id, &dir, stored, digest)
+    }
+
+    /// Store an envelope and post it for the first time (or again, after a
+    /// `wake: false` refusal).
+    fn post_new(&self, ctx: &Ctx, workspace_id: &str, dir: &Path, stored: Stored, digest: [u8; 32]) -> Result<OutboxEntry, String> {
         // Durable before the network: a crash after the POST still resends it.
-        self.edit_outbox(&dir, |entries| entries.push(stored.clone()))?;
-        let entry = self.post_envelope(&ctx, workspace_id, &dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".to_string())?;
-        if !wake && entry.state == "rejected" && entry.category.as_deref() == Some(WORKSPACE_STOPPED) {
-            // Nothing was stored there, so nothing is kept here: it was not sent.
+        self.edit_outbox(dir, |entries| entries.push(stored.clone()))?;
+        let entry = self.post_envelope(ctx, workspace_id, dir, &stored.client_command_id)?.ok_or_else(|| "cloud_agent_command_unknown".to_string())?;
+        if stored.no_wake && entry.state == "rejected" && entry.category.as_deref() == Some(WORKSPACE_STOPPED) {
+            // Nothing was stored there, so nothing is kept in the outbox: it was not sent.
             let id = stored.client_command_id.clone();
-            self.edit_outbox(&dir, |entries| entries.retain(|entry| entry.client_command_id != id))?;
+            self.edit_outbox(dir, |entries| entries.retain(|entry| entry.client_command_id != id))?;
+            self.refused.lock().unwrap().insert(dir.to_path_buf(), (stored, digest));
             return Err(WORKSPACE_STOPPED.into());
         }
         Ok(entry)

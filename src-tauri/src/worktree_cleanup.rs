@@ -37,6 +37,11 @@
 //! itself if a file appeared in between. The branch always stays. Sessions
 //! keep their conversations and are filed under the project as belonging to
 //! a removed workspace, unless the request asks for them to be deleted.
+//!
+//! A removal says how far it is while it runs ([`Progress`]): which worktree
+//! it is on, the step, and what each one came to as soon as that is known.
+//! Reporting changes nothing about what is removed, and neither does being
+//! told to stop: that is only read between worktrees, never during one.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashSet};
@@ -136,6 +141,10 @@ pub struct RemoveItem {
     /// The person chose to remove it although it holds ignored local files.
     #[serde(default)]
     pub accept_ignored: bool,
+    /// What the review measured it at. When given, the tree is not walked a
+    /// second time and this is what the result reports, marked as an estimate.
+    #[serde(default)]
+    pub estimated_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -156,11 +165,77 @@ pub struct ItemResult {
     pub outcome: Outcome,
     pub reason: Option<String>,
     pub freed_bytes: u64,
+    /// `freed_bytes` is what the review measured, not a walk made just before the removal.
+    pub freed_estimated: bool,
     /// The branch it was on, which stays.
     pub kept_branch: Option<String>,
     pub sessions_kept: Vec<String>,
     pub sessions_deleted: Vec<String>,
 }
+
+/// The desktop's event for [`Progress`], with the id of the removal it belongs
+/// to. A cloud runtime sends the same to the caller as `cleanup.progress`.
+pub const PROGRESS_EVENT: &str = "worktree_cleanup_progress";
+
+/// What a removal is doing to the worktree it is on.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Step {
+    /// Walking the tree to see what removing it frees.
+    Measuring,
+    /// Reading it again, to compare with what was reviewed.
+    Checking,
+    /// Git is removing it.
+    Removing,
+    /// Filing, or deleting, the sessions that ran in it.
+    Sessions,
+}
+
+/// How far a removal is. `index` counts from 0 over the `total` worktrees of
+/// the call. A worktree that is not attempted, because the removal was told
+/// to stop, is only ever `Finished`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Progress {
+    Started { index: usize, total: usize, project_path: String, path: String },
+    Step { index: usize, total: usize, path: String, step: Step },
+    Finished { index: usize, total: usize, result: ItemResult },
+}
+
+/// A progress report with the id of the removal it belongs to, as it is sent:
+/// the report's own fields, and `run`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct OfRun<'a, T: Serialize> {
+    pub run: &'a str,
+    #[serde(flatten)]
+    pub progress: &'a T,
+}
+
+/// How a removal is followed while it runs. Neither part changes what is
+/// removed.
+#[derive(Clone, Copy, Default)]
+pub struct Watch<'a> {
+    /// Told each [`Progress`], in order.
+    pub report: Option<&'a dyn Fn(&Progress)>,
+    /// Set to leave the worktrees that were not started yet. The one under
+    /// way is always finished.
+    pub stop: Option<&'a AtomicBool>,
+}
+
+impl Watch<'_> {
+    fn tell(&self, progress: Progress) {
+        if let Some(report) = self.report {
+            report(&progress);
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.is_some_and(|stop| stop.load(Ordering::SeqCst))
+    }
+}
+
+/// Why a worktree was left when the removal was told to stop.
+pub const STOPPED: &str = "Not attempted: the clean-up was stopped.";
 
 /// What is running on this host right now.
 #[derive(Debug, Clone, Default)]
@@ -676,6 +751,7 @@ fn result(item: &RemoveItem, outcome: Outcome, reason: impl Into<Option<String>>
         outcome,
         reason: reason.into(),
         freed_bytes: 0,
+        freed_estimated: false,
         kept_branch: None,
         sessions_kept: Vec::new(),
         sessions_deleted: Vec::new(),
@@ -730,7 +806,7 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
     }
 }
 
-fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<'_>], item: &RemoveItem) -> ItemResult {
+fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<'_>], item: &RemoveItem, step: &dyn Fn(Step)) -> ItemResult {
     // The project is one that is open here, by where it really is.
     let asked = canonical(Path::new(&item.project_path));
     let Some(repository) = repositories.iter().find(|repository| same_dir(&repository.root, &asked)) else {
@@ -752,9 +828,14 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "That path is not a worktree of this project.".to_string());
     };
     // Measured first: walking a large tree takes a while, and nothing may
-    // come between the inspection below and the removal.
-    let freed = git::size_on_disk(&target);
+    // come between the inspection below and the removal. A tree the review
+    // already measured is not walked again; its figure is kept as an estimate.
+    let freed = item.estimated_bytes.unwrap_or_else(|| {
+        step(Step::Measuring);
+        git::size_on_disk(&target)
+    });
     // Everything is read again now, as late as it can be.
+    step(Step::Checking);
     let sessions = match index::load() {
         Ok(sessions) => sessions,
         Err(error) => return result(item, Outcome::Skipped, format!("The session index could not be read, so nothing was removed: {error:#}")),
@@ -778,6 +859,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
         return result(item, Outcome::Skipped, "It has no commit checked out.".to_string());
     };
     let affected = session_ops::sessions_within(sessions, &target);
+    step(Step::Removing);
     // Never forced, never deleted directly: git removes it or says why not.
     let options = crate::workspaces::DeleteOptions { delete_branch: false, direct: git::DirectDelete::Never, verified_head: Some(head) };
     if let Err(error) = crate::workspaces::delete(&repository.root, &target, options) {
@@ -785,7 +867,9 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
     }
     let mut done = result(item, Outcome::Removed, None);
     done.freed_bytes = freed;
+    done.freed_estimated = item.estimated_bytes.is_some();
     done.kept_branch = now.branch.clone();
+    step(Step::Sessions);
     if item.delete_sessions {
         if let Err(error) = session_ops::remove_session_entries(&affected) {
             done.outcome = Outcome::Failed;
@@ -810,36 +894,59 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
 }
 
 /// Remove the worktrees the person confirmed, each checked again first. One
-/// that fails or is skipped never stops the others.
-pub fn remove(host: &Host<'_>, sink: &dyn EventSink, items: &[RemoveItem]) -> Vec<ItemResult> {
+/// that fails or is skipped never stops the others. `watch` hears about each
+/// as it goes; the list returned is what happened.
+pub fn remove(host: &Host<'_>, sink: &dyn EventSink, items: &[RemoveItem], watch: Watch<'_>) -> Vec<ItemResult> {
     let repositories: Vec<Repository<'_>> = host.projects.iter().filter_map(|project| Repository::open(project, host.fetch).ok()).collect();
     let mut seen = HashSet::new();
-    items.iter().filter(|item| seen.insert(item.path.clone())).map(|item| remove_one(host, sink, &repositories, item)).collect()
+    let items: Vec<&RemoveItem> = items.iter().filter(|item| seen.insert(item.path.clone())).collect();
+    let total = items.len();
+    let mut results = Vec::with_capacity(total);
+    for (index, item) in items.into_iter().enumerate() {
+        // Read between worktrees only: one that was started is finished.
+        let done = if watch.stopped() {
+            result(item, Outcome::Skipped, STOPPED.to_string())
+        } else {
+            watch.tell(Progress::Started { index, total, project_path: item.project_path.clone(), path: item.path.clone() });
+            remove_one(host, sink, &repositories, item, &|step| watch.tell(Progress::Step { index, total, path: item.path.clone(), step }))
+        };
+        watch.tell(Progress::Finished { index, total, result: done.clone() });
+        results.push(done);
+    }
+    results
 }
 
-/// Size estimates that are under way, so each can be stopped by its id.
+/// Work that is under way, so each piece can be stopped by its id.
 #[derive(Default)]
-pub struct SizeJobs {
+pub struct Jobs {
     running: Mutex<Vec<(String, Arc<AtomicBool>)>>,
 }
 
-impl SizeJobs {
-    pub fn global() -> &'static SizeJobs {
-        static JOBS: std::sync::OnceLock<SizeJobs> = std::sync::OnceLock::new();
+impl Jobs {
+    /// The size estimates of this process.
+    pub fn sizes() -> &'static Jobs {
+        static JOBS: std::sync::OnceLock<Jobs> = std::sync::OnceLock::new();
         JOBS.get_or_init(Default::default)
     }
 
-    fn start(&self, id: &str) -> Arc<AtomicBool> {
+    /// The removals of this process. Stopping one leaves the worktrees it has
+    /// not started ([`Watch::stop`]).
+    pub fn removals() -> &'static Jobs {
+        static JOBS: std::sync::OnceLock<Jobs> = std::sync::OnceLock::new();
+        JOBS.get_or_init(Default::default)
+    }
+
+    pub fn start(&self, id: &str) -> Arc<AtomicBool> {
         let stop = Arc::new(AtomicBool::new(false));
         self.running.lock().unwrap().push((id.to_string(), stop.clone()));
         stop
     }
 
-    fn finish(&self, stop: &Arc<AtomicBool>) {
+    pub fn finish(&self, stop: &Arc<AtomicBool>) {
         self.running.lock().unwrap().retain(|(_, running)| !Arc::ptr_eq(running, stop));
     }
 
-    /// Stop the estimates whose id starts with `prefix`.
+    /// Stop the jobs whose id starts with `prefix`.
     pub fn cancel(&self, prefix: &str) {
         for (id, stop) in self.running.lock().unwrap().iter() {
             if id.starts_with(prefix) {
@@ -873,7 +980,7 @@ fn walk_size(path: &Path, stop: &AtomicBool) -> Option<u64> {
 
 /// What removing the worktree at `path` would free, or `None` when the
 /// estimate was stopped. Only a worktree of an open project is measured.
-pub fn estimate_size(host: &Host<'_>, jobs: &SizeJobs, job: &str, project_path: &str, path: &str) -> anyhow::Result<Option<u64>> {
+pub fn estimate_size(host: &Host<'_>, jobs: &Jobs, job: &str, project_path: &str, path: &str) -> anyhow::Result<Option<u64>> {
     let asked = canonical(Path::new(project_path));
     let project = host.projects.iter().find(|project| same_dir(&canonical(Path::new(&project.path)), &asked)).ok_or_else(|| anyhow::anyhow!("that project is not open on this host"))?;
     let target = std::fs::canonicalize(path)?;
