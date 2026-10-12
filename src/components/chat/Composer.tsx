@@ -441,6 +441,8 @@ export function Composer({
           "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
           attach.dragging && "ring-2 ring-accent/60",
         )}
+        // What stays in the corner of the window (the clean-up indicator) keeps off this box.
+        data-composer-box
         {...attach.dropZoneProps}
       >
         {pickerOpen && (

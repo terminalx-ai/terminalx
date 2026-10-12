@@ -1,17 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { CleanupCandidate, CleanupProject, CleanupRemoveItem, CleanupResult } from "@terminalx/portable/workspace";
+import type { CleanupCandidate, CleanupProgress, CleanupProject, CleanupRemoveItem, CleanupResult } from "@terminalx/portable/workspace";
 
-const local = { scan: vi.fn(), size: vi.fn(), cancel: vi.fn(), remove: vi.fn() };
+const local = { scan: vi.fn(), size: vi.fn(), cancel: vi.fn(), remove: vi.fn(), stop: vi.fn() };
 const cloud = { scan: vi.fn(), size: vi.fn(), cancel: vi.fn(), remove: vi.fn() };
 const forgetWorkspaceSize = vi.fn();
+/** The backend's progress events, as the removal that is listening hears them. */
+const events = { run: null as string | null, listener: null as ((progress: CleanupProgress) => void) | null };
+const emit = (progress: CleanupProgress) => act(() => void events.listener?.(progress));
 
 vi.mock("@/lib/api", () => ({
   api: {
     worktreeCleanupScan: () => local.scan(),
     worktreeCleanupSize: (job: string, projectPath: string, path: string) => local.size(job, projectPath, path),
     worktreeCleanupCancelSizes: (prefix: string) => local.cancel(prefix),
-    worktreeCleanupRemove: (items: CleanupRemoveItem[]) => local.remove(items),
+    worktreeCleanupRemove: (items: CleanupRemoveItem[], run: string) => {
+      events.run = run;
+      return local.remove(items);
+    },
+    onWorktreeCleanupProgress: async (run: string, onProgress: (progress: CleanupProgress) => void) => {
+      events.listener = (progress) => events.run === run && onProgress(progress);
+      return () => (events.listener = null);
+    },
+    worktreeCleanupStop: async (run: string) => local.stop(run),
+    setQuitWarning: async () => undefined,
   },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
@@ -39,7 +51,9 @@ vi.mock("@/lib/cloudConnections", () => ({
 }));
 vi.mock("@/lib/cloudSessions", () => ({ managesOf: () => true }));
 
+import { getCleanupRun, resetCleanupRun } from "@/lib/cleanupRun";
 import { closeWorktreeCleanup, openWorktreeCleanup } from "@/lib/dialogs";
+import { STOPPED } from "@/lib/worktreeCleanup";
 import { WorktreeCleanupDialog } from "./WorktreeCleanupDialog";
 
 function candidate(projectPath: string, name: string, patch: Partial<CleanupCandidate> = {}): CleanupCandidate {
@@ -81,6 +95,8 @@ const beta: CleanupProject = { path: "/Users/me/beta", name: "beta", note: null,
 const remote: CleanupProject = { path: "/home/dev/repo", name: "repo", note: null, candidates: [main("/home/dev/repo"), candidate("/home/dev/repo", "far-yak")] };
 
 const box = (name: RegExp | string) => screen.getByRole("checkbox", { name }) as HTMLInputElement;
+const quiet = "/Users/me/alpha/.raccoon/worktrees/quiet-fox";
+const calm = "/Users/me/beta/.raccoon/worktrees/calm-elk";
 
 async function opened() {
   openWorktreeCleanup();
@@ -88,13 +104,42 @@ async function opened() {
   await screen.findByText("quiet-fox");
 }
 
+/** Confirm the removal of this computer's two safe worktrees; the backend answers when `answer` is called. */
+async function removing() {
+  let answer!: (results: CleanupResult[]) => Promise<void>;
+  local.remove.mockImplementation(
+    () =>
+      new Promise<CleanupResult[]>((resolve) => {
+        answer = (results) =>
+          act(async () => {
+            resolve(results);
+            await new Promise((settled) => setTimeout(settled, 0));
+          });
+      }),
+  );
+  await opened();
+  // Every size is in, so the review's figures go with the removal.
+  await waitFor(() => expect(screen.queryByText("Estimating sizes…")).toBeNull());
+  fireEvent.click(box("Select all safe worktrees on This computer"));
+  fireEvent.click(screen.getByRole("button", { name: /Review 2 worktrees/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Remove 2 worktrees/ }));
+  await waitFor(() => expect(local.remove).toHaveBeenCalledTimes(1));
+  return (results: CleanupResult[]) => answer(results);
+}
+
+const bar = () => screen.getByRole("progressbar", { name: "Worktrees cleaned up" });
+
 describe("WorktreeCleanupDialog", () => {
   afterEach(() => {
     cleanup();
-    act(() => closeWorktreeCleanup());
+    act(() => {
+      resetCleanupRun();
+      closeWorktreeCleanup();
+    });
   });
   beforeEach(() => {
     for (const mock of [...Object.values(local), ...Object.values(cloud), forgetWorkspaceSize]) mock.mockReset();
+    events.run = events.listener = null;
     local.scan.mockResolvedValue([alpha, beta]);
     cloud.scan.mockResolvedValue([remote]);
     local.size.mockResolvedValue(1_000);
@@ -149,6 +194,7 @@ describe("WorktreeCleanupDialog", () => {
     ]);
     cloud.remove.mockImplementation(async (items: CleanupRemoveItem[]) => [removed(items[0]!, { outcome: "failed", reason: "Could not remove the worktree", freedBytes: 0, keptBranch: null })]);
     await opened();
+    await waitFor(() => expect(screen.queryByText("Estimating sizes…")).toBeNull());
     // Scope: everything safe on this computer, plus one on the cloud workspace.
     fireEvent.click(box("Select all safe worktrees on This computer"));
     fireEvent.click(box(/far-yak/));
@@ -159,11 +205,12 @@ describe("WorktreeCleanupDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: /Remove 3 worktrees/ }));
 
     await screen.findByText(/Removed 1 and freed 5000 B\. 1 skipped, 1 failed\./);
+    // Each goes with the size the review measured, so its host does not walk it again.
     expect(local.remove).toHaveBeenCalledWith([
-      { projectPath: "/Users/me/alpha", path: "/Users/me/alpha/.raccoon/worktrees/quiet-fox", token: "token-quiet-fox", deleteSessions: false, acceptIgnored: false },
-      { projectPath: "/Users/me/beta", path: "/Users/me/beta/.raccoon/worktrees/calm-elk", token: "token-calm-elk", deleteSessions: false, acceptIgnored: false },
+      { projectPath: "/Users/me/alpha", path: quiet, token: "token-quiet-fox", deleteSessions: false, acceptIgnored: false, estimatedBytes: 1_000 },
+      { projectPath: "/Users/me/beta", path: calm, token: "token-calm-elk", deleteSessions: false, acceptIgnored: false, estimatedBytes: 1_000 },
     ]);
-    expect(cloud.remove).toHaveBeenCalledWith([{ projectPath: "/home/dev/repo", path: "/home/dev/repo/.raccoon/worktrees/far-yak", token: "token-far-yak", deleteSessions: false, acceptIgnored: false }]);
+    expect(cloud.remove).toHaveBeenCalledWith([{ projectPath: "/home/dev/repo", path: "/home/dev/repo/.raccoon/worktrees/far-yak", token: "token-far-yak", deleteSessions: false, acceptIgnored: false, estimatedBytes: 7_000 }]);
     const results = within(screen.getByRole("list", { name: "Results" }));
     expect(results.getByText(/changed since it was reviewed/)).toBeTruthy();
     expect(results.getByText("Could not remove the worktree")).toBeTruthy();
@@ -197,6 +244,113 @@ describe("WorktreeCleanupDialog", () => {
     expect(screen.getByRole("switch", { name: "Allow worktrees with ignored local files" }).getAttribute("aria-checked")).toBe("false");
     expect(screen.getByRole("switch", { name: "Also delete conversation history" }).getAttribute("aria-checked")).toBe("false");
     expect(box(/env-cat/).disabled).toBe(true);
+  });
+
+  it("shows how far the removal is while it runs: the worktree, its step, the space freed and each outcome", async () => {
+    const answer = await removing();
+    expect(bar().getAttribute("aria-valuenow")).toBe("0");
+    expect(bar().getAttribute("aria-valuemax")).toBe("2");
+    expect(bar().getAttribute("aria-valuetext")).toBe("0 of 2 worktrees done");
+    const now = within(screen.getByLabelText("Being cleaned up now"));
+    expect(now.getByText("quiet-fox")).toBeTruthy();
+    expect(now.getByText(/on This computer/)).toBeTruthy();
+    // Nothing invites a new scan while worktrees are being removed, and the keyboard lands on Hide.
+    expect(screen.queryByRole("button", { name: /Scan again/ })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Hide" }));
+
+    emit({ kind: "step", index: 0, total: 2, path: quiet, step: "checking" });
+    expect(now.getByText("Checking it again…")).toBeTruthy();
+    emit({ kind: "step", index: 0, total: 2, path: quiet, step: "removing" });
+    expect(now.getByText("Removing…")).toBeTruthy();
+    emit({ kind: "finished", index: 0, total: 2, result: removed({ projectPath: "/Users/me/alpha", path: quiet, token: "" }, { freedBytes: 1_000, freedEstimated: true }) });
+    emit({ kind: "started", index: 1, total: 2, projectPath: "/Users/me/beta", path: calm });
+
+    // The counter and the space freed move after each worktree, not only at the end.
+    expect(bar().getAttribute("aria-valuenow")).toBe("1");
+    expect(screen.getByText("1 of 2 worktrees done")).toBeTruthy();
+    expect(screen.getByText("1000 B of about 2000 B freed")).toBeTruthy();
+    expect(screen.getByText("1 removed · 0 skipped · 0 failed")).toBeTruthy();
+    expect(now.getByText("calm-elk")).toBeTruthy();
+    const results = within(screen.getByRole("list", { name: "Results" }));
+    expect(results.getAllByRole("listitem")).toHaveLength(1);
+    expect(results.getByText("quiet-fox")).toBeTruthy();
+    expect(results.getByText("about 1000 B")).toBeTruthy();
+
+    await answer([
+      removed({ projectPath: "/Users/me/alpha", path: quiet, token: "" }, { freedBytes: 1_000, freedEstimated: true }),
+      removed({ projectPath: "/Users/me/beta", path: calm, token: "" }, { outcome: "skipped", reason: "It changed since it was reviewed, so it was left alone.", freedBytes: 0, keptBranch: null }),
+    ]);
+    // The same view is now the result, and says the figure is the review's.
+    expect(screen.getByText("Removed 1 and freed about 1000 B. 1 skipped, 0 failed.")).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(within(screen.getByRole("list", { name: "Results" })).getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /Scan again/ })).toBeTruthy();
+  });
+
+  it("can be hidden while it runs: the run carries on, and opening the clean-up again comes back to it", async () => {
+    const answer = await removing();
+    const scans = local.scan.mock.calls.length;
+    emit({ kind: "finished", index: 0, total: 2, result: removed({ projectPath: "/Users/me/alpha", path: quiet, token: "" }, { freedBytes: 1_000 }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(getCleanupRun()?.status).toBe("running");
+    // It is still heard from while nothing shows it.
+    emit({ kind: "step", index: 1, total: 2, path: calm, step: "removing" });
+
+    act(() => openWorktreeCleanup());
+    expect(bar().getAttribute("aria-valuenow")).toBe("1");
+    expect(within(screen.getByLabelText("Being cleaned up now")).getByText("Removing…")).toBeTruthy();
+    // The same run: nothing was scanned again and nothing was sent twice.
+    expect(local.scan).toHaveBeenCalledTimes(scans);
+    expect(local.remove).toHaveBeenCalledTimes(1);
+
+    // Escape and the close button hide it the same way; neither stops anything.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    act(() => openWorktreeCleanup());
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(local.stop).not.toHaveBeenCalled();
+    expect(getCleanupRun()?.status).toBe("running");
+
+    // It finishes while hidden. Its result is kept until it is read.
+    await answer([removed({ projectPath: "/Users/me/alpha", path: quiet, token: "" }, { freedBytes: 1_000 }), removed({ projectPath: "/Users/me/beta", path: calm, token: "" }, { outcome: "failed", reason: "Could not remove the worktree", freedBytes: 0, keptBranch: null })]);
+    expect(getCleanupRun()?.status).toBe("done");
+    act(() => openWorktreeCleanup());
+    expect(screen.getByText("Removed 1 and freed 1000 B. 0 skipped, 1 failed.")).toBeTruthy();
+    expect(screen.getByText("Could not remove the worktree")).toBeTruthy();
+    expect(local.scan).toHaveBeenCalledTimes(scans);
+    expect(forgetWorkspaceSize.mock.calls).toEqual([[quiet]]);
+
+    // Read: the next opening is a new clean-up, and scans.
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(getCleanupRun()).toBeNull();
+    act(() => openWorktreeCleanup());
+    await waitFor(() => expect(local.scan).toHaveBeenCalledTimes(scans + 1));
+    await screen.findByText("quiet-fox");
+  });
+
+  it("stop lets the worktree being removed finish and leaves the rest, reported as not attempted", async () => {
+    const answer = await removing();
+    emit({ kind: "step", index: 0, total: 2, path: quiet, step: "removing" });
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(local.stop).toHaveBeenCalledWith(events.run);
+    expect((screen.getByRole("button", { name: "Stopping…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/The worktree being removed is finished first/)).toBeTruthy();
+    // Still running until the backend has finished the one it was on.
+    expect(bar()).toBeTruthy();
+
+    await answer([removed({ projectPath: "/Users/me/alpha", path: quiet, token: "" }), removed({ projectPath: "/Users/me/beta", path: calm, token: "" }, { outcome: "skipped", reason: STOPPED, freedBytes: 0, keptBranch: null })]);
+    expect(screen.getByText("Removed 1 and freed 5000 B. 1 skipped, 0 failed.")).toBeTruthy();
+    expect(screen.getByText("Not attempted: the clean-up was stopped.")).toBeTruthy();
+
+    // From the result, "Scan again" starts a new clean-up.
+    const scans = local.scan.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /Scan again/ }));
+    expect(getCleanupRun()).toBeNull();
+    await waitFor(() => expect(local.scan).toHaveBeenCalledTimes(scans + 1));
+    await screen.findByText("quiet-fox");
   });
 
   it("size estimation can be stopped without closing the view", async () => {

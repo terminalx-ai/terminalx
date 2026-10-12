@@ -21,6 +21,10 @@
 //! reason it is kept and can only be removed from the workspace dialog,
 //! which asks for the second confirmation. Deletes are direct; nothing goes
 //! to the Trash.
+//!
+//! A removal says how far it is while it runs ([`Progress`]): first that
+//! everything is being looked at again, then each leftover as it starts and
+//! what it came to.
 
 use std::collections::HashSet;
 use std::io::BufRead;
@@ -78,6 +82,21 @@ pub struct Removal {
     pub removed: Vec<String>,
     pub failed: Vec<Failed>,
     pub freed_bytes: u64,
+}
+
+/// The desktop's event for [`Progress`], with the id of the removal it belongs to.
+pub const PROGRESS_EVENT: &str = "leftover_cleanup_progress";
+
+/// How far a removal is. `index` counts from 0 over the `total` leftovers
+/// that were asked for.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum Progress {
+    /// Everything is scanned again before anything is deleted.
+    Checking { total: usize },
+    Started { index: usize, total: usize, id: String },
+    /// `error` says why it was kept; `None` when it was deleted.
+    Finished { index: usize, total: usize, id: String, freed_bytes: u64, error: Option<String> },
 }
 
 /// Everything the scan reads, so tests can hand it temporary places.
@@ -430,20 +449,25 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>) -> std::result::Result
 
 /// Remove the leftovers named by `ids`. Each is looked up in a fresh scan:
 /// one that is no longer a leftover, or that the scan would keep, is
-/// reported as failed and left alone.
-pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String]) -> Removal {
-    let fresh = scan_sources(sources);
-    let mut removal = Removal::default();
+/// reported as failed and left alone. `report` hears about each as it goes;
+/// what is returned is what happened.
+pub(crate) fn remove_from_sources(sources: &Sources<'_>, ids: &[String], report: &dyn Fn(&Progress)) -> Removal {
     // Worktrees first: removing one also removes its branch when it can.
     let mut wanted: Vec<&String> = ids.iter().collect();
     wanted.sort_by_key(|id| !id.starts_with("worktree:"));
     wanted.dedup();
-    for id in wanted {
+    let total = wanted.len();
+    report(&Progress::Checking { total });
+    let fresh = scan_sources(sources);
+    let mut removal = Removal::default();
+    for (index, id) in wanted.into_iter().enumerate() {
+        report(&Progress::Started { index, total, id: id.clone() });
         let outcome = match fresh.iter().find(|leftover| &leftover.id == id) {
             None => Err("This is no longer a leftover; it was not deleted.".to_string()),
             Some(Leftover { kept_because: Some(reason), .. }) => Err(reason.clone()),
             Some(leftover) => remove_one(leftover, sources),
         };
+        report(&Progress::Finished { index, total, id: id.clone(), freed_bytes: *outcome.as_ref().unwrap_or(&0), error: outcome.as_ref().err().cloned() });
         match outcome {
             Ok(freed) => {
                 removal.freed_bytes += freed;
@@ -469,8 +493,8 @@ pub fn scan() -> anyhow::Result<Vec<Leftover>> {
 }
 
 /// Delete the confirmed leftovers. See [`remove_from_sources`].
-pub fn remove(ids: &[String]) -> anyhow::Result<Removal> {
-    with_sources(|sources| remove_from_sources(sources, ids))
+pub fn remove(ids: &[String], report: &dyn Fn(&Progress)) -> anyhow::Result<Removal> {
+    with_sources(|sources| remove_from_sources(sources, ids, report))
 }
 
 #[cfg(test)]
@@ -539,7 +563,15 @@ mod tests {
 
         fn remove(&self, sessions: &[SessionEntry], ids: &[&str]) -> Removal {
             let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-            remove_from_sources(&self.sources(std::slice::from_ref(&self.project), sessions), &ids)
+            remove_from_sources(&self.sources(std::slice::from_ref(&self.project), sessions), &ids, &|_| {})
+        }
+
+        /// Remove `ids`, with everything the removal reported on the way.
+        fn remove_watched(&self, ids: &[&str]) -> (Removal, Vec<Progress>) {
+            let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+            let seen = std::sync::Mutex::new(Vec::new());
+            let removal = remove_from_sources(&self.sources(std::slice::from_ref(&self.project), &[]), &ids, &|progress| seen.lock().unwrap().push(progress.clone()));
+            (removal, seen.into_inner().unwrap())
         }
 
         fn sources<'a>(&'a self, projects: &'a [Project], sessions: &'a [SessionEntry]) -> Sources<'a> {
@@ -1026,6 +1058,42 @@ mod tests {
     fn the_real_entry_points_read_only_the_temporary_home() {
         let _home = crate::store::temp_home();
         assert_eq!(scan().unwrap(), vec![]);
-        assert_eq!(remove(&["worktree:/:x".to_string()]).unwrap().removed, Vec::<String>::new());
+        assert_eq!(remove(&["worktree:/:x".to_string()], &|_| {}).unwrap().removed, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_removal_reports_each_leftover_in_order_as_it_goes() {
+        let f = Fixture::new();
+        let wt = f.worktree("quiet-amber-fox");
+        std::fs::write(wt.join("big.bin"), vec![7u8; 64 * 1024]).unwrap();
+        std::fs::write(f.path().join(".git/info/exclude"), "/.raccoon/\nbig.bin\n").unwrap();
+        let dirty = f.worktree("dirty-red-owl");
+        std::fs::write(dirty.join("notes.txt"), "unsaved").unwrap();
+        sh(f.path(), &["branch", "raccoon/idle", "main"]);
+        let worktree = format!("worktree:{}:quiet-amber-fox", f.project.path);
+        let kept = format!("worktree:{}:dirty-red-owl", f.project.path);
+        let branch = format!("branch:{}:raccoon/idle", f.project.path);
+
+        // Asked for in another order: worktrees still go first, and that is the order reported.
+        let (removal, progress) = f.remove_watched(&[&branch, &kept, &worktree]);
+        let told: Vec<String> = progress
+            .iter()
+            .map(|progress| match progress {
+                Progress::Checking { total } => format!("checking {total}"),
+                Progress::Started { index, total, id } => format!("started {index}/{total} {}", id.rsplit(':').next().unwrap()),
+                Progress::Finished { index, error, .. } => format!("{} {index}", if error.is_some() { "kept" } else { "deleted" }),
+            })
+            .collect();
+        assert_eq!(told, ["checking 3", "started 0/3 dirty-red-owl", "kept 0", "started 1/3 quiet-amber-fox", "deleted 1", "started 2/3 raccoon/idle", "deleted 2"]);
+        // What was reported adds up to what the call returns.
+        let freed: u64 = progress.iter().map(|progress| if let Progress::Finished { freed_bytes, .. } = progress { *freed_bytes } else { 0 }).sum();
+        assert!(freed >= 64 * 1024);
+        assert_eq!(removal.freed_bytes, freed);
+        assert_eq!(removal.removed, vec![worktree.clone(), branch.clone()]);
+        assert_eq!(removal.failed.len(), 1);
+        let Progress::Finished { error, .. } = &progress[2] else { panic!("{:?}", progress[2]) };
+        assert_eq!(error.as_ref(), Some(&removal.failed[0].error));
+        assert_eq!(serde_json::to_value(&progress[4]).unwrap(), serde_json::json!({ "kind": "finished", "index": 1, "total": 3, "id": worktree, "freedBytes": freed, "error": null }));
+        assert!(!wt.exists() && dirty.join("notes.txt").exists());
     }
 }

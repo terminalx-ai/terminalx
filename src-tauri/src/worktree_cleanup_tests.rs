@@ -151,11 +151,22 @@ impl Fixture {
     }
 
     fn item(&self, candidate: &Candidate) -> RemoveItem {
-        RemoveItem { project_path: candidate.project_path.clone(), path: candidate.path.clone(), token: candidate.token.clone(), delete_sessions: false, accept_ignored: false }
+        RemoveItem { project_path: candidate.project_path.clone(), path: candidate.path.clone(), token: candidate.token.clone(), delete_sessions: false, accept_ignored: false, estimated_bytes: None }
     }
 
     fn remove(&self, items: &[RemoveItem]) -> Vec<ItemResult> {
-        self.with_host(&[], None, |host| remove(host, &*self.events, items))
+        self.with_host(&[], None, |host| remove(host, &*self.events, items, Watch::default()))
+    }
+
+    /// Remove `items`, with everything the removal reported on the way.
+    fn remove_watched(&self, items: &[RemoveItem], stop: Option<&AtomicBool>, on: &dyn Fn(&Progress)) -> (Vec<ItemResult>, Vec<Progress>) {
+        let seen = Mutex::new(Vec::new());
+        let report = |progress: &Progress| {
+            seen.lock().unwrap().push(progress.clone());
+            on(progress);
+        };
+        let done = self.with_host(&[], None, |host| remove(host, &*self.events, items, Watch { report: Some(&report), stop }));
+        (done, seen.into_inner().unwrap())
     }
 
     fn remove_one(&self, item: RemoveItem) -> ItemResult {
@@ -233,7 +244,7 @@ fn the_main_directory_is_protected_whatever_it_is_called_or_asked() {
     let session = f.session(&alpha, &alpha, TabStatus::Idle);
     for (path, token) in [(alpha.clone(), main.token.clone()), (alpha.clone(), "forged".into()), (alias, main.token), (opened.clone(), f.find(&opened).token), (outer.clone(), found.token)] {
         for project_path in [alpha.clone(), opened.clone()] {
-            let item = RemoveItem { project_path: project_path.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: token.clone(), delete_sessions: true, accept_ignored: true };
+            let item = RemoveItem { project_path: project_path.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: token.clone(), delete_sessions: true, accept_ignored: true, estimated_bytes: None };
             let done = f.remove_one(item);
             assert_eq!(done.outcome, Outcome::Skipped, "{}: {:?}", path.display(), done.reason);
         }
@@ -514,9 +525,9 @@ fn a_cloud_host_removes_only_inside_its_workspace_and_never_its_root() {
 
     // A path that belongs to another host (the desktop's project) is not interpreted here.
     let local = f.alpha();
-    let foreign = RemoveItem { project_path: local.to_string_lossy().into_owned(), path: local.join(".raccoon/worktrees/x").to_string_lossy().into_owned(), token: "t".into(), delete_sessions: false, accept_ignored: false };
+    let foreign = RemoveItem { project_path: local.to_string_lossy().into_owned(), path: local.join(".raccoon/worktrees/x").to_string_lossy().into_owned(), token: "t".into(), delete_sessions: false, accept_ignored: false, estimated_bytes: None };
     let items = [f.item(&of(&inside)), f.item(&of(&outside)), f.item(&of(&repo)), foreign, RemoveItem { path: root.to_string_lossy().into_owned(), ..f.item(&of(&inside)) }];
-    let done = f.with_host(&protected, Some(&root), |host| remove(host, &*f.events, &items));
+    let done = f.with_host(&protected, Some(&root), |host| remove(host, &*f.events, &items, Watch::default()));
     assert_eq!(done.iter().map(|item| item.outcome).collect::<Vec<_>>(), vec![Outcome::Removed, Outcome::Skipped, Outcome::Skipped, Outcome::Skipped, Outcome::Skipped]);
     assert!(!inside.exists() && outside.exists() && repo.join("a.txt").exists() && local.join("a.txt").exists());
 }
@@ -573,7 +584,7 @@ fn a_folder_that_went_missing_is_not_taken_for_a_removed_worktree() {
     .unwrap();
     let inside = index::get(&inside.id).unwrap();
     for path in [gone.clone(), f.base.join("never-existed")] {
-        let forged = RemoveItem { project_path: alpha.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: "forged".into(), delete_sessions: true, accept_ignored: true };
+        let forged = RemoveItem { project_path: alpha.to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), token: "forged".into(), delete_sessions: true, accept_ignored: true, estimated_bytes: None };
         assert_eq!(f.remove_one(forged).outcome, Outcome::Skipped);
     }
     assert_eq!(index::get(&inside.id).unwrap(), inside);
@@ -619,7 +630,7 @@ fn a_size_estimate_can_be_stopped_and_measures_only_worktrees() {
     let alpha = f.alpha();
     let wt = f.pushed(&alpha, "sized");
     std::fs::write(wt.join("big.bin"), vec![0u8; 64 * 1024]).unwrap();
-    let jobs = SizeJobs::default();
+    let jobs = Jobs::default();
     let project = alpha.to_string_lossy().into_owned();
     f.with_host(&[], None, |host| {
         let size = estimate_size(host, &jobs, "a", &project, wt.to_str().unwrap()).unwrap();
@@ -631,4 +642,82 @@ fn a_size_estimate_can_be_stopped_and_measures_only_worktrees() {
     jobs.cancel("peer:");
     assert_eq!(walk_size(&wt, &stop), None);
     assert!(wt.join("big.bin").exists());
+}
+
+/// What a removal reported, one word per event: `started 0`, `checking 0`, `removed 0`.
+fn told(progress: &[Progress]) -> Vec<String> {
+    progress
+        .iter()
+        .map(|progress| match progress {
+            Progress::Started { index, .. } => format!("started {index}"),
+            Progress::Step { index, step, .. } => format!("{} {index}", serde_json::to_value(step).unwrap().as_str().unwrap()),
+            Progress::Finished { index, result, .. } => format!("{} {index}", serde_json::to_value(result.outcome).unwrap().as_str().unwrap()),
+        })
+        .collect()
+}
+
+#[test]
+fn a_removal_reports_each_worktree_in_order_as_it_goes() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    let first = f.pushed(&alpha, "first");
+    let changed = f.pushed(&alpha, "changed");
+    let last = f.pushed(&alpha, "last");
+    f.session(&alpha, &last, TabStatus::Idle);
+    // The second one changes after the review; the third was measured by it.
+    let items = [f.item(&f.find(&first)), f.item(&f.find(&changed)), RemoveItem { estimated_bytes: Some(4_096), ..f.item(&f.find(&last)) }];
+    std::fs::write(changed.join("late.txt"), "late").unwrap();
+
+    // Each worktree is finished, and said to be, before the next is touched.
+    let on = |progress: &Progress| {
+        if let Progress::Finished { index: 0, result, .. } = progress {
+            assert_eq!(result.outcome, Outcome::Removed);
+            assert!(!first.exists() && last.exists(), "the first is gone and the last not yet started");
+        }
+    };
+    let (done, progress) = f.remove_watched(&items, None, &on);
+    assert_eq!(
+        told(&progress),
+        ["started 0", "measuring 0", "checking 0", "removing 0", "sessions 0", "removed 0", "started 1", "measuring 1", "checking 1", "skipped 1", "started 2", "checking 2", "removing 2", "sessions 2", "removed 2"]
+    );
+    // What was reported for each is what the call returns for it.
+    let finished: Vec<&ItemResult> = progress.iter().filter_map(|progress| if let Progress::Finished { result, .. } = progress { Some(result) } else { None }).collect();
+    assert_eq!(finished, done.iter().collect::<Vec<_>>());
+    assert!(progress.iter().all(|progress| matches!(progress, Progress::Started { total: 3, .. } | Progress::Step { total: 3, .. } | Progress::Finished { total: 3, .. })));
+    assert_eq!(serde_json::to_value(&progress[0]).unwrap(), serde_json::json!({ "kind": "started", "index": 0, "total": 3, "projectPath": items[0].project_path, "path": items[0].path }));
+    assert_eq!(serde_json::to_value(&progress[1]).unwrap(), serde_json::json!({ "kind": "step", "index": 0, "total": 3, "path": items[0].path, "step": "measuring" }));
+    assert_eq!(serde_json::to_value(&progress[5]).unwrap()["result"]["outcome"], "removed");
+
+    // A walk of the tree is exact; the review's figure is passed on as the estimate it is.
+    assert!(done[0].freed_bytes > 0 && !done[0].freed_estimated);
+    assert_eq!((done[2].freed_bytes, done[2].freed_estimated), (4_096, true));
+    assert_eq!((done[1].freed_bytes, done[1].freed_estimated), (0, false));
+    assert!(!first.exists() && changed.exists() && !last.exists());
+}
+
+#[test]
+fn a_removal_told_to_stop_finishes_the_worktree_it_is_on_and_leaves_the_rest() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    let paths = [f.pushed(&alpha, "one"), f.pushed(&alpha, "two"), f.pushed(&alpha, "three")];
+    let items: Vec<RemoveItem> = paths.iter().map(|path| f.item(&f.find(path))).collect();
+    let stop = AtomicBool::new(false);
+    // Told to stop while git is removing the first: that one is not interrupted.
+    let on = |progress: &Progress| {
+        if matches!(progress, Progress::Step { index: 0, step: Step::Removing, .. }) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    };
+    let (done, progress) = f.remove_watched(&items, Some(&stop), &on);
+    assert_eq!(done.iter().map(|item| item.outcome).collect::<Vec<_>>(), [Outcome::Removed, Outcome::Skipped, Outcome::Skipped]);
+    assert_eq!(done[1].reason.as_deref(), Some(STOPPED));
+    assert_eq!(told(&progress), ["started 0", "measuring 0", "checking 0", "removing 0", "sessions 0", "removed 0", "skipped 1", "skipped 2"]);
+    assert!(!paths[0].exists() && paths[1].join("two.txt").exists() && paths[2].join("three.txt").exists());
+    // Nothing of the first is left half done, and the others are as they were reviewed.
+    assert!(!git::list_worktrees(&alpha).unwrap().iter().any(|(path, _)| Path::new(path) == paths[0]));
+    assert_eq!(f.find(&paths[1]).token, items[1].token);
+
+    // Stopping is per removal: the next one runs as usual.
+    let (again, _) = f.remove_watched(&items[1..], None, &|_| {});
+    assert_eq!(again.iter().map(|item| item.outcome).collect::<Vec<_>>(), [Outcome::Removed, Outcome::Removed]);
 }

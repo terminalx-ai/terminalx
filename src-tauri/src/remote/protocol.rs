@@ -38,6 +38,10 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   into its local mirror. Read-only; the copies are read with `fs.read`.
 /// - `cleanup/1`: the bulk worktree clean-up (`worktree_cleanup.rs`). The
 ///   runtime inspects and removes its own worktrees; a client only names them.
+///   While `cleanup.remove` runs, its caller is sent `cleanup.progress`
+///   notifications (#426): added without a new version, since a client that
+///   does not know them ignores them and one that does needs nothing from a
+///   runtime that does not send them.
 /// - `workspace/1`: one session's worktree, for the removal dialog a desktop
 ///   shows: `workspace.disposition` and `workspace.remove`. The worktree is
 ///   named by its session, never by a path.

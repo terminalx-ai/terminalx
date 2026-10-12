@@ -996,7 +996,7 @@ impl WorkspaceRpc {
             "cleanup.scan" => self.cleanup_scan(),
             "cleanup.size" => self.cleanup_size(peer, params),
             "cleanup.cancel" => self.cleanup_cancel(peer),
-            "cleanup.remove" => self.cleanup_remove(params),
+            "cleanup.remove" => self.cleanup_remove(peer, params),
             "workspace.disposition" => self.workspace_disposition(peer, params),
             "workspace.remove" => self.workspace_remove(peer, params),
             git if git.starts_with("git.") => self
@@ -2167,27 +2167,37 @@ impl WorkspaceRpc {
         let job = format!("peer:{}:{}", peer.id, required_str(&params, "job")?);
         let (project, path) = (required_str(&params, "projectPath")?, required_str(&params, "path")?);
         let size = self
-            .with_cleanup_host(|host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &job, project, path))?
+            .with_cleanup_host(|host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::Jobs::sizes(), &job, project, path))?
             .map_err(|error| RpcError::invalid(format!("{error:#}")))?;
         Ok(json!({ "bytes": size }))
     }
 
     fn cleanup_cancel(&self, peer: &Peer) -> Result<Value, RpcError> {
-        crate::worktree_cleanup::SizeJobs::global().cancel(&format!("peer:{}:", peer.id));
+        crate::worktree_cleanup::Jobs::sizes().cancel(&format!("peer:{}:", peer.id));
         Ok(json!({}))
     }
 
     /// `cleanup/1`: remove the named worktrees. Each is inspected again here,
     /// on the machine that holds it, and left alone unless it is still what
     /// its token stands for. Nothing running is stopped.
-    fn cleanup_remove(&self, params: Value) -> Result<Value, RpcError> {
+    ///
+    /// While it runs the caller, and nobody else, is sent `cleanup.progress`
+    /// notifications: each worktree as it starts, the step it is on, and what
+    /// it came to. `run` in them is the request's `clientRequestId`. The
+    /// answer is what happened; a resent request gets it without them.
+    fn cleanup_remove(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        use crate::worktree_cleanup::{OfRun, Progress, Watch};
         #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Params {
             items: Vec<crate::worktree_cleanup::RemoveItem>,
+            #[serde(default)]
+            client_request_id: String,
         }
         let p: Params = parse(params)?;
         let before = index::load().map_err(RpcError::internal)?;
-        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items))?;
+        let report = |progress: &Progress| peer.notify("cleanup.progress", json!(OfRun { run: &p.client_request_id, progress }));
+        let results = self.with_cleanup_host(|host| crate::worktree_cleanup::remove(host, &*self.sink, &p.items, Watch { report: Some(&report), stop: None }))?;
         // What the runtime still holds for sessions that were deleted with
         // their worktree, as after `session.delete`.
         let deleted: HashSet<String> = results.iter().flat_map(|done| done.sessions_deleted.iter().cloned()).collect();

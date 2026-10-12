@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -95,6 +96,39 @@ const replace = async () => {
 };
 
 describe("organization provider controls", () => {
+  it("loads once when it opens, and the controls stay once they are shown", async () => {
+    await ready();
+    // Run whatever the first load left pending: it must not start a second one.
+    await act(async () => {});
+    expect(api.cloudProviders).toHaveBeenCalledTimes(1);
+    expect(api.cloudProvider).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Loading provider connection…")).toBeNull();
+    expect(screen.getByRole("button", { name: "Replace / validate key" })).toBeTruthy();
+  });
+  it("loads the chosen provider's connection, once, when the provider is changed", async () => {
+    const box = (await api.cloudProviders()).providers[0];
+    vi.mocked(api.cloudProviders).mockResolvedValue({
+      providers: [box, { ...box, id: "hetzner", displayName: "Hetzner" }],
+    });
+    vi.mocked(api.cloudProvider).mockImplementation(async (id) => ({
+      ...structuredClone(detail),
+      provider: id,
+      providerAccount: id === "hetzner" ? "Hetzner account" : "Original account",
+    }));
+    await ready();
+    vi.mocked(api.cloudProviders).mockClear();
+    vi.mocked(api.cloudProvider).mockClear();
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "hetzner" },
+    });
+    await screen.findByText("Hetzner account");
+    await act(async () => {});
+    expect(api.cloudProviders).toHaveBeenCalledTimes(1);
+    expect(api.cloudProvider).toHaveBeenCalledTimes(1);
+    expect(api.cloudProvider).toHaveBeenCalledWith("hetzner");
+    expect((screen.getByRole("combobox", { name: "Provider" }) as HTMLSelectElement).value).toBe("hetzner");
+    expect(screen.queryByText("Loading provider connection…")).toBeNull();
+  });
   it("shows members an admin action with no key controls or account metadata", async () => {
     detail.canManage = false;
     detail.state = "attention-required";

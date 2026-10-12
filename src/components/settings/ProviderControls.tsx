@@ -55,13 +55,16 @@ export function ProviderControls({
   const epoch = useRef(0);
   const provider = providers.find((item) => item.id === selected);
 
-  const refresh = useCallback(async () => {
+  // `preferred` is an argument, not the `selected` state: a load that settles on a
+  // provider must not change this callback, or the effect below would run it a
+  // second time and put the controls it had just shown back behind "Loading…".
+  const refresh = useCallback(async (preferred: string) => {
     const request = ++epoch.current;
     setLoading(true);
     try {
       const result = await api.cloudProviders();
       const next =
-        result.providers.find((item) => item.id === selected) ??
+        result.providers.find((item) => item.id === preferred) ??
         result.providers[0];
       const detail = next ? await api.cloudProvider(next.id) : null;
       if (request !== epoch.current) return;
@@ -76,10 +79,10 @@ export function ProviderControls({
     } finally {
       if (request === epoch.current) setLoading(false);
     }
-  }, [selected]);
+  }, []);
 
   useEffect(() => {
-    void refresh();
+    void refresh("");
     return () => {
       epoch.current++;
     };
@@ -101,12 +104,12 @@ export function ProviderControls({
       setConsented(false);
       setDisconnecting(false);
       setDisposition("");
-      await refresh();
+      await refresh(selected);
       setNotice(done);
     } catch (failure) {
       if (request === epoch.current) {
         setError(providerActionMessage(failure));
-        await refresh();
+        await refresh(selected);
       }
     } finally {
       setBusy(false);
@@ -146,6 +149,7 @@ export function ProviderControls({
               setDisposition("");
               setError(null);
               setNotice(null);
+              void refresh(event.target.value);
             }}
           >
             {!providers.length && (
@@ -165,7 +169,7 @@ export function ProviderControls({
           onClick={() => {
             setError(null);
             setNotice(null);
-            void refresh();
+            void refresh(selected);
           }}
         >
           Refresh

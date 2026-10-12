@@ -34,6 +34,7 @@ import { SessionDialogs } from "@/components/session/SessionDialogs";
 import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
+import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
@@ -126,6 +127,11 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  const openStorageSettings = useCallback(() => {
+    setSettingsTab("storage");
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
@@ -158,6 +164,8 @@ export function AppShell() {
       <div className="pointer-events-none fixed bottom-8 right-4 z-(--z-toast) flex max-h-[calc(100dvh-3rem)] w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-2">
         <StarReminder />
         <Toasts />
+        {/* Last, so it keeps the corner and the toasts stack above it. */}
+        <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
       <SessionDialogs />
