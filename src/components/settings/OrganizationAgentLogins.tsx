@@ -34,11 +34,37 @@ interface SignIn {
   replaceAsked?: boolean;
 }
 
+const MANAGERS_ONLY = "only workspaces that nobody but owners and admins can drive";
+
+/**
+ * Who may use a login that is about to be stored. The page offers no choice
+ * of scope, so the app sends none and the account service decides: a new
+ * login takes the service's default, and one that replaces a login of the
+ * same kind keeps that login's scope (a login someone narrowed is not
+ * widened by connecting again). A login of another kind counts as new.
+ */
+export function agentLoginReach(stored: AgentLogin | undefined, authKind: AgentLogin["authKind"], organization: string): { kept: boolean; lead: string; who: string; tail: string } {
+  const replaced = stored && stored.state !== "disconnected" && stored.authKind === authKind ? stored : undefined;
+  const everyone = { who: "every member's", tail: ` cloud workspaces of ${organization}` };
+  if (!replaced) return { kept: false, lead: "By default, agents in ", ...everyone, tail: `${everyone.tail} may run on this login.` };
+  if (replaced.sharedUse === "managers") return { kept: true, lead: "This keeps who can use the login now: ", who: MANAGERS_ONLY, tail: ` in ${organization}.` };
+  // A server from before the scope existed says nothing, and shared every login with the organization.
+  if (!replaced.sharedUse || replaced.sharedUse === "organization") return { kept: true, lead: "This keeps who can use the login now: agents in ", ...everyone, tail: `${everyone.tail}.` };
+  return { kept: true, lead: "This keeps ", who: "who can use the login now", tail: `, as the account service has it for ${organization}.` };
+}
+
+/** What the page says once a login is stored: who it reaches, from the service's own answer when there is one. */
+export function connectedNotice(agent: string, login: Pick<AgentLogin, "sharedUse"> | null | undefined): string {
+  return login?.sharedUse === "managers"
+    ? `${agent} is connected for this organization's cloud workspaces: ${MANAGERS_ONLY}.`
+    : `${agent} is connected for this organization's cloud workspaces.`;
+}
+
 /** What to say after trying to finish a sign-in, and whether the attempt is over. */
 export function signInOutcome(outcome: ClaudeLoginOutcome): { done: boolean; over: boolean; text: string } {
   switch (outcome.status) {
     case "complete":
-      return { done: true, over: true, text: "Claude Code is connected for this organization's cloud workspaces. The account service keeps this login and renews it." };
+      return { done: true, over: true, text: `${connectedNotice("Claude Code", outcome.credential)} The account service keeps this login and renews it.` };
     case "code-invalid":
       return {
         done: false,
@@ -133,7 +159,7 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
     return { text: `Expired ${new Date(lent.at).toLocaleString()} (${how}${who}): agents can no longer sign in with it. Connect a login again.`, warn: true };
   }
   // The service's rule for this scope is about who can drive a workspace, not who created it.
-  const scope = login.sharedUse === "managers" ? " · only workspaces that nobody but owners and admins can drive" : "";
+  const scope = login.sharedUse === "managers" ? ` · ${MANAGERS_ONLY}` : "";
   if (lent) return { text: `Connected · ${how}${who}${scope} · expires in ${remaining(lent.at - now)} (${new Date(lent.at).toLocaleString()})`, warn: lent.at - now < 60 * 60_000 };
   return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
@@ -256,16 +282,16 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
     setBusy(false);
   };
 
-  const run = async (action: () => Promise<unknown>, done: string) => {
+  const run = async <T,>(action: () => Promise<T>, done: string | ((result: T) => string)) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await action();
+      const result = await action();
       setPending(null);
       await load();
-      setNotice(done);
+      setNotice(typeof done === "string" ? done : done(result));
     } catch (failure) {
       setError(agentLoginMessage(failure));
       await load();
@@ -314,6 +340,8 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
               const status = agentLoginStatus(login, now);
               const storedKind = login?.authKind === "api-key" ? "API key" : "login";
               const open = pending?.agent === agent.id ? pending : null;
+              // An API key is one kind of login; the sign-in and the lent sign-in are the other.
+              const reach = open && open.source !== "disconnect" ? agentLoginReach(login, open.source === "api-key" ? "api-key" : "oauth-credentials-json", organization) : null;
               return (
                 <li key={agent.id} className="rounded-md bg-well p-2" data-testid="agent-login" data-agent={agent.id}>
                   {/* The status has the row's full width; the actions go under it, so neither squeezes the other. */}
@@ -403,8 +431,11 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                       )}
                       <label className="flex items-start gap-2">
                         <input type="checkbox" checked={sharing} disabled={busy} onChange={(event) => setSharing(event.target.checked)} />
-                        <span>
-                          Agents in <strong>every member's</strong> cloud workspaces of {organization} may run on this login.
+                        <span data-testid="agent-login-reach">
+                          {reach?.lead}
+                          <strong>{reach?.who}</strong>
+                          {reach?.tail}
+                          {reach && !reach.kept && " The account service decides this, and the row above says who the login reaches once it is stored."}
                         </span>
                       </label>
                       <label className="flex items-start gap-2">
@@ -433,7 +464,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                                   machineInstallation: machines,
                                   replaceExisting: stored && replace,
                                 }),
-                              `${agent.name} is connected for this organization's cloud workspaces.`,
+                              (saved) => connectedNotice(agent.name, saved),
                             )
                           }
                         >
