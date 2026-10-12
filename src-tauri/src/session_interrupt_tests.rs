@@ -462,3 +462,105 @@ fn the_hard_stop_ends_a_headless_agent_and_drops_what_was_queued() {
     // The queued message never reached it.
     assert_eq!(tab.count("session/prompt"), 1);
 }
+
+// ---- real agents ----------------------------------------------------------------
+
+/// The whole path against an installed headless agent: the agent as the
+/// tab's child, its own protocol spoken to it, a real model behind it.
+/// Escape stops the turn that is running, the message queued behind it is
+/// the next prompt, and the agent is the same process afterwards.
+///
+/// The first reply has to outlast the few seconds before Escape is pressed,
+/// which a request to count to two hundred does on any model.
+#[cfg(unix)]
+fn live_escape_stops_the_turn_and_the_queued_message_goes_on(harness: &str, project: &str) {
+    let rig = Rig::of(CliKind::Claude, "");
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": project, "cwd": project,
+        "title": "live", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": harness, "created": index::now() }]
+    }))
+    .unwrap();
+    index::save(&[entry]).unwrap();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = harness.into();
+        rt.engine = Engine::None;
+    }
+    // The agent must not outlive the test, whichever way it ends.
+    struct AgentGone(SessionManager);
+    impl Drop for AgentGone {
+        fn drop(&mut self) {
+            self.0.host.kill(&key_of(SESSION, TAB));
+        }
+    }
+    let _agent_gone = AgentGone(rig.manager.clone());
+    let texts = |rig: &Rig| -> Vec<String> {
+        rig.events().iter().filter_map(|e| match &e.payload { Payload::AssistantText { text, .. } => Some(text.clone()), _ => None }).collect()
+    };
+    let pid = || rig.rt.lock().unwrap().child_pid;
+    let send = |text: &str| rig.manager.send(SESSION, TAB, text.into(), Vec::new()).unwrap();
+
+    let first = send("TICKS=60 Count from 1 to 200, one number per line.");
+    assert!(!first.queued);
+    let agent = pid().expect("the agent is the tab's child");
+    // The reply is on its way: the agent has opened a session and taken the prompt.
+    wait_until("the agent opens a session", || match &rig.rt.lock().unwrap().engine {
+        Engine::OpenCode(o) => o.ready,
+        Engine::Acp(a) => a.ready,
+        _ => false,
+    });
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(rig.turn_open(), "the first reply should still be coming; use a slower model or a longer prompt");
+    assert!(send("TICKS=4 Reply with the single word done.").queued);
+
+    assert!(rig.escape());
+    wait_until("the first turn is stopped", || rig.turn_ends().first() == Some(&TurnStatus::Aborted));
+    // The queued message went out at once, to the same agent.
+    wait_until("the queued message has run", || rig.turn_ends().len() == 2);
+    assert_eq!(rig.turn_ends(), [TurnStatus::Aborted, TurnStatus::Ok]);
+    assert_eq!(rig.manager.queued(SESSION, TAB).len(), 0);
+    assert_eq!(pid(), Some(agent), "Escape must not end the agent");
+    assert!(!rig.said_session_closed());
+    assert_eq!((rig.recovery(), rig.banner()), (None, None));
+    // Each turn drew its own reply and nothing of the other's.
+    let replies = texts(&rig);
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    eprintln!("{harness}: the stopped turn said {:?}; the queued one said {:?}", replies[0], replies[1]);
+
+    // Nothing running: Escape does nothing, and the agent is still there for the next message.
+    assert!(!rig.escape());
+    assert!(!send("TICKS=2 Reply with the single word again.").queued);
+    wait_until("the next message runs on the same agent", || rig.turn_ends().len() == 3);
+    assert_eq!(rig.turn_ends()[2], TurnStatus::Ok);
+    assert_eq!(pid(), Some(agent));
+}
+
+/// Against the installed `opencode`: its server, its event stream, its HTTP
+/// API. Needs `opencode` on `PATH`, and in `TERMINALX_LIVE_OPENCODE_PROJECT`
+/// a directory whose `opencode.json` names a model. Run it alone, with
+/// `--ignored`, under a `HOME` that is not yours if the agent should not
+/// read your own configuration.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs opencode on PATH and TERMINALX_LIVE_OPENCODE_PROJECT; run with --ignored"]
+fn live_opencode_escape_stops_the_turn_and_the_queued_message_goes_on() {
+    match std::env::var("TERMINALX_LIVE_OPENCODE_PROJECT") {
+        Ok(project) => live_escape_stops_the_turn_and_the_queued_message_goes_on("opencode", &project),
+        Err(_) => eprintln!("TERMINALX_LIVE_OPENCODE_PROJECT is not set; skipping"),
+    }
+}
+
+/// Against an installed ACP agent, launched as the app launches one
+/// (`cursor-agent acp`). Any agent that speaks ACP under that name will do:
+/// it was checked with a `cursor-agent` script on `PATH` that runs
+/// `opencode "$@"`. `TERMINALX_LIVE_ACP_PROJECT` is the directory it works in.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs an ACP agent on PATH as cursor-agent and TERMINALX_LIVE_ACP_PROJECT; run with --ignored"]
+fn live_acp_escape_stops_the_turn_and_the_queued_message_goes_on() {
+    match std::env::var("TERMINALX_LIVE_ACP_PROJECT") {
+        Ok(project) => live_escape_stops_the_turn_and_the_queued_message_goes_on("cursor", &project),
+        Err(_) => eprintln!("TERMINALX_LIVE_ACP_PROJECT is not set; skipping"),
+    }
+}

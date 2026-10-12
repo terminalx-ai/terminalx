@@ -285,11 +285,23 @@ them) have no screen and no queue. Their interrupt is their protocol's own
 (`session/cancel`, `POST /session/:id/abort`), the app's queue is kept, and
 the next message in it starts when the interrupted turn has ended, so Escape
 means the same there: stop this turn, go on to what is queued, or stop when
-nothing is. An OpenCode turn ends when its session goes idle; the
-`MessageAbortedError` the server also reports is not treated as an end,
-because whichever of the two came second would end the turn a queued message
-started in between. Neither agent was installed to check against (OpenCode's
-engine is written from its documented API, as its module says).
+nothing is. Checked against real agents, each behind a model that answers one
+word a second:
+
+| Agent | Escape with a message queued |
+| --- | --- |
+| OpenCode 1.19.0, its server (`opencode serve`) | The abort ends the turn and the server takes the next message at once. It says idle twice for every turn (`session.status`, then the older `session.idle`), twice again once an aborted request has unwound, and sends the aborted reply's last text after the idle that ended it. The engine ends a turn once and draws only what belongs to it (`harness/opencode`, with the recordings under `fixtures/`). |
+| OpenCode 1.19.0 as an ACP agent (`opencode acp`), through the app's ACP engine | `session/cancel` is answered within a tenth of a second: the prompt returns `stopReason: "cancelled"`, and the next prompt runs. A permission request answered as cancelled first never runs its tool. |
+| Gemini CLI 0.63.0 (`gemini --acp`), spoken to as the engine speaks | The same: `cancelled` within milliseconds, then the next prompt to its end. The app does not launch Gemini; it is a second ACP implementation to hold the engine's reading of the protocol against. |
+| Cursor's agent | Not run: it needs a Cursor account to take a turn. It is launched as `cursor-agent acp` and gets the same `session/cancel`. |
+
+Two opt-in tests run the whole path (the agent as the tab's child, a real
+send, Escape, the queued message, the same process afterwards) against
+whatever is installed: `cargo test --lib live_ -- --ignored`, with
+`TERMINALX_LIVE_OPENCODE_PROJECT` or `TERMINALX_LIVE_ACP_PROJECT` naming a
+directory the agent is configured for. Running the first is what found that
+an OpenCode tab's first message always failed: the request that opens its
+session was made before the server it had just started was listening.
 
 ### One model and effort, whichever side changed it
 

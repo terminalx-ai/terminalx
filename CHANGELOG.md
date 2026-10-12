@@ -54,6 +54,11 @@
   (`session/3`), for whoever may stop the tab. A workspace whose runtime is
   older than this leaves the key alone until it is updated; its Stop works as
   before.
+- The same holds for the agents that are driven without a terminal, checked
+  against the real ones. On an OpenCode tab the first message no longer fails
+  with "The connection was lost" (it was sent before OpenCode had started),
+  the reply no longer begins with your own prompt, and a message queued
+  behind a turn is no longer cut short the moment it starts.
 
 ## 0.2.10
 
