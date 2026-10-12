@@ -214,6 +214,11 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       return;
     }
     if (generation !== this.generation || !this.running) return;
+    // A new pairing is asked for once. The server answers the ask by issuing
+    // the attachment again, which then waits for the runtime, and it issues a
+    // ready one again every time it is asked: asking on each poll would never
+    // see it ready (`still_refreshing` in the desktop's client).
+    this.refreshPairing = false;
     if (attachment.state !== "ready" || !attachment.pairingCode) {
       // Each ask counts as activity on the server, so they grow apart and end.
       this.waits += 1;
@@ -246,7 +251,6 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       this.retry("ticket");
       return;
     }
-    this.refreshPairing = false;
     // The same runtime key means the resume credential installed earlier is still its own.
     const resume = this.resumeToken && this.offer && this.offer.publicKeyB64 === offer.publicKeyB64 ? this.resumeToken : null;
     if (!resume) this.resumeToken = null;

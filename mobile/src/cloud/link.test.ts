@@ -38,6 +38,31 @@ function harness(listed: string | null = "ready", clock: { now?: () => number; s
   return { link, open, runtimes, states, list: (next: string | null) => (state = next), each: (run: (runtime: Runtime) => void) => (configure = run) };
 }
 
+/**
+ * The account service's `open` for one phone, as terminalx-saas answers it
+ * (`CloudWorkspaceController.open`): a ready attachment asked for with
+ * `refreshPairing` is issued again under a new id and waits for the runtime;
+ * one that is still waiting is left as it is. The runtime completes a waiting
+ * one between two requests, after `polls` requests have found it waiting.
+ */
+function service(h: ReturnType<typeof harness>, polls = 0) {
+  const issued = { count: 1, ready: true, left: 0 };
+  h.open.mockImplementation(async (...args: unknown[]) => {
+    if (!issued.ready) {
+      if (issued.left === 0) issued.ready = true;
+      else issued.left -= 1;
+    }
+    if (issued.ready && (args[3] as { refreshPairing?: boolean }).refreshPairing === true) {
+      issued.count += 1;
+      issued.ready = false;
+      issued.left = polls;
+    }
+    const id = `a${issued.count}`;
+    return (issued.ready ? ready({ id }) : { id, workspaceId: "ws-1", state: "waiting-for-runtime", authority: "participate", expiresAt: NOW + 600_000 }) as never;
+  });
+  return issued;
+}
+
 const settle = async () => {
   for (let index = 0; index < 40; index++) await Promise.resolve();
 };
@@ -385,5 +410,73 @@ describe("the phone's connection to a cloud workspace", () => {
     h.link.start();
     await connected(h);
     expect(h.open.mock.calls[1][3]).toEqual({ refreshPairing: true });
+  });
+
+  // #448: the service issues a ready attachment again every time a new pairing is asked for, so asking on each poll never sees it ready.
+  describe("against a service that issues the attachment again for each new pairing asked for", () => {
+    const refreshes = (h: ReturnType<typeof harness>) => h.open.mock.calls.map((call) => (call[3] as { refreshPairing: boolean }).refreshPairing);
+
+    it("is live again after the app was in the background: the new pairing is asked for once", async () => {
+      const h = harness();
+      const issued = service(h);
+      h.link.start();
+      await connected(h);
+      // Home, then back (`CloudWorkspaceSession.pause` and `resume`).
+      h.link.close();
+      h.link.start();
+      await settle();
+      expect(h.link.state.state).toBe("waitingForRuntime");
+      await vi.advanceTimersByTimeAsync(2_000);
+      await connected(h);
+      expect(refreshes(h)).toEqual([false, true, false]);
+      // One new attachment, not one per poll.
+      expect(issued.count).toBe(2);
+      await vi.advanceTimersByTimeAsync(STABLE_AFTER_MS);
+      expect(h.open).toHaveBeenCalledTimes(3);
+    });
+
+    it("is live again when the runtime takes a few polls to complete the new attachment", async () => {
+      const h = harness();
+      const issued = service(h, 2);
+      h.link.start();
+      await connected(h);
+      h.link.close();
+      h.link.start();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await connected(h);
+      expect(refreshes(h)).toEqual([false, true, false, false, false]);
+      expect(issued.count).toBe(2);
+    });
+
+    it("is live again after the relay refused the credential (a workspace that was stopped and started)", async () => {
+      const h = harness();
+      const issued = service(h);
+      h.link.start();
+      await connected(h);
+      h.runtimes[0].drop(4401);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await connected(h);
+      expect(refreshes(h)).toEqual([false, true, false]);
+      expect(issued.count).toBe(2);
+      expect(h.runtimes[1].auth!.credential).toBe("i".repeat(43));
+    });
+
+    it("asks again for a new pairing when the answer to the first ask never came", async () => {
+      const h = harness();
+      const issued = service(h);
+      h.link.start();
+      await connected(h);
+      h.link.close();
+      const answer = h.open.getMockImplementation()!;
+      h.open.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+      h.link.start();
+      await settle();
+      expect(h.link.state.state).toBe("reconnecting");
+      h.open.mockImplementation(answer);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await connected(h);
+      expect(refreshes(h)).toEqual([false, true, true, false]);
+      expect(issued.count).toBe(2);
+    });
   });
 });
