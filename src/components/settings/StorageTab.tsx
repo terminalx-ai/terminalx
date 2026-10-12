@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage } from "@/lib/api";
 import { openWorktreeCleanup } from "@/lib/dialogs";
 import { formatSize } from "@/lib/workspaceSizes";
@@ -30,6 +30,8 @@ export function StorageTab() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [failures, setFailures] = useState<Record<string, string>>({});
+  const [confirming, setConfirming] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   const scan = useCallback(async () => {
     setBusy(true);
@@ -63,14 +65,11 @@ export function StorageTab() {
       return next;
     });
 
+  const count = `${chosen.length} item${chosen.length === 1 ? "" : "s"}`;
+
   const remove = async () => {
+    setConfirming(false);
     if (!chosen.length) return;
-    const count = `${chosen.length} item${chosen.length === 1 ? "" : "s"}`;
-    const yes = await ask(
-      `Delete ${count} (${formatSize(chosenBytes)})?\n\n${chosen.map((item) => `• ${item.projectName}: ${describe(item)}`).join("\n")}\n\nThis deletes them from disk; they are not moved to the Trash. Each is checked again first: anything not clean and merged, or in use, is kept.`,
-      { title: "Clean up leftovers", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
-    ).catch(() => false);
-    if (!yes) return;
     setBusy(true);
     setError(null);
     setResult(null);
@@ -128,7 +127,7 @@ export function StorageTab() {
         <Button variant="secondary" size="sm" disabled={busy || !removable.length} onClick={() => setSelected(new Set(removable.map((item) => item.id)))}>
           Select all removable
         </Button>
-        <Button variant="destructive" size="sm" disabled={busy || !chosen.length} onClick={() => void remove()}>
+        <Button variant="destructive" size="sm" disabled={busy || !chosen.length} onClick={() => setConfirming(true)}>
           <Trash2 /> Delete selected{chosen.length ? ` (${formatSize(chosenBytes)})` : ""}
         </Button>
         {items && items.length > 0 && <span className="text-xs text-muted-foreground tabular-nums">{formatSize(totalBytes)} in total</span>}
@@ -184,6 +183,52 @@ export function StorageTab() {
           </ul>
         </section>
       ))}
+
+      <Dialog open={confirming && chosen.length > 0} onOpenChange={(next) => !next && setConfirming(false)}>
+        <DialogContent
+          width="max-w-[36rem]"
+          layout="pinned"
+          aria-describedby="leftover-cleanup-description"
+          // Focus starts on Cancel, so Enter or Space cannot delete by accident.
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            cancelRef.current?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-sm font-medium">Clean up leftovers</DialogTitle>
+            <DialogDescription id="leftover-cleanup-description" className="text-xs leading-relaxed text-muted-foreground">
+              Delete {count} ({formatSize(chosenBytes)})? This is everything that will be deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogScrollArea aria-label="Items to delete, scrollable">
+            <ul aria-label="Items to delete" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
+              {chosen.map((item) => (
+                <li key={item.id} className="flex items-start gap-3 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="break-words text-xs text-foreground">{describe(item)}</div>
+                    <div className="break-words text-[11px] text-muted-foreground">
+                      {item.projectName} · {KIND_LABEL[item.kind]}
+                    </div>
+                  </div>
+                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{item.kind === "branch" ? "" : formatSize(item.sizeBytes)}</span>
+                </li>
+              ))}
+            </ul>
+          </DialogScrollArea>
+          <p className="mt-3 shrink-0 text-xs leading-relaxed text-muted-foreground">
+            This deletes them from disk; they are not moved to the Trash. Each is checked again first: anything not clean and merged, or in use, is kept.
+          </p>
+          <DialogFooter>
+            <Button ref={cancelRef} variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void remove()}>
+              <Trash2 /> Delete {count}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

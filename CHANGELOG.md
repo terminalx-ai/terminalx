@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Dialogs with long lists
+
+- A dialog can no longer grow past the window and take its buttons out of
+  reach. Deleting many leftovers in Settings → Storage now asks in the app
+  instead of in a system alert that listed every item and ran off the screen:
+  the list scrolls on its own, each item shows its project and size, and
+  Cancel and Delete stay in view. Cancel holds the focus, so Enter does not
+  delete. What can be deleted, and the check made before each deletion, are
+  unchanged. (#424)
+- The worktree clean-up keeps its buttons in view the same way in short
+  windows, in its list, its review and its results, and every other dialog
+  now ends at the window's edge and scrolls if it is taller. (#424)
+
 ### Chat messages that reached the terminal but were not sent
 
 - A message sent from chat is submitted only after the agent CLI has read it.

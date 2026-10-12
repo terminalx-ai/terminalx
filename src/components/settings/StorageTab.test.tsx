@@ -1,12 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { Leftover } from "@/types/session";
 
-const ask = vi.fn();
 const scanLeftovers = vi.fn();
 const removeLeftovers = vi.fn();
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: (...args: unknown[]) => ask(...args) }));
 vi.mock("@/lib/api", () => ({
   api: {
     scanLeftovers: () => scanLeftovers(),
@@ -25,7 +23,6 @@ const transcripts: Leftover = { ...base, id: "claude:-p--raccoon-worktrees-gone"
 describe("StorageTab", () => {
   afterEach(cleanup);
   beforeEach(() => {
-    ask.mockReset();
     removeLeftovers.mockReset();
     scanLeftovers.mockReset().mockResolvedValue([clean, unsaved, transcripts]);
   });
@@ -42,24 +39,55 @@ describe("StorageTab", () => {
     expect(removeLeftovers).not.toHaveBeenCalled();
   });
 
-  it("deletes nothing when the confirmation is declined", async () => {
-    ask.mockResolvedValue(false);
+  it("asks in a dialog that names every item, and deletes nothing when it is declined", async () => {
     render(<StorageTab />);
     fireEvent.click(await screen.findByRole("checkbox", { name: /quiet-amber-fox/ }));
     fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
-    expect(ask).toHaveBeenCalledTimes(1);
-    expect(ask.mock.calls[0][0]).toContain("they are not moved to the Trash");
+    const dialog = screen.getByRole("dialog", { name: "Clean up leftovers" });
+    expect(within(dialog).getByText("Delete 1 item (2.5 GB)? This is everything that will be deleted.")).toBeTruthy();
+    expect(within(dialog).getByText(/they are not moved to the Trash/)).toBeTruthy();
+    expect(within(within(dialog).getByRole("list", { name: "Items to delete" })).getAllByRole("listitem")).toHaveLength(1);
+    // Cancel holds the focus, so Enter cannot confirm the deletion.
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(removeLeftovers).not.toHaveBeenCalled();
+  });
+
+  it("deletes nothing when the dialog is dismissed with Escape", async () => {
+    render(<StorageTab />);
+    fireEvent.click(await screen.findByRole("checkbox", { name: /quiet-amber-fox/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(removeLeftovers).not.toHaveBeenCalled();
+  });
+
+  it("lists every selected item for review, however many there are", async () => {
+    const many = Array.from({ length: 150 }, (_, index): Leftover => ({ ...clean, id: `worktree:/p:synthetic-${index}`, name: `synthetic-${index}`, sizeBytes: 1_000_000 }));
+    scanLeftovers.mockResolvedValue([...many, unsaved]);
+    render(<StorageTab />);
+    await screen.findByText("synthetic-0");
+    fireEvent.click(screen.getByRole("button", { name: "Select all removable" }));
+    fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
+    const dialog = screen.getByRole("dialog", { name: "Clean up leftovers" });
+    const rows = within(within(dialog).getByRole("list", { name: "Items to delete" })).getAllByRole("listitem");
+    expect(rows).toHaveLength(150);
+    expect(rows.at(-1)!.textContent).toContain("synthetic-149");
+    expect(within(dialog).queryByText(/dirty-red-owl/)).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "Delete 150 items" })).toBeTruthy();
     expect(removeLeftovers).not.toHaveBeenCalled();
   });
 
   it("deletes only the confirmed, removable rows and reports what was freed", async () => {
-    ask.mockResolvedValue(true);
     removeLeftovers.mockResolvedValue({ removed: [clean.id, transcripts.id], failed: [], freedBytes: 2_518_000_000 });
     render(<StorageTab />);
     await screen.findByText("quiet-amber-fox");
     fireEvent.click(screen.getByRole("button", { name: "Select all removable" }));
     scanLeftovers.mockResolvedValue([unsaved]);
     fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
+    expect(removeLeftovers).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Delete 2 items" }));
     await waitFor(() => expect(removeLeftovers).toHaveBeenCalledWith([clean.id, transcripts.id]));
     expect(await screen.findByText("Deleted 2 items and freed 2.5 GB.")).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("quiet-amber-fox")).toBeNull());
@@ -67,11 +95,11 @@ describe("StorageTab", () => {
   });
 
   it("shows why something could not be deleted", async () => {
-    ask.mockResolvedValue(true);
     removeLeftovers.mockResolvedValue({ removed: [], failed: [{ id: clean.id, error: "Has 1 uncommitted file." }], freedBytes: 0 });
     render(<StorageTab />);
     fireEvent.click(await screen.findByRole("checkbox", { name: /quiet-amber-fox/ }));
     fireEvent.click(screen.getByRole("button", { name: /Delete selected/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete 1 item" }));
     expect(await screen.findByText("Kept: Has 1 uncommitted file.")).toBeTruthy();
     expect(screen.getByText(/1 could not be deleted and was kept/)).toBeTruthy();
   });

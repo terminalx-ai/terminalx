@@ -3,7 +3,7 @@ import type { CleanupCandidate, CleanupVerdict } from "@terminalx/portable/works
 import { Cloud, Loader2, Lock, Monitor, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCloudConnectionsVersion } from "@/lib/cloudConnections";
 import { closeWorktreeCleanup, useDialogs } from "@/lib/dialogs";
@@ -150,7 +150,7 @@ export function WorktreeCleanupDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[52rem]" showClose={stage !== "running"} aria-describedby="worktree-cleanup-description">
+      <DialogContent width="max-w-[52rem]" layout="pinned" showClose={stage !== "running"} aria-describedby="worktree-cleanup-description">
         <DialogHeader>
           <DialogTitle className="text-sm font-medium">Clean up worktrees</DialogTitle>
           <DialogDescription id="worktree-cleanup-description" className="text-xs leading-relaxed text-muted-foreground">
@@ -163,7 +163,7 @@ export function WorktreeCleanupDialog() {
 
         {stage === "review" && (
           <>
-            <div className="mb-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
+            <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 text-xs">
               <label className="flex items-center gap-2">
                 <Switch checked={includeIgnored} onCheckedChange={setIncludeIgnored} aria-label="Allow worktrees with ignored local files" />
                 <span>Allow worktrees with ignored local files (like .env)</span>
@@ -173,7 +173,7 @@ export function WorktreeCleanupDialog() {
                 <span>Also delete the conversation history of removed worktrees</span>
               </label>
             </div>
-            <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="mb-2 flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
               <Button variant="secondary" size="xs" disabled={!scans} onClick={() => void scan()}>
                 <RefreshCw /> Scan again
               </Button>
@@ -187,7 +187,7 @@ export function WorktreeCleanupDialog() {
                 </>
               )}
             </div>
-            <div className="max-h-[52vh] overflow-y-auto pr-1">
+            <DialogScrollArea aria-label="Worktrees">
               {!scans && (
                 <div className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
                   <Loader2 className="size-3.5 animate-spin" /> Scanning worktrees…
@@ -270,7 +270,7 @@ export function WorktreeCleanupDialog() {
                   </section>
                 );
               })}
-            </div>
+            </DialogScrollArea>
             <DialogFooter>
               <Button variant="ghost" onClick={close}>
                 Cancel
@@ -285,7 +285,7 @@ export function WorktreeCleanupDialog() {
 
         {stage === "confirm" && (
           <>
-            <div className="max-h-[52vh] overflow-y-auto pr-1">
+            <DialogScrollArea aria-label="Worktrees to remove, scrollable">
               <ul aria-label="Worktrees to remove" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
                 {chosen.map((row) => (
                   <li key={row.key} className="px-3 py-2">
@@ -303,13 +303,13 @@ export function WorktreeCleanupDialog() {
                   </li>
                 ))}
               </ul>
-              <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                {plural(chosen.length, "worktree", "worktrees")} will be deleted from disk ({unsized ? "at least " : ""}
-                {formatSize(chosenBytes)}); nothing is moved to the Trash. Branches are kept.{" "}
-                {deleteSessions ? "The conversations listed above are deleted too. " : "Conversations are kept and stay under their project, marked as from a removed workspace. "}
-                Main directories, their sessions and everything not listed here are left untouched.
-              </p>
-            </div>
+            </DialogScrollArea>
+            <p className="mt-3 shrink-0 text-xs leading-relaxed text-muted-foreground">
+              {plural(chosen.length, "worktree", "worktrees")} will be deleted from disk ({unsized ? "at least " : ""}
+              {formatSize(chosenBytes)}); nothing is moved to the Trash. Branches are kept.{" "}
+              {deleteSessions ? "The conversations listed above are deleted too. " : "Conversations are kept and stay under their project, marked as from a removed workspace. "}
+              Main directories, their sessions and everything not listed here are left untouched.
+            </p>
             <DialogFooter>
               <Button variant="ghost" onClick={() => setStage("review")}>
                 Back
@@ -333,34 +333,36 @@ export function WorktreeCleanupDialog() {
                 Removed {sum.removed} and freed {formatSize(sum.freedBytes)}. {sum.skipped} skipped, {sum.failed} failed.
               </p>
             )}
-            <ul aria-label="Results" className="flex max-h-[52vh] flex-col divide-y divide-hairline overflow-y-auto rounded-lg bg-well">
-              {outcomes.map((outcome) => {
-                const row = rows.find((candidate) => candidate.key === candidateKey(outcome.hostId, outcome.path));
-                const good = outcome.outcome === "removed" || outcome.outcome === "alreadyRemoved";
-                return (
-                  <li key={candidateKey(outcome.hostId, outcome.path)} className="px-3 py-2">
-                    <div className="flex items-baseline gap-2">
-                      <span className={`text-xs ${good ? "text-foreground" : outcome.outcome === "skipped" ? "text-warning" : "text-destructive"}`}>{OUTCOME_LABEL[outcome.outcome]}</span>
-                      <span className="truncate text-xs text-foreground">{row?.candidate.name ?? outcome.path}</span>
-                      {row && <span className="text-[11px] text-muted-foreground">on {row.host.name}</span>}
-                      {outcome.freedBytes > 0 && <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatSize(outcome.freedBytes)}</span>}
-                    </div>
-                    {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
-                    {good && (
-                      <div className="text-[11px] text-muted-foreground">
-                        {[
-                          outcome.keptBranch && `Branch ${outcome.keptBranch} kept`,
-                          outcome.sessionsKept.length > 0 && `${plural(outcome.sessionsKept.length, "conversation", "conversations")} kept`,
-                          outcome.sessionsDeleted.length > 0 && `${plural(outcome.sessionsDeleted.length, "conversation", "conversations")} deleted`,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+            <DialogScrollArea aria-label="Results, scrollable">
+              <ul aria-label="Results" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
+                {outcomes.map((outcome) => {
+                  const row = rows.find((candidate) => candidate.key === candidateKey(outcome.hostId, outcome.path));
+                  const good = outcome.outcome === "removed" || outcome.outcome === "alreadyRemoved";
+                  return (
+                    <li key={candidateKey(outcome.hostId, outcome.path)} className="px-3 py-2">
+                      <div className="flex items-baseline gap-2">
+                        <span className={`text-xs ${good ? "text-foreground" : outcome.outcome === "skipped" ? "text-warning" : "text-destructive"}`}>{OUTCOME_LABEL[outcome.outcome]}</span>
+                        <span className="truncate text-xs text-foreground">{row?.candidate.name ?? outcome.path}</span>
+                        {row && <span className="text-[11px] text-muted-foreground">on {row.host.name}</span>}
+                        {outcome.freedBytes > 0 && <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatSize(outcome.freedBytes)}</span>}
                       </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+                      {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
+                      {good && (
+                        <div className="text-[11px] text-muted-foreground">
+                          {[
+                            outcome.keptBranch && `Branch ${outcome.keptBranch} kept`,
+                            outcome.sessionsKept.length > 0 && `${plural(outcome.sessionsKept.length, "conversation", "conversations")} kept`,
+                            outcome.sessionsDeleted.length > 0 && `${plural(outcome.sessionsDeleted.length, "conversation", "conversations")} deleted`,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </DialogScrollArea>
             {stage === "done" && (
               <DialogFooter>
                 <Button variant="secondary" onClick={() => void scan()}>
