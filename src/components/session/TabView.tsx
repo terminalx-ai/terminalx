@@ -334,7 +334,9 @@ export function TabView({
         <Composer
           tab={tab}
           cwd={local ? session.cwd : undefined}
-          commands={backend.commands?.(tab)}
+          // A tab that is not on screen asks its runtime for nothing: on a runtime that answers
+          // in order, its command list held up the terminal view of the tab that is (#449).
+          commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
           remote={!local}
           busy={live}

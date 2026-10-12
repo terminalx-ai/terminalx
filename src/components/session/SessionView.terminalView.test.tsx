@@ -51,15 +51,23 @@ vi.mock("@/components/terminal/TerminalView", () => ({
   createTerminal: () => mocks.createTerminal(),
 }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonRunner: () => null, RaccoonScene: () => null }));
-vi.mock("@/components/chat/Composer", () => ({
-  Composer: (props: { draft: string; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; disabledReason?: string | null }) => (
-    <div data-testid="composer">
-      {props.disabledReason && <p role="note">{props.disabledReason}</p>}
-      <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
-      <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).catch(() => undefined)}>Send</button>
-    </div>
-  ),
-}));
+vi.mock("@/components/chat/Composer", async () => {
+  const { useEffect } = await import("react");
+  type Props = { draft: string; onDraftChange: (v: string) => void; onSend: (t: string, i: unknown[]) => Promise<void>; disabledReason?: string | null; commands?: { key: string; load(): Promise<unknown> } | null };
+  return {
+    Composer: (props: Props) => {
+      // As the real composer does: it asks where its `/` list comes from as soon as it has a source.
+      useEffect(() => void props.commands?.load().catch(() => undefined), [props.commands?.key]);
+      return (
+        <div data-testid="composer">
+          {props.disabledReason && <p role="note">{props.disabledReason}</p>}
+          <textarea aria-label="Prompt" value={props.draft} onChange={(e) => props.onDraftChange(e.target.value)} />
+          <button onClick={() => void Promise.resolve(props.onSend(props.draft, [])).catch(() => undefined)}>Send</button>
+        </div>
+      );
+    },
+  };
+});
 
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { SessionView } from "./SessionView";
@@ -680,6 +688,86 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
       act(() => xterm.pressReturn());
       await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:after wake", "\r"]));
       expect(notice()).toBeNull();
+    });
+
+    /** Stopped, then running again with the terminal still this person's (the runtime kept running). */
+    const stopThenWake = async () => {
+      setCatalog(workspaceItem("suspended"));
+      await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
+      await act(async () => runtime.emit({ state: "suspended" }));
+      await waitFor(() => expect(status()).toBe("Stopped: the workspace is asleep. Typing here wakes it, as sending a message does."));
+      act(() => xterm.type("k"));
+      await waitFor(() => expect(activate).toHaveBeenCalledTimes(1));
+      await act(async () => runtime.emit({ state: "waitingForRuntime" }));
+      setCatalog(workspaceItem("ready"));
+      await act(async () => runtime.connect());
+      await settle();
+    };
+
+    it("a line typed right after a wake arrives while another tab of the session shows its chat (#449)", async () => {
+      // The other tab's composer lists its slash commands from the runtime, which asks the tab's CLI:
+      // seconds on a machine that just woke. A runtime that answers in order answers nothing else meanwhile.
+      runtime.capabilities.push("composer/1");
+      runtime.tabs = [agentTab(), agentTab({ tabId: "t-2", title: "Second" })];
+      runtime.sessions[0]!.tabs.push({ id: "t-2", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" });
+      await open();
+      await typeBeforeStop();
+      const asked = runtime.methods("session.commands").length;
+      runtime.slow = ["session.commands"];
+      await stopThenWake();
+      // The tab that is not on screen asked for nothing, so the terminal is attached at once.
+      expect(runtime.methods("session.commands")).toHaveLength(asked);
+      expect(screen.getByTestId("cloud-terminal-view-title").textContent).toBe("Terminal view · Idle");
+      expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull();
+      act(() => xterm.type("echo:after wake"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:after wake"]));
+      act(() => xterm.pressReturn());
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:after wake", "\r"]));
+      expect(notice()).toBeNull();
+      // Its list is asked for when its chat is shown.
+      runtime.slow = [];
+      act(() => selectSessionTab(KEY, { kind: "agent", id: "t-2" }));
+      await waitFor(() => expect(runtime.params("session.commands").at(-1)).toMatchObject({ tabId: "t-2" }));
+    });
+
+    it("says it is still connecting while the runtime has not answered the attach, and that a key typed then was not sent (#449)", async () => {
+      await open();
+      await typeBeforeStop();
+      // A runtime from before #449, busy with something asked ahead of the attach.
+      runtime.slow = ["pty.attach"];
+      await stopThenWake();
+      // The header already reads Idle and the screen is the one from before the stop: for a moment nothing more is said.
+      expect(screen.getByTestId("cloud-terminal-view-title").textContent).toBe("Terminal view · Idle");
+      expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull();
+      expect(agentTerminalOf(WORKSPACE, "t-1")?.live).toBe(false);
+      // A key now goes nowhere, and the view says so at once.
+      act(() => xterm.insert("echo:lost"));
+      await waitFor(() => expect(status()).toBe("Connecting to the agent's terminal: what you typed was not sent. Type it again once this line is gone."));
+      act(() => xterm.pressReturn());
+      await settle();
+      expect(runtime.typed).toEqual(["a"]);
+      expect(xterm.term.textarea!.value).toBe("");
+      // Attached: the line goes, and what is typed from here on arrives, without what was dropped.
+      runtime.slow = [];
+      await act(async () => runtime.release());
+      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+      act(() => xterm.insert("echo:again"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "echo:again"]));
+      expect(notice()).toBeNull();
+    });
+
+    it("says it is still connecting after a moment of waiting, before anything is typed (#449)", async () => {
+      await open();
+      await typeBeforeStop();
+      runtime.slow = ["pty.attach"];
+      await stopThenWake();
+      expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull();
+      await waitFor(() => expect(status()).toBe("Connecting to the agent's terminal: keys pressed now are not sent."), { timeout: 3000 });
+      runtime.slow = [];
+      await act(async () => runtime.release());
+      await waitFor(() => expect(screen.queryByTestId("cloud-agent-terminal-status")).toBeNull());
+      act(() => xterm.type("b"));
+      await waitFor(() => expect(runtime.typed).toEqual(["a", "b"]));
     });
 
     it("says the terminal is theirs from another device and offers Take control, and it works: what is typed next arrives", async () => {

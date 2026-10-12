@@ -74,6 +74,22 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   private applied = new Map<string, number>();
   /** A numbered write was refused for its number (`conflict`). */
   conflicts = 0;
+  /** `session.commands` (`composer/1`), when the runtime is given that capability. */
+  commands: { name: string; description: string; source: string }[] = [];
+  /**
+   * Methods this runtime takes its time over. It answers one connection's
+   * requests in order, as a real one does for all but its slow methods: every
+   * request sent after one of these waits with it, until `release()`.
+   */
+  slow: string[] = [];
+  private held: unknown[] | null = null;
+
+  /** The slow answer is ready: it and everything that waited behind it arrive, in order. */
+  release() {
+    const held = this.held ?? [];
+    this.held = null;
+    for (const answer of held) for (const listener of this.messages) listener(answer);
+  }
 
   /**
    * The workspace stopped and woke: every attachment was revoked, so this
@@ -100,6 +116,14 @@ export class FakeAgentRuntime implements WorkspaceTransport {
     if (!this.up) return false;
     this.sent.push(frame);
     const answer = this.answer(frame);
+    if (this.held) {
+      this.held.push(answer);
+      return true;
+    }
+    if (this.slow.includes(frame.method)) {
+      this.held = [answer];
+      return true;
+    }
     queueMicrotask(() => {
       for (const listener of this.messages) listener(answer);
     });
@@ -216,6 +240,8 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         return ok({ notes: [], more: false });
       case "runtime.agents":
         return ok({ agents: this.agents });
+      case "session.commands":
+        return ok({ commands: this.commands, restricted: false });
       case "pty.list":
         // An agent's own terminal is never listed as a shell.
         return ok({ epoch: this.epoch, terminals: [] });
