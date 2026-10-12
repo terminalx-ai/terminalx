@@ -298,6 +298,11 @@ instead of from this computer.
   not kept, and the composer asks again when the reader next starts a
   command. It never wakes a stopped workspace for the list: a stopped
   workspace shows what was last listed in this run of the app, or no list.
+  Only the tab on screen asks: a tab that is not shown asks its runtime for
+  nothing. The runtime answers the list from its own task (`SLOW_METHODS`
+  in `remote::host`), because asking the CLI takes seconds on a machine that
+  just woke: answered in order it held up everything the connection asked
+  next, the transcript and the agent's terminal included (#449).
   A list made for someone who may approve is never shown to the same person
   without that right.
 

@@ -131,6 +131,20 @@ through a silent turn and follow role changes.
   promoted to driver starts holding it without reconnecting. Phones are still
   not counted, and revoking access or the first member list revalidates the
   connections already open. (#423)
+- A line typed into a cloud agent tab's terminal view in the first seconds
+  after a wake is no longer lost without a word. With another tab of the
+  session left in chat, that tab asked the runtime for its slash commands on
+  every connect; the runtime answered nothing else until the tab's CLI had
+  answered (15 seconds when it never did), so the terminal was not attached
+  yet while the view already read "Idle", and keys typed then were dropped.
+  The runtime now answers the command list apart from everything else, a
+  tab that is not on screen no longer asks for it, and while the terminal is
+  still connecting the view says so, and says when something typed was not
+  sent. Needs the next runtime release for the first part; the rest is in
+  the desktop. (#449)
+- Opening a cloud agent tab's terminal view no longer prints its history
+  more than once when the view was left and shown again before the runtime
+  had answered. (#449)
 
 ## 0.2.9
 

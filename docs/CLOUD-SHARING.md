@@ -667,6 +667,14 @@ so switching starts, stops and restarts nothing and both views show the same
 turn. It shows what the CLI draws: prompts, menus, slash-command pickers and
 login or first-run screens, which is where those are answered.
 
+Until the runtime has answered the view's `pty.attach`, the picture is the
+one from before and nothing typed is sent: a key is never typed into a
+screen that is not attached. The view says "Connecting to the agent's
+terminal" when that takes longer than a second, and at once, with "what you
+typed was not sent", when a key was dropped for it (#449). An attach that
+was replaced while still on its way (the view left and came back) draws
+nothing when its answer arrives, so the replay is printed once.
+
 ### Runtime: `agent-pty/1`
 
 Every agent tab's CLI already runs in a terminal the runtime owns (the pane
