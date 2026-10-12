@@ -497,6 +497,7 @@ async function sendOnce(params: Params) {
       if (!workspaceStopped(error)) throw error;
       void refreshCloudCatalog(target.orgId).catch(() => undefined);
       await confirmResume();
+      // The same message again: native code posts the envelope that was refused, under its one command id.
       await backend.send(tab.tabId, message, []);
     }
   } else {

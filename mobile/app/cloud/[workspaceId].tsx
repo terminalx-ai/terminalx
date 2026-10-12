@@ -132,7 +132,8 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   const mayWrite = snapshot.role === "manager" || snapshot.role === "driver";
   const stopped = listedState === "suspended";
   // Written earlier and still on the phone, for a workspace that is stopped now: held until the person says to start it.
-  const held = stopped ? outbox.filter((entry) => entry.state === "unsent") : [];
+  // Also what the server holds for a workspace that stopped before it was delivered: nothing starts it until the person says so.
+  const held = stopped ? outbox.filter((entry) => entry.state === "unsent" || entry.asleep) : [];
   const working = tab?.status === "in_progress";
 
   const run = async (action: () => Promise<unknown>, done?: () => void) => {

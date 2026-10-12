@@ -770,6 +770,8 @@ describe("a cloud workspace on the phone", () => {
       expect(await h.session.send("t1", "are you there", { allowWake: true })).toMatchObject({ state: "queued", wake: "queued" });
       expect(wakeOptions(h).at(-1)).toBeUndefined();
       expect(h.posted).toHaveLength(1);
+      // The envelope the server refused is the one that goes out: one command id from the first attempt on.
+      expect(h.posted[0]).toEqual((h.api.enqueue.mock.calls[0] as unknown[])[2]);
       h.session.close();
     });
 
@@ -803,6 +805,32 @@ describe("a cloud workspace on the phone", () => {
       await h.session.deliverHeld({ allowWake: true });
       expect(h.posted).toHaveLength(1);
       expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "queued" }]);
+      h.session.close();
+    });
+
+    it("asks when the server already holds a message for a workspace that stopped, instead of showing it as sent", async () => {
+      const before = harness();
+      await before.session.start();
+      await connected(before);
+      // Stored by the server; the answer was lost.
+      before.api.enqueue.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+      expect(await before.session.send("t1", "run the tests")).toMatchObject({ state: "unsent" });
+      before.session.close();
+
+      const h = harness({ secrets: before.secrets, blobs: before.blobs });
+      (h.api as unknown as { doNotWake: () => Promise<boolean> }).doNotWake = async () => true;
+      h.api.enqueue.mockImplementation((async (_org: string, _ws: string, envelope: CommandEnvelope, options: { wake?: boolean } = {}) => {
+        h.posted.push(envelope);
+        return { command: { clientCommandId: envelope.clientCommandId, tabId: envelope.tabId, kind: envelope.kind, state: "queued", keyId: envelope.keyId, createdAt: 1, updatedAt: 1 }, existing: true, wake: options.wake === false ? "not-requested" : "queued" };
+      }) as never);
+      h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
+      await h.session.start();
+      await vi.waitFor(() => expect(h.session.getSnapshot().connection.state).toBe("stopped"));
+      await expect(h.session.deliverHeld()).rejects.toMatchObject({ code: "would-wake" });
+      expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", asleep: true }]);
+      await h.session.deliverHeld({ allowWake: true });
+      expect(h.session.getSnapshot().outbox).toMatchObject([{ state: "queued", wake: "queued", asleep: false }]);
+      expect(h.posted.at(-1)).toEqual(h.posted[0]);
       h.session.close();
     });
   });
