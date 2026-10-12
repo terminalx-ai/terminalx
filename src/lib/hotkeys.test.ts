@@ -159,6 +159,47 @@ describe("a terminal with the focus", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  // #427: an agent's own interrupt, leaving insert mode in an editor. Escape is a key for the program on screen.
+  it("keeps Escape from every action, whatever is bound to it, and the key reaches the program", () => {
+    const interrupt = vi.fn();
+    const sidebar = vi.fn();
+    cleanups.push(registerShortcut("session.interrupt", interrupt), registerShortcut("app.toggleSidebar", sidebar));
+    // Stored by hand, for an action that is not in any context.
+    setPrefs({ shortcuts: { "app.toggleSidebar": ["escape"], "session.interrupt": ["escape"] } });
+    const input = terminal();
+    const reached = vi.fn();
+    input.addEventListener("keydown", reached);
+    const typed = press({ key: "Escape", code: "Escape" }, input);
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(sidebar).not.toHaveBeenCalled();
+    expect(typed.defaultPrevented).toBe(false);
+    expect(reached).toHaveBeenCalledTimes(1);
+    // Outside a terminal the same key is the action's.
+    press({ key: "Escape", code: "Escape" });
+    expect(interrupt.mock.calls.length + sidebar.mock.calls.length).toBe(1);
+  });
+
+  it("still lets a surface over the terminal close on its own Escape", () => {
+    const interrupt = vi.fn();
+    const closeDialog = vi.fn();
+    cleanups.push(registerShortcut("session.interrupt", interrupt), registerHotkey("escape", closeDialog));
+    const typed = press({ key: "Escape", code: "Escape" }, terminal());
+    expect(closeDialog).toHaveBeenCalledTimes(1);
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(typed.defaultPrevented).toBe(true);
+  });
+
+  it("gives the interrupt its Escape while the reader types in the chat", () => {
+    const interrupt = vi.fn();
+    cleanups.push(registerShortcut("session.interrupt", interrupt));
+    const composer = document.createElement("textarea");
+    document.body.append(composer);
+    cleanups.push(() => composer.remove());
+    const typed = press({ key: "Escape", code: "Escape" }, composer);
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect(typed.defaultPrevented).toBe(true);
+  });
+
   it("does not start dictation on a held key: Option is Meta there", () => {
     setPrefs({ shortcuts: MAC_DICTATION });
     const { onStart } = held();

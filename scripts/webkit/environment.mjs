@@ -50,7 +50,7 @@ const recipes = {
       provider: "local-docker",
       state: "proposed",
       baseRevision: 4,
-      definition: { ...definition, installScript: `${definition.installScript}\ncorepack enable` },
+      definition: { ...definition, installScript: `${definition.installScript}\ncorepack enable\n${Array.from({ length: 40 }, (_, line) => `echo "step ${line}"`).join("\n")}\ncurl -fsSL https://example.test/install.sh | sh` },
       definitionDigest: "sha256:x",
       observations: {
         v: 1,
@@ -96,6 +96,10 @@ try {
         answers.cloud_providers = { providers: [{ id: "local-docker", displayName: "Local Docker", availability: "available", canManage: true, connection: { state: "connected", connectedAt: 1, lastValidatedAt: 1, credentialFingerprint: null }, capabilities: {} }] };
         answers.organization_environment_status = { ...status, contextRevision: "s:1" };
         answers.organization_environment_recipes = { ...recipes, contextRevision: "s:1" };
+        answers.organization_compute_policy = { policy: { version: 1, maxWorkspaces: 5, maxRunningWorkspaces: 3 }, canEdit: true, counts: { workspaces: 2, running: 1 }, workspaceCeiling: 10, runningWorkspaceCeiling: 10 };
+        answers.cloud_agent_logins = { credentials: [{ provider: "claude" }, { provider: "codex" }] };
+        answers.cloud_workspace_setup = { provider: "local-docker", currency: "USD", pricing: "provider-rate", defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 15, retentionDays: 30, networkPolicy: "relay-only" }, allowedIdleSuspendMinutes: [5, 15, 60, 0], allowedRetentionDays: [30], sources: [], locations: [], machineClasses: [] };
+        answers.cloud_workspace_quote = { id: "quote-1", provider: "local-docker", expiresAt: Date.now() + 300000, currency: "USD", pricing: "provider-rate", activeHourlyMicros: 20000, alwaysOnThirtyDayMicros: 14400000, estimatedSuspendedMonthlyMicros: null, configuration: {} };
         answers.organization_environment_version = { ...status.versions[0], contextRevision: "s:1", logs: [{ phase: "install", content: "E: Unable to locate package build-essentials\nexit status 100", occurredAt: 1 }] };
       },
       { status, recipes },
@@ -108,6 +112,11 @@ try {
     await page.getByRole("listitem", { name: "Version 4" }).getByRole("button", { name: "Show log" }).click();
     await page.getByLabel("Build log of version 4").getByText(/Unable to locate/).waitFor();
     await page.getByRole("button", { name: "Apply…" }).click();
+    // PRO-20 part 4: asking to configure with an agent prices a machine and shows the confirmation; it starts none.
+    await page.getByRole("button", { name: "Configure with an agent…" }).click();
+    const before = page.getByLabel("Before the machine starts");
+    await before.waitFor();
+    await before.getByRole("button", { name: "Show what the agent is asked" }).click();
     const section = page.locator("div.rounded-lg", { has: page.getByText("Cloud environment", { exact: true }) }).last();
     const layout = await section.evaluate((root) => {
       const main = root.closest('[role="main"]') ?? document.body;
@@ -142,8 +151,12 @@ try {
       "every control, table and script stays inside the section": layout.outside.length === 0,
       "no two buttons overlap": layout.overlaps.length === 0,
       "the machine script and repository setup are separate fields": (await template.getByLabel("Machine install script").count()) === 1 && (await template.getByRole("listitem").count()) === 2,
-      "a failing check reads as failing, and a pre-existing one says so": /Failed \(already failing before this recipe\) \(exit 1\)/.test(layout.text) && /Timed out/.test(layout.text),
+      "a failing check reads as failing, and a pre-existing one says so": /Failed \(also fails without this recipe's setup\) \(exit 1\)/.test(layout.text) && /Timed out/.test(layout.text),
+      "proposed scripts are shown whole, with no scroll box": await section.evaluate((root) => [...root.querySelectorAll('pre[aria-label^="Proposed"], pre[aria-label^="Script of step"]')].every((pre) => pre.scrollHeight <= pre.clientHeight + 1 && getComputedStyle(pre).overflowY === "visible")) && /lines?, shown in full/.test(layout.text),
+      "results are not called independent of the agent": /Re-run by TerminalX on the preparation machine/.test(layout.text) && /not an independent result/.test(layout.text),
       "the build and the apply each ask first": /starts a temporary builder machine on Local Docker/.test(layout.text) && /Replace the template's machine script/.test(layout.text),
+      "configuring with an agent asks first, with the price, the running limit and the 60 minutes": /about \$0\.02 an hour/.test(layout.text) && /1 of 3 are running now/.test(layout.text) && /after 60 minutes/.test(layout.text) && /Never edit code, tests or configuration/.test(layout.text),
+      "asking starts no machine and stores no recipe": !calls.includes("cloud_workspace_create") && !calls.includes("organization_environment_recipe_propose"),
       "looking and asking sends no build, retry, rollback, apply or save": !calls.some((command) => /^organization_environment_(build|update|version_retry|version_cancel|version_rollback|recipe_apply|recipe_dismiss)$/.test(command)) && !calls.some((command) => /^cloud_(remote_attach|workspace_resume|workspace_create)$/.test(command)),
     }, { outside: layout.outside, overlaps: layout.overlaps, calls: calls.filter((command) => command.startsWith("organization_environment")) });
     await page.close();

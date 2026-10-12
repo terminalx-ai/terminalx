@@ -194,6 +194,17 @@ pub type Decoder = fn(&str, &HashSet<String>, &mut Vec<Payload>);
 pub enum TurnMark {
     Opened,
     Ended,
+    /// Ended by being interrupted, where the record says so and draws
+    /// nothing of its own (Codex's `turn_aborted`). To whoever only asks
+    /// whether the turn is over, it is.
+    Aborted,
+}
+
+impl TurnMark {
+    /// Whether the record says the turn is over, however it ended.
+    pub fn ends(self) -> bool {
+        matches!(self, Self::Ended | Self::Aborted)
+    }
 }
 
 /// A [`Decoder`] that also reads the record for a [`TurnMark`], from the one
@@ -255,28 +266,48 @@ impl Streamer {
     /// Feed the bytes read after `offset()`. Complete lines are decoded; the
     /// tail after the last newline is kept for the next chunk.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Payload> {
+        let mut out = Vec::new();
+        for (payloads, mark) in self.push_records(chunk) {
+            out.extend(payloads);
+            if mark.is_some() {
+                self.mark = mark;
+            }
+        }
+        out
+    }
+
+    /// [`Self::push`], record by record: what each complete line decoded to
+    /// and what it said about the turn. A conversation read from its start
+    /// (#437) needs each turn's end where it happened, not only the last.
+    pub fn push_records(&mut self, chunk: &[u8]) -> Vec<Record> {
         self.offset += chunk.len() as u64;
         self.partial.extend_from_slice(chunk);
-        let mut out = Vec::new();
+        let mut records = Vec::new();
         while let Some(nl) = self.partial.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.partial.drain(..=nl).collect();
             if let Ok(text) = std::str::from_utf8(&line) {
                 let line = text.trim_end_matches(['\n', '\r']);
                 if !line.trim().is_empty() {
-                    match self.marker {
-                        Some(decode_marked) => {
-                            if let Some(mark) = decode_marked(line, &self.skip, &mut out) {
-                                self.mark = Some(mark);
-                            }
+                    let mut out = Vec::new();
+                    let mark = match self.marker {
+                        Some(decode_marked) => decode_marked(line, &self.skip, &mut out),
+                        None => {
+                            (self.decode)(line, &self.skip, &mut out);
+                            None
                         }
-                        None => (self.decode)(line, &self.skip, &mut out),
+                    };
+                    if !out.is_empty() || mark.is_some() {
+                        records.push((out, mark));
                     }
                 }
             }
         }
-        out
+        records
     }
 }
+
+/// One transcript record: its payloads, and its word about the turn.
+pub type Record = (Vec<Payload>, Option<TurnMark>);
 
 /// How long a `Stop` hook waits for the transcript to catch up with the reply
 /// the hook is already holding. Well inside the hook's own 10 s.
@@ -318,6 +349,14 @@ impl Tail {
         Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode, marker: None }
     }
 
+    /// Follow a conversation the app did not start (#437), from `offset`:
+    /// the file's start when none of it has been logged, so the chat shows
+    /// the turns exchanged before the app noticed, or wherever the tab had
+    /// read to when it last followed this file.
+    pub fn from_offset(path: PathBuf, offset: u64, decode: Decoder) -> Self {
+        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
+    }
+
     /// Also report what the records say about the turn; see [`Self::drain_marked`].
     pub fn marking(mut self, marker: Marker) -> Self {
         self.marker = Some(marker);
@@ -326,11 +365,19 @@ impl Tail {
     }
 
     /// How far into the file the tail has read.
-    #[cfg(test)]
     pub fn offset(&self) -> u64 {
         self.stream.lock().unwrap().offset()
     }
 
+    /// Point at `path` and read on from `offset`, whatever was being
+    /// followed. For a CLI that was started by hand (#437): which file it
+    /// writes is found out by looking, and it may move to another.
+    pub fn follow(&self, path: &Path, offset: u64) {
+        let mut current = self.path.lock().unwrap();
+        *current = path.to_path_buf();
+        let mut stream = self.stream.lock().unwrap();
+        *stream = Streamer::skipping(offset, self.decode, stream.carried().clone()).marking(self.marker);
+    }
 
     /// Point at the file the CLI actually opened. Hooks carry
     /// `transcript_path`, which is authoritative; anything derived before the
@@ -361,18 +408,42 @@ impl Tail {
     /// applies the payloads and then records the mark never records an end
     /// ahead of the reply that came before it.
     pub fn drain_marked(&self) -> (Vec<Payload>, Option<TurnMark>) {
+        let path = self.following();
+        let mut stream = self.stream.lock().unwrap();
+        let Some(appended) = self.appended(&path, &mut stream) else { return (Vec::new(), None) };
+        let payloads = stream.push(&appended);
+        (payloads, stream.take_mark())
+    }
+
+    /// [`Self::drain_marked`], record by record.
+    pub fn drain_records(&self) -> Vec<Record> {
+        let path = self.following();
+        let mut stream = self.stream.lock().unwrap();
+        match self.appended(&path, &mut stream) {
+            Some(appended) => stream.push_records(&appended),
+            None => Vec::new(),
+        }
+    }
+
+    /// The file being followed, read and let go of before the cursor is
+    /// taken. `retarget` and `follow` hold the path while they take the
+    /// cursor, so a reader that held the cursor while it asked for the path
+    /// would wait on them for good, and they on it.
+    fn following(&self) -> PathBuf {
+        self.path.lock().unwrap().clone()
+    }
+
+    /// The bytes `path` has gained since `stream` last read it.
+    fn appended(&self, path: &Path, stream: &mut Streamer) -> Option<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
 
-        let path = self.path.lock().unwrap().clone();
         if path.as_os_str().is_empty() {
-            return (Vec::new(), None);
+            return None;
         }
-        let mut stream = self.stream.lock().unwrap();
-        let Ok(meta) = std::fs::metadata(&path) else { return (Vec::new(), None) };
-        let size = meta.len();
+        let size = std::fs::metadata(path).ok()?.len();
         let offset = stream.offset();
         if size == offset {
-            return (Vec::new(), None);
+            return None;
         }
         if size < offset {
             // A CLI only appends, so a shorter file means it was replaced.
@@ -380,24 +451,19 @@ impl Tail {
             // would duplicate the whole conversation in the log.
             log::warn!("transcript {} shrank; skipping to its end", path.display());
             *stream = Streamer::skipping(size, self.decode, stream.carried().clone()).marking(self.marker);
-            return (Vec::new(), None);
+            return None;
         }
-        let mut file = match std::fs::File::open(&path) {
+        let mut file = match std::fs::File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 log::warn!("transcript {}: {e}", path.display());
-                return (Vec::new(), None);
+                return None;
             }
         };
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return (Vec::new(), None);
-        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
         let mut buf = Vec::with_capacity((size - offset) as usize);
-        if file.take(size - offset).read_to_end(&mut buf).is_err() {
-            return (Vec::new(), None);
-        }
-        let payloads = stream.push(&buf);
-        (payloads, stream.take_mark())
+        file.take(size - offset).read_to_end(&mut buf).ok()?;
+        Some(buf)
     }
 }
 
@@ -504,6 +570,45 @@ mod tests {
             return;
         }
         out.push(Payload::Status { text: line.to_string() });
+    }
+
+    /// A hook that points the tail at another file and the thread that reads
+    /// it take the tail's two locks in the same order. They once did not, and
+    /// then each waited on the other for good: the tab's transcript was never
+    /// read again, and everything that reads it before acting hung with it.
+    #[test]
+    fn reading_a_tail_and_pointing_it_elsewhere_at_once_never_wait_on_each_other() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let files = [dir.path().join("a.jsonl"), dir.path().join("b.jsonl")];
+        for file in &files {
+            std::fs::write(file, "one\ntwo\n").unwrap();
+        }
+        let tail = Arc::new(Tail::from_offset(files[0].clone(), 0, echo));
+        let (done, finished) = std::sync::mpsc::channel();
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                let (tail, files, done) = (tail.clone(), files.clone(), done.clone());
+                std::thread::spawn(move || {
+                    for round in 0..4000 {
+                        match worker % 4 {
+                            0 => drop(tail.drain_marked()),
+                            1 => drop(tail.drain_records()),
+                            2 => tail.retarget(&files[round % 2]),
+                            _ => tail.follow(&files[round % 2], 0),
+                        }
+                    }
+                    let _ = done.send(());
+                })
+            })
+            .collect();
+        for _ in &workers {
+            finished.recv_timeout(Duration::from_secs(60)).expect("a reader and a writer of the tail are waiting on each other");
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 
     /// The `Stop` hook and the assistant record race, and the reply must be

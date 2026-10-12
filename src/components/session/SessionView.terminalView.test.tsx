@@ -385,7 +385,7 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     expect(screen.getByTestId("composer")).toBeTruthy();
   });
 
-  it("leaves Escape to the agent in the terminal view, and stops the turn with it from the chat", async () => {
+  it("leaves Escape to the agent in the terminal view, and interrupts the turn with it from the chat", async () => {
     runtime.tabs = [agentTab({ status: "in_progress" })];
     await open();
     showTerminal();
@@ -400,10 +400,35 @@ describe("the chat / terminal switch on a cloud agent tab (PRO-86)", () => {
     await waitFor(() => expect(runtime.typed).toEqual(["\x1b"]));
     expect(enqueued).toEqual([]);
 
+    // In the chat the app takes the key and sends the agent its Escape over the live connection (#427).
     fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
     await screen.findByTestId("composer");
     expect(fireEvent.keyDown(window, { key: "Escape", code: "Escape" })).toBe(false);
-    await waitFor(() => expect(enqueued).toEqual(["stop"]));
+    await waitFor(() => expect(runtime.params("session.interrupt")).toEqual([{ sessionId: "s-1", tabId: "t-1" }]));
+    await settle();
+    // Never a mailbox stop: that ends the agent's process and drops its queued follow-ups.
+    expect(enqueued).toEqual([]);
+    for (const method of ["session.close", "pty.kill"]) expect(runtime.methods(method)).toEqual([]);
+  });
+
+  it("leaves the chat's Escape alone on a runtime from before session/3: nothing is interrupted, and nothing is stopped", async () => {
+    runtime.capabilities = runtime.capabilities.filter((capability) => capability !== "session/3");
+    runtime.tabs = [agentTab({ status: "in_progress" })];
+    await open();
+    await screen.findByTestId("composer");
+    expect(fireEvent.keyDown(window, { key: "Escape", code: "Escape" })).toBe(true);
+    await settle();
+    expect(runtime.methods("session.interrupt")).toEqual([]);
+    expect(enqueued).toEqual([]);
+  });
+
+  it("does not send Escape to a tab with nothing running", async () => {
+    await open();
+    await screen.findByTestId("composer");
+    expect(fireEvent.keyDown(window, { key: "Escape", code: "Escape" })).toBe(true);
+    await settle();
+    expect(runtime.methods("session.interrupt")).toEqual([]);
+    expect(enqueued).toEqual([]);
   });
 
   it("remembers the view per tab", async () => {

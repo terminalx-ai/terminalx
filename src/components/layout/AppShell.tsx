@@ -26,6 +26,7 @@ import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
+import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
@@ -172,6 +173,7 @@ export function AppShell() {
       <BypassDialog />
       <SessionDialogs />
       <CloudShareDialogHost />
+      <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />

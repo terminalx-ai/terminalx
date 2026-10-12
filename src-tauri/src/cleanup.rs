@@ -635,6 +635,7 @@ mod tests {
             context_used: None,
             context_max: None,
             fork_from: None,
+            follow: Default::default(),
             unknown: BTreeMap::new(),
         }
     }

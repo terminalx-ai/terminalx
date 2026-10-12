@@ -11,7 +11,7 @@ vi.mock("@/lib/mobileDriver", () => ({ useMobileDrivenTabs: () => new Set<string
 vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => ({ files: [] }) }));
 vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => true, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
-  clearTabViewError: vi.fn(), leaveTerminalView: vi.fn(),
+  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => <div>Terminal output</div> }));
 vi.mock("@/components/chat/Chat", () => ({ Chat: ({ footer }: { footer: React.ReactNode }) => <div>{footer}</div> }));

@@ -32,6 +32,43 @@
 
 This covers workspaces on this computer. See
 [docs/ISSUE-PIPELINE.md](docs/ISSUE-PIPELINE.md).
+### Cloud workspaces
+
+- Scheduled tasks. On a server that has them turned on, an organization's
+  owners and admins find "Scheduled tasks…" in a cloud workspace's menu: a
+  task wakes the workspace at set times and sends one prompt to an agent.
+  The dialog shows what a task costs before it is saved (each run, a month,
+  and the limit of 24 runs in 24 hours), how its last run went, and lets
+  them pause, resume or delete it, or pause every task of the organization.
+  A scheduled agent never starts in bypass permissions. (PRO-37)
+### Tabs follow their terminal
+
+- A tab is now what runs in its terminal. Type `claude` or `codex` into a
+  plain terminal and its sidebar row becomes that agent's tab, with its
+  status and a chat that shows the conversation from its first turn. Exit
+  the agent and the row is a terminal again. Start another agent there and
+  the same tab is that agent's. The tab keeps its place, its selection and
+  any name you gave it throughout. (#437)
+- The same goes for a tab created as an agent tab: exiting its CLI from the
+  terminal view leaves a shell in the same terminal, and the tab is a
+  terminal until an agent is started in it. (#437)
+- Exiting an agent is not an error. There is no "needs attention", no
+  recovery banner and no "Resume safely"; a turn that was cut short is
+  marked as interrupted, with one line saying so. (#437)
+- A tab keeps every conversation it has held. The chat shows the current
+  one; earlier ones are under **Conversations**, and a terminal's last
+  conversation can be resumed in place with **Resume here**. Starting an
+  agent by hand on a conversation the tab already holds (`claude --resume`,
+  `claude -c`, `codex resume`) picks it up instead of opening a second copy.
+  (#437)
+- Sending from the chat types into an agent you started by hand, as it does
+  for one the app started. What would need that agent restarted (its
+  permission mode, and for Codex its model and effort) is disabled there and
+  says why. (#437)
+- Cursor and OpenCode started in a terminal are shown on the terminal's row
+  by their mark; they have no chat. Cloud workspaces do not follow their
+  terminals yet. See [docs/TABS-FOLLOW-TERMINAL.md](docs/TABS-FOLLOW-TERMINAL.md).
+  (#437)
 
 ### Dictation
 
@@ -92,6 +129,43 @@ This covers workspaces on this computer. See
   first: from the Quit menu item and ⌘Q, the tray's Quit and the main
   window's close button. Quitting from the Dock, logging out and shutting
   down cannot be asked about and end the app as before. (#426)
+
+### Escape interrupts the agent instead of ending it
+
+- Pressing Escape while an agent works no longer kills the agent and puts
+  "Session closed … Resume safely" over the tab. Escape is the agent's own
+  key. In the terminal view (local and cloud) it is typed into the agent's
+  screen like every other key, so it also closes the agent's menus and leaves
+  its modes; an Escape typed in any terminal is never taken by a shortcut. In
+  the chat it interrupts the running turn: the turn shows as "Stopped", the
+  agent's process stays, and the next message goes to it without a restart.
+  With nothing running, Escape does nothing. Dialogs, menus, pickers and the
+  editor still get the key first. (#427)
+- Queued follow-ups survive Escape. Claude Code and Codex keep their own
+  queue and, interrupted with a message queued, send it at once as the next
+  turn; the chat now shows that as the queued message becoming the next
+  prompt rather than drawing it twice. For agents with no queue of their own
+  the app's is kept, and the next message starts when the interrupted turn
+  has ended. A request the turn was waiting on (a permission or a question)
+  is withdrawn with it, so nothing you were still deciding about runs.
+- Stopping the session is now a separate, explicit action: "Stop session" in
+  the terminal view and on the recovery banner, and "Stop the session" in
+  Settings → Shortcuts, which has no keys until you give it some (never a bare
+  Escape). The composer's Stop interrupts first; if the agent does not answer,
+  the same button becomes "Stop session" and ends the process. Only that
+  shows the "Session closed" banner.
+- If you had moved "Stop the running turn" to other keys, they now interrupt
+  (that is what stopping a turn does now), and Escape stays free if you had
+  taken the action off it.
+- Cloud tabs: Escape in the chat is sent to the runtime as a live interrupt
+  (`session/3`), for whoever may stop the tab. A workspace whose runtime is
+  older than this leaves the key alone until it is updated; its Stop works as
+  before.
+- The same holds for the agents that are driven without a terminal, checked
+  against the real ones. On an OpenCode tab the first message no longer fails
+  with "The connection was lost" (it was sent before OpenCode had started),
+  the reply no longer begins with your own prompt, and a message queued
+  behind a turn is no longer cut short the moment it starts.
 
 ## 0.2.10
 

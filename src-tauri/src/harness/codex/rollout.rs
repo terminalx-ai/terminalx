@@ -140,7 +140,8 @@ pub fn decode_marked(line: &str, _skip: &std::collections::HashSet<String>, out:
     }
     let mark = match v["payload"]["type"].as_str().unwrap_or("") {
         "task_started" => Some(TurnMark::Opened),
-        "task_complete" | "turn_aborted" => Some(TurnMark::Ended),
+        "task_complete" => Some(TurnMark::Ended),
+        "turn_aborted" => Some(TurnMark::Aborted),
         _ => None,
     };
     decode_event(&v["payload"], out);
@@ -546,7 +547,9 @@ mod tests {
         let marks: Vec<TurnMark> = FIXTURE.lines().filter_map(turn_mark).collect();
         assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended].repeat(3));
         let aborted = r#"{"timestamp":"2026-09-04T10:52:02.106Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1","reason":"interrupted"}}"#;
-        assert_eq!(turn_mark(aborted), Some(TurnMark::Ended));
+        // An interruption ends the turn too, and says which it was.
+        assert_eq!(turn_mark(aborted), Some(TurnMark::Aborted));
+        assert!(TurnMark::Aborted.ends() && TurnMark::Ended.ends() && !TurnMark::Opened.ends());
     }
 
     #[test]

