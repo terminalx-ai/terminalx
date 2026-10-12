@@ -1882,7 +1882,7 @@ pub async fn send_message(
 }
 
 #[tauri::command]
-pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
 }
 

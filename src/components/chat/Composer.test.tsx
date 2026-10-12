@@ -560,6 +560,21 @@ describe("a shared cloud tab's limits (PRO-30 review)", () => {
     expect(screen.queryByTestId("composer-settings-note")).toBeNull();
   });
 
+  // #427: the control names what its press does now. Stop interrupts; only "Stop session" ends the agent's process.
+  it("calls its stop control Stop while that interrupts, and Stop session once it would end the process", () => {
+    const onStop = vi.fn();
+    const base = { tab, busy: true, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop, onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    const view = render(<Composer {...base} stopMode="interrupt" />);
+    expect(screen.queryByRole("button", { name: "Stop session" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+
+    view.rerender(<Composer {...base} stopMode="force" />);
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
+    expect(onStop).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the pickers and Stop by default", () => {
     render(<Composer tab={tab} busy draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();

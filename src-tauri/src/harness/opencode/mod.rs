@@ -68,6 +68,9 @@ pub struct OpenCode {
     /// Open permission requests: our request id → the server's permission id.
     asks: HashMap<String, String>,
     turn_open: bool,
+    /// The app asked for the open turn to be aborted (`interrupt`): its idle
+    /// is a stopped turn, not a finished one.
+    aborting: bool,
     turn_started_at: Option<std::time::Instant>,
     last_usage: Option<(u64, Option<u64>)>,
 }
@@ -108,6 +111,7 @@ impl OpenCode {
             body["model"] = json!({"providerID": provider, "modelID": model});
         }
         self.turn_open = true;
+        self.aborting = false;
         self.turn_started_at = Some(std::time::Instant::now());
         self.seen.clear();
         self.committed.clear();
@@ -126,11 +130,26 @@ impl OpenCode {
         self.begin_turn(&text, &images)
     }
 
+    /// Abort the open turn; the server keeps running. The turn ends when the
+    /// session goes idle (`idle`), not here.
     pub fn interrupt(&mut self) -> Vec<Action> {
+        if !self.turn_open {
+            return Vec::new();
+        }
         match &self.session_id {
-            Some(sid) => vec![self.http("abort", "POST", &format!("/session/{sid}/abort"), Some(json!({})))],
+            Some(sid) => {
+                self.aborting = true;
+                vec![self.http("abort", "POST", &format!("/session/{sid}/abort"), Some(json!({})))]
+            }
             None => Vec::new(),
         }
+    }
+
+    /// The session has nothing running: the open turn is over. It is a
+    /// stopped turn when the app asked for the abort.
+    fn idle(&mut self) -> Vec<Action> {
+        let status = if std::mem::take(&mut self.aborting) { TurnStatus::Aborted } else { TurnStatus::Ok };
+        self.end_turn(status, None, false)
     }
 
     pub fn answer(&mut self, request_id: &str, option_id: &str) -> Option<Vec<Action>> {
@@ -226,6 +245,11 @@ impl OpenCode {
                 // reported the turn; only an error path needs it.
                 Vec::new()
             }
+            // The server did not take the abort: the turn goes on, and its end is its own.
+            "abort" if !ok => {
+                self.aborting = false;
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -272,14 +296,14 @@ impl OpenCode {
                 if !mine(&p["sessionID"]) {
                     return Vec::new();
                 }
-                self.end_turn(TurnStatus::Ok, None, false)
+                self.idle()
             }
             "session.status" => {
                 if !mine(&p["sessionID"]) {
                     return Vec::new();
                 }
                 if p["status"]["type"].as_str() == Some("idle") {
-                    self.end_turn(TurnStatus::Ok, None, false)
+                    self.idle()
                 } else {
                     Vec::new()
                 }
@@ -291,8 +315,13 @@ impl OpenCode {
                 let name = p["error"]["name"].as_str().unwrap_or("");
                 let message = p["error"]["data"]["message"].as_str().or_else(|| p["error"]["message"].as_str()).unwrap_or("OpenCode reported an error").to_string();
                 let auth = name.to_lowercase().contains("auth") || message.to_lowercase().contains("api key");
+                // An abort is reported twice, as this error and as the
+                // session's idle, in an order the server does not promise.
+                // The idle is the one that ends the turn: whichever of the
+                // two came second would otherwise end the turn after it, when
+                // a queued message has started one in between (#427).
                 if name == "MessageAbortedError" {
-                    self.end_turn(TurnStatus::Aborted, None, false)
+                    Vec::new()
                 } else {
                     self.end_turn(TurnStatus::Error, Some(message), auth)
                 }
@@ -558,5 +587,74 @@ mod tests {
         o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s2"}}}"#);
         let a = o.handle(r#"{"type":"session.error","properties":{"sessionID":"s2","error":{"name":"ProviderAuthError","data":{"message":"Invalid API key"}}}}"#);
         assert!(matches!(emits(&a)[0], Payload::TurnCompleted { status: TurnStatus::Error, auth_failed: true, .. }));
+    }
+
+    // ---- #427: Escape for a running turn
+
+    /// A tab with its session open and a turn running on `text`.
+    fn working(text: &str) -> OpenCode {
+        let mut o = OpenCode::new(1, "/tmp/x", None, None, "auto");
+        o.start(text.into(), vec![]);
+        o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s"}}}"#);
+        o
+    }
+    fn ends(actions: &[Action]) -> Vec<TurnStatus> {
+        emits(actions).into_iter().filter_map(|p| if let Payload::TurnCompleted { status, .. } = p { Some(*status) } else { None }).collect()
+    }
+    const IDLE: &str = r#"{"type":"session.idle","properties":{"sessionID":"s"}}"#;
+    const STATUS_IDLE: &str = r#"{"type":"session.status","properties":{"sessionID":"s","status":{"type":"idle"}}}"#;
+    const ABORTED: &str = r#"{"type":"session.error","properties":{"sessionID":"s","error":{"name":"MessageAbortedError","data":{"message":"The operation was aborted."}}}}"#;
+
+    #[test]
+    fn an_interrupt_aborts_the_session_and_the_turn_ends_as_stopped_when_it_goes_idle() {
+        let mut o = working("x");
+        let (tag, url, _) = https(&o.interrupt()).into_iter().next().unwrap();
+        assert_eq!(tag, "abort");
+        assert!(url.ends_with("/session/s/abort"));
+        // Asking is not the end of the turn: the server says when it has stopped.
+        assert!(o.turn_open);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Aborted]);
+        // The same idle reported the other way ends nothing a second time.
+        assert_eq!(ends(&o.handle(STATUS_IDLE)), []);
+        // A turn nobody interrupted still ends as finished.
+        o.prompt("y".into(), vec![]);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok]);
+    }
+
+    /// An abort is reported twice (the error and the idle), in an order the
+    /// server does not promise. Only the idle ends a turn, so whichever comes
+    /// second cannot end the turn a queued message started in between.
+    #[test]
+    fn the_second_word_about_an_abort_never_ends_the_turn_that_followed_it() {
+        for order in [[IDLE, ABORTED], [ABORTED, IDLE]] {
+            let mut o = working("first");
+            o.interrupt();
+            let mut ended = Vec::new();
+            // The queued message is sent the moment the interrupted turn ends.
+            for line in order {
+                let now = ends(&o.handle(line));
+                if !now.is_empty() {
+                    assert_eq!(https(&o.prompt("second".into(), vec![]))[0].0, "prompt");
+                }
+                ended.extend(now);
+            }
+            assert_eq!(ended, [TurnStatus::Aborted], "{order:?}");
+            assert!(o.turn_open, "{order:?}: the next turn is still running");
+            // Its own end is its own, and it was not interrupted.
+            assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok], "{order:?}");
+        }
+    }
+
+    #[test]
+    fn an_interrupt_with_no_turn_or_one_the_server_refused_changes_nothing() {
+        // Nothing running: nothing is asked of the server.
+        let mut o = working("x");
+        o.handle(IDLE);
+        assert!(o.interrupt().is_empty());
+        // The server did not take the abort: the turn goes on and ends as finished.
+        o.prompt("y".into(), vec![]);
+        assert_eq!(https(&o.interrupt())[0].0, "abort");
+        o.handle(r#"{"raccoon_http":{"tag":"abort","status":500,"body":{"message":"no"}}}"#);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok]);
     }
 }

@@ -22,7 +22,7 @@ export function StarNagCard({ view, onAction, onDismiss }: {
 }) {
   useHotkey("escape", () => {
     // Editors, menus, pickers and dialogs keep their Escape behavior. Otherwise capture
-    // the key before a tab's stop shortcut or xterm can interrupt an agent.
+    // the key before a tab's interrupt shortcut or xterm can interrupt an agent.
     if (hasEscapeOverlay() || document.activeElement?.closest(".editor-pane")) return false;
     if (!view.busy) onDismiss();
     return true;

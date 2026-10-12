@@ -56,7 +56,7 @@ function cloudBackend(onChange: () => void): SessionBackend {
     kind: "cloud",
     key: `cloud:org-1:ws-1:${logSessionId}`,
     generation: "g1",
-    caps: { local: false, write: true, steer: true, images: false, recovery: false },
+    caps: { local: false, write: true, steer: true, images: false, recovery: false, interrupt: false },
     readOnlyReason: null,
     logSessionId,
     openTab: () => undefined,
@@ -67,6 +67,7 @@ function cloudBackend(onChange: () => void): SessionBackend {
       return { events: [], queued: true };
     },
     steer: async () => undefined,
+    interrupt: async () => undefined,
     stop: async () => undefined,
     respondPermission: async () => undefined,
     answerQuestions: async () => undefined,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ImageInput } from "@/lib/api";
-import { applyEvent, useTabLog } from "@/lib/agentEvents";
+import { applyEvent, getTabLog, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { useSessionIsGit } from "@/lib/quickChats";
@@ -30,6 +30,8 @@ import { openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
+
+const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
  * One tab: its event log, the transcript built from it, and the composer.
@@ -177,9 +179,37 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // The newest event when the last interrupt was sent. Until a turn has ended
+  // after it, the agent has not answered: the tab is still working on the turn
+  // Escape was meant for.
+  const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!live) setInterruptedAt(null);
+  }, [live]);
+  const interrupts = backend.caps.interrupt;
+  const unanswered = useMemo(
+    () => interrupts && live && interruptedAt !== null && !log.events.some((e) => e.seq > interruptedAt && e.payload.type === "turn_completed"),
+    [interrupts, live, interruptedAt, log.events, log.version],
+  );
+
+  // Escape, as the agent's own screen takes it (#427): the turn is
+  // interrupted and the agent's process stays, so nothing here is closed,
+  // settled or resumed. The turn shows as stopped when the agent says so.
+  const interrupt = useCallback(() => {
+    if (gate && !gate.mayStop) {
+      setError(STOP_REFUSED);
+      return;
+    }
+    // Read now, not at the last render: the turn this is for may have ended since.
+    const events = getTabLog(backend.logSessionId, tab.id).events;
+    setInterruptedAt(events.length ? events[events.length - 1].seq : 0);
+    void backend.interrupt(tab.id).catch((e) => setError(local ? safeError(e) : commandError(e)));
+  }, [backend, local, tab.id, gate?.mayStop]);
+
+  // The hard stop: the agent's process is ended and the banner offers to resume.
   const stop = useCallback(() => {
     if (gate && !gate.mayStop) {
-      setError("Only the person driving this tab or an admin can stop the agent.");
+      setError(STOP_REFUSED);
       return;
     }
     if (recoveryLock.current) return;
@@ -219,9 +249,15 @@ export function TabView({
     finally { recoveryLock.current = false; setRecovering(false); }
   };
 
-  // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  // In a cloud tab's terminal view the stop key (Escape, unless remapped) belongs to the agent's own screen, as every other key does.
-  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), {
+  // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
+  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
+  // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
+  // there the key is typed into the agent's own screen, like every other key.
+  useShortcut("session.interrupt", () => (takesKey() ? (interrupt(), true) : false), {
+    enabled: active && !continuationOpen && !terminalMode && interrupts,
+  });
+  // The hard stop has no keys unless the reader gives it some. A cloud tab's terminal view passes those through too.
+  useShortcut("session.stop", () => (takesKey() ? (stop(), true) : false), {
     enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
   });
 
@@ -310,7 +346,9 @@ export function TabView({
           }}
           onSend={send}
           history={history}
-          onStop={stop}
+          // Stop is Escape first; once that went unanswered, the same control ends the process.
+          onStop={interrupts && !unanswered ? interrupt : stop}
+          stopMode={!interrupts ? "stop" : unanswered ? "force" : "interrupt"}
           onSetModel={(m) => {
             if (gate && !gate.mayConfigure) return;
             if (recovery) { void retry(m); return; }

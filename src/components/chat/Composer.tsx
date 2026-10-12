@@ -111,6 +111,7 @@ export function Composer({
   settingsNote = null,
   settingsNoteWarning = false,
   canStop = true,
+  stopMode = "stop",
   autoFocus,
 }: {
   tab: TabEntry;
@@ -152,6 +153,13 @@ export function Composer({
   settingsNoteWarning?: boolean;
   /** False hides Stop (someone else drives this tab, or this reader may only watch). */
   canStop?: boolean;
+  /**
+   * What `onStop` does now, which is what the control says (#427).
+   * `interrupt`: Escape for the agent, and its process stays. `force`: the
+   * interrupt went unanswered, so this press ends the process. `stop`: the
+   * hard stop where there is no interrupt to send first.
+   */
+  stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
 }) {
   const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
@@ -639,8 +647,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
-                <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
+              <WithTooltip label={stopMode === "force" ? "Stop session" : "Stop"} keys={keysOf(stopMode === "interrupt" ? "session.interrupt" : "session.stop")}>
+                <Button
+                  size="icon-sm"
+                  variant={stopMode === "force" ? "destructive" : "secondary"}
+                  aria-label={stopMode === "force" ? "Stop session" : "Stop"}
+                  onClick={onStop}
+                >
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>

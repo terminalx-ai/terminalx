@@ -209,7 +209,87 @@ A single-line prompt starting with `/` is written as plain keystrokes instead,
 because a pasted slash command is classified as prose and never opens the
 command palette. `/model` and `/effort` reach the running CLI the same way.
 
-Interrupt writes a bare Escape. Stop kills the pane.
+### Escape interrupts; only Stop ends the process
+
+Escape is the agent's key (#427). It used to be the app's "stop the running
+turn", and that stop killed the CLI: every Escape ended the process, dropped
+what was queued, cancelled open permission requests and put "Session closed …
+Resume safely" over the tab. Now there are two actions, and only one of them
+is on a key by default.
+
+| | Interrupt (`session.interrupt`, Escape) | Stop (`session.stop`, no keys) |
+| --- | --- | --- |
+| What it does | A bare Escape typed into the CLI (`interrupt`) | Kills the pane (`stop`) |
+| The agent's process | Stays; the next message goes to it | Ends; the next message resumes the conversation in a new one |
+| Queued follow-ups | Kept (see below) | Dropped |
+| What the tab shows | The turn as "Stopped", once the agent says so | The same, plus "Session closed … Resume safely" |
+| Where it is | Escape in the chat, the composer's Stop | "Stop session" in the terminal view and on the recovery banner, the composer's Stop after an interrupt went unanswered, and a shortcut the reader may set |
+
+**Which view the key is pressed in decides who reads it.**
+
+- **Terminal view** (local and cloud): the key is not the app's at all. The
+  action is not bound there, and the binder never gives an Escape typed in a
+  terminal to any action whatever it is bound to (`hotkeys.ts`), so it reaches
+  xterm and the CLI like every other key: it interrupts a turn, closes one of
+  the CLI's menus, leaves a mode. That holds for every terminal in the
+  window, a shell's included.
+- **Chat view**: Escape, when no dialog, menu, picker or editor pane has it,
+  calls `interrupt`, which writes the same bare Escape into the pane. With no
+  turn running the key is not taken and nothing is typed: an Escape in an
+  idle CLI would clear what is in its input.
+
+**The app settles nothing when the key is pressed.** `interrupt` does not
+close the turn or mark the tab idle. The turn ends when the CLI says it has:
+Codex's `Interrupt` hook, or the interruption each CLI records in its
+transcript. A CLI that does nothing with the key keeps its turn, and the tab
+goes on saying it is working, which is true.
+
+**Open requests are withdrawn.** A permission or question card the turn was
+waiting on is marked "Cancelled" and its parked hook answers the CLI with a
+denial, so a tool the reader was still deciding about never runs after an
+Escape. The same happens when the turn is stopped from the agent's own
+terminal with a card still open in the app: the card goes with the turn
+instead of waiting out the hook's ten minutes and then reading as lapsed.
+
+**The composer's Stop is Escape first.** It interrupts. While the turn it
+interrupted is still the one running (no turn has ended since), the same
+control becomes "Stop session" and the next press is the hard stop: the way
+out for an agent that does not answer an interrupt. The next turn's Stop is
+an interrupt again.
+
+**The queue is the CLI's.** A message sent mid-turn is typed into the CLI at
+once and held by it; the app keeps no queue for these tabs. Checked against
+the real CLIs with a message queued behind a running turn:
+
+| CLI | Escape with a message queued | Escape with nothing queued |
+| --- | --- | --- |
+| Claude Code 2.1.296 | The turn is interrupted and the queued message is sent at once as the next prompt. The transcript reads `queue-operation` dequeue, the partial reply, `[Request interrupted by user]`, then the prompt. | The turn is interrupted: "Interrupted · What should Claude do instead?" |
+| Codex 0.153.4 | The same: its queue line reads "press esc to interrupt and send immediately", and it then says "Model interrupted to submit steer instructions". The rollout has `turn_aborted` (`interrupted`), then a new `task_started` with the prompt. | "Conversation interrupted", and `turn_aborted`. |
+
+So the chat keeps expecting a queued message when its turn is stopped. When
+the CLI's record of it arrives it becomes the prompt of the next turn, which
+is that same message and not a second copy. (The app used to forget a queued
+message the moment its turn was stopped, on the understanding that an
+interrupted CLI hands its queue back to its input; with these versions every
+Escape with a message queued then drew that message twice.) A CLI that does
+keep it back is not left in silence: after `QUEUED_ECHO_GRACE` the tab says
+delivery could not be confirmed, exactly as for a message a finished turn
+never picked up.
+
+One difference between the two CLIs is worth knowing and is theirs, not the
+app's: without Escape, Claude Code holds a queued message until its turn is
+over, while Codex submits it into the running turn at the next tool call.
+
+The headless agents (ACP and OpenCode, still driven for the tabs that have
+them) have no screen and no queue. Their interrupt is their protocol's own
+(`session/cancel`, `POST /session/:id/abort`), the app's queue is kept, and
+the next message in it starts when the interrupted turn has ended, so Escape
+means the same there: stop this turn, go on to what is queued, or stop when
+nothing is. An OpenCode turn ends when its session goes idle; the
+`MessageAbortedError` the server also reports is not treated as an end,
+because whichever of the two came second would end the turn a queued message
+started in between. Neither agent was installed to check against (OpenCode's
+engine is written from its documented API, as its module says).
 
 ### One model and effort, whichever side changed it
 
@@ -638,7 +718,9 @@ rule at click time rather than trusting the rendered row.
   pasted for the CLI to pick up, rather than base64 bytes on a wire.
 - **Queueing.** A prompt sent mid-turn is written immediately — the CLI queues
   typed input itself. The chat shows it as queued until the CLI takes it and the
-  transcript says so; the app keeps no queue of its own for these tabs.
+  transcript says so; the app keeps no queue of its own for these tabs. What
+  Escape does with that queue is the CLI's to decide (see "Escape interrupts;
+  only Stop ends the process").
 - **Permission mode changes** restart the CLI on the same conversation, because
   the TUI only cycles modes on a key with no way to read the result back and
   the CLI reads `--permission-mode` at startup alone. A change made mid-turn

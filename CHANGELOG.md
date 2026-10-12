@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Escape interrupts the agent instead of ending it
+
+- Pressing Escape while an agent works no longer kills the agent and puts
+  "Session closed … Resume safely" over the tab. Escape is the agent's own
+  key. In the terminal view (local and cloud) it is typed into the agent's
+  screen like every other key, so it also closes the agent's menus and leaves
+  its modes; an Escape typed in any terminal is never taken by a shortcut. In
+  the chat it interrupts the running turn: the turn shows as "Stopped", the
+  agent's process stays, and the next message goes to it without a restart.
+  With nothing running, Escape does nothing. Dialogs, menus, pickers and the
+  editor still get the key first. (#427)
+- Queued follow-ups survive Escape. Claude Code and Codex keep their own
+  queue and, interrupted with a message queued, send it at once as the next
+  turn; the chat now shows that as the queued message becoming the next
+  prompt rather than drawing it twice. For agents with no queue of their own
+  the app's is kept, and the next message starts when the interrupted turn
+  has ended. A request the turn was waiting on (a permission or a question)
+  is withdrawn with it, so nothing you were still deciding about runs.
+- Stopping the session is now a separate, explicit action: "Stop session" in
+  the terminal view and on the recovery banner, and "Stop the session" in
+  Settings → Shortcuts, which has no keys until you give it some (never a bare
+  Escape). The composer's Stop interrupts first; if the agent does not answer,
+  the same button becomes "Stop session" and ends the process. Only that
+  shows the "Session closed" banner.
+- If you had moved "Stop the running turn" to other keys, they now interrupt
+  (that is what stopping a turn does now), and Escape stays free if you had
+  taken the action off it.
+- Cloud tabs: Escape in the chat is sent to the runtime as a live interrupt
+  (`session/3`), for whoever may stop the tab. A workspace whose runtime is
+  older than this leaves the key alone until it is updated; its Stop works as
+  before.
+
 ## 0.2.10
 
 Dialogs that keep their buttons in reach, and cloud workspaces that stay awake
