@@ -2807,6 +2807,56 @@ pub fn github_repo(project_path: String) -> Option<String> {
     crate::issues::github_repo(Path::new(&project_path))
 }
 
+// ------------------------------------------------------------------ issue pipelines
+
+/// A pipeline as it starts, with what the author's first prompt must carry
+/// for the pipeline to hear when the work is done.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedIssuePipeline {
+    pub pipeline: crate::issue_pipeline::Pipeline,
+    pub author_brief: String,
+}
+
+#[tauri::command]
+pub fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>> {
+    crate::issue_pipeline::store::list().map_err(err)
+}
+
+/// Carry a session that was started from an issue on to a pull request, a
+/// review and a merge. Refused, with the reason, for a session the pipeline
+/// cannot serve: one on the default branch, or in a project that turned it off.
+#[tauri::command]
+pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: String, auto_merge: Option<bool>) -> CmdResult<StartedIssuePipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        let pipeline = crate::issue_pipeline::engine::start(&host, &session_id, &tab_id, auto_merge).map_err(err)?;
+        Ok(StartedIssuePipeline { pipeline, author_brief: crate::issue_pipeline::prompts::author_brief() })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn issue_pipeline_set_auto_merge(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        crate::issue_pipeline::engine::set_auto_merge(&host, &id, value).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn issue_pipeline_act(app: AppHandle, id: String, action: crate::issue_pipeline::engine::Action) -> CmdResult<crate::issue_pipeline::Pipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        crate::issue_pipeline::engine::act(&host, &id, action).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[cfg(test)]
 mod command_tests {
     #[test]

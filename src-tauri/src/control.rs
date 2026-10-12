@@ -468,6 +468,8 @@ impl ControlService {
             }
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
+            #[cfg(feature = "desktop")]
+            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -522,7 +524,20 @@ impl ControlService {
             #[serde(default)]
             cwd: Option<String>,
             agent: String,
+            /// Required, unless the session starts from an issue.
+            #[serde(default)]
             prompt: String,
+            /// A tracker issue to work on: its number, key or URL.
+            #[serde(default)]
+            issue: Option<String>,
+            #[serde(default)]
+            provider: Option<String>,
+            /// The issue's "merge automatically" switch; the project's default when absent.
+            #[serde(default)]
+            auto_merge: Option<bool>,
+            /// Start from the issue and stop at the code, as before pipelines.
+            #[serde(default)]
+            no_pipeline: bool,
             #[serde(default)]
             title: Option<String>,
             #[serde(default)]
@@ -542,12 +557,18 @@ impl ControlService {
             .map_err(|e| ControlError::invalid(format!("Invalid session request: {e}")))?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = crate::store::index::requested_mode(p.mode.take());
-        if p.prompt.trim().is_empty() {
+        if p.prompt.trim().is_empty() && p.issue.is_none() {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }
+        if p.issue.is_none() && (p.provider.is_some() || p.auto_merge.is_some() || p.no_pipeline) {
+            return Err(ControlError::invalid("--provider, --auto-merge, --no-auto-merge and --no-pipeline apply to a session started with --issue."));
+        }
+        if p.auto_merge.is_some() && (p.no_pipeline || p.on_main) {
+            return Err(ControlError::invalid("--auto-merge needs the pipeline and a worktree: it cannot be combined with --no-pipeline or --on-main."));
+        }
         if p.quick {
-            if p.project.is_some() || p.name.is_some() || p.use_worktree || p.on_main {
-                return Err(ControlError::invalid("A quick chat has no project, so --project, --name, --worktree and --on-main do not apply to it."));
+            if p.project.is_some() || p.name.is_some() || p.use_worktree || p.on_main || p.issue.is_some() {
+                return Err(ControlError::invalid("A quick chat has no project, so --project, --name, --worktree, --on-main and --issue do not apply to it."));
             }
         } else {
             if p.project.is_none() {
@@ -583,6 +604,7 @@ impl ControlService {
             }
         }
         let first_tab = NewTab { harness: p.agent, model: p.model, effort: p.effort, permission_mode: p.mode };
+        let mut issue = None;
         let entry = match p.project.as_deref() {
             None => {
                 // The title a quick chat started from the window gets: the prompt's first line.
@@ -592,6 +614,11 @@ impl ControlService {
             }
             Some(selector) => {
                 let project = resolve_project(selector)?;
+                // The tracker is asked before anything is created: an issue
+                // that cannot be read must not leave a worktree behind.
+                if let Some(reference) = p.issue.as_deref() {
+                    issue = Some(issue_for_session(&project.path, reference, p.provider.as_deref())?);
+                }
                 crate::session_ops::create_named_session_blocking(
                     &*self.sink,
                     NewSession {
@@ -601,7 +628,7 @@ impl ControlService {
                         on_main: p.on_main,
                         base_ref: None,
                         worktree_name: None,
-                        issue: None,
+                        issue: issue.as_ref().map(|issue| issue.reference.clone()),
                         automation: None,
                         cwd: None,
                         tab: Some(first_tab),
@@ -616,13 +643,85 @@ impl ControlService {
             .first()
             .cloned()
             .ok_or_else(|| ControlError::internal("the new session has no tab"))?;
+        // From an issue the prompt is the issue itself, with anything the
+        // caller added after it, and the pipeline's brief last.
+        let mut prompt = match &issue {
+            Some(issue) if p.prompt.trim().is_empty() => issue.prompt.clone(),
+            Some(issue) => format!("{}\n\n{}", issue.prompt, p.prompt.trim()),
+            None => p.prompt,
+        };
+        let mut pipeline = Value::Null;
+        let mut pipeline_note = Value::Null;
+        if issue.is_some() && !p.no_pipeline {
+            match self.start_pipeline(&entry.id, &tab.id, p.auto_merge) {
+                Ok((started, brief)) => {
+                    prompt = format!("{prompt}\n\n{brief}");
+                    pipeline = started;
+                }
+                // The session still starts; it just ends at the code, and says why.
+                Err(reason) => pipeline_note = json!(reason),
+            }
+        }
         let outcome = self
             .manager
-            .send(&entry.id, &tab.id, p.prompt, Vec::new())
+            .send(&entry.id, &tab.id, prompt, Vec::new())
             .map_err(ControlError::internal)?;
         Ok(json!({"sessionId": entry.id, "tabId": tab.id, "title": entry.title, "kind": entry.kind,
             "worktreeName": entry.worktree_name, "branch": entry.branch, "path": entry.cwd,
-            "session": entry, "outcome": outcome}))
+            "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note}))
+    }
+
+    #[cfg(feature = "desktop")]
+    fn pipeline_host(&self) -> crate::issue_pipeline::desktop::LocalHost {
+        crate::issue_pipeline::desktop::LocalHost::new(self.sink.clone(), self.manager.clone())
+    }
+
+    /// Start the issue pipeline for a new session: the pipeline and what the
+    /// author's first prompt must carry for it, or why there is none.
+    #[cfg(feature = "desktop")]
+    fn start_pipeline(&self, session_id: &str, tab_id: &str, auto_merge: Option<bool>) -> Result<(Value, String), String> {
+        let pipeline = crate::issue_pipeline::engine::start(&self.pipeline_host(), session_id, tab_id, auto_merge).map_err(|error| format!("{error:#}"))?;
+        Ok((json!(pipeline), crate::issue_pipeline::prompts::author_brief()))
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    fn start_pipeline(&self, _session_id: &str, _tab_id: &str, _auto_merge: Option<bool>) -> Result<(Value, String), String> {
+        Err("Issue pipelines run in the desktop app.".into())
+    }
+
+    #[cfg(feature = "desktop")]
+    fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::issue_pipeline::{engine, store};
+        if command == "pipelines.list" {
+            let mut pipelines = store::list().map_err(ControlError::internal)?;
+            if let Some(selector) = optional_string(&params, "project") {
+                let project = resolve_project(&selector)?;
+                pipelines.retain(|pipeline| pipeline.project_path == project.path);
+            }
+            return Ok(json!({"pipelines": pipelines}));
+        }
+        let project = optional_string(&params, "project").map(|selector| resolve_project(&selector)).transpose()?;
+        let pipeline = resolve_pipeline(&required_string(&params, "pipeline")?, project.as_ref())?;
+        let host = self.pipeline_host();
+        let changed = match command {
+            "pipelines.show" => Ok(pipeline),
+            "pipelines.autoMerge" => {
+                let value = params.get("value").and_then(Value::as_bool).ok_or_else(|| ControlError::invalid("Say on or off."))?;
+                engine::set_auto_merge(&host, &pipeline.id, value)
+            }
+            "pipelines.act" => {
+                let action: engine::Action = serde_json::from_value(params.get("action").cloned().unwrap_or(Value::Null)).map_err(|_| ControlError::invalid("Unknown pipeline action."))?;
+                // Merging by hand is the reader's own act, on the issue page:
+                // it is what "a person merges this" waits for.
+                if action == engine::Action::Merge {
+                    return Err(ControlError::invalid("A pipeline is merged by hand from the issue page in TerminalX, not from the command line."));
+                }
+                engine::act(&host, &pipeline.id, action)
+            }
+            other => return Err(ControlError::invalid(format!("Unknown control command {other}."))),
+        }
+        .map_err(ControlError::internal)?;
+        Ok(json!({"pipeline": changed}))
     }
 
     fn read(&self, params: Value) -> Result<Value, ControlError> {
@@ -825,6 +924,79 @@ struct Target {
 fn computer_error(error: crate::computer::ComputerError) -> ControlError {
     let recovery = error.recovery();
     ControlError::new(&error.code, error.message, Some(recovery))
+}
+
+/// What `--issue` adds to a new session: the reference it carries and the
+/// prompt it starts with.
+struct IssueStart {
+    reference: crate::store::index::IssueRef,
+    prompt: String,
+}
+
+#[cfg(feature = "desktop")]
+fn issue_for_session(project_path: &str, reference: &str, provider: Option<&str>) -> Result<IssueStart, ControlError> {
+    let (provider, id) = crate::issues::parse_issue_reference(reference, provider).map_err(ControlError::invalid)?;
+    // A URL names its repository. The issue is read from the project's own,
+    // so a URL into another one would silently become this project's issue of
+    // the same number, and the pull request would close that one.
+    if let Some(named) = crate::issues::github_issue_url_repo(reference) {
+        let own = crate::issues::github_repo(Path::new(project_path));
+        if !own.as_deref().is_some_and(|own| own.eq_ignore_ascii_case(&named)) {
+            return Err(ControlError::invalid(format!(
+                "That issue is in {named}, and this project is {}. Start it from a project of that repository.",
+                own.as_deref().unwrap_or("not a GitHub repository")
+            )));
+        }
+    }
+    let issue = if provider == "linear" {
+        let key = crate::store::settings::load().linear_api_key.filter(|key| !key.trim().is_empty()).ok_or_else(|| {
+            ControlError::new("integration_unavailable", "Linear is not connected.", Some(LINEAR_INTEGRATION_RECOVERY.into()))
+        })?;
+        crate::issues::linear_details(&key, &id)
+    } else {
+        crate::issues::github_details(Path::new(project_path), &id)
+    }
+    .map_err(|error| ControlError::not_found(format!("{reference} could not be read: {error:#}")))?;
+    Ok(IssueStart {
+        prompt: crate::issue_pipeline::prompts::issue_prompt(&issue),
+        reference: crate::store::index::IssueRef { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
+    })
+}
+
+#[cfg(not(feature = "desktop"))]
+fn issue_for_session(_project_path: &str, _reference: &str, _provider: Option<&str>) -> Result<IssueStart, ControlError> {
+    Err(ControlError::invalid("Sessions are started from an issue in the desktop app."))
+}
+
+/// A pipeline by its id (or the start of it), by its issue (`#433`,
+/// `ENG-42`), or by the session working on it. An issue worked on more than
+/// once names its newest pipeline. Two projects can each have an issue #12:
+/// then the number alone names neither, and `project` has to say which.
+#[cfg(feature = "desktop")]
+fn resolve_pipeline(selector: &str, project: Option<&Project>) -> Result<crate::issue_pipeline::Pipeline, ControlError> {
+    let mut pipelines = crate::issue_pipeline::store::list().map_err(ControlError::internal)?;
+    if let Some(project) = project {
+        pipelines.retain(|pipeline| pipeline.project_path == project.path);
+    }
+    if let Some(exact) = pipelines.iter().find(|pipeline| pipeline.id == selector) {
+        return Ok(exact.clone());
+    }
+    // `#433` starts a comment in most shells, so the bare number names it too.
+    let named = selector.trim_start_matches('#');
+    let by_issue: Vec<&crate::issue_pipeline::Pipeline> = pipelines.iter().filter(|pipeline| pipeline.issue.identifier.trim_start_matches('#').eq_ignore_ascii_case(named) || pipeline.issue.url == selector).collect();
+    let projects: std::collections::BTreeSet<&str> = by_issue.iter().map(|pipeline| pipeline.project_path.as_str()).collect();
+    if projects.len() > 1 {
+        return Err(ControlError::new(
+            "ambiguous_selector",
+            format!("More than one project has a pipeline for {selector}."),
+            Some("Add --project, or use the pipeline's id from `terminalx pipelines list`.".into()),
+        ));
+    }
+    if let Some(newest) = by_issue.last() {
+        return Ok((*newest).clone());
+    }
+    let partial: Vec<_> = pipelines.into_iter().filter(|pipeline| pipeline.id.starts_with(selector) || pipeline.author.session_id.starts_with(selector)).collect();
+    unique(partial, "pipeline", selector)
 }
 
 fn resolve_project(selector: &str) -> Result<Project, ControlError> {
@@ -1253,6 +1425,49 @@ mod tests {
         assert_eq!(error.code, "app_not_found");
         assert_eq!(error.message, "no app matches Gmail");
         assert!(error.recovery.unwrap().contains("list-apps"));
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn a_pipeline_is_named_by_its_issue_its_id_or_its_session() {
+        let _home = crate::store::temp_home();
+        let in_project = |project: &str, id: &str, identifier: &str, session: &str| -> crate::issue_pipeline::Pipeline {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": project, "branch": "raccoon/x",
+                "issue": {"provider": "github", "id": "1", "identifier": identifier, "title": "T", "url": format!("https://example.test/{identifier}")},
+                "author": {"sessionId": session, "tabId": "t1"},
+                "stage": "work", "state": "working", "maxRounds": 3,
+                "created": "2026-10-12T00:00:00.000Z", "modified": "2026-10-12T00:00:00.000Z",
+            }))
+            .unwrap()
+        };
+        let pipeline = |id: &str, identifier: &str, session: &str| in_project("/repo", id, identifier, session);
+        for stored in [pipeline("0199aaaa-1", "#433", "s-one"), pipeline("0199bbbb-2", "ENG-42", "s-two"), pipeline("0199cccc-3", "#433", "s-three")] {
+            crate::issue_pipeline::store::insert(&stored).unwrap();
+        }
+        // The issue names its newest pipeline, with or without the hash a shell would eat.
+        assert_eq!(resolve_pipeline("#433", None).unwrap().id, "0199cccc-3");
+        assert_eq!(resolve_pipeline("433", None).unwrap().id, "0199cccc-3");
+        assert_eq!(resolve_pipeline("eng-42", None).unwrap().id, "0199bbbb-2");
+        assert_eq!(resolve_pipeline("0199aaaa-1", None).unwrap().id, "0199aaaa-1");
+        assert_eq!(resolve_pipeline("0199bb", None).unwrap().id, "0199bbbb-2");
+        assert_eq!(resolve_pipeline("s-one", None).unwrap().id, "0199aaaa-1");
+        assert_eq!(resolve_pipeline("0199", None).unwrap_err().code, "ambiguous_selector");
+        assert_eq!(resolve_pipeline("#9", None).unwrap_err().code, "not_found");
+
+        // Another project has an issue #433 of its own. The number alone must
+        // not pick one: turning on a merge for the wrong repository is not a typo to shrug off.
+        crate::issue_pipeline::store::insert(&in_project("/other", "0199dddd-4", "#433", "s-four")).unwrap();
+        let ambiguous = resolve_pipeline("433", None).unwrap_err();
+        assert_eq!(ambiguous.code, "ambiguous_selector");
+        assert!(ambiguous.recovery.unwrap().contains("--project"));
+        let project = |path: &str| -> Project { serde_json::from_value(json!({"path": path, "name": "p"})).unwrap() };
+        assert_eq!(resolve_pipeline("433", Some(&project("/repo"))).unwrap().id, "0199cccc-3");
+        assert_eq!(resolve_pipeline("433", Some(&project("/other"))).unwrap().id, "0199dddd-4");
+        // An id is an id wherever it is, unless the project named does not hold it.
+        assert_eq!(resolve_pipeline("0199dddd-4", None).unwrap().id, "0199dddd-4");
+        assert_eq!(resolve_pipeline("0199dddd-4", Some(&project("/repo"))).unwrap_err().code, "not_found");
+        assert_eq!(resolve_pipeline("eng-42", None).unwrap().id, "0199bbbb-2");
     }
 
     #[test]

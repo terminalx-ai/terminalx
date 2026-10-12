@@ -170,10 +170,14 @@ mod desktop {
         }
 
         fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>) {
+            // A turn ending is also what moves an issue pipeline: the author
+            // reporting its work, the reviewer its verdict.
+            crate::issue_pipeline::desktop::turn_completed(self, session_id, tab_id, final_message.clone());
             crate::automations::complete_from_hook(self, session_id, tab_id, final_message);
         }
 
         fn automation_failed(&self, session_id: &str, tab_id: &str, message: &str) {
+            crate::issue_pipeline::desktop::turn_failed(self, session_id, tab_id, message.contains("interrupted"));
             crate::automations::fail_from_hook(self, session_id, tab_id, message);
         }
     }

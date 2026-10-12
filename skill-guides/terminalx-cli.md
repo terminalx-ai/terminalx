@@ -86,8 +86,8 @@ requires a Git project and cannot be combined with `--on-main`.
 
 With only `--title`, its slug becomes the worktree name. Generated names gain a numeric
 suffix when taken; random names remain the fallback without a usable title. Sessions started
-from an issue use its identifier and title by default, preserving the issue number in both
-the session title and worktree name.
+from an issue (`--issue`, below) use its identifier and title by default, preserving the issue
+number in both the session title and worktree name.
 
 ```text
 terminalx sessions create --project <project> --agent codex --prompt "Fix the timeout" \
@@ -196,6 +196,63 @@ terminalx issues list --project <project> [--provider github|linear] \
 
 GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX →
 Settings → Integrations. The default provider is GitHub.
+
+### Sessions from an issue, and their pipelines
+
+```text
+terminalx sessions create --project <project> --agent <agent> --issue <issue> \
+  [--provider github|linear] [--prompt <text>] \
+  [--auto-merge|--no-auto-merge] [--no-pipeline] \
+  [--title <text>] [--name <name>] [--model <id>] [--effort <level>] [--mode <mode>] --json
+```
+
+`<issue>` is a GitHub number (`433`; quote `'#433'`, since an unquoted `#` starts a shell
+comment), a Linear key (`ENG-42`), or the issue's URL. A GitHub URL must point into the
+project's own repository. The issue is read first; if it cannot be, nothing is created. The issue is the prompt, and `--prompt` adds text after it. The session
+title and worktree name come from the issue unless `--title` or `--name` are given.
+
+A session started this way in a worktree gets an issue pipeline: when the agent reports the
+work done and its checks passing, TerminalX pushes the branch, opens a pull request that closes
+the issue, has a separate reviewer session review it, takes the findings back to the author
+session, and reviews the new commit, up to the project's limit (three by default). It stops at
+`readyToMerge` unless automatic merging is on for the issue. `--auto-merge` and
+`--no-auto-merge` set that switch; without either the project's default applies.
+`--no-pipeline` starts from the issue and stops at the code. `--on-main` implies no pipeline:
+there is no branch to open a pull request from.
+
+The response carries `pipeline` (or `null`, with the reason in `pipelineNote`, when the project
+has the pipeline turned off or the session is not on a branch of its own).
+
+```text
+terminalx pipelines list [--project <project>] --json
+terminalx pipelines show <pipeline> [--project <project>] --json
+terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
+terminalx pipelines stop|resume|advance|review|refresh <pipeline> [--project <project>] --json
+```
+
+`<pipeline>` is a pipeline id or its unique prefix, the issue (`433`, `ENG-42`; the newest
+pipeline when an issue has several), or the author session's id. When more than one project
+has a pipeline for the same issue number the command fails with `ambiguous_selector`: add
+`--project`, or use the id. A pipeline has a `stage`
+(`work`, `pullRequest`, `review`, `address`, `merge`), a `state` (`working`, `waiting`,
+`readyToMerge`, `needsYou`, `merged`, `stopped`), a `note` saying where it stands in a
+sentence, a structured `reason` when it is at `readyToMerge` or `needsYou`, the reviewer's last
+`verdict` with its open `findings`, and `events`, the record of every stage, verdict and merge.
+
+- `advance` pushes the current stage forward on your say-so: opens the pull request for work
+  that was not reported done, retries a failed step, asks for another review, or looks at the
+  checks again.
+- `review` has the reviewer read the pull request's current head, for a branch that moved
+  after its last review.
+- `refresh` looks at the pull request now instead of at the next pass.
+- `stop` halts the pipeline; `resume` picks it up at the stage it was in.
+- `auto-merge on` merges at once if the pull request was only waiting for the switch. A merge
+  is only ever made at the exact commit the reviewer approved, with its checks passed, and
+  never where the project keeps the merge for a person. There is no command to merge by hand:
+  that is done on the issue's page in TerminalX.
+
+Do not wait on a pipeline with `terminalx wait`: that waits for one session's turn. Poll
+`pipelines show` until `state` is `readyToMerge`, `needsYou`, `merged` or `stopped`.
 
 ### Cloud workspaces
 
