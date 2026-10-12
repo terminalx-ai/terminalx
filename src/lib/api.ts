@@ -30,6 +30,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
+import type { IssuePipeline, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -1732,6 +1733,15 @@ export const issues = {
   linearSetApiKey: (key: string) => invoke<LinearStatus>("linear_set_api_key", { key }),
   linearTeams: () => invoke<IssueTeam[]>("linear_teams"),
   githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
+};
+
+/** Sessions started from an issue, carried on to a pull request, a review and a merge. */
+export const issuePipelines = {
+  list: () => invoke<IssuePipeline[]>("issue_pipelines_list"),
+  /** Rejects, with the reason, for a session the pipeline cannot serve (one on the default branch, a project that turned it off). */
+  start: (sessionId: string, tabId: string, autoMerge: boolean | null) => invoke<StartedIssuePipeline>("issue_pipeline_start", { sessionId, tabId, autoMerge }),
+  setAutoMerge: (id: string, value: boolean) => invoke<IssuePipeline>("issue_pipeline_set_auto_merge", { id, value }),
+  act: (id: string, action: PipelineAction) => invoke<IssuePipeline>("issue_pipeline_act", { id, action }),
 };
 
 // ---- transcription models and dictation input

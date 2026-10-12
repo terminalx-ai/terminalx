@@ -47,6 +47,8 @@ import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
 import { SessionTabStrip } from "./SessionTabStrip";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
+import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
+import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -306,6 +308,7 @@ export function SessionView({
   const compact = !!chrome?.compact;
   const isGit = useSessionIsGit(session);
   const quick = isQuickChat(session);
+  const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
   const backend = cloud?.backend ?? localSessionBackend(session.id);
@@ -431,6 +434,20 @@ export function SessionView({
                 >
                   <CircleDot className="size-3" />
                   {session.issue.identifier}
+                </button>
+              </WithTooltip>
+            )}
+            {pipelineRole && (
+              // The issue pipeline this session is part of, as its author or its reviewer.
+              <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${pipelineRole.pipeline.issue.identifier} · ${pipelineRole.pipeline.note ?? pipelineRole.pipeline.issue.title}`}>
+                <button
+                  type="button"
+                  onClick={() => (pipelineRole.pipeline.pr ? void openUrl(pipelineRole.pipeline.pr.url) : void openUrl(pipelineRole.pipeline.issue.url))}
+                  className="ml-1 flex shrink-0 items-center gap-1.5 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  data-testid="session-pipeline"
+                >
+                  {pipelineRole.role === "reviewer" && <span>Reviewer ·</span>}
+                  <PipelineStatus pipeline={pipelineRole.pipeline} />
                 </button>
               </WithTooltip>
             )}

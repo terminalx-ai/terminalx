@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Issues
+
+- A session started from a GitHub or Linear issue no longer stops at the
+  code. When the agent reports the work done and its checks passing,
+  TerminalX opens a pull request that closes the issue, has a second session
+  that did not write the code review it, takes the findings back to the first
+  session, and has the new commit reviewed again, up to three times. The
+  issue's page shows the stage it is at, the open findings, and a record of
+  every stage, verdict and merge with links to the sessions and the pull
+  request. A Linear issue is moved to In Review when its pull request opens.
+  (#433)
+- It ends at *Ready to merge* unless **Merge automatically when the review is
+  addressed** is on for the issue. With it on, TerminalX merges only at the
+  exact commit the reviewer approved, with no finding of medium severity or
+  higher open, its checks passed, no conflicts, and nothing in a category the
+  project keeps for a person (database migrations, deploy configuration,
+  anything the security pass flagged). Otherwise the page says *Ready to
+  merge* or *Needs you*, and why. The merge uses your own `gh` credentials
+  and never bypasses branch protection. (#433)
+- Each project has its own settings under **Issue pipeline…** in its menu:
+  whether the pipeline runs at all, what the switch starts at, whether a
+  person always does the merge, the number of review rounds, the merge
+  method, and what is always left for a person. (#433)
+- `terminalx sessions create --issue <issue>` starts a session from an issue,
+  and `terminalx pipelines` lists and steers the pipelines. (#433)
+- With a session already on an issue, **Open session** and **Start session**
+  no longer cover the worktree choice in a narrow window. (#433)
+
+This covers workspaces on this computer. See
+[docs/ISSUE-PIPELINE.md](docs/ISSUE-PIPELINE.md).
+
 ### Dictation
 
 - Text deleted from the composer while dictating stays deleted. Selecting

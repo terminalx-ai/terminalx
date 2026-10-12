@@ -42,7 +42,10 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   press the new keys, save.
 - **Issues from GitHub and Linear** (⌘I): browse them, read them, and start a
   session on one — the worktree is named after the issue and the header links
-  back.
+  back. When the work is done TerminalX opens the pull request, has a second
+  session review it, and takes the findings back to the first; it stops at
+  *Ready to merge* unless you turn on merging for that issue
+  ([docs/ISSUE-PIPELINE.md](docs/ISSUE-PIPELINE.md)).
 - **File explorer** (⌘⇧E) with git status badges and Material icons, **editor
   tabs** with a gutter against HEAD and markdown preview, ⌘P quick open and
   ⌘⇧F project search.
@@ -58,8 +61,8 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   every checkout — including worktrees made outside the app — listed with its
   sessions.
 - **A first-party command line interface**: `terminalx` (or `tnx`) drives
-  projects, sessions, tabs, transcripts, permission cards, worktrees and
-  issues through the running app's authenticated control socket.
+  projects, sessions, tabs, transcripts, permission cards, worktrees, issues
+  and issue pipelines through the running app's authenticated control socket.
 - **Notifications graded by attention** (banner, in-app notice, or just a
   tone), a Dock badge, four themes in light and dark, and a pixel raccoon that
   potters about while you wait.
@@ -79,8 +82,8 @@ app. The outbound connections are these nine:
 | TerminalX machine directory | While you remain signed in: once when binding this Mac, then a liveness heartbeat every 30 seconds | Host id, public key, binding generation, the editable machine name, platform, environment kind and pairing capability — no workspace, session, path, transcript, scrollback or device credential |
 | TerminalX relay | While you remain signed in, and whenever a paired device connects or you open a cloud workspace | Account and host identifiers, public keys, routing ids, connection metadata and plaintext handshake keys; device credentials, RPC and terminal traffic are end-to-end encrypted |
 | TerminalX cloud API | Signed in with an organization, when you open organization settings or cloud workspaces, or act on them | Organization, member, compute, provider-connection, GitHub App, workspace and diagnostics requests to `login.terminalx.ai` under `/v1/desktop/orgs/…`, authorized with your account session |
-| GitHub | You open the Issues view or a PR panel, or become eligible for the local star reminder | Uses your existing `gh` credentials; the reminder checks only whether you starred `terminalx-ai/raccoon`. It stars only when you press **Star on GitHub**; **Open GitHub** opens that repository in your system browser |
-| Linear | You open the Issues view with a Linear key configured | A GraphQL query to `api.linear.app`, authorized with the key you pasted |
+| GitHub | You open the Issues view or a PR panel, a session you started from an issue reports its work done, or you become eligible for the local star reminder | Uses your existing `gh` credentials. For an issue session it pushes the branch, opens the pull request, posts the review as a comment, reads the checks, and merges only if you turned that on for the issue. The reminder checks only whether you starred `terminalx-ai/raccoon`. It stars only when you press **Star on GitHub**; **Open GitHub** opens that repository in your system browser |
+| Linear | You open the Issues view with a Linear key configured, or a session you started from a Linear issue has its pull request opened | A GraphQL query to `api.linear.app`, authorized with the key you pasted; for the pull request, one update that moves the issue to its team's review state |
 | Anthropic usage | While the status bar shows usage and the window is on screen, at the **Usage auto-refresh interval** in Settings (one minute by default; Off leaves returning to the app, Refresh and window resets), and less often while Anthropic asks the app to wait | A GET to `api.anthropic.com/api/oauth/usage`, authorized with the OAuth token Claude Code already stores; no prompts, transcripts or files |
 | Hugging Face | You press Download on a transcription model | A plain GET for the weights, at a pinned revision |
 | The update endpoint | You press "Check for updates" | The current version and your channel |

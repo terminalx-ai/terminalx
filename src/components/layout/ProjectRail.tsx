@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, ImagePlus, LayoutGrid, MessageCircle, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, GitPullRequest, ImagePlus, LayoutGrid, MessageCircle, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -45,6 +45,7 @@ import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/Cl
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
+import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 
 /**
  * The unified sidebar: global destinations followed by an expandable project
@@ -464,6 +465,7 @@ function ProjectRow({
   const main = store.workspaces[project.path]?.find((w) => w.isMain);
   const [name, setName] = useState(project.name);
   const [busy, setBusy] = useState(false);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
 
   const commitName = () => {
     const n = name.trim();
@@ -624,6 +626,11 @@ function ProjectRow({
         <DropdownMenuItem onSelect={() => void refresh()} disabled={busy}>
           <RefreshCw className={cn(busy && "animate-spin")} /> Refresh workspaces
         </DropdownMenuItem>
+        {project.kind !== "folder" && (
+          <DropdownMenuItem onSelect={() => setPipelineOpen(true)}>
+            <GitPullRequest /> Issue pipeline…
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void updateProject(project.path, { archived: !project.archived })}>
           <Archive /> {project.archived ? "Unarchive" : "Archive"}
@@ -632,6 +639,8 @@ function ProjectRow({
           <Trash2 /> Remove from TerminalX
         </DropdownMenuItem>
       </DropdownMenuContent>
+      {/* Mounted only while open: a row per project would otherwise each hold a dialog. */}
+      {pipelineOpen && <IssuePipelineSettingsDialog project={project} open onOpenChange={setPipelineOpen} />}
     </DropdownMenu>
   );
 }
