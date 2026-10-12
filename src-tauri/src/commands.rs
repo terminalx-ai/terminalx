@@ -1097,6 +1097,73 @@ pub async fn cloud_workspace_share_revoke(
         .share_revoke(org_id.as_deref(), &workspace_id, &user_id))
 }
 
+/// The organization's scheduled cloud tasks, or one workspace's (PRO-37).
+#[tauri::command]
+pub async fn cloud_schedules(
+    workspace_id: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedules, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedules(org_id.as_deref(), workspace_id.as_deref()))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule(
+    schedule_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudScheduleDetail, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule(org_id.as_deref(), &schedule_id))
+}
+
+/// What a schedule would cost, before it is saved. Writes nothing.
+#[tauri::command]
+pub async fn cloud_schedule_estimate(
+    input: crate::cloud_workspaces::CloudScheduleEstimateInput,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudScheduleQuote, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_estimate(org_id.as_deref(), &input))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_create(
+    input: crate::cloud_workspaces::CloudScheduleCreateInput,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_create(org_id.as_deref(), &input))
+}
+
+/// Pause a scheduled task (`active: false`) or resume a paused one.
+#[tauri::command]
+pub async fn cloud_schedule_set_active(
+    schedule_id: String,
+    active: bool,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_set_active(org_id.as_deref(), &schedule_id, active))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_delete(
+    schedule_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_delete(org_id.as_deref(), &schedule_id))
+}
+
+/// Pause every active scheduled task of the organization.
+#[tauri::command]
+pub async fn cloud_schedules_pause_all(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedulesPaused, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedules_pause_all(org_id.as_deref()))
+}
+
 /// Switch who may see a cloud workspace: `organization` so it can be shared,
 /// `private` to hide it again (the server revokes every share with it).
 #[tauri::command]

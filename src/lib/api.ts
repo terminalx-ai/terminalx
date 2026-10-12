@@ -307,6 +307,22 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceDisposition: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
+  /** Scheduled tasks (PRO-37, saas contract §24): the organization's, or one workspace's. Owners and admins only; a server with the feature off answers 404. */
+  cloudSchedules: (workspaceId?: string | null, orgId?: string | null) =>
+    invoke<{ schedules: CloudSchedule[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+  /** One scheduled task and its newest runs. */
+  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudScheduleDetail>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  /** What a schedule would cost and when it would first run, before it is saved. Writes nothing. */
+  cloudScheduleEstimate: (input: CloudScheduleEstimateInput, orgId?: string | null) =>
+    invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
+  /** Make a scheduled task. Only after the person confirmed that it starts billed compute by itself. */
+  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudSchedule>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  /** Pause a scheduled task, or resume a paused one (which then runs for the person resuming it). */
+  cloudScheduleSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
+    invoke<CloudSchedule>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
+  cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
+  /** Pause every active scheduled task of the organization. */
+  cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
   cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
@@ -904,6 +920,96 @@ export interface CloudWorkspaceShare {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** When a scheduled task runs. `hour` is ignored for `hourly`; `weekdays` belong to `weekly`. */
+export interface CloudScheduleTiming {
+  preset: "hourly" | "daily" | "weekdays" | "weekly";
+  hour: number;
+  minute: number;
+  weekdays: string[];
+  /** IANA, e.g. `Europe/Berlin`. The local time holds across daylight-saving changes. */
+  timezone: string;
+}
+
+/** Upper bounds on what a scheduled task costs and occupies, from the workspace's own rate. */
+export interface CloudScheduleEstimate {
+  currency: string;
+  hourlyMicros: number;
+  perRunMaxMicros: number;
+  monthlyRuns: number;
+  monthlyMaxMicros: number;
+  /** The machine a run starts is left on afterwards. */
+  keepsMachineRunning: boolean;
+  runningSlots: number;
+  /** The most runs the schedule starts in any 24 hours. */
+  maxRunsPerDay: number;
+}
+
+export interface CloudScheduleRun {
+  id: string;
+  scheduledFor: number;
+  trigger: string;
+  /** queued | provisioning | working | completed | failed | skipped | canceled | expired */
+  state: string;
+  category?: string;
+  sessionId?: string;
+  tabId?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+/** A scheduled task. Its prompt is never returned. */
+export interface CloudSchedule {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdBy: string;
+  agent: string;
+  model?: string;
+  effort?: string;
+  mode?: string;
+  promptBytes: number;
+  schedule: CloudScheduleTiming;
+  missedRunPolicy: "skip" | "run-once";
+  completionPolicy: "suspend" | "keep";
+  maxRunMinutes: number;
+  state: "active" | "paused";
+  pausedReason?: string;
+  nextRunAt?: number;
+  lastRunAt?: number;
+  estimate: CloudScheduleEstimate;
+  lastRun?: CloudScheduleRun;
+}
+
+export interface CloudScheduleDetail {
+  schedule: CloudSchedule;
+  runs: CloudScheduleRun[];
+}
+
+export interface CloudScheduleQuote {
+  estimate: CloudScheduleEstimate;
+  nextRunAt?: number;
+  /** Whether the workspace's runtime can take a scheduled run. */
+  supported: boolean;
+}
+
+export interface CloudScheduleEstimateInput {
+  workspaceId: string;
+  schedule: CloudScheduleTiming;
+  completionPolicy: "suspend" | "keep";
+  maxRunMinutes: number;
+}
+
+export interface CloudScheduleCreateInput extends CloudScheduleEstimateInput {
+  name: string;
+  agent: string;
+  model?: string;
+  effort?: string;
+  /** Never `bypassPermissions`: nobody watches a scheduled run. */
+  mode: string;
+  prompt: string;
+  missedRunPolicy: "skip" | "run-once";
 }
 
 export interface CloudWorkspaceShares {

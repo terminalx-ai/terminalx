@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Cloud workspaces
+
+- Scheduled tasks. On a server that has them turned on, an organization's
+  owners and admins find "Scheduled tasks…" in a cloud workspace's menu: a
+  task wakes the workspace at set times and sends one prompt to an agent.
+  The dialog shows what a task costs before it is saved (each run, a month,
+  and the limit of 24 runs in 24 hours), how its last run went, and lets
+  them pause, resume or delete it, or pause every task of the organization.
+  A scheduled agent never starts in bypass permissions. (PRO-37)
+
 ### Dictation
 
 - Text deleted from the composer while dictating stays deleted. Selecting
