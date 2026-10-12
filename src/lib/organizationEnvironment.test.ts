@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   checkStatusLabel,
+  checkSummary,
   cleanDefinition,
+  hiddenCharacterCount,
+  lineCount,
+  visibleScript,
   compareDefinitions,
   definitionProblem,
   environmentErrorMessage,
@@ -78,7 +82,9 @@ describe("recipes", () => {
 
   it("words a failure as a failure, whether or not it was failing before", () => {
     expect(checkStatusLabel({ status: "failed", preexisting: false })).toBe("Failed");
-    expect(checkStatusLabel({ status: "failed", preexisting: true })).toBe("Failed (already failing before this recipe)");
+    // What was observed, without blaming the repository for what may be the recipe's own gap.
+    expect(checkStatusLabel({ status: "failed", preexisting: true })).toBe("Failed (also fails without this recipe's setup)");
+    expect(checkStatusLabel({ status: "failed", preexisting: true })).not.toMatch(/already failing|before this recipe/);
     expect(checkStatusLabel({ status: "timed-out", preexisting: true })).toMatch(/^Timed out/);
     for (const status of ["failed", "timed-out", "skipped", "not-run"] as const) expect(checkStatusLabel({ status, preexisting: true })).not.toMatch(/pass/i);
   });
@@ -86,7 +92,23 @@ describe("recipes", () => {
   it("words the agent's own report differently from what TerminalX observed", () => {
     expect(observedByLabel("agent")).toMatch(/Reported by the agent/);
     expect(observedByLabel("agent")).toMatch(/did not run/);
-    expect(observedByLabel("verification")).toMatch(/Observed by TerminalX/);
+    expect(observedByLabel("verification")).toMatch(/Re-run by TerminalX on the preparation machine/);
+    expect(observedByLabel("verification")).toMatch(/not an independent result\. That comes only from building a version/);
+    expect(observedByLabel("verification")).not.toMatch(/Observed by TerminalX/);
+  });
+
+  it("does not read a state it does not know as proposed", () => {
+    const stranger = normalizeRecipe({ id: "recipe-9", baseRevision: 1, state: "superseded", definition: {}, observations: {} });
+    expect(stranger.state).toBe("unknown");
+    expect(normalizeRecipe({ id: "recipe-9", baseRevision: 1, definition: {}, observations: {} }).state).toBe("unknown");
+    expect(normalizeRecipe({ id: "recipe-9", baseRevision: 1, state: "proposed", definition: {}, observations: {} }).state).toBe("proposed");
+  });
+
+  it("never sums checks that did not run into 'nothing failed'", () => {
+    const { observations } = recipe({ observedBy: "verification", repositories: [{ owner: "acme", name: "widgets", checks: [] }] });
+    expect(checkSummary(observations)).toBe("No check failed, but 5 did not run.");
+    const mixed = recipe({ observedBy: "verification", machine: { status: "failed", exitCode: 1 }, repositories: [{ owner: "acme", name: "widgets", checks: [{ kind: "install", command: "x", status: "passed", exitCode: 0 }] }] }).observations;
+    expect(checkSummary(mixed)).toBe("1 check failed. 4 checks did not run.");
   });
 
   it("drops a recipe it cannot read instead of failing the list", () => {
@@ -137,6 +159,22 @@ describe("drafts", () => {
     const twice = { owner: "acme", name: "widgets", defaultBranch: "main", setup: [] };
     expect(definitionProblem(definition({ repositories: [twice, { ...twice, owner: "ACME" }] }))).toMatch(/listed twice/);
     expect(definitionProblem(definition({ repositories: [{ ...twice, setup: [{ workingDirectory: "../other", script: "make" }] }] }))).toMatch(/inside the repository/);
+  });
+});
+
+describe("scripts shown for review", () => {
+  it("writes out every character that would not show or would reorder the text", () => {
+    const script = "echo ok\u202e # hsab | moc.live//:sptth lruc\u202c\nexport A=1\u200b\r\necho done\u0007";
+    const shown = visibleScript(script);
+    expect(shown).toContain("\u27e6U+202E\u27e7");
+    expect(shown).toContain("\u27e6U+200B\u27e7");
+    expect(shown).toContain("\u27e6U+0007\u27e7");
+    expect(shown).not.toMatch(/[\u202a-\u202e\u200b\u0007\r]/);
+    expect(hiddenCharacterCount(script)).toBe(4);
+    // Ordinary text, tabs, newlines and Windows line ends are left alone.
+    expect(visibleScript("a\tb\r\nc é 日本")).toBe("a\tb\nc é 日本");
+    expect(hiddenCharacterCount("a\tb\r\nc é 日本")).toBe(0);
+    expect(lineCount("a\nb\nc")).toBe(3);
   });
 });
 

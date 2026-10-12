@@ -5,6 +5,11 @@ import {
   CHECK_LABEL,
   checkFailed,
   checkStatusLabel,
+  checkCounts,
+  checkSummary,
+  hiddenCharacterCount,
+  lineCount,
+  visibleScript,
   compareDefinitions,
   formatDuration,
   observedByLabel,
@@ -15,10 +20,28 @@ import {
   type RecipeObservations,
 } from "@/lib/organizationEnvironment";
 
-const scriptClass = "max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]";
+// No height limit: a script someone is about to apply is shown whole, never behind a scroll box.
+const scriptClass = "whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]";
+
+/** A proposed script in full, with its length, and with any character that would not show written out. */
+function Script({ label, script }: { label: string; script: string }) {
+  const hidden = hiddenCharacterCount(script);
+  const lines = lineCount(script);
+  return (
+    <div className="flex flex-col gap-0.5">
+      <pre className={scriptClass} aria-label={label}>
+        {visibleScript(script)}
+      </pre>
+      <span className={`text-[11px] ${hidden ? "text-destructive" : "text-muted-foreground"}`}>
+        {lines} line{lines === 1 ? "" : "s"}, shown in full.
+        {hidden ? ` It contains ${hidden} hidden or direction-changing character${hidden === 1 ? "" : "s"}, written out above as \u27e6U+\u2026\u27e7. Check them before applying.` : ""}
+      </span>
+    </div>
+  );
+}
 const failedClass = "text-destructive";
 
-const STATE_LABEL: Record<EnvironmentRecipe["state"], string> = { proposed: "Proposed", applied: "Applied", dismissed: "Dismissed" };
+const STATE_LABEL: Record<EnvironmentRecipe["state"], string> = { proposed: "Proposed", applied: "Applied", dismissed: "Dismissed", unknown: "In a state this version does not know" };
 const CHANGE_NOTE = { added: "New repository", changed: "Changes this repository's setup", unchanged: "Same as the current template" } as const;
 
 const formatTime = (timestamp: number | null) => (timestamp ? new Date(timestamp).toLocaleString() : "");
@@ -36,7 +59,7 @@ function RepositorySetup({ repository }: { repository: EnvironmentRepository }) 
           <span className="text-[11px] text-muted-foreground">
             Step {index + 1}, in {step.workingDirectory === "." ? "the repository root" : step.workingDirectory}
           </span>
-          <pre className={scriptClass}>{step.script}</pre>
+          <Script label={`Script of step ${index + 1}`} script={step.script} />
         </li>
       ))}
     </ol>
@@ -57,7 +80,7 @@ export function RecipeDetails({ definition, observations, current }: { definitio
           <span>Machine install script</span>
           <span className="text-[11px] font-normal text-muted-foreground">{comparison.machineChanged ? "Changes the current script" : "Same as the current template"}</span>
         </div>
-        {definition.installScript ? <pre className={scriptClass}>{definition.installScript}</pre> : <p className="text-[11px] text-muted-foreground">No machine install script.</p>}
+        {definition.installScript ? <Script label="Proposed machine install script" script={definition.installScript} /> : <p className="text-[11px] text-muted-foreground">No machine install script.</p>}
         {observations.machine && (
           <p className={`text-[11px] ${checkFailed(observations.machine) ? failedClass : "text-muted-foreground"}`}>
             Result: {checkStatusLabel({ ...observations.machine, preexisting: false })}
@@ -78,6 +101,11 @@ export function RecipeDetails({ definition, observations, current }: { definitio
               <span className="shrink-0 text-[11px] font-normal text-muted-foreground">{CHANGE_NOTE[change]}</span>
             </div>
             <RepositorySetup repository={repository} />
+            {results?.commit && (
+              <p className="text-[11px] text-muted-foreground">
+                Checked at commit <span className="font-mono">{results.commit.slice(0, 12)}</span>, fetched from GitHub.
+              </p>
+            )}
             {results ? (
               <table className="w-full table-fixed text-left text-[11px]" aria-label={`Results for ${label}`}>
                 <thead className="text-muted-foreground">
@@ -140,7 +168,8 @@ function RecipeCard({
   // The template moved on since this was proposed: applying would overwrite
   // what someone saved meanwhile, so the server refuses it.
   const stale = recipe.state === "proposed" && recipe.baseRevision !== currentRevision;
-  const failures = observations.repositories.flatMap((repository) => repository.checks.filter(checkFailed)).length + (observations.machine && checkFailed(observations.machine) ? 1 : 0);
+  const failures = checkCounts(observations).failed;
+  const summary = checkSummary(observations);
 
   return (
     <li className="rounded-md border border-hairline p-2" aria-label={name}>
@@ -154,7 +183,7 @@ function RecipeCard({
         </span>
       </div>
       <p className={`mt-1 text-[11px] ${failures ? failedClass : "text-muted-foreground"}`}>
-        {failures ? `${failures} check${failures === 1 ? "" : "s"} failed.` : "No failed checks."} A recipe is a proposal: it changes nothing until an admin applies it, and applying builds nothing.
+        {summary} A recipe is a proposal: it changes nothing until an admin applies it, and applying builds nothing.
       </p>
       {open && (
         <div className="mt-2 flex flex-col gap-3">
@@ -170,7 +199,7 @@ function RecipeCard({
               {confirming ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="min-w-0 flex-1 text-[11px]">
-                    Replace the template's machine script and repository setup with this recipe?{failures ? ` ${failures} check${failures === 1 ? "" : "s"} failed.` : ""} Nothing is built until you build a version.
+                    Replace the template's machine script and repository setup with this recipe? {summary} Nothing is built until you build a version.
                   </p>
                   <Button size="xs" disabled={Boolean(busy)} onClick={() => onApply(recipe)}>
                     {busy === `apply:${recipe.id}` ? <Loader2 className="animate-spin" /> : "Apply to template"}

@@ -4,8 +4,8 @@ import { listRepositories } from "@terminalx/portable/workspaceGit";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { retainCloudConnection, waitCloudConnected, type CloudLease } from "@/lib/cloudConnections";
 import { isOpen } from "@/lib/cloudLifecycle";
-import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
-import { SCRATCH_DIRECTORY, cleanupScript, verifyProposal, type RunScript, type ScriptRun } from "@/lib/environmentVerification";
+import { PROPOSAL_MAX_BYTES, PROPOSAL_PATH, ProposalError, parseProposal, preparationPrompt, proposalProblemMessage, reportedObservations, type EnvironmentProposal, type PreparationRepository } from "@/lib/environmentProposal";
+import { SCRATCH_DIRECTORY, cleanupScript, verifyProposal, type RunScript, type ScriptRun, type VerifiedSource } from "@/lib/environmentVerification";
 import { effectiveRunningLimit, organizationCompute } from "@/lib/organizationCompute";
 import type { RecipeObservations } from "@/lib/organizationEnvironment";
 
@@ -25,6 +25,10 @@ const DEADLINE_MARGIN_MS = 3 * 60 * 1000;
 const OPERATION_POLL_MS = 3000;
 const AGENT_POLL_MS = 5000;
 const CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+/** How long the machine may sit connected with no agent on it before the run gives up and stops it. */
+const AGENT_START_TIMEOUT_MS = 10 * 60 * 1000;
+/** A dropped request is tried again this many times in a row before the run fails. */
+const TRANSIENT_RETRIES = 3;
 
 export interface PreparationOffer {
   provider: CloudWorkspaceProviderId;
@@ -41,8 +45,10 @@ export type PreparationRefusal = "running-limit" | "provisioning-paused" | "no-a
 
 export class PreparationError extends Error {
   constructor(
-    readonly code: PreparationRefusal | "create-failed" | "unreachable" | "agent-sign-in" | "no-proposal" | "bad-proposal" | "canceled" | "limit-reached" | "request-failed",
+    readonly code: PreparationRefusal | "create-refused" | "create-outcome-unknown" | "create-failed" | "unreachable" | "agent-sign-in" | "no-agent" | "no-proposal" | "bad-proposal" | "canceled" | "limit-reached" | "request-failed",
     message: string,
+    /** What became of the machine once the run ended; null when there was none, or it is not known. */
+    readonly machine: StopOutcome | null = null,
   ) {
     super(message);
   }
@@ -64,8 +70,9 @@ export async function offerPreparation(provider: CloudWorkspaceProviderId): Prom
   if (view.policy.provisioningPaused) throw new PreparationError("provisioning-paused", "New cloud machines are paused for this organization.");
   if (view.counts.running >= runningLimit)
     throw new PreparationError("running-limit", `The organization is at its running limit (${view.counts.running} of ${runningLimit} running). Stop a workspace first.`);
-  const agents = logins.credentials.map((login) => login.provider);
-  if (!agents.length) throw new PreparationError("no-agent-login", "The organization has no agent login. Add one under Agent logins first.");
+  // A login that was revoked or has stopped working would only fail on the machine, after it was paid for.
+  const agents = logins.credentials.filter((login) => (login.state ?? "connected") === "connected").map((login) => login.provider);
+  if (!agents.length) throw new PreparationError("no-agent-login", "The organization has no working agent login. Add or reconnect one under Agent logins first.");
   const idle = setup.allowedIdleSuspendMinutes.filter((minutes) => minutes > 0 && minutes <= MAX_IDLE_MINUTES).sort((a, b) => a - b)[0];
   if (idle === undefined) throw new PreparationError("no-idle-window", "This provider offers no short idle-stop setting, which a preparation machine needs.");
   const quote = await api.cloudWorkspaceQuote({ provider, ...setup.defaults, idleSuspendMinutes: idle });
@@ -85,15 +92,27 @@ export interface PreparationRequest {
   repositories: PreparationRepository[];
   /** One key for this start: a retry after a lost response must not make a second machine. */
   idempotencyKey: string;
+  /** Marks the proposal file as written in this run; the agent is told to copy it. */
+  token: string;
 }
 
 export interface PreparationResult {
   workspaceId: string;
   proposal: EnvironmentProposal;
   observations: RecipeObservations;
-  /** False when the stop request itself failed; the server's own limit still applies. */
-  stopped: boolean;
+  /** Where each checked copy came from; empty when TerminalX could not run the checks itself. */
+  sources: VerifiedSource[];
+  /** What the stop request came to. The server's own limit applies whatever it says. */
+  machine: StopOutcome;
 }
+
+/**
+ * `stopping`: the server accepted the stop. `busy`: it is already changing
+ * state (starting, or on its way down) and was not asked again. `failed`: the
+ * request was refused or lost. `deleted`: it never finished starting, so it
+ * was removed instead.
+ */
+export type StopOutcome = "stopping" | "busy" | "failed" | "deleted";
 
 export interface PreparationHandle {
   /** Known as soon as the machine exists, so the screen can name it even if the run fails. */
@@ -115,6 +134,17 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     };
     signal?.addEventListener("abort", abort, { once: true });
   });
+
+// The one line typed into a terminal. `exec` makes the terminal's shell
+// become the script, so the terminal exits with the script's own code. The
+// script runs in a new non-interactive bash that reads no profile or rc file
+// and inherits no environment but a standard PATH: what the agent left in
+// shell start-up files or variables does not reach it, and a tool must be on
+// the standard PATH to be found, as it must be when a version is built.
+// It is still typed into a shell the agent's files have already configured;
+// that shell could have been made to do something else with this line.
+export const TERMINAL_LINE =
+  'builtin exec /usr/bin/env -i HOME="$HOME" USER="$USER" LANG=C.UTF-8 TERM=dumb PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc';
 
 /**
  * Runs a script in the workspace through a terminal of its own, which is how
@@ -151,8 +181,7 @@ export function terminalRunner(client: WorkspaceRpcClient): RunScript {
         .then((attached) => {
           attachment = attached;
           if (settled) attached.detach();
-          // `exec`: the terminal's shell becomes the script, so the terminal exits with the script's own code.
-          return client.write(terminal.ptyId, `exec bash ${path}\r`);
+          return client.write(terminal.ptyId, `${TERMINAL_LINE} ${path}\r`);
         })
         .catch(() => finish(null, false));
     });
@@ -185,33 +214,51 @@ async function repositoryDirectories(client: WorkspaceRpcClient): Promise<Record
 
 const isMissing = (failure: unknown) => serverCode(failure) === "not_found";
 
-/** Waits for the agent to stop working and for its proposal file, whichever the deadline allows. */
-async function awaitProposal(client: WorkspaceRpcClient, path: string, expected: PreparationRepository[], deadline: number, handle: PreparationHandle): Promise<EnvironmentProposal> {
+/** One request to the runtime, tried again when it is merely dropped. A refusal the caller understands is passed through at once. */
+async function steady<T>(request: () => Promise<T>, passThrough: (failure: unknown) => boolean, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await request();
+    } catch (failure) {
+      if (passThrough(failure) || attempt >= TRANSIENT_RETRIES) throw failure;
+      await sleep(AGENT_POLL_MS, signal);
+    }
+  }
+}
+
+/** Waits for the agent to stop working and for the proposal file of this run, whichever the deadline allows. */
+async function awaitProposal(client: WorkspaceRpcClient, path: string, request: PreparationRequest, deadline: number, handle: PreparationHandle): Promise<EnvironmentProposal> {
+  const started = Date.now();
   let sawAgent = false;
   let idleWithoutFile = 0;
   for (;;) {
     if (Date.now() >= deadline) throw new PreparationError("limit-reached", "The agent did not finish before the preparation machine's time limit.");
-    const tabs = await client.listAgentTabs();
+    const tabs = await steady(() => client.listAgentTabs(), () => false, handle.signal);
     if (tabs.some((tab) => tab.signIn)) throw new PreparationError("agent-sign-in", "The agent could not sign in on the preparation machine. Check the organization's agent login.");
     sawAgent ||= tabs.length > 0;
+    // A machine with no agent on it does nothing useful; it is not kept awake waiting for one.
+    if (!sawAgent && Date.now() - started >= AGENT_START_TIMEOUT_MS) throw new PreparationError("no-agent", "The agent never started on the preparation machine.");
     const waiting = tabs.some((tab) => tab.status === "waiting" || tab.pendingPermissions.length > 0);
     const working = waiting || tabs.some((tab) => tab.status === "in_progress");
     handle.onPhase?.({ step: "agent", waitingForPermission: waiting });
     if (sawAgent && !working) {
       // The agent is done: its file is read once it has stopped, never mid-write.
+      let content: string | null = null;
       try {
-        const file = await readRemoteFile(client, path, { maxBytes: PROPOSAL_MAX_BYTES, signal: handle.signal });
-        try {
-          return parseProposal(file.text ?? "", expected);
-        } catch (failure) {
-          throw new PreparationError("bad-proposal", proposalProblemMessage(failure));
-        }
+        content = (await steady(() => readRemoteFile(client, path, { maxBytes: PROPOSAL_MAX_BYTES, signal: handle.signal }), isMissing, handle.signal)).text ?? "";
       } catch (failure) {
-        if (failure instanceof PreparationError) throw failure;
         if (!isMissing(failure)) throw failure;
-        // Between turns a tab reads idle for a moment; give it a few looks before deciding there is no file.
-        if (++idleWithoutFile >= 6) throw new PreparationError("no-proposal", "The agent stopped without writing its proposal.");
       }
+      if (content !== null) {
+        try {
+          return parseProposal(content, request.repositories, request.token);
+        } catch (failure) {
+          // A file without this run's token is not the agent's answer: it is as if there were none yet.
+          if (!(failure instanceof ProposalError && failure.problem === "not-this-run")) throw new PreparationError("bad-proposal", proposalProblemMessage(failure));
+        }
+      }
+      // Between turns a tab reads idle for a moment; give it a few looks before deciding there is no answer.
+      if (++idleWithoutFile >= 6) throw new PreparationError("no-proposal", "The agent stopped without writing its proposal.");
     } else idleWithoutFile = 0;
     await sleep(AGENT_POLL_MS, handle.signal);
   }
@@ -233,21 +280,24 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
       confirmProviderSpend: true,
       idempotencyKey: request.idempotencyKey,
       repositories: repositories.map((repository) => ({ cloneUrl: `https://github.com/${repository.owner}/${repository.name}`, ref: repository.defaultBranch })),
-      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories) },
+      launch: { agent: request.agent, mode: "bypassPermissions", prompt: preparationPrompt(repositories, request.token) },
       preparation: true,
     });
   } catch (failure) {
-    throw new PreparationError("request-failed", createRefusalMessage(serverCode(failure)));
+    const code = serverCode(failure);
+    // No answer is not a refusal: the server may have made the machine.
+    throw new PreparationError(createOutcomeUnknown(code) ? "create-outcome-unknown" : "create-refused", createRefusalMessage(code));
   }
   const workspace = created.workspace;
   handle.onWorkspace?.(workspace);
   const target = { orgId: workspace.orgId, workspaceId: workspace.id };
   let lease: CloudLease | null = null;
   let client: WorkspaceRpcClient | null = null;
-  let stopped = false;
+  let ready = false;
   try {
     const settled = await waitForOperation(created, handle.signal);
     if (settled.operation.state !== "succeeded") throw new PreparationError("create-failed", "The preparation machine could not be started.");
+    ready = true;
     const stopAfter = settled.workspace.preparation?.stopAfter ?? workspace.preparation?.stopAfter ?? workspace.createdAt + PREPARATION_LIMIT_MINUTES * 60_000;
     const deadline = stopAfter - DEADLINE_MARGIN_MS;
 
@@ -263,13 +313,14 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
     const directories = await repositoryDirectories(client);
     const first = repositories[0];
     const home = directories[`${first.owner}/${first.name}`.toLowerCase()] ?? ".";
-    const proposal = await awaitProposal(client, home === "." ? PROPOSAL_PATH : `${home}/${PROPOSAL_PATH}`, repositories, deadline, handle);
+    const proposal = await awaitProposal(client, home === "." ? PROPOSAL_PATH : `${home}/${PROPOSAL_PATH}`, request, deadline, handle);
 
     let observations: RecipeObservations;
+    let sources: VerifiedSource[] = [];
     try {
       const run = terminalRunner(client);
       const reader = client;
-      observations = await verifyProposal(proposal, run, {
+      ({ observations, sources } = await verifyProposal(proposal, run, {
         directories,
         deadline,
         signal: handle.signal,
@@ -281,7 +332,7 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
             return null;
           }
         },
-      });
+      }));
       await run(cleanupScript, 60_000).catch(() => undefined);
     } catch (failure) {
       if (handle.signal?.aborted) throw new PreparationError("canceled", "Canceled.");
@@ -289,43 +340,63 @@ export async function runPreparation(request: PreparationRequest, handle: Prepar
       // agent's own account, and it is kept labelled as exactly that.
       console.error("environment verification failed", failure);
       observations = reportedObservations(proposal);
+      sources = [];
     }
     handle.onPhase?.({ step: "stopping" });
     lease.release();
     lease = null;
-    stopped = await stopPreparation(workspace);
-    return { workspaceId: workspace.id, proposal, observations, stopped };
+    return { workspaceId: workspace.id, proposal, observations, sources, machine: await stopPreparation(workspace) };
   } catch (failure) {
     lease?.release();
     lease = null;
     handle.onPhase?.({ step: "stopping" });
-    await stopPreparation(workspace);
-    if (failure instanceof PreparationError) throw failure;
-    if (handle.signal?.aborted) throw new PreparationError("canceled", "Canceled.");
-    throw new PreparationError("request-failed", "The preparation run failed. The machine has been asked to stop.");
+    // A machine that never finished starting cannot be suspended: this run made it, and removes it.
+    const machine = ready ? await stopPreparation(workspace) : await discardUnstartedPreparation(workspace);
+    const canceled = handle.signal?.aborted && !(failure instanceof PreparationError && failure.code !== "canceled");
+    const known = failure instanceof PreparationError ? failure : null;
+    throw new PreparationError(canceled ? "canceled" : (known?.code ?? "request-failed"), `${canceled ? "Canceled." : (known?.message ?? "The preparation run failed.")} ${machineSentence(machine)}`, machine);
+  }
+}
+
+/** What to tell the admin about the machine, in one sentence that claims no more than the server said. */
+export function machineSentence(machine: StopOutcome): string {
+  switch (machine) {
+    case "stopping":
+      return "The preparation machine is being stopped.";
+    case "deleted":
+      return "The preparation machine had not finished starting and is being deleted.";
+    case "busy":
+      return "The preparation machine was already changing state, so it was not asked to stop again. Check it in the list below.";
+    case "failed":
+      return "TerminalX could not stop the preparation machine. Stop it from the list below; the server stops it at its time limit regardless.";
   }
 }
 
 /**
- * Asks the server to stop a preparation machine. A create still in flight is
- * canceled instead. True when the server accepted either, or it is already
- * stopped.
+ * Asks the server to stop a preparation machine. It only ever stops: it never
+ * falls back to deleting, so a "Stop" can never remove a machine.
  */
-export async function stopPreparation(workspace: Pick<CloudWorkspace, "id" | "orgId">): Promise<boolean> {
+export async function stopPreparation(workspace: Pick<CloudWorkspace, "id" | "orgId">): Promise<StopOutcome> {
   try {
     await api.cloudWorkspaceSuspend(workspace.id, workspace.orgId);
-    return true;
+    return "stopping";
   } catch (failure) {
-    if (serverCode(failure) !== "cloud_workspace_operation_in_progress") return false;
-  }
-  // Not ready yet, or already on its way down: deleting covers a create still in flight.
-  try {
-    await api.cloudWorkspaceDelete(workspace.id, true, workspace.orgId);
-    return true;
-  } catch {
-    return false;
+    return serverCode(failure) === "cloud_workspace_operation_in_progress" ? "busy" : "failed";
   }
 }
+
+/** For the run's own machine when its create never finished: a create in flight can be canceled only by deleting. */
+async function discardUnstartedPreparation(workspace: Pick<CloudWorkspace, "id" | "orgId">): Promise<StopOutcome> {
+  try {
+    await api.cloudWorkspaceDelete(workspace.id, true, workspace.orgId);
+    return "deleted";
+  } catch {
+    return "failed";
+  }
+}
+
+/** Codes that mean the create got no answer, as the native client names them, or no code at all. */
+export const createOutcomeUnknown = (code: string) => code === "" || code === "cloud_workspace_create_outcome_unknown" || code === "cloud_workspace_request_outcome_unknown";
 
 export function createRefusalMessage(code: string): string {
   switch (code) {
@@ -350,8 +421,10 @@ export function createRefusalMessage(code: string): string {
     case "cloud_workspace_request_invalid":
       return "This server does not accept preparation machines, or refused the request as invalid.";
     case "":
+    case "cloud_workspace_create_outcome_unknown":
+    case "cloud_workspace_request_outcome_unknown":
       // No answer from the server: the request may have been applied.
-      return "TerminalX did not get an answer, so a preparation machine may have been started. If one is listed below, stop or delete it; the server stops it at its time limit regardless.";
+      return "TerminalX did not get an answer, so a preparation machine may have been started. Press Try again to ask for the same machine, not a second one. If one is listed below and you do not want it, stop or delete it; the server stops it at its time limit regardless.";
     default:
       return "The server refused to start the preparation machine. Nothing was started.";
   }

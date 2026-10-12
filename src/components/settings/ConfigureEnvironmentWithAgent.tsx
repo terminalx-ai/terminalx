@@ -4,10 +4,10 @@ import { Button } from "@/components/ui/button";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId } from "@/lib/api";
 import { refreshCloudWorkspaces, useCloudCatalog } from "@/lib/cloudCatalog";
 import { observationsBody, preparationPrompt, type PreparationRepository } from "@/lib/environmentProposal";
-import { PREPARATION_LIMIT_MINUTES, PreparationError, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
-import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
+import { PREPARATION_LIMIT_MINUTES, PreparationError, machineSentence, offerPreparation, stopPreparation, type PreparationOffer, type PreparationPhase, type PreparationResult } from "@/lib/environmentPreparation";
+import { cancelEnvironmentRun, clearEnvironmentRun, keepEnvironmentRunFor, retryEnvironmentRun, startEnvironmentRun, useEnvironmentRun } from "@/lib/environmentRun";
 import { formatMicros, providerLabel } from "@/lib/organizationCompute";
-import { checkFailed, environmentErrorMessage, organizationEnvironment, type EnvironmentStatus } from "@/lib/organizationEnvironment";
+import { checkSummary, environmentErrorMessage, organizationEnvironment, type EnvironmentStatus } from "@/lib/organizationEnvironment";
 import { RecipeDetails } from "./EnvironmentRecipes";
 
 const inputClass = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
@@ -34,7 +34,9 @@ function phaseText(phase: PreparationPhase): string {
     case "connecting":
       return "Connecting to the preparation machine…";
     case "agent":
-      return phase.waitingForPermission ? "The agent is waiting for an answer. Open the preparation workspace from the sidebar to reply." : "The agent is reading the repositories and working out the setup…";
+      return phase.waitingForPermission
+        ? "The agent is waiting: for an answer from you, or it has been silent for a while. Open the preparation workspace from the sidebar to look."
+        : "The agent is reading the repositories and working out the setup…";
     case "verifying":
       return `TerminalX is running the proposed commands itself. ${phase.detail}…`;
     case "stopping":
@@ -64,6 +66,8 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
   const [machineBusy, setMachineBusy] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const startKey = useRef<string | null>(null);
+  // Given to the agent to copy into its proposal, so a file that was already in a repository is not taken for its answer.
+  const [token, setToken] = useState("");
   const mounted = useRef(true);
   const catalog = useCloudCatalog();
 
@@ -85,14 +89,18 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
   const mine = run.kind !== "none" && run.provider === provider;
   const stage: Stage | { kind: "running"; phase: PreparationPhase } | { kind: "review"; result: PreparationResult; baseRevision: number } =
     mine && run.kind === "running" ? { kind: "running", phase: run.phase } : mine && run.kind === "review" ? { kind: "review", result: run.result, baseRevision: run.baseRevision } : local;
-  const runMessage = mine && run.kind === "ended" ? run.message : mine && run.kind === "review" && !run.result.stopped ? "TerminalX could not confirm the preparation machine stopped. Stop or delete it below; the server stops it at its time limit regardless." : null;
-  const busyElsewhere = run.kind === "running" && !mine;
+  const runMessage = mine && run.kind === "ended" ? run.message : null;
+  const canRetry = mine && run.kind === "ended" && run.retry !== null;
+  // A run or an unsaved proposal for another provider is not thrown away from here.
+  const busyElsewhere = !mine && (run.kind === "running" || run.kind === "review");
+  const refresh = () => void refreshCloudWorkspaces(organizationId).catch(() => undefined);
 
   const machines: CloudWorkspace[] = (organizationId ? (catalog.orgs[organizationId]?.workspaces ?? []) : [])
     .map((item) => item.workspace)
     .filter((workspace) => workspace.preparation && workspace.provider === provider && workspace.state !== "destroyed" && !workspace.deletedAt);
 
   const begin = async () => {
+    if (busyElsewhere) return;
     clearEnvironmentRun();
     setError(null);
     setStage({ kind: "offering" });
@@ -102,6 +110,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
       if (!mounted.current) return;
       setAgent(offer.agents[0] ?? "");
       startKey.current = crypto.randomUUID();
+      setToken(crypto.randomUUID());
       setStage({ kind: "confirm", offer });
     } catch (failure) {
       if (!mounted.current) return;
@@ -121,11 +130,11 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
           : null;
 
   const start = (offer: PreparationOffer) => {
-    if (!repositories || repositoryProblem || !agent || !startKey.current) return;
+    if (!repositories || repositoryProblem || !agent || !startKey.current || !token) return;
     setError(null);
     const started = startEnvironmentRun(
-      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current },
-      { baseRevision: status.template?.revision ?? 0, onChange: () => void refreshCloudWorkspaces(organizationId).catch(() => undefined) },
+      { offer: { ...offer, contextRevision: status.contextRevision }, agent, repositories, idempotencyKey: startKey.current, token },
+      { baseRevision: status.template?.revision ?? 0, onChange: refresh },
     );
     if (!started) {
       setError("Another preparation run is in progress. Wait for it or cancel it first.");
@@ -160,11 +169,13 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
     setError(null);
     try {
       if (action === "stop") {
-        if (!(await stopPreparation(workspace))) throw new Error("stop");
+        // Stop only ever stops. What the server answered is what is said.
+        const outcome = await stopPreparation(workspace);
+        if (outcome !== "stopping" && mounted.current) setError(machineSentence(outcome));
       } else await api.cloudWorkspaceDelete(workspace.id, true, workspace.orgId);
       setConfirmDelete(null);
     } catch {
-      if (mounted.current) setError(action === "stop" ? "TerminalX could not stop that machine. Try again; the server stops it at its time limit regardless." : "TerminalX could not delete that machine. Try again.");
+      if (mounted.current) setError("TerminalX could not delete that machine. Try again.");
     } finally {
       if (mounted.current) setMachineBusy(null);
       void refreshCloudWorkspaces(organizationId).catch(() => undefined);
@@ -181,6 +192,13 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
           {error ?? runMessage}
         </p>
       )}
+      {canRetry && local.kind === "idle" && (
+        <div>
+          <Button size="xs" variant="outline" onClick={() => retryEnvironmentRun(refresh)}>
+            Try again (the same machine, not a second one)
+          </Button>
+        </div>
+      )}
 
       {stage.kind === "idle" && (
         <>
@@ -191,7 +209,7 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
             <Button size="sm" variant="outline" className="h-7" disabled={busyElsewhere} onClick={() => void begin()}>
               Configure with an agent…
             </Button>
-            {busyElsewhere && <span className="ml-2 text-[11px] text-muted-foreground">A preparation run for another provider is in progress.</span>}
+            {busyElsewhere && <span className="ml-2 text-[11px] text-muted-foreground">{run.kind === "running" ? "A preparation run for another provider is in progress." : "A proposal for another provider is waiting to be saved or discarded there."}</span>}
           </div>
         </>
       )}
@@ -216,6 +234,8 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
               It is stopped when the agent and the checks have finished, when you cancel, or after {PREPARATION_LIMIT_MINUTES} minutes, whichever comes first. The server enforces the {PREPARATION_LIMIT_MINUTES} minutes even if this app is closed.
             </li>
             <li>The machine is private to you and is given none of the organization's configured secrets. A check that needs one will fail and be reported as failing.</li>
+            <li>The organization's login for the agent you choose, and read access to the repositories you name, are placed on the machine for the agent to use.</li>
+            <li>The agent runs with permissions bypassed and reads whatever the repositories contain. Name only repositories you trust.</li>
           </ul>
           <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
             Repositories (one per line: owner/name, or owner/name@branch)
@@ -236,8 +256,8 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
               {showPrompt ? "Hide what the agent is asked" : "Show what the agent is asked"}
             </Button>
             {showPrompt && repositories && repositories.length > 0 && (
-              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]" aria-label="What the agent is asked">
-                {preparationPrompt(repositories)}
+              <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]" aria-label="What the agent is asked">
+                {preparationPrompt(repositories, token)}
               </pre>
             )}
           </div>
@@ -266,12 +286,16 @@ export function ConfigureEnvironmentWithAgent({ status, organizationId, onSaved 
       {stage.kind === "review" && (
         <div className="flex flex-col gap-3 rounded-md border border-hairline p-2" aria-label="Proposed recipe">
           <p className="text-[11px]">
-            The agent's proposal, against the current template (revision {stage.baseRevision}). The preparation machine {stage.result.stopped ? "has been stopped" : "may still be running"}.{" "}
-            {(() => {
-              const failures = stage.result.observations.repositories.flatMap((repository) => repository.checks.filter(checkFailed)).length + (stage.result.observations.machine && checkFailed(stage.result.observations.machine) ? 1 : 0);
-              return failures ? `${failures} check${failures === 1 ? "" : "s"} failed.` : "No check failed.";
-            })()}
+            The agent's proposal, against the current template (revision {stage.baseRevision}). {machineSentence(stage.result.machine)} {checkSummary(stage.result.observations)}
           </p>
+          {stage.result.sources
+            .filter((source) => source.agentCheckout === "differs")
+            .map((source) => (
+              <p key={`${source.owner}/${source.name}`} className="text-[11px] text-amber-600 dark:text-amber-400" role="note">
+                The agent's own copy of {source.owner}/{source.name} had commits or changed files that are not on GitHub. They were not checked: the results below are for {source.branch} as GitHub has it
+                {source.commit ? ` (${source.commit.slice(0, 12)})` : ""}.
+              </p>
+            ))}
           <RecipeDetails definition={stage.result.proposal.definition} observations={stage.result.observations} current={status.template?.definition ?? null} />
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" className="h-7" disabled={saving} onClick={() => void save(stage.result, stage.baseRevision)}>

@@ -2,14 +2,22 @@ import type { EnvironmentProposal } from "@/lib/environmentProposal";
 import { RECIPE_CHECK_KINDS, type RecipeCheck, type RecipeCheckKind, type RecipeObservations } from "@/lib/organizationEnvironment";
 
 // Verification for "Configure with an agent" (PRO-20). The results a recipe
-// carries are not taken from the agent's word: each command is run again here,
-// in a fresh clone the agent never touched, and how it ended is recorded.
+// carries are not taken from the agent's word: each command is run again here
+// and how it ended is recorded.
 //
-// For every repository: clone the agent's checkout, run the proposed setup
-// steps, then lint, test, build and start, each on its own. A check that
-// fails is run once more in a second clone with none of the recipe's setup;
-// if it fails there too it is marked as already failing before the recipe.
-// It is still a failure either way.
+// For every repository the branch is fetched fresh from GitHub into a new
+// directory. Nothing is taken from the agent's own checkout, so a commit the
+// agent made and did not push, or a file it edited, is not in what is checked;
+// whether its checkout differs from the remote is recorded and shown. Then
+// the proposed setup steps run, then lint, test, build and start, each on its
+// own. A check that fails is run once more in a second copy with none of the
+// recipe's setup; whether it fails there too is recorded as observed. It is a
+// failure either way.
+//
+// What this is not: independent of the agent. It runs on the machine the
+// agent has just worked on, as the same user, so tools the agent installed by
+// hand are there too. A result that owes nothing to the agent comes only
+// from building a version. The screen says so.
 //
 // This module only decides what to run and what each ending means. Running a
 // script inside the workspace is the caller's (`RunScript`).
@@ -25,13 +33,15 @@ export interface ScriptRun {
 export type RunScript = (script: string, timeoutMs: number) => Promise<ScriptRun>;
 
 export interface VerificationOptions {
-  /** Workspace-relative directory of each repository's checkout, by `owner/name` in lower case. */
+  /** Workspace-relative directory of the agent's checkout of each repository, by `owner/name` in lower case. Only compared with the remote, never built from. */
   directories: Record<string, string>;
+  /** Where a repository is fetched from. GitHub, except in tests. */
+  remoteUrl?: (owner: string, name: string) => string;
   /** When to stop starting new commands (the preparation workspace's own limit, with a margin). */
   deadline: number;
   now?: () => number;
   /** Reads back a small file a script wrote under the scratch directory; null when it is not there. */
-  readScratch?: (name: string) => Promise<string | null>;
+  readScratch: (name: string) => Promise<string | null>;
   onProgress?: (step: string) => void;
   signal?: AbortSignal;
 }
@@ -68,15 +78,38 @@ else bash -euo pipefail "$V/machine.sh"
 fi`;
 }
 
-/** A fresh clone of the agent's checkout at its current commit, without its uncommitted files. */
-export function cloneScript(directory: string, target: string): string {
+const BRANCH = /^[A-Za-z0-9._\/-]{1,200}$/;
+
+/**
+ * The branch as GitHub has it now, fetched into a new directory, and the
+ * commit that was fetched written to `<target>.commit`. The agent's checkout
+ * is not read: neither its objects, its refs nor its remote configuration.
+ */
+export function fetchScript(url: string, branch: string, target: string): string {
   return `${PREAMBLE}
-rm -rf "$V/${target}"
-git clone --quiet --no-hardlinks "$ROOT"/${quote(directory)} "$V/${target}"`;
+rm -rf "$V/${target}" "$V/${target}.commit"
+git init --quiet "$V/${target}" || exit 96
+cd "$V/${target}" || exit 96
+GIT_TERMINAL_PROMPT=0 git fetch --quiet --depth 1 ${quote(url)} ${quote(`refs/heads/${branch}`)} || exit 95
+git checkout --quiet --detach FETCH_HEAD || exit 96
+git rev-parse HEAD > "$V/${target}.commit"`;
 }
 
-export function commitScript(directory: string, output: string): string {
-  return `${PREAMBLE}\ngit -C "$ROOT"/${quote(directory)} rev-parse HEAD > "$V/${output}"`;
+/** A second copy of what was fetched, for running a failed check without the recipe's setup. */
+export function copyScript(source: string, target: string): string {
+  return `${PREAMBLE}\nrm -rf "$V/${target}"\ncp -R "$V/${source}" "$V/${target}"`;
+}
+
+/**
+ * What the agent's own checkout looks like, written to `<output>`: its HEAD,
+ * then how many files differ from it. The agent's proposal file is its to
+ * write and is not counted.
+ */
+export function inspectScript(directory: string, output: string): string {
+  return `${PREAMBLE}
+cd "$ROOT"/${quote(directory)} || exit 97
+{ git rev-parse HEAD; git status --porcelain --untracked-files=all | grep -v -c -F ' .terminalx/environment-recipe.json'; } > "$V/${output}"
+exit 0`;
 }
 
 /** One command or setup step inside a clone. `seconds` bounds a command that is expected to keep running. */
@@ -103,6 +136,26 @@ export function outcomeOf(run: ScriptRun): Outcome {
 }
 
 const failed = (outcome: Outcome) => outcome.status === "failed" || outcome.status === "timed-out";
+
+/** Where the checked copy of a repository came from, and whether the agent's own copy matches it. */
+export interface VerifiedSource {
+  owner: string;
+  name: string;
+  branch: string;
+  /** The commit GitHub had on the branch, which is what was checked. Null when it could not be fetched. */
+  commit: string | null;
+  /**
+   * `same`: the agent's checkout is at that commit with no changed files.
+   * `differs`: it has commits or changes of its own; they were not checked.
+   * `unknown`: its checkout could not be read.
+   */
+  agentCheckout: "same" | "differs" | "unknown";
+}
+
+export interface Verification {
+  observations: RecipeObservations;
+  sources: VerifiedSource[];
+}
 const blank = (kind: RecipeCheckKind, command: string, status: "skipped" | "not-run"): RecipeCheck => ({ kind, command, status, exitCode: null, durationMs: null, preexisting: false });
 
 /**
@@ -110,7 +163,9 @@ const blank = (kind: RecipeCheckKind, command: string, status: "skipped" | "not-
  * failing command; it throws only when it is aborted. Whatever it could not
  * get to before the deadline is reported `not-run`.
  */
-export async function verifyProposal(proposal: EnvironmentProposal, run: RunScript, options: VerificationOptions): Promise<RecipeObservations> {
+export async function verifyProposal(proposal: EnvironmentProposal, run: RunScript, options: VerificationOptions): Promise<Verification> {
+  const remoteUrl = options.remoteUrl ?? ((owner: string, name: string) => `https://github.com/${owner}/${name}.git`);
+  const sources: VerifiedSource[] = [];
   const now = options.now ?? Date.now;
   const outOfTime = () => now() >= options.deadline;
   const guarded = async (script: string, timeoutMs: number): Promise<ScriptRun | null> => {
@@ -134,6 +189,7 @@ export async function verifyProposal(proposal: EnvironmentProposal, run: RunScri
     const directory = options.directories[label.toLowerCase()];
     const definition = proposal.definition.repositories[index];
     const commands = repository.commands;
+    const fetched = `source-${slug(repository.owner, repository.name)}`;
     const after = `after-${slug(repository.owner, repository.name)}`;
     const before = `before-${slug(repository.owner, repository.name)}`;
     const checks = new Map<RecipeCheckKind, RecipeCheck>();
@@ -142,17 +198,22 @@ export async function verifyProposal(proposal: EnvironmentProposal, run: RunScri
     };
     const finish = (commit: string | null) => repositories.push({ owner: repository.owner, name: repository.name, commit, checks: RECIPE_CHECK_KINDS.map((kind) => checks.get(kind)!) });
 
-    options.onProgress?.(`Cloning ${label}`);
-    const cloned = directory === undefined ? null : await guarded(cloneScript(directory, after), CLONE_TIMEOUT_MS);
-    if (!cloned || cloned.exitCode !== 0) {
+    options.onProgress?.(`Fetching ${label} from GitHub`);
+    const source: VerifiedSource = { owner: repository.owner, name: repository.name, branch: definition.defaultBranch, commit: null, agentCheckout: "unknown" };
+    sources.push(source);
+    const fetchedRun = BRANCH.test(definition.defaultBranch) ? await guarded(fetchScript(remoteUrl(repository.owner, repository.name), definition.defaultBranch, fetched), CLONE_TIMEOUT_MS) : null;
+    const head = fetchedRun?.exitCode === 0 ? ((await options.readScratch(`${fetched}.commit`))?.trim() ?? "") : "";
+    const commit = /^[a-f0-9]{40}$/.test(head) ? head : null;
+    // Without the commit GitHub served there is nothing trustworthy to check.
+    if (!commit || (await guarded(copyScript(fetched, after), CLONE_TIMEOUT_MS))?.exitCode !== 0) {
       notRun();
       finish(null);
       continue;
     }
-    let commit: string | null = null;
-    if (options.readScratch && (await guarded(commitScript(directory!, `${after}.commit`), 60_000))?.exitCode === 0) {
-      const head = (await options.readScratch(`${after}.commit`))?.trim() ?? "";
-      commit = /^[a-f0-9]{40}$/.test(head) ? head : null;
+    source.commit = commit;
+    if (directory !== undefined && (await guarded(inspectScript(directory, `${fetched}.agent`), 60_000))?.exitCode === 0) {
+      const [agentHead, changed] = ((await options.readScratch(`${fetched}.agent`)) ?? "").trim().split("\n");
+      if (/^[a-f0-9]{40}$/.test(agentHead ?? "") && /^\d+$/.test(changed ?? "")) source.agentCheckout = agentHead === commit && changed === "0" ? "same" : "differs";
     }
 
     // Install: the proposed setup steps, in order, then the install command
@@ -196,12 +257,13 @@ export async function verifyProposal(proposal: EnvironmentProposal, run: RunScri
       checks.set(kind, { kind, command, ...outcomeOf(result), preexisting: false });
     }
 
-    // A failure is run again without any of the recipe's setup. Failing
-    // there too, it was failing before the recipe.
+    // A failure is run again without any of the recipe's setup, and whether
+    // it fails there too is recorded. That is an observation, not a verdict
+    // on whose fault it is.
     const failing = (["lint", "test", "build", "start"] as const).filter((kind) => failed(checks.get(kind)!));
     if (failing.length) {
       options.onProgress?.(`${label}: checking failures without the recipe`);
-      const base = await guarded(cloneScript(directory!, before), CLONE_TIMEOUT_MS);
+      const base = await guarded(copyScript(fetched, before), CLONE_TIMEOUT_MS);
       if (base?.exitCode === 0)
         for (const kind of failing) {
           const result = await guarded(commandScript(before, ".", commands[kind], kind === "start" ? START_SECONDS : undefined), COMMAND_TIMEOUT_MS);
@@ -211,7 +273,7 @@ export async function verifyProposal(proposal: EnvironmentProposal, run: RunScri
     notRun();
     finish(commit);
   }
-  return { observedBy: "verification", machine, repositories };
+  return { observations: { observedBy: "verification", machine, repositories }, sources };
 }
 
 /** Removes what verification left in the workspace. */

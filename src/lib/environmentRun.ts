@@ -11,7 +11,8 @@ export type EnvironmentRun =
   | { kind: "none" }
   | { kind: "running"; provider: string; contextRevision: string; phase: PreparationPhase }
   | { kind: "review"; provider: string; contextRevision: string; result: PreparationResult; baseRevision: number }
-  | { kind: "ended"; provider: string; contextRevision: string; message: string };
+  /** `retry`: the start got no answer, so the same request (same key) may be sent again without making a second machine. */
+  | { kind: "ended"; provider: string; contextRevision: string; message: string; retry: { request: PreparationRequest; baseRevision: number } | null };
 
 let run: EnvironmentRun = { kind: "none" };
 let controller: AbortController | null = null;
@@ -54,14 +55,27 @@ export function startEnvironmentRun(request: PreparationRequest, options: { base
     })
     .catch((failure) => {
       if (controller !== own) return;
-      const canceled = failure instanceof PreparationError && failure.code === "canceled";
-      set({ kind: "ended", provider, contextRevision, message: canceled ? "Canceled. The preparation machine has been asked to stop." : failure instanceof Error ? failure.message : "The preparation run failed." });
+      const unknown = failure instanceof PreparationError && failure.code === "create-outcome-unknown";
+      set({
+        kind: "ended",
+        provider,
+        contextRevision,
+        // The run's own words: they say what became of the machine, and claim no more than the server answered.
+        message: failure instanceof Error && failure.message ? failure.message : "The preparation run failed.",
+        retry: unknown ? { request, baseRevision: options.baseRevision } : null,
+      });
     })
     .finally(() => {
       if (controller === own) controller = null;
       options.onChange?.();
     });
   return true;
+}
+
+/** Sends a start that got no answer again, unchanged: the server answers with the machine it already made, if it made one. */
+export function retryEnvironmentRun(onChange?: () => void): boolean {
+  if (run.kind !== "ended" || !run.retry) return false;
+  return startEnvironmentRun(run.retry.request, { baseRevision: run.retry.baseRevision, onChange });
 }
 
 /** Cancels a run in progress: the run then stops its machine and ends. */
