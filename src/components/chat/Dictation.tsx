@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
-import { anchorAt, insertSpoken, type DictationAnchor } from "@/lib/dictationText";
+import { anchorAt, insertSpoken, spokenSince, type DictationAnchor } from "@/lib/dictationText";
 import { useTranscriptionInput } from "@/lib/transcriptionInput";
 import { TranscriptionInputPicker } from "./TranscriptionInputPicker";
 
@@ -38,6 +38,9 @@ export interface Dictation {
   held: boolean;
 }
 
+/** How many drafts on their way back to the composer are remembered, so that a draft which lags cannot grow the list for ever. */
+const EXPECTED_DRAFTS = 8;
+
 /**
  * Dictate into a draft. Where the caret sits when the mic opens is where the
  * words go: the draft is split there and both halves are kept as they are, so
@@ -48,11 +51,20 @@ export interface Dictation {
  * late costs a moment rather than a phrase.
  *
  * `field` is the textarea the draft belongs to: watched for where the reader
- * leaves the caret, and moved to the end of the dictated words as they arrive.
+ * leaves the caret and for what they change, and moved to the end of the
+ * dictated words as they arrive.
  *
- * If the reader edits the draft while the mic is open the hook stops trying to
- * be clever: their draft becomes the new base, the caret is read again, and
- * what has already been dictated stays where it sits.
+ * The reader's edit always wins (#428). Whatever they type, delete, cut, paste
+ * or undo in the field while the mic is open becomes their text: the draft is
+ * split again at their caret, everything heard so far is theirs to keep or to
+ * have deleted, and only what is said afterwards is added. That is the same
+ * whether the mic was toggled on or a key is held to talk. An edit is known
+ * from the field saying so, never from what the draft then reads: deleting the
+ * dictated words leaves the very draft there was before them, and deleting the
+ * last word leaves one this hook wrote a moment earlier.
+ *
+ * The hook owns the draft only while its dictation runs. Once the mic has
+ * closed and the last words are in, the draft is the reader's alone again.
  */
 export function useDictationInto(target: string, draft: string, onDraftChange: (v: string) => void, field?: RefObject<HTMLTextAreaElement | null>): Dictation {
   const state = useDictation();
@@ -62,25 +74,38 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     void dictationAvailable().then(setAvailable);
   }, []);
 
-  // The draft split where the words go, and how much of what has been heard is
-  // already part of the half in front of them — which is none, until the reader
-  // edits the draft and everything so far becomes part of their text.
+  // The draft split where the words go, and what had been heard when it was
+  // last split: nothing when the mic opened, and everything so far once the
+  // reader has edited the draft, since those words are then part of their text.
   const anchor = useRef<DictationAnchor>({ before: "", after: "" });
-  const consumed = useRef(0);
-  // The dictation this composer is following, the reader's own draft under it,
-  // and the last few it has written itself. A draft that is none of those is
-  // the reader typing; an older write is a state update still on its way, which
-  // says nothing about what they want.
+  const taken = useRef("");
+  // The dictation this composer is following, and whether it has ended.
   const session = useRef<number | null>(null);
-  const base = useRef("");
-  const recent = useRef<string[]>([]);
+  const over = useRef(false);
+  // The draft as this hook last saw it, and the ones on their way back to it:
+  // what it wrote itself and what the reader left in the field. A draft that
+  // changes to anything else was changed by the composer (a message sent, a
+  // file mentioned), and is taken as it stands.
+  const seen = useRef(draft);
+  const expected = useRef<string[]>([]);
+  // The last draft written, and where the caret should end up once it comes back round.
   const last = useRef<string | null>(null);
-  // Where the caret should end up once the draft comes back round.
   const caret = useRef<number | null>(null);
   const current = useRef(draft);
   current.current = draft;
   const change = useRef(onDraftChange);
   change.current = onDraftChange;
+  const heard = useRef(state);
+  heard.current = state;
+
+  /** Split `text` at a caret (or around a selection) and take `said` as already part of it. */
+  const split = useCallback((text: string, start: number, end: number, said: string) => {
+    anchor.current = anchorAt(text, start, end);
+    taken.current = said;
+    expected.current = [];
+    last.current = null;
+    caret.current = null;
+  }, []);
 
   // The caret as the reader last left it. Clicking the mic takes the focus out
   // of the field, so where they meant to dictate has to be remembered before
@@ -93,16 +118,29 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       if (document.activeElement !== el) return;
       mark.current = { value: el.value, start: el.selectionStart ?? el.value.length, end: el.selectionEnd ?? el.value.length };
     };
-    const events = ["keyup", "mouseup", "input", "select"] as const;
+    // The field only says this when the reader changed it themselves; a draft
+    // written from here does not. The field is read as they left it, before the
+    // draft has come round. Undo can leave what it restored selected, and the
+    // words that follow must not replace that, so they go after it.
+    const edited = () => {
+      remember();
+      if (session.current !== heard.current.session || over.current) return;
+      const at = el.selectionEnd ?? el.value.length;
+      split(el.value, at, at, heard.current.text);
+      expected.current = [el.value];
+    };
+    const events = ["keyup", "mouseup", "select"] as const;
     for (const e of events) el.addEventListener(e, remember);
+    el.addEventListener("input", edited);
     return () => {
       for (const e of events) el.removeEventListener(e, remember);
+      el.removeEventListener("input", edited);
     };
-  }, [field]);
+  }, [field, split]);
 
-  /** Start the words at the reader's caret, keeping `heard` as their text. */
+  /** Start the words at the reader's caret in the draft as it stands, keeping `said` as their text. */
   const reanchor = useCallback(
-    (heard: string) => {
+    (said: string) => {
       const text = current.current;
       // Where the reader last had the caret, if that is still their draft. A
       // field they never put it in reports it at the very start, which is the
@@ -110,20 +148,18 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       // answer: without a caret of their own the words go on the end.
       const m = mark.current;
       const at = m && m.value === text ? { start: m.start, end: m.end } : { start: text.length, end: text.length };
-      anchor.current = anchorAt(text, at.start, at.end);
-      consumed.current = heard.length;
-      base.current = text;
-      recent.current = [];
-      last.current = null;
+      split(text, at.start, at.end, said);
+      seen.current = text;
     },
-    [],
+    [split],
   );
 
   const write = useCallback((spoken: string) => {
     const next = insertSpoken(anchor.current, spoken);
     last.current = next.text;
-    recent.current = [...recent.current.slice(-3), next.text];
+    if (next.text === current.current) return;
     caret.current = next.caret;
+    if (expected.current[expected.current.length - 1] !== next.text) expected.current = [...expected.current.slice(1 - EXPECTED_DRAFTS), next.text];
     change.current(next.text);
   }, []);
 
@@ -133,18 +169,27 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       // rather than sitting the rest of it out.
       if (!dictating || session.current != null) return;
       session.current = state.session;
+      over.current = false;
       reanchor(state.text);
       return;
     }
-    // A draft that this composer never wrote is the reader editing around the
-    // words. Take their draft as the new base and leave what they have alone.
-    if (last.current != null && draft !== last.current && draft !== base.current && !recent.current.includes(draft)) reanchor(state.text);
-    // What is left is what the reader has not already got. The cut can land on
-    // the space between two segments, which the anchor puts back itself.
-    const spoken = state.text.slice(Math.min(consumed.current, state.text.length)).trimStart();
-    if (!spoken) return;
-    write(spoken);
-  }, [state.text, state.session, draft, dictating, reanchor, write]);
+    // Its dictation has ended: whatever happens to the draft now is not this hook's to answer.
+    if (over.current) return;
+    if (draft !== seen.current) {
+      seen.current = draft;
+      const at = expected.current.indexOf(draft);
+      if (at < 0) reanchor(state.text);
+      else expected.current = expected.current.slice(at + 1);
+    }
+    // What is left is what the reader has not already got.
+    const since = spokenSince(taken.current, state.text);
+    taken.current = since.taken;
+    // Nothing is written until there is something to say, so a selection the
+    // mic opened on is not removed by silence. After that even nothing is
+    // written: words the recogniser took back must leave the draft too.
+    if (since.spoken || last.current != null) write(since.spoken);
+    if (state.phase === "idle") over.current = true;
+  }, [state.text, state.session, state.phase, draft, dictating, reanchor, write]);
 
   // Put the caret back after the words, once the draft has come round again.
   useLayoutEffect(() => {
@@ -172,6 +217,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       const id = startDictation(target);
       if (id == null) return false;
       session.current = id;
+      over.current = false;
       setHeld(!!opts?.held);
       reanchor("");
       return true;

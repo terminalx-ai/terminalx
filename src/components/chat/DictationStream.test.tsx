@@ -66,6 +66,20 @@ function Field({ initial = "", hold = false }: { initial?: string; hold?: boolea
   );
 }
 
+/** A composer whose parent hands each draft back a moment after it is asked for, one at a time and in order. */
+function LateField() {
+  const [text, setText] = useState("");
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const change = useCallback((v: string) => void setTimeout(() => setText(v), 0), []);
+  const dictation = useDictationInto(NEW_SESSION_TARGET, text, change, ref);
+  return (
+    <>
+      <textarea ref={ref} autoFocus value={text} onChange={(e) => change(e.target.value)} />
+      <button onClick={dictation.toggle}>mic</button>
+    </>
+  );
+}
+
 /** The session composer's wiring: the draft lives in the per-tab store. */
 function TabField({ tabId }: { tabId: string }) {
   const text = useDraft(tabId);
@@ -209,6 +223,30 @@ describe("when the plumbing misbehaves", () => {
     }
   });
 
+  it("lets the reader's edit win over a write that was still on its way back", async () => {
+    const late = () => act(async () => void (await new Promise((resolve) => setTimeout(resolve, 5))));
+    await open(<LateField />);
+    await send({ kind: "partial", text: "Fix the", segment: 0 });
+    await late();
+    expect(box().value).toBe("Fix the");
+    // The next result is written, and before it comes back the reader deletes "the" from what they can see.
+    await send({ kind: "partial", text: "Fix the build", segment: 0 });
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box(), "Fix ");
+      box().setSelectionRange(4, 4);
+      box().dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    });
+    await late();
+    expect(box().value).toBe("Fix ");
+    // Everything heard by then was theirs to delete; only what follows is added.
+    await send({ kind: "partial", text: "Fix the build", segment: 0 });
+    await late();
+    expect(box().value).toBe("Fix ");
+    await send({ kind: "partial", text: "Fix the build today", segment: 0 });
+    await late();
+    expect(box().value).toBe("Fix today");
+  });
+
   it("carries on into a composer that was remounted mid-dictation", async () => {
     await open();
     for (const partial of SENTENCE_ONE) await send({ kind: "partial", text: partial });
@@ -318,3 +356,31 @@ describe("the utterances Apple hands over across pauses", () => {
     expect(box().value).toBe(`Notes: ${OBSERVED_TEXT}`);
   });
 });
+
+describe("a deletion in the middle of that stream (#428)", () => {
+  it("stays deleted in a session composer, whose draft lives in the tab store, as the app mounts it", async () => {
+    setDraft("tab-8", "");
+    render(
+      <StrictMode>
+        <TabField tabId="tab-8" />
+      </StrictMode>,
+    );
+    await act(async () => {});
+    await click(mic());
+    await send({ kind: "listening" }, ...OBSERVED.slice(0, 3));
+    expect(box().value).toBe("Fix the build, please");
+    // Select everything and press Backspace: the field empties, then says so.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box(), "");
+      box().dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    });
+    expect(getDraft("tab-8")).toBe("");
+    // The utterance comes back settled, then the speaker carries on.
+    await send(OBSERVED[3]);
+    expect(box().value).toBe("");
+    await send(...OBSERVED.slice(4));
+    expect(box().value).toBe("Then run the test for it Then ship it");
+    expect(getDraft("tab-8")).toBe("Then run the test for it Then ship it");
+  });
+});
+

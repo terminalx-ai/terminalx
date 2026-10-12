@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
 type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
@@ -73,6 +73,60 @@ describe("draftWithSpeech", () => {
   it("replaces a selection, as typing into it would", () => {
     const anchor = anchorAt("Fix the old build", 8, 11); // "old" selected
     expect(draftWithSpeech(anchor, spoken("new"))).toEqual({ text: "Fix the new build", caret: 11 });
+  });
+});
+
+describe("spokenSince", () => {
+  it("is everything heard while the reader has taken nothing", () => {
+    expect(spokenSince("", "")).toEqual({ taken: "", spoken: "" });
+    expect(spokenSince("", "Fix the build")).toEqual({ taken: "", spoken: "Fix the build" });
+  });
+
+  it("is nothing while no more has been said", () => {
+    expect(spokenSince("Fix the build", "Fix the build")).toEqual({ taken: "Fix the build", spoken: "" });
+  });
+
+  it("is the words added to the utterance, and the next utterance after it", () => {
+    expect(spokenSince("Fix the build", "Fix the build and ship it")).toEqual({ taken: "Fix the build", spoken: "and ship it" });
+    expect(spokenSince("Fix the build", "Fix the build Then run the tests")).toEqual({ taken: "Fix the build", spoken: "Then run the tests" });
+  });
+
+  it("is nothing when the utterance comes back settled: capitals, a comma, a full stop", () => {
+    // Two characters longer than what the reader took: a cut at the old length hands back "e.".
+    expect(spokenSince("fix the build please", "Fix the build, please.")).toEqual({ taken: "Fix the build, please.", spoken: "" });
+    expect(spokenSince("fix the build please", "Fix the build, please. Then run")).toEqual({ taken: "Fix the build, please.", spoken: "Then run" });
+  });
+
+  it("counts a corrected word as the old one, not as something new", () => {
+    expect(spokenSince("Fix the bill", "Fix the build")).toEqual({ taken: "Fix the build", spoken: "" });
+    expect(spokenSince("Fix the bill", "Fix the build and ship it")).toEqual({ taken: "Fix the build", spoken: "and ship it" });
+    expect(spokenSince("I scream", "Ice cream is good")).toEqual({ taken: "Ice cream", spoken: "is good" });
+    expect(spokenSince("Fix", "Six")).toEqual({ taken: "Six", spoken: "" });
+  });
+
+  it("is nothing when the recogniser takes words back", () => {
+    expect(spokenSince("Fix the build please", "Fix the build")).toEqual({ taken: "Fix the build", spoken: "" });
+  });
+
+  it("keeps a phrase that repeats what the reader already has", () => {
+    expect(spokenSince("I think the bill", "I think the build is the bill")).toEqual({ taken: "I think the build", spoken: "is the bill" });
+    expect(spokenSince("Run it", "Run it. Run it")).toEqual({ taken: "Run it.", spoken: "Run it" });
+  });
+
+  it("follows the taken words through one revision after another", () => {
+    let taken = "fix the bill";
+    const heard = ["fix the bill", "fix the build and", "Fix the building and ship", "Fix the building, and ship it.", "Fix the building, and ship it. Then"];
+    const spoken = heard.map((text) => {
+      const since = spokenSince(taken, text);
+      taken = since.taken;
+      return since.spoken;
+    });
+    expect(spoken).toEqual(["", "and", "and ship", "and ship it.", "and ship it. Then"]);
+    expect(taken).toBe("Fix the building,");
+  });
+
+  it("keeps the spacing of what follows as it was heard", () => {
+    expect(spokenSince("Notes", "Notes:\nfirst  second")).toEqual({ taken: "Notes:", spoken: "first  second" });
   });
 });
 

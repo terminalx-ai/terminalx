@@ -193,6 +193,63 @@ export function applyFinal(buffer: DictationBuffer, final: string, result: Dicta
   return { committed: joinSpoken(spokenText(buffer), text), live: "" };
 }
 
+/** One word of a transcript as it was heard, where it starts, and the form it is compared in. */
+interface SpokenWord {
+  at: number;
+  word: string;
+}
+
+function spokenWords(text: string): SpokenWord[] {
+  return Array.from(text.matchAll(/\S+/gu), (match) => ({ at: match.index, word: match[0].toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "") }));
+}
+
+/**
+ * How many of the words `now` opens with are `had` said again. The recogniser
+ * may have thought again about any of them, so they are lined up by the fewest
+ * words changed, dropped or added, and a changed word at the end counts as a
+ * correction of the old one, not as something new.
+ */
+function saidAgain(had: string[], now: string[]): number {
+  const shared = sharedPrefixLength(had, now);
+  const a = had.slice(shared);
+  if (a.length === 0) return shared;
+  // Past twice the old words, more of the new ones can only cost more.
+  const b = now.slice(shared, shared + 2 * a.length);
+  // row[j]: the edits that turn the old words read so far into the first j new ones.
+  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j += 1) next.push(Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)));
+    row = next;
+  }
+  let best = 0;
+  for (let j = 1; j <= b.length; j += 1) if (row[j] <= row[best]) best = j;
+  return shared + best;
+}
+
+/**
+ * What of `heard` was said after `taken`, where `taken` is everything that had
+ * been heard when the reader made the dictated words their own (they edited
+ * the draft). A count of characters cannot answer that: the utterance still
+ * being revised comes back with a comma added or a word corrected, and a cut
+ * at the old length lands in the middle of a word. So the words are compared
+ * instead, and what the reader already has stays theirs however it is respelt.
+ *
+ * `taken` comes back as it now reads in `heard`, for the next comparison.
+ */
+export function spokenSince(taken: string, heard: string): { taken: string; spoken: string } {
+  const had = spokenWords(taken);
+  if (had.length === 0) return { taken: "", spoken: heard.trimStart() };
+  const now = spokenWords(heard);
+  const kept = saidAgain(
+    had.map((w) => w.word),
+    now.map((w) => w.word),
+  );
+  if (kept >= now.length) return { taken: heard, spoken: "" };
+  const at = now[kept].at;
+  return { taken: heard.slice(0, at).trimEnd(), spoken: heard.slice(at) };
+}
+
 /**
  * The draft to show, and where the caret belongs in it: the words sit between
  * the anchor's halves with one space on each side where one is wanted — none

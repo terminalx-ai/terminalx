@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Dictation
+
+- Text deleted from the composer while dictating stays deleted. Selecting
+  dictated words and pressing Backspace or Delete, or cutting them, used to
+  look as if nothing had happened: dictation wrote the words straight back,
+  and went on doing so after the mic had closed. Whatever is typed, deleted,
+  cut, pasted or undone in the composer now wins, with the mic toggled on or
+  a key held to talk; dictation carries on from the caret with what is said
+  next. (#428)
+- A dictated message no longer comes back into the composer after it is
+  sent. (#428)
+- An edit made before the first words arrive is kept. With a local model,
+  whose words all arrive when the mic closes, it used to be overwritten.
+  (#428)
+- When an utterance settles after an edit (a comma added, a word corrected),
+  words already in the draft or already deleted are not added again, and no
+  stray piece of a word is left behind. (#428)
+- A composer stops following the recogniser once its own dictation has
+  ended, so a later dictation in the other window (main or floating) cannot
+  add its words to it as well. (#428)
+
 ### Escape interrupts the agent instead of ending it
 
 - Pressing Escape while an agent works no longer kills the agent and puts

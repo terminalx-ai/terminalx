@@ -90,6 +90,14 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
       return page;
     };
   }
+  // `floating`: this page is the floating chat window, on screen. With
+  // `localSession` it was asked to show that session's chat tab; without, it
+  // opens on its start screen.
+  if (f.floating) {
+    answers.floating_status = { shortcut: null, alwaysOnTop: false, retentionDays: 0, shortcutError: null };
+    answers.floating_visible = true;
+    answers.floating_take_pending = f.localSession ? { sessionId: "local-s1", tabId: "lt-chat" } : null;
+  }
   // Fixture scripts loaded after this one add answers (a value, or a function
   // of the command's arguments) and emit native events through `__PW_STUB__`.
   let id = 1;
@@ -124,7 +132,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     },
     unregisterCallback: (handle) => void callbacks.delete(handle),
     convertFileSrc: (p) => p,
-    metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main", windowLabel: "main" } },
+    metadata: { currentWindow: { label: f.floating ? "floating" : "main" }, currentWebview: { label: f.floating ? "floating" : "main", windowLabel: f.floating ? "floating" : "main" } },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => undefined };
 })();
