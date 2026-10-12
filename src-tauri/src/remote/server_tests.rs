@@ -742,6 +742,42 @@ async fn only_a_client_that_can_type_counts_as_attached_for_idle_suspend() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_a_client_that_may_answer_a_permission_request_counts_as_an_approver() {
+    // A scheduled run that stops at a permission request waits only for
+    // someone who could answer it (`cloud_agents::scheduled`).
+    let f = fixture();
+    let list = |alice_approves: bool| {
+        members(json!([
+            { "userId": "admin", "role": "manager" },
+            { "userId": "alice", "role": "driver", "canApprove": alice_approves },
+            { "userId": "dave", "role": "driver", "canApprove": true },
+            { "userId": "bob", "role": "viewer", "canApprove": true },
+        ]))
+    };
+    f.rpc.set_collaboration(list(false));
+    let (admin, _admin_events, _) = person(&f.rpc, "d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events, _) = person(&f.rpc, "d-alice", Authority::Participate, "alice").await;
+    let (dave, _dave_events, _) = person(&f.rpc, "d-dave", Authority::Participate, "dave").await;
+    let (bob, _bob_events, _) = person(&f.rpc, "d-bob", Authority::Participate, "bob").await;
+    assert!(admin.counts_as_approver() && dave.counts_as_approver());
+    // A driver who may not approve types, and cannot answer the request.
+    assert!(alice.counts_as_attached() && !alice.counts_as_approver());
+    // A viewer answers nothing, whatever its share says.
+    assert!(!bob.counts_as_approver());
+    // No reconnect: the API's refresh alone gives and takes the right.
+    f.rpc.set_collaboration(list(true));
+    assert!(alice.counts_as_attached() && alice.counts_as_approver());
+    f.rpc.set_collaboration(list(false));
+    assert!(alice.counts_as_attached() && !alice.counts_as_approver());
+    f.rpc.disconnect(&dave);
+    assert!(!dave.counts_as_approver());
+    // A phone answers through the mailbox: it is not attached.
+    let (phone, _events) = Peer::for_user("p-admin".into(), Authority::Manage, Some("admin".into()));
+    call(&f.rpc, &phone, "rpc.hello", json!({ "protocol": PROTOCOL, "client": { "app": "terminalx-mobile", "version": "1.0.0" }, "want": ALL })).await.unwrap();
+    assert!(!phone.counts_as_approver());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn idle_suspend_attachment_follows_connected_role_changes() {
     for (authority, initial_role, next_role) in [
         (Authority::Participate, "driver", "viewer"),
@@ -3050,4 +3086,139 @@ async fn a_restarted_runtime_starts_the_terminal_over_for_the_returning_device()
     assert_eq!(code(call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "x", "seq": 2, "writerId": "w" })).await), "conflict");
     call(&f.rpc, &after, "pty.write", json!({ "ptyId": AGENT_TERMINAL, "data": "echo woke-$$\n", "seq": 1, "writerId": "new" })).await.unwrap();
     output_until(&mut events, &format!("woke-{pid}")).await;
+}
+
+// ---- #427: Escape for a running turn (`session/3`) ----------------------------
+
+/// The seeded session's tab with a turn running, and every interrupt and
+/// stop it is sent on record.
+struct Interruptible {
+    session_id: String,
+    tab_id: String,
+    interrupts: Mutex<Vec<(String, String)>>,
+    stops: AtomicUsize,
+}
+
+impl crate::cloud_agents::AgentOps for Interruptible {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        let mut tab = OneTab.tabs().remove(0);
+        tab.session_id = self.session_id.clone();
+        tab.tab_id = self.tab_id.clone();
+        tab.status = crate::store::index::TabStatus::InProgress;
+        vec![tab]
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        true
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        panic!("an interrupt sends nothing to the agent but its Escape")
+    }
+    fn interrupt(&self, session_id: &str, tab_id: &str) -> anyhow::Result<bool> {
+        self.interrupts.lock().unwrap().push((session_id.into(), tab_id.into()));
+        Ok(true)
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Ok(())
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Ok(())
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Escape in a cloud tab's chat is a live call that interrupts the turn. It
+/// is for whoever may stop the tab (a driver while nobody else drives it, a
+/// manager always), it stops nothing and drops no queued follow-up, and it
+/// is never answered from a cache: each call is an Escape for the turn
+/// running then.
+#[tokio::test(flavor = "multi_thread")]
+async fn escape_interrupts_a_running_turn_for_whoever_may_stop_it_and_stops_nothing() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let ops = Arc::new(Interruptible { session_id: session.id.clone(), tab_id: tab_id.clone(), interrupts: Mutex::new(Vec::new()), stops: AtomicUsize::new(0) });
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    // A message someone queued behind the running turn.
+    let queued = crate::cloud_agents::FollowUp { client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new() };
+    agents.follow_ups.push(&tab_id, queued).unwrap();
+    f.rpc.set_collaboration(members(json!([
+        { "userId": "admin", "role": "manager" },
+        { "userId": "alice", "role": "driver", "canApprove": false },
+        { "userId": "bob", "role": "driver" },
+        { "userId": "vic", "role": "viewer" },
+    ])));
+    let hello = |device: &'static str, authority: Authority, user: &'static str| {
+        let rpc = f.rpc.clone();
+        async move {
+            let (peer, events) = Peer::for_user(device.into(), authority, Some(user.into()));
+            call(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "session/2", "session/3", "collab/1"] })).await.unwrap();
+            (peer, events)
+        }
+    };
+    let (admin, _admin_events) = hello("d-admin", Authority::Manage, "admin").await;
+    let (alice, _alice_events) = hello("d-alice", Authority::Participate, "alice").await;
+    let (bob, _bob_events) = hello("d-bob", Authority::Participate, "bob").await;
+    let (vic, _vic_events) = hello("d-vic", Authority::Participate, "vic").await;
+    let params = json!({ "sessionId": session.id, "tabId": tab_id });
+    let sent = || ops.interrupts.lock().unwrap().len();
+
+    // A driver interrupts, with or without the right to approve: it is less than the stop they may already send.
+    assert_eq!(call(&f.rpc, &alice, "session.interrupt", params.clone()).await.unwrap(), json!({ "interrupted": true }));
+    assert_eq!(*ops.interrupts.lock().unwrap(), [(session.id.clone(), tab_id.clone())]);
+    // Someone who only watches does not.
+    assert_eq!(code(call(&f.rpc, &vic, "session.interrupt", params.clone()).await), "forbidden");
+    assert_eq!(sent(), 1);
+
+    // While alice drives the tab, another driver's Escape is refused as their stop would be. A manager's is not.
+    f.rpc.collab.claim(&tab_id, "alice", crate::cloud_agents::now_ms(), true, false).unwrap();
+    let refused = f.rpc.handle(&bob, &json!({ "id": "9", "method": "session.interrupt", "params": params })).await;
+    assert_eq!((refused["error"]["code"].as_str(), refused["error"]["data"]["lease"]["holderId"].as_str()), (Some("lease_held"), Some("alice")));
+    assert_eq!(sent(), 1);
+    call(&f.rpc, &alice, "session.interrupt", params.clone()).await.unwrap();
+    call(&f.rpc, &admin, "session.interrupt", params.clone()).await.unwrap();
+    // Each call reached the agent: none was answered from an earlier one.
+    assert_eq!(sent(), 3);
+    // An interrupt does not take the tab over from whoever drives it.
+    assert_eq!(agents.tabs()[0].lease.as_ref().unwrap().holder_id, "alice");
+
+    // The agent's process was never stopped, and what was queued behind the turn is still queued.
+    assert_eq!(ops.stops.load(Ordering::SeqCst), 0);
+    assert_eq!(agents.follow_ups.list(&tab_id).len(), 1);
+
+    // A tab that is not there, and a client that never asked for `session/3`.
+    assert_eq!(code(call(&f.rpc, &admin, "session.interrupt", json!({ "sessionId": session.id, "tabId": "no-such-tab" })).await), "not_found");
+    let (old, _old_events) = hello_with(&f.rpc, "device-old", Authority::Manage, &["session/1", "session/2"]).await;
+    assert_eq!(code(call(&f.rpc, &old, "session.interrupt", params.clone()).await), "capability_not_granted");
+    assert_eq!(sent(), 3);
+}
+
+/// Before the API has listed anyone, a participant keeps what it had: it
+/// could stop a tab through the mailbox, so it may interrupt one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let params = json!({ "sessionId": session.id, "tabId": tab_id });
+    let (manager, _events) = hello_with(&f.rpc, "device-manage", Authority::Manage, &protocol::CAPABILITIES).await;
+    // No agents in this runtime: nothing to interrupt, said as such.
+    assert_eq!(code(call(&f.rpc, &manager, "session.interrupt", params.clone()).await), "unavailable");
+
+    let ops = Arc::new(Interruptible { session_id: session.id.clone(), tab_id, interrupts: Mutex::new(Vec::new()), stops: AtomicUsize::new(0) });
+    f.rpc.set_agents(crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap());
+    assert_eq!(call(&f.rpc, &manager, "session.interrupt", params).await.unwrap()["interrupted"], true);
+    assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
 }

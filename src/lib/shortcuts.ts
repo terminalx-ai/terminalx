@@ -60,7 +60,10 @@ const ACTIONS = [
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"] },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"] },
-  { id: "session.stop", label: "Stop the running turn", group: "Session", keys: ["escape"], scope: "context" },
+  // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
+  { id: "session.interrupt", label: "Interrupt the running turn", group: "Session", keys: ["escape"], scope: "context" },
+  // No keys by default: it ends the agent's process, so it is never a key pressed out of habit.
+  { id: "session.stop", label: "Stop the session (ends the agent's process)", group: "Session", keys: [] },
   { id: "panel.changes", label: "Changes", group: "Panel", keys: ["mod+alt+1"] },
   { id: "panel.repository", label: "Repository", group: "Panel", keys: ["mod+alt+2"] },
   { id: "panel.pullRequests", label: "Pull requests", group: "Panel", keys: ["mod+alt+3"] },
@@ -301,6 +304,8 @@ export function bindingProblem(id: ShortcutId, binding: string, mac = isMac): st
   if (!key || key.includes("+")) return "Press one key, with or without modifiers.";
   if (isTerminalReserved(binding, mac)) return `${text} is a key the terminal needs (Ctrl with a letter goes to the shell), so it cannot be an app shortcut.`;
   if (isEditingKey(binding, mac)) return `${text} is used for editing text (copy, paste, select all, undo) or quitting, so it cannot be an app shortcut.`;
+  // Escape is the agent's own key, in its terminal and (as the interrupt) in the chat: it never ends the process.
+  if (id === "session.stop" && key === "escape" && !mods.length) return `${text} goes to the agent, which interrupts its turn. Stopping the session needs ${mac ? "⌘ or ⌃" : "Ctrl or Alt"} (or a function key).`;
   const command = mods.includes("mod") || mods.includes("ctrl") || mods.includes("meta");
   const plain = !command && !mods.includes("alt");
   if (key === "tab" && plain) return "Tab moves the focus, so it cannot be a shortcut on its own.";

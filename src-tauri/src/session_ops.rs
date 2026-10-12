@@ -159,6 +159,7 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
         context_used: None,
         context_max: None,
         fork_from: None,
+        follow: Default::default(),
         unknown: BTreeMap::new(),
     }
 }
@@ -471,6 +472,14 @@ pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str,
     sink.emit("session_updated", &updated);
     sink.emit(WORKSPACES_CHANGED_EVENT, &project);
     Ok(updated)
+}
+
+/// Whether the reader has a shell open in `session`: one of its terminals
+/// (`live` names the session of each that is running), or the shell of a tab
+/// that became a terminal when its agent exited (#437). That one runs in the
+/// tab's own pane, which is not listed among the session's shells.
+pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: impl Fn(&str) -> bool) -> bool {
+    live.contains(&session.id.as_str()) || session.tabs.iter().any(|tab| tab.is_terminal() && running(&tab.pane_id()))
 }
 
 /// Delete quick chats nobody has touched for `days` days, with their scratch
@@ -925,6 +934,27 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A quick chat is kept while the reader has a shell open in it. The
+    /// shell that takes an exited agent's place is in the tab's own pane,
+    /// and counts as much as a terminal opened beside the tab (#437).
+    #[test]
+    fn a_shell_in_a_tab_that_became_a_terminal_is_a_shell_in_use() {
+        let session: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id": "quick", "projectPath": "/p", "cwd": "/p", "title": "t", "created": "x", "modified": "y",
+            "tabs": [
+                { "id": "agent", "harness": "claude", "created": "x" },
+                { "id": "was-agent", "harness": "claude", "created": "x", "front": "terminal" },
+            ],
+        }))
+        .unwrap();
+        assert!(!has_shell_in_use(&session, &[], |_| false));
+        assert!(has_shell_in_use(&session, &["quick"], |_| false));
+        assert!(!has_shell_in_use(&session, &["another"], |_| false));
+        // Only the pane of a tab that is a terminal is a shell: an agent's own pane is the agent.
+        assert!(!has_shell_in_use(&session, &[], |pane| pane == "tab:agent"));
+        assert!(has_shell_in_use(&session, &[], |pane| pane == "tab:was-agent"));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     fn repo() -> tempfile::TempDir {

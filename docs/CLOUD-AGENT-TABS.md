@@ -19,6 +19,11 @@ shell. It is keystrokes, not commands: nothing is queued, receipted or
 replayed, it only works while the runtime is online, and it has its own
 authority rules. See "An agent tab's terminal view" in `CLOUD-SHARING.md`.
 
+Escape in the chat is the other live call (#427): `session.interrupt`
+(`session/3`), below. It is a keystroke in the same sense. A queued Escape
+would land in whatever turn runs when the runtime gets to it, so it is never
+a mailbox command.
+
 The server half is terminalx-saas #109 (`apps/api/docs/cloud-workspace-remote-runtime-contract.md`
 §11-14). This document is the runtime/app half of that contract.
 
@@ -65,7 +70,7 @@ Every plaintext is JSON with `"v": 1`. It is AES-256-GCM encrypted with AAD
 | --- | --- | --- |
 | `send` | `{ v, text, model?, effort?, mode? }` | Idle tab: the prompt goes to the agent now. Mid-turn: it joins the tab's durable follow-up queue and goes out when the turn ends. `model`/`effort`/`mode` are applied to the tab first. |
 | `steer` | `{ v, text }` | Mid-turn: typed into the running CLI now; Claude Code and Codex take it at their next step. Idle: like `send`. |
-| `stop` | `{ v }` | Interrupts the turn and drops the tab's queued follow-ups (listed in the receipt). |
+| `stop` | `{ v }` | The hard stop: ends the tab's agent process (the conversation resumes with the next message) and drops the tab's queued follow-ups (listed in the receipt). Escape is not this; see `session.interrupt`. |
 | `permission-decision` | `{ v, requestId, optionId }` or `{ v, requestId, answers }` | Answers that pending request. If it is no longer pending, the command is `rejected` with `request-not-pending`. |
 
 The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps?, requestId?, message? }`. It is
@@ -117,6 +122,40 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
   upload. If the file is missing, the epoch is the current runtime generation.
   A `409 stale` moves to epoch + 1 and retries once.
 - Closing a tab with `remove` deletes its checkpoints.
+
+### `session/3`: Escape for a running turn (#427)
+
+| Method | Authority | Params → result |
+| --- | --- | --- |
+| `session.interrupt` | participate, **not** idempotent | `{ sessionId, tabId }` → `{ interrupted }` |
+
+The running turn is interrupted the way its agent takes that (a bare Escape
+typed into a Claude Code or Codex CLI, `session/cancel` for ACP, an abort for
+OpenCode) and the agent's process stays up, so the next message does not
+restart it. `interrupted` is false when the tab had nothing running; then
+nothing was typed.
+
+- **Who.** Whoever may stop the tab: a driver while nobody else holds its
+  lease (`lease_held` otherwise), a manager always, with or without the right
+  to approve. A viewer is refused. It claims no lease.
+- **The queue.** Follow-ups queued behind the turn are kept, and the next one
+  goes out when the interrupted turn has ended, as after a turn that
+  finished. Only the mailbox `stop` drops them. A message already typed into
+  the CLI mid-turn (a `steer`) is the CLI's: both CLIs send it at once when
+  interrupted (`PTY-FIRST.md`, "Escape interrupts; only Stop ends the
+  process").
+- **Open requests.** What the turn was asking is withdrawn (`permission_decided`,
+  label "Cancelled"), so nothing a person was still deciding about runs.
+- **Never replayed.** No `clientRequestId`, no idempotency cache, and the
+  client does not send it again after a dropped connection: each call is an
+  Escape for the turn running at that moment.
+- **Older runtimes.** A desktop offers Escape in a cloud tab's chat only on a
+  connection that granted `session/3`. Without it (an older runtime, or one
+  that is not connected) the key is left alone and the composer's Stop stays
+  the mailbox `stop`.
+
+In a cloud tab's terminal view Escape is typed into the agent's screen with
+`pty.write`, as before; `session.interrupt` is only what the chat sends.
 
 ### `session/1` additions (additive)
 
@@ -503,3 +542,70 @@ reports `outcome-unknown`. In neither case is the prompt sent twice. Tests:
 `cloud_agents::launch` unit tests and `serve/tests/launch_intent.rs`. The
 latter runs the real runtime with the fake Claude against the fake API and
 checks both work branches, one prompt, and no second prompt after a restart.
+
+## Scheduled runs (PRO-37)
+
+A schedule on a cloud workspace is kept and dispatched by the server
+(terminalx-saas contract §24). The runtime's part is
+`cloud_agents::scheduled`, a loop of its own next to the launch intent:
+
+- **Claim.** `POST …/scheduled-run/claim` at start and every 30 seconds
+  while no run is in hand. The server hands a run out once (it becomes
+  `working` in the claim), so an answer that is lost is never given again and
+  that run times out on the server. A server without scheduled runs, or with
+  the feature off, answers `404`: the runtime then asks every five minutes
+  and does nothing else. A `401` (the credential is not accepted right
+  now) is asked about again after the usual 30 seconds: the workspace may
+  have been woken for a run. Waits are spread by up to a fifth, so
+  workspaces woken together do not ask together. No run is taken while the
+  workspace's launch is still cloning its repositories. Asking never wakes
+  anything; only the server's dispatch starts a machine.
+- **Start.** One new session in the project folder, named after the
+  schedule, with the schedule's agent, model, effort and permission mode. A
+  run with no mode, with `bypassPermissions` or with a mode this runtime
+  does not know is not started (a tab made with no mode runs in bypass
+  permissions). The prompt is held to `slash::check` as for a person who may
+  drive but not configure: no slash command, no `!` shell line, no file
+  from outside the project.
+- **Report.** `started` with the session and tab, then `completed` or
+  `failed` with one of the server's categories (`timed-out`, `canceled`,
+  `agent-failed`, `agent-exited`, `agent-start-failed`, `agent-unavailable`,
+  `agent-credential-required`, `project-unavailable`, `needs-approval`,
+  the three prompt refusals, `runtime-error`). `started` is sent again
+  every minute; an answer that says the run is over on the server (`409`),
+  or that the server does not know the run (`404` with
+  `cloud_workspace_scheduled_run_not_found`), ends the turn. Any other
+  `404` means scheduled runs were turned off (or the server is from before
+  them): that says nothing about the run, so the turn goes on to its end
+  or its limit, as the contract's "running ones still time out" says, and
+  its end stays on record until a server takes reports again.
+- **An approval nobody can give.** A scheduled run is never in bypass
+  permissions, so its agent may stop at a permission request. When it does
+  and no attached client may answer one (`cloud_activity::approver_attached`:
+  a manager, or a driver who may approve; a phone acts through the mailbox
+  and is not attached), the runtime waits three minutes
+  (`Timing::approval_grace`), then ends the turn and reports `failed` /
+  `needs-approval`. Otherwise the pending request would keep the machine
+  from idling until `maxRunMinutes`. An answer, or someone attaching,
+  starts the wait afresh. A server from before the category refuses a
+  report that names it; the run is then reported `canceled`.
+- **The agent process ends with the run**, however the run ends: a
+  workspace people keep up would otherwise collect one idle CLI per run.
+  The transcript and the resume state stay, so the tab can be continued.
+- **The limit.** `maxRunMinutes` after the claim the turn is interrupted;
+  an agent that has not ended it 30 seconds later is stopped. The run is
+  reported `failed` / `timed-out`.
+- **Once.** `scheduled-run.json` in the runtime's state directory names the
+  run in hand (ids only, never the prompt) and is written before the agent is
+  touched. A runtime that starts with a record of an unfinished run reports
+  it `failed` / `runtime-error` and does not send its prompt again; an end
+  that could not be reported is reported by a later pass.
+  `scheduled-runs-seen.json` keeps the ids of the last 64 runs taken: a run
+  the server hands out a second time is reported `failed` /
+  `runtime-error` and not run again.
+- **Idle.** From the claim until the turn is seen running the run is counted
+  as work, like a launch. After that the turn is counted by the session
+  manager like any other, and nothing is held once it ends, so the server
+  can stop a machine that only the run woke.
+
+The runtime protocol is 2 from this change (`src-tauri/serve/Cargo.toml`).

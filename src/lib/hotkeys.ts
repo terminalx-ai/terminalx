@@ -26,7 +26,11 @@ import {
  * handler to let the keys fall through to the next one.
  *
  * A terminal with the focus keeps the keys a shell needs (`isTerminalReserved`):
- * no shortcut is run for them, whatever is stored.
+ * no shortcut is run for them, whatever is stored. It keeps Escape from every
+ * action too (#427): there Escape is a key for the program on screen (an
+ * agent's own interrupt, leaving a mode in an editor), never the app's. A
+ * surface's own Escape (a dialog over the terminal) is not an action and still
+ * closes it.
  */
 
 export { chordOf, isMac, keycaps };
@@ -143,11 +147,14 @@ function install() {
       const chord = chordOf(e);
       if (!chord) return;
       // The shell's keys are the terminal's, whatever is bound to them.
-      if (isTerminalReserved(chord) && inTerminal(e.target)) return;
+      const typedInTerminal = inTerminal(e.target);
+      if (isTerminalReserved(chord) && typedInTerminal) return;
       const keymap = currentKeymap();
       for (let i = bindings.length - 1; i >= 0; i--) {
         const b = bindings[i];
         if (b.action ? !keymap[b.action].includes(chord) : b.chord !== chord) continue;
+        // Escape typed in a terminal is the program's: no action takes it there.
+        if (b.action && chord === "escape" && typedInTerminal) continue;
         if (!b.global && !firesWhileTyping(chord) && isEditable(e.target)) continue;
         const r = b.handler(e);
         if (r !== false) {

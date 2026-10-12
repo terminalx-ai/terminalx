@@ -1,6 +1,7 @@
 import { activateBrowserPage, closeBrowserPage } from "@/lib/browser";
 import type { BrowserPage } from "@/lib/api";
 import { removeTab, setActiveTab } from "@/lib/sessions";
+import { followedSelection } from "@/lib/tabFront";
 import { closeTerminal, setActiveTerminal, type SelectedSessionTab, type TerminalPane } from "@/lib/terminal";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
@@ -9,16 +10,24 @@ export type PeerTab =
   | { kind: "terminal"; id: string; created: string; pane: TerminalPane }
   | { kind: "browser"; id: string; created: string; page: BrowserPage };
 
-/** Every tab of a session in creation order: agents, shells and browser pages alike. */
+/**
+ * Every tab of a session in creation order: agents, shells and browser pages alike.
+ *
+ * A shell an agent was started in is that agent's tab from then on (#437),
+ * listed once, where the shell stood: the session's own entry for it carries
+ * the time the shell was opened.
+ */
 export function peerOrder(session: SessionEntry, panes: TerminalPane[], pages: BrowserPage[] = []): PeerTab[] {
+  const taken = new Set(session.tabs.map((tab) => tab.pane).filter(Boolean));
   return [
     ...session.tabs.map((tab): PeerTab => ({ kind: "agent", id: tab.id, created: tab.created, tab })),
-    ...panes.filter((pane) => pane.sessionId === session.id && !pane.hidden).map((pane): PeerTab => ({ kind: "terminal", id: pane.id, created: pane.created, pane })),
+    ...panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !taken.has(pane.id)).map((pane): PeerTab => ({ kind: "terminal", id: pane.id, created: pane.created, pane })),
     ...pages.map((page): PeerTab => ({ kind: "browser", id: page.id, created: page.created, page })),
   ].sort((a, b) => a.created.localeCompare(b.created));
 }
 
-export function selectedPeer(session: SessionEntry, tabs: PeerTab[], requested?: SelectedSessionTab): PeerTab | undefined {
+export function selectedPeer(session: SessionEntry, tabs: PeerTab[], asked?: SelectedSessionTab): PeerTab | undefined {
+  const requested = followedSelection(session, asked);
   return tabs.find((tab) => tab.kind === requested?.kind && tab.id === requested.id)
     ?? tabs.find((tab) => tab.kind === "agent" && tab.id === session.activeTab)
     ?? tabs.find((tab) => tab.kind === "agent")

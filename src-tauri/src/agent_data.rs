@@ -88,12 +88,15 @@ pub(crate) fn session_dirs(session: &SessionEntry) -> Vec<&str> {
 }
 
 fn conversation_ids<'a>(sessions: &'a [SessionEntry], harness: &str) -> HashSet<&'a str> {
-    sessions
-        .iter()
-        .flat_map(|session| &session.tabs)
-        .filter(|tab| tab.harness == harness)
-        .filter_map(|tab| tab.provider_session_id.as_deref())
-        .collect()
+    sessions.iter().flat_map(|session| &session.tabs).flat_map(|tab| tab.conversations()).filter(|(of, _, _)| *of == harness).map(|(_, id, _)| id).collect()
+}
+
+/// The conversations of `harness` a session's tabs hold or have held that
+/// are the app's to remove with the session: the ones it started. One the
+/// reader started by hand in a tab's terminal (#437) is theirs, as a
+/// conversation made in any other terminal is, and stays.
+fn own_conversations<'a>(session: &'a SessionEntry, harness: &'a str) -> impl Iterator<Item = &'a str> {
+    session.tabs.iter().flat_map(|tab| tab.conversations()).filter(move |(of, _, adopted)| *of == harness && !adopted).map(|(_, id, _)| id)
 }
 
 /// Conversations the remaining sessions need: the ones their tabs hold, and
@@ -104,9 +107,10 @@ fn conversation_ids<'a>(sessions: &'a [SessionEntry], harness: &str) -> HashSet<
 fn needed_conversation_ids<'a>(remaining: &'a [SessionEntry], harness: &str, has_transcript: &dyn Fn(&SessionEntry, &str) -> bool) -> HashSet<&'a str> {
     let mut needed = HashSet::new();
     for session in remaining {
+        // Every conversation a tab has held (#437), not only the one it is on.
+        needed.extend(session.tabs.iter().flat_map(|tab| tab.conversations()).filter(|(of, _, _)| *of == harness).map(|(_, id, _)| id));
         for tab in session.tabs.iter().filter(|tab| tab.harness == harness) {
             let own = tab.provider_session_id.as_deref();
-            needed.extend(own);
             if let Some(parent) = tab.fork_from.as_deref() {
                 if !own.is_some_and(|own| has_transcript(session, own)) {
                     needed.insert(parent);
@@ -189,8 +193,7 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
     for session in doomed {
         for dir in session_dirs(session) {
             let Some(folder) = real_child_dir(&root, &encoded_cwd(dir)) else { continue };
-            for tab in session.tabs.iter().filter(|tab| tab.harness == "claude") {
-                let Some(id) = tab.provider_session_id.as_deref().filter(|id| ours.contains(id)) else { continue };
+            for id in own_conversations(session, "claude").filter(|id| ours.contains(id)) {
                 freed += remove_file_counted(&folder.join(format!("{id}.jsonl")));
                 if let Some(side) = real_child_dir(&folder, id) {
                     freed += remove_dir_counted(&side);
@@ -223,8 +226,8 @@ pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining:
     // Codex forks are new threads over a copied log, so none waits on a parent's file.
     let kept_ids = needed_conversation_ids(remaining, "codex", &|_, _| true);
     let mut freed = 0;
-    for tab in doomed.iter().flat_map(|session| &session.tabs).filter(|tab| tab.harness == "codex") {
-        let Some(id) = tab.provider_session_id.as_deref().and_then(conversation_id) else { continue };
+    for id in doomed.iter().flat_map(|session| own_conversations(session, "codex")) {
+        let Some(id) = conversation_id(id) else { continue };
         if kept_ids.contains(id) {
             continue;
         }
@@ -239,7 +242,9 @@ pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining:
 /// Every conversation the sessions hold or have forked from, whichever agent
 /// it belongs to: what must not be treated as left behind.
 pub(crate) fn referenced_conversations(sessions: &[SessionEntry]) -> HashSet<&str> {
-    sessions.iter().flat_map(|session| &session.tabs).flat_map(|tab| [tab.provider_session_id.as_deref(), tab.fork_from.as_deref()]).flatten().collect()
+    let held = sessions.iter().flat_map(|session| &session.tabs).flat_map(|tab| tab.conversations()).map(|(_, id, _)| id);
+    let forked = sessions.iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.fork_from.as_deref());
+    held.chain(forked).collect()
 }
 
 /// Whether a rollout's year, month and day folders are real ones inside the
@@ -286,6 +291,7 @@ mod tests {
             context_used: None,
             context_max: None,
             fork_from: None,
+            follow: Default::default(),
             unknown: BTreeMap::new(),
         }
     }
@@ -373,6 +379,33 @@ mod tests {
         assert!(!also_mine.exists());
         assert!(!folder.exists(), "nothing was left in it, so the folder for the removed worktree goes too");
         assert!(elsewhere.exists(), "the project's own folder is not the session's to remove");
+    }
+
+    /// A tab follows its terminal (#437) and may have held several
+    /// conversations. The ones the app started go with the session, the one
+    /// before the current included. One the reader started by hand in the
+    /// tab's terminal is theirs, as one made in any other terminal is.
+    #[test]
+    fn every_conversation_the_app_started_in_a_tab_goes_and_one_started_by_hand_stays() {
+        let f = Fixture::new();
+        let gone = f.worktree("gone");
+        let (first, by_hand, current) = (f.transcript(&gone, CONV_A), f.transcript(&gone, CONV_B), f.transcript(&gone, CONV_C));
+        let mut held = tab("claude", Some(CONV_C));
+        held.follow.history.push(tab("claude", Some(CONV_A)).past());
+        let mut typed = tab("claude", Some(CONV_B));
+        typed.follow.adopted = true;
+        held.follow.history.push(typed.past());
+
+        // While a session holds it, an earlier conversation is in use: another session's deletion leaves it.
+        let other = session(&f.project(), &gone, vec![tab("claude", Some(CONV_A))]);
+        let keeper = session(&f.project(), &gone, vec![held.clone()]);
+        remove_claude_data(&f.root, &[other], std::slice::from_ref(&keeper));
+        assert!(first.exists(), "a conversation a remaining tab once held is still that tab's");
+        assert!(referenced_conversations(std::slice::from_ref(&keeper)).is_superset(&[CONV_A, CONV_B, CONV_C].into_iter().collect()));
+
+        remove_claude_data(&f.root, &[keeper], &[]);
+        assert!(!first.exists() && !current.exists(), "what the app started goes with the session");
+        assert!(by_hand.exists(), "what the reader started by hand is not the app's to delete");
     }
 
     #[test]

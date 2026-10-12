@@ -77,6 +77,7 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { useTabViews } from "@/lib/tabViews";
+import { isTerminalTab, tabLabel, tabPaneId, tabViewIn } from "@/lib/tabFront";
 import { activatePeer, browserPageLabel, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
 import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
@@ -350,6 +351,7 @@ export function SessionNode({
   const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
   const isActive = (peer: PeerTab) => selected && activePeer?.kind === peer.kind && peer.id === activePeer.id;
+  const agentName = (harness: string) => harnessNames.get(harness) || harness;
   const close = (peer: PeerTab) => () => void closePeer(session.id, peer, peers, activePeer);
   const open = (peer: PeerTab) => () => { selectSession(session.id); activatePeer(session.id, peer); };
 
@@ -387,9 +389,12 @@ export function SessionNode({
               session={session}
               tab={peer.tab}
               active={isActive(peer)}
-              label={peer.tab.title?.trim() || harnessNames.get(peer.tab.harness) || peer.tab.harness}
-              terminal={tabViews[peer.id] === "terminal"}
+              label={tabLabel(peer.tab, agentName, terminals.agents[tabPaneId(peer.tab)])}
+              terminal={tabViewIn(tabViews, peer.tab) === "terminal"}
               mobileDriven={mobileDriven.has(peer.id)}
+              // What its terminal holds while it is one: a shell that may have exited, or an agent the app has no chat for.
+              shellExited={!!terminals.panes.find((pane) => pane.id === tabPaneId(peer.tab))?.exited}
+              paneAgent={terminals.agents[tabPaneId(peer.tab)] ?? null}
               onClose={close(peer)}
             />
           ) : peer.kind === "browser" ? (
@@ -411,6 +416,7 @@ export function SessionNode({
               panelId={tabPanelId(peer)}
               title={peer.pane.title}
               exited={peer.pane.exited}
+              agent={terminals.agents[peer.id] ?? null}
               selected={isActive(peer)}
               onOpen={open(peer)}
               onClose={close(peer)}
@@ -431,6 +437,8 @@ function TabNode({
   label,
   terminal,
   mobileDriven,
+  shellExited,
+  paneAgent,
   onClose,
 }: {
   session: SessionEntry;
@@ -439,33 +447,43 @@ function TabNode({
   label: string;
   terminal: boolean;
   mobileDriven: boolean;
+  shellExited: boolean;
+  paneAgent: string | null;
   onClose: () => void;
 }) {
   const open = () => {
     selectSession(session.id);
     void setActiveTab(session.id, tab.id);
   };
+  const ids = { nodeId: tabNodeId({ kind: "agent", id: tab.id }), panelId: tabPanelId({ kind: "agent", id: tab.id }) };
+  // A tab is drawn as what its terminal holds now (#437): its agent, or a terminal.
+  const asTerminal = isTerminalTab(tab);
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <AgentTabRow
-          nodeId={tabNodeId({ kind: "agent", id: tab.id })}
-          panelId={tabPanelId({ kind: "agent", id: tab.id })}
-          harness={tab.harness}
-          label={label}
-          status={tab.status}
-          mobileDriven={mobileDriven}
-          terminalView={terminal}
-          selected={active}
-          onOpen={open}
-          onClose={onClose}
-        />
+        {asTerminal ? (
+          <ShellTabRow {...ids} title={label} exited={shellExited} agent={paneAgent} selected={active} onOpen={open} onClose={onClose} />
+        ) : (
+          <AgentTabRow
+            {...ids}
+            harness={tab.harness}
+            label={label}
+            status={tab.status}
+            mobileDriven={mobileDriven}
+            terminalView={terminal}
+            selected={active}
+            onOpen={open}
+            onClose={onClose}
+          />
+        )}
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => openSkills({ agent: tab.harness, projectPath: session.cwd })}>
-          <Sparkles /> Skills for this tab
-        </ContextMenuItem>
-        <ContextMenuSeparator />
+        {asTerminal ? null : (
+          <ContextMenuItem onSelect={() => openSkills({ agent: tab.harness, projectPath: session.cwd })}>
+            <Sparkles /> Skills for this tab
+          </ContextMenuItem>
+        )}
+        {asTerminal ? null : <ContextMenuSeparator />}
         <ContextMenuItem destructive onSelect={onClose}>
           <X /> Close tab
         </ContextMenuItem>

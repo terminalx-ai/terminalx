@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   WorkspaceRpcClient,
   type Activation,
+  type CleanupProgress,
   type CleanupProject,
   type CleanupRemoveItem,
   type CleanupResult,
@@ -24,6 +25,7 @@ import type {
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
+  LeftoverProgress,
   LeftoverRemoval,
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
@@ -57,6 +59,22 @@ function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
   // A refusal for lack of role or membership means the roles held are stale: they are read again.
   if (call && typeof (call as Promise<T>).then === "function") call.then(undefined, noteCallFailure);
   return call;
+}
+
+/**
+ * The progress the backend reports for the long call named `run`: `event`
+ * carries every run's, each with its id. Resolves to the function that stops
+ * listening.
+ */
+async function onRunProgress<T>(event: string, run: string, onProgress: (progress: T) => void): Promise<() => void> {
+  try {
+    return await listen<T & { run: string }>(event, ({ payload }) => {
+      if (payload.run === run) onProgress(payload);
+    });
+  } catch {
+    // Outside a webview there is no event stream; the call still answers.
+    return () => {};
+  }
 }
 
 export interface NewTab {
@@ -193,8 +211,18 @@ export interface ShellPane {
   id: string;
   sessionId: string;
   title: string | null;
+  /** The reader named it; `title` is otherwise the name it was opened with. */
+  renamed?: boolean;
   cwd: string;
   exited: boolean;
+  /** When it was opened, so every window lists it in the same place. */
+  created?: string;
+}
+
+/** The agent in front of a pane's terminal (#437), or none once it has left. */
+export interface PaneAgent {
+  paneId: string;
+  harness: string | null;
 }
 
 /** How a workspace is removed. */
@@ -398,15 +426,23 @@ export const api = {
     invoke<WorkspaceRename>("rename_workspace", { projectPath, path, name }),
   /** What earlier deletes left on disk. Reads only, apart from fetching each project's default branch. */
   scanLeftovers: () => invoke<Leftover[]>("scan_leftovers"),
-  /** Delete the confirmed leftovers; each is checked again first. */
-  removeLeftovers: (ids: string[]) => invoke<LeftoverRemoval>("remove_leftovers", { ids }),
+  /** Delete the confirmed leftovers; each is checked again first. `run` names it in its progress events. */
+  removeLeftovers: (ids: string[], run?: string) => invoke<LeftoverRemoval>("remove_leftovers", { ids, run: run ?? null }),
+  /** How far the removal `run` is, until the returned function is called. */
+  onLeftoverProgress: (run: string, onProgress: (progress: LeftoverProgress) => void) => onRunProgress("leftover_cleanup_progress", run, onProgress),
   /** Every worktree of the open local projects with what the clean-up may do with it. Reads only. */
   worktreeCleanupScan: (projectPaths?: string[]) => invoke<CleanupProject[]>("worktree_cleanup_scan", { projectPaths: projectPaths ?? null }),
   /** What removing one worktree would free; null when `job` was cancelled. */
   worktreeCleanupSize: (job: string, projectPath: string, path: string) => invoke<number | null>("worktree_cleanup_size", { job, projectPath, path }),
   worktreeCleanupCancelSizes: (prefix: string) => invoke<void>("worktree_cleanup_cancel_sizes", { prefix }),
-  /** Remove the confirmed worktrees; each is checked again first. */
-  worktreeCleanupRemove: (items: CleanupRemoveItem[]) => invoke<CleanupResult[]>("worktree_cleanup_remove", { items }),
+  /** Remove the confirmed worktrees; each is checked again first. `run` names it in its progress events and to `worktreeCleanupStop`. */
+  worktreeCleanupRemove: (items: CleanupRemoveItem[], run?: string) => invoke<CleanupResult[]>("worktree_cleanup_remove", { items, run: run ?? null }),
+  /** How far the removal `run` is, until the returned function is called. */
+  onWorktreeCleanupProgress: (run: string, onProgress: (progress: CleanupProgress) => void) => onRunProgress("worktree_cleanup_progress", run, onProgress),
+  /** Leave the worktrees the removal `run` has not started. The one it is on is finished first. */
+  worktreeCleanupStop: (run: string) => invoke<void>("worktree_cleanup_stop", { run }),
+  /** Say what quitting now would cut short, so the app asks first; null when it is over. */
+  setQuitWarning: (warning: string | null) => invoke<void>("set_quit_warning", { warning }),
   workspaceSize: (projectPath: string, path: string) => invoke<number>("workspace_size", { projectPath, path }),
   /**
    * What a workspace holds. With `fetch`, the default branch is fetched and
@@ -437,6 +473,7 @@ export const api = {
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
+  /** Name a tab. The name stays whatever runs in the tab; an empty one gives the naming back (#437). */
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
@@ -1503,6 +1540,10 @@ export interface TabPtyEvent {
   paneId: string;
   command: string;
   harness: string;
+  /** The CLI in the pane was started by hand in it (#437). */
+  byHand?: boolean;
+  /** The pane holds a shell and no agent: the tab is a terminal (#437). */
+  terminal?: boolean;
 }
 
 export const agent = {
@@ -1510,12 +1551,17 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
-  interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
+  /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
+  interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
   tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
+  /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
+  resumeConversation: (sessionId: string, tabId: string, harness: string, providerSessionId: string) =>
+    invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
+  /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
@@ -1674,6 +1720,8 @@ export const pty = {
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
   /** The shell tabs open in every session, for a window that was not there when they were opened. */
   shells: () => invoke<ShellPane[]>("pty_shells"),
+  /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
+  agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
   /**

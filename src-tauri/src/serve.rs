@@ -456,7 +456,8 @@ fn start_cloud_agents(
         watch_access(agents.clone(), cloud.clone());
     }
     if let Some(http) = http {
-        start_launch(runtime, root, data_dir, http, &agents);
+        start_launch(runtime, root, data_dir, http.clone(), &agents);
+        start_scheduled_runs(runtime, root, data_dir, http, &agents);
     }
     Ok(agents)
 }
@@ -486,6 +487,33 @@ fn start_launch(
         cancel_poll: crate::cloud_agents::launch::CANCEL_POLL,
     };
     let _ = std::thread::Builder::new().name("cloud-launch".into()).spawn(move || launcher.run());
+}
+
+/// Take the scheduled runs this workspace is woken for (PRO-37): one agent
+/// turn each, reported, and ended at the schedule's limit
+/// (`cloud_agents::scheduled`).
+fn start_scheduled_runs(
+    runtime: &Runtime,
+    root: &str,
+    data_dir: &std::path::Path,
+    api: Arc<crate::cloud_agents::api::HttpMailboxApi>,
+    agents: &Arc<crate::cloud_agents::CloudAgents>,
+) {
+    use crate::cloud_agents::scheduled::{ManagerAgent, Runner, Store, Timing};
+    let quiesced = Arc::downgrade(agents);
+    let runner = Runner {
+        api,
+        agent: Arc::new(ManagerAgent::new(runtime.manager.clone(), runtime.sink.clone(), root.to_string(), Arc::downgrade(agents))),
+        store: Store::open(&crate::cloud_agents::CloudAgents::state_dir(data_dir)),
+        root: std::path::PathBuf::from(root),
+        timing: Timing::default(),
+        // No run is taken while the workspace's launch is still cloning its
+        // repositories: the agent would start in a folder that is not there yet.
+        paused: Arc::new(move || crate::cloud_activity::launches() > 0 || quiesced.upgrade().is_none_or(|agents| agents.quiesced())),
+        hold: Arc::new(crate::cloud_agents::scheduled::working),
+        approver: Arc::new(crate::cloud_activity::approver_attached),
+    };
+    let _ = std::thread::Builder::new().name("cloud-scheduled-runs".into()).spawn(move || runner.run());
 }
 
 /// A development link file's mailbox: `(origin, runtime credential, identity)`.

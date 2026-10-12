@@ -108,9 +108,12 @@ export function Composer({
   disabledReason,
   disabled = false,
   settingsLockedReason = null,
+  modelLockedReason = null,
+  modeLockedReason = null,
   settingsNote = null,
   settingsNoteWarning = false,
   canStop = true,
+  stopMode = "stop",
   autoFocus,
 }: {
   tab: TabEntry;
@@ -146,12 +149,23 @@ export function Composer({
   disabled?: boolean;
   /** Set when this reader may not change the model, effort or mode (a shared cloud workspace); the pickers are disabled with it. */
   settingsLockedReason?: string | null;
+  /** Set when the model and effort cannot be changed from here whoever asks (an agent started by hand that takes them only at startup, #437). */
+  modelLockedReason?: string | null;
+  /** The same for the permission mode. */
+  modeLockedReason?: string | null;
   /** Said under the pickers when a chosen model, effort or mode has not reached the agent yet (a cloud tab: it rides with the next message). */
   settingsNote?: string | null;
   /** The note reports a change that was not applied, rather than one on its way. */
   settingsNoteWarning?: boolean;
   /** False hides Stop (someone else drives this tab, or this reader may only watch). */
   canStop?: boolean;
+  /**
+   * What `onStop` does now, which is what the control says (#427).
+   * `interrupt`: Escape for the agent, and its process stays. `force`: the
+   * interrupt went unanswered, so this press ends the process. `stop`: the
+   * hard stop where there is no interrupt to send first.
+   */
+  stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
 }) {
   const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
@@ -428,6 +442,8 @@ export function Composer({
   const pendingNote = pendingSettingsNote(tab, models, busy);
   const modelTitle = `Model: ${model?.alias ? `${model.label} (latest${runs ? `, running ${prettyModelId(runs)}` : ""})` : modelName}${effortName ? ` · ${effortName}` : ""}`;
   const permissionLabel = modeLabel(tab.permissionMode);
+  const modelLock = settingsLockedReason ?? modelLockedReason;
+  const modeLock = settingsLockedReason ?? modeLockedReason;
   // The picker's own id for the tab's mode; none when the agent reported one the picker does not offer (#417).
   const pickedMode = pickerMode(tab.permissionMode)?.id;
   const pct = contextUsed && contextMax ? Math.min(100, Math.round((contextUsed / contextMax) * 100)) : null;
@@ -441,6 +457,8 @@ export function Composer({
           "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
           attach.dragging && "ring-2 ring-accent/60",
         )}
+        // What stays in the corner of the window (the clean-up indicator) keeps off this box.
+        data-composer-box
         {...attach.dropZoneProps}
       >
         {pickerOpen && (
@@ -526,7 +544,7 @@ export function Composer({
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
-              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? modelTitle} aria-label={settingsLockedReason ? `Model: ${settingsLockedReason}` : undefined}>
+              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
                 {/* An alias and the same version pinned read alike otherwise. */}
@@ -578,7 +596,7 @@ export function Composer({
                 single letter: with no room for that it wraps out of sight below the button's one
                 line, leaving the mode's dot and the chevron. The tooltip names the mode either way.
               */}
-              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!settingsLockedReason} title={settingsLockedReason ?? `Permission mode: ${permissionLabel}`} aria-label={settingsLockedReason ? `Permission mode: ${settingsLockedReason}` : undefined} data-testid="permission-mode">
+              <Button variant="ghost" size="sm" className="min-w-11 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modeLock} title={modeLock ?? `Permission mode: ${permissionLabel}`} aria-label={modeLock ? `Permission mode: ${modeLock}` : undefined} data-testid="permission-mode">
                 <span
                   className={cn(
                     "size-2 shrink-0 rounded-full",
@@ -639,8 +657,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
-                <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
+              <WithTooltip label={stopMode === "force" ? "Stop session" : "Stop"} keys={keysOf(stopMode === "interrupt" ? "session.interrupt" : "session.stop")}>
+                <Button
+                  size="icon-sm"
+                  variant={stopMode === "force" ? "destructive" : "secondary"}
+                  aria-label={stopMode === "force" ? "Stop session" : "Stop"}
+                  onClick={onStop}
+                >
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>

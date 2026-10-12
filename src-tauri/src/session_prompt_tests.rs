@@ -759,21 +759,92 @@ fn a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one() {
     }
 }
 
-/// The reader queues a prompt from the composer, stops the turn, and then
-/// types the same words into the terminal. The CLI never sent what was
-/// queued, so its echo must not be left to swallow what was typed.
+/// The reader queues a prompt from the composer and presses Escape. Both
+/// CLIs stop the turn and send what was queued at once, as their next prompt
+/// (#427; Claude Code 2.1.296 writes the interruption and then the prompt,
+/// Codex 0.153.4 says "Model interrupted to submit steer instructions"). It
+/// is the message the reader already sees as queued, so it becomes the
+/// prompt of the next turn rather than being drawn a second time.
 #[test]
-fn a_queued_prompt_the_cli_never_sent_does_not_swallow_the_same_words_typed_later() {
+fn a_queued_prompt_the_cli_sends_once_its_turn_was_stopped_starts_the_next_turn() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
         rig.compose("start", 0);
         rig.cli_takes("start");
         assert!(rig.compose("continue", 0));
+        rig.enter_written();
         rig.interrupt();
         assert!(!rig.turn_open(), "{kind:?}");
 
         rig.cli_takes("continue");
+        assert!(rig.turn_open(), "{kind:?}");
+        assert_eq!(rig.status(), TabStatus::InProgress, "{kind:?}");
         rig.cli_replies("continuing");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "reply: continuing", "end"], "{kind:?}: one message, not two");
+        assert_eq!(rig.taken_as_prompts(), ["continue"], "{kind:?}");
+        rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}");
+    }
+}
+
+/// Found in the app, with Codex: the message had been queued for a minute
+/// behind a reply that was still streaming when Escape was pressed. Nothing
+/// is written to the transcript while a reply streams, and the turn was
+/// closed by the `Interrupt` hook with nothing new to read, so the wait for
+/// the queued message, counted from when it was sent, had already run out.
+/// The tab said delivery could not be confirmed and then drew the message a
+/// second time when the CLI sent it. The wait starts when the turn ends.
+#[test]
+fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("continue", 0));
+        rig.enter_written();
+        // Queued five minutes ago, and the transcript has been quiet since.
+        if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().sent_at = Instant::now() - Duration::from_secs(300);
+        }
+        rig.interrupt();
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}: the CLI has a moment to send it, counted from now");
+        assert!(!rig.kinds().iter().any(|k| k == "recovery"), "{kind:?}");
+
+        rig.cli_takes("continue");
+        rig.cli_replies("continuing");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "reply: continuing", "end"], "{kind:?}: one message, not two");
+        assert_eq!(rig.taken_as_prompts(), ["continue"], "{kind:?}");
+    }
+}
+
+/// A CLI that keeps what was queued in its own input when its turn is
+/// stopped (as Claude Code did before it sent it): the reader is told the
+/// message was not sent, and the same words typed into the terminal later
+/// are a message of their own, not that one's echo.
+#[test]
+fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_swallows_nothing() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("continue", 0));
+        rig.enter_written();
+        rig.interrupt();
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}: the CLI has a moment to send it");
+
+        rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        rig.tick();
+        rig.tick();
+        assert_eq!(rig.banner(), Some(RecoveryKind::DeliveryUnconfirmed), "{kind:?}: not silently dropped");
+        assert_eq!(rig.kinds().iter().filter(|k| *k == "recovery").count(), 1, "{kind:?}: said once");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end"], "{kind:?}: nothing sent again");
+
+        rig.cli_takes("continue");
+        rig.cli_replies("continuing");
+        assert_eq!(rig.banner(), None, "{kind:?}");
         assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "user: continue", "reply: continuing", "end"], "{kind:?}");
     }
 }
@@ -976,3 +1047,8 @@ fn a_slash_command_is_shown_as_typed_and_the_app_s_own_is_not_shown() {
     }
     assert_eq!(rig.told().len(), 3, "{:?}", rig.told());
 }
+
+/// Escape, from the chat and from the agent's own terminal (#427): the same
+/// rig and the same two CLIs, and a headless tab beside them.
+#[path = "session_interrupt_tests.rs"]
+mod interrupts;

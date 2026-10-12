@@ -29,7 +29,9 @@ describe("Settings → Shortcuts", () => {
     render(<ShortcutsTab />);
     expect(row("app.commandPalette").textContent).toContain("Command palette");
     expect(within(row("app.commandPalette")).getByRole("button", { name: "Command palette: Ctrl+K. Change" })).toBeTruthy();
-    expect(within(row("session.stop")).getByRole("button", { name: "Stop the running turn: Esc. Change" })).toBeTruthy();
+    expect(within(row("session.interrupt")).getByRole("button", { name: "Interrupt the running turn: Esc. Change" })).toBeTruthy();
+    // Ending the agent's process has no keys until the reader gives it some (#427).
+    expect(within(row("session.stop")).getByRole("button", { name: "Stop the session (ends the agent's process): no shortcut. Set one" })).toBeTruthy();
     // The characters typed in the composer are shown, not offered for change.
     expect(row("composer.mention").textContent).toContain("@");
     expect(within(row("composer.mention")).queryByRole("button")).toBeNull();
@@ -87,7 +89,7 @@ describe("Settings → Shortcuts", () => {
     const closeSettings = vi.fn();
     const unregister = registerHotkey("escape", closeSettings);
     render(<ShortcutsTab />);
-    record("session.stop", { key: "Escape", code: "Escape", shiftKey: true });
+    record("session.interrupt", { key: "Escape", code: "Escape", shiftKey: true });
     expect(screen.getByTestId("shortcut-editor")).toBeTruthy();
     // The focus is on Save now: Escape leaves the editor, and Settings stays open.
     fireEvent.keyDown(document.activeElement!, { key: "Escape", code: "Escape" });
@@ -187,9 +189,9 @@ describe("Settings → Shortcuts", () => {
     record("composer.send", { key: "Enter", code: "Enter", ctrlKey: true });
     fireEvent.click(within(editor()).getByRole("button", { name: "Save" }));
     expect(bindingsOf("composer.send")).toEqual(["mod+enter"]);
-    record("session.stop", { key: "Escape", code: "Escape", shiftKey: true });
+    record("session.interrupt", { key: "Escape", code: "Escape", shiftKey: true });
     fireEvent.click(within(editor()).getByRole("button", { name: "Save" }));
-    expect(bindingsOf("session.stop")).toEqual(["shift+escape"]);
+    expect(bindingsOf("session.interrupt")).toEqual(["shift+escape"]);
   });
 
   it("makes dictation a held modifier key: press and release it on its own", () => {

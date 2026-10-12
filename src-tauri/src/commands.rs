@@ -52,15 +52,21 @@ fn stop_agents_and_wait(state: &tauri::State<'_, crate::AppState>, session: &Ses
         .iter()
         .map(|tab| {
             state.host.kill(&format!("{}/{}", session.id, tab.id));
-            crate::session::SessionManager::pane_id(&tab.id)
+            tab.pane_id()
         })
         .collect();
     state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
 }
 
-fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
+fn kill_tab(app: &AppHandle, state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
     state.host.kill(&format!("{session_id}/{tab_id}"));
-    state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
+    // The tab's own pane, or the shell's it took over (#437).
+    let pane = index::get(session_id).ok().and_then(|session| session.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| crate::session::SessionManager::pane_id(tab_id));
+    state.terminals.kill(&pane);
+    // A shell's pane is listed by every window, which is told it has gone.
+    if crate::pty::is_shell_id(&pane) {
+        let _ = app.emit(PTY_CLOSED_EVENT, &pane);
+    }
 }
 
 // ------------------------------------------------------------------ account
@@ -333,6 +339,90 @@ pub fn organization_github_app_open(url: String, app: tauri::AppHandle) -> Githu
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| crate::organization_github_app::GithubAppError::local("github_app_browser_failed"))
+}
+
+// ------------------------------------------------ organization environment
+
+async fn environment_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_environment::OrganizationEnvironmentService) -> ComputeResult + Send + 'static,
+) -> ComputeResult {
+    let service = state.organization_environment.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_compute::OrganizationComputeError::local("cloud_environment_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn organization_environment_status(provider: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.status(&provider)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_update(
+    provider: String,
+    expected_revision: u64,
+    definition: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.update(&provider, expected_revision, &definition, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_build(
+    provider: String,
+    idempotency_key: String,
+    confirm_provider_spend: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.build(&provider, &idempotency_key, confirm_provider_spend, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version(version_id: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.version(&version_id)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_retry(
+    version_id: String,
+    confirm_provider_spend: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.retry(&version_id, confirm_provider_spend, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_cancel(version_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.cancel(&version_id, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_rollback(version_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.rollback(&version_id, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipes(provider: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.recipes(&provider)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipe_apply(
+    recipe_id: String,
+    confirm_apply: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.apply_recipe(&recipe_id, confirm_apply, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipe_dismiss(recipe_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.dismiss_recipe(&recipe_id, &context_revision)).await
 }
 
 // ------------------------------------------- cloud workspace configuration
@@ -1468,7 +1558,7 @@ pub fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, t
 #[tauri::command]
 pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let state = app.state::<crate::AppState>();
-    kill_tab(&state, &session_id, &tab_id);
+    kill_tab(&app, &state, &session_id, &tab_id);
     index::update_session(&session_id, |s| {
         s.tabs.retain(|t| t.id != tab_id);
         if s.active_tab.as_deref() == Some(&tab_id) {
@@ -1579,7 +1669,8 @@ fn sweep_quick_chats(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
     // A shell the reader left running in it is a use of it, whatever its date.
     let shells = state.terminals.shells();
-    let busy = |session: &SessionEntry| shells.iter().any(|shell| shell.session_id == session.id && !shell.exited);
+    let live: Vec<&str> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();
+    let busy = |session: &SessionEntry| crate::session_ops::has_shell_in_use(session, &live, |pane| state.terminals.is_running(pane));
     let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
     match crate::session_ops::sweep_idle_quick_chats(app, days, &busy, &stop) {
         Ok(removed) if !removed.is_empty() => log::info!("removed {} quick chat(s) idle for more than {days} day(s)", removed.len()),
@@ -1703,7 +1794,7 @@ pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<S
             return Err("session has no worktree".to_string());
         }
         for tab in &s.tabs {
-            kill_tab(&state, &s.id, &tab.id);
+            kill_tab(&app, &state, &s.id, &tab.id);
         }
         let branch = git::current_branch(Path::new(&s.project_path));
         let out = index::update_session(&session_id, |s| {
@@ -1965,7 +2056,7 @@ pub async fn send_message(
 }
 
 #[tauri::command]
-pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
 }
 
@@ -2360,12 +2451,30 @@ pub(crate) const PTY_RENAMED_EVENT: &str = "pty_renamed";
 /// they were opened (the floating one, a reload) lists them from this.
 #[tauri::command]
 pub fn pty_shells(state: State<'_, AppState>) -> Vec<crate::pty::ShellPane> {
-    state.terminals.shells()
+    // A shell an agent was started in is that agent's tab from then on
+    // (#437): the session lists it, and it is not also a shell tab.
+    let taken: std::collections::HashSet<String> = index::load().unwrap_or_default().iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.follow.pane.clone()).collect();
+    state.terminals.shells().into_iter().filter(|shell| !taken.contains(&shell.id)).collect()
+}
+
+/// The agents in front of terminals right now (#437), for a window that
+/// loads after they were started.
+#[tauri::command]
+pub fn pane_agents(state: State<'_, AppState>) -> Vec<crate::session::follow::PaneAgent> {
+    state.manager().map(|manager| manager.pane_agents()).unwrap_or_default()
+}
+
+/// Start a tab's agent again on one of the tab's conversations (#437): the
+/// one it holds, or one it held before another agent was run in its terminal.
+#[tauri::command]
+pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
+    let manager = app.state::<AppState>().manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub fn pty_rename(app: AppHandle, state: State<'_, AppState>, id: String, title: String) {
-    state.terminals.set_title(&id, &title);
+    state.terminals.rename(&id, &title);
     if let Some(shell) = state.terminals.shell(&id) {
         let _ = app.emit(PTY_RENAMED_EVENT, &shell);
     }
@@ -3341,11 +3450,16 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 }
 
 /// Delete the leftovers the person confirmed. Each is checked again first;
-/// anything in use, or not clean and merged, is left alone.
+/// anything in use, or not clean and merged, is left alone. How far it is
+/// goes out as `leftover_cleanup_progress` events carrying `run`.
 #[tauri::command]
-pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>) -> CmdResult<crate::cleanup::Removal> {
+pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
     tauri::async_runtime::spawn_blocking(move || {
-        let removal = crate::cleanup::remove(&ids).map_err(err)?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &crate::cleanup::Progress| {
+            let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
+        };
+        let removal = crate::cleanup::remove(&ids, &report).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
         for project in projects {
@@ -3387,7 +3501,7 @@ pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<Str
 pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: String, path: String) -> CmdResult<Option<u64>> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &format!("local:{job}"), &project_path, &path).map_err(err))?
+        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::Jobs::sizes(), &format!("local:{job}"), &project_path, &path).map_err(err))?
     })
     .await
     .map_err(err)?
@@ -3396,16 +3510,26 @@ pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: St
 /// Stop the size estimates whose job id starts with `prefix`.
 #[tauri::command]
 pub fn worktree_cleanup_cancel_sizes(prefix: String) {
-    crate::worktree_cleanup::SizeJobs::global().cancel(&format!("local:{prefix}"));
+    crate::worktree_cleanup::Jobs::sizes().cancel(&format!("local:{prefix}"));
 }
 
 /// Remove the worktrees the person confirmed. Each is checked again on the
 /// spot; one that changed, is in use or is protected is left and reported.
+/// How far it is goes out as `worktree_cleanup_progress` events carrying
+/// `run`; the list returned is what happened.
 #[tauri::command]
-pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+    use crate::worktree_cleanup::{Jobs, OfRun, Progress, Watch, PROGRESS_EVENT};
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items))?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &Progress| {
+            let _ = app.emit(PROGRESS_EVENT, OfRun { run: &run, progress });
+        };
+        let stop = Jobs::removals().start(&run);
+        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items, Watch { report: Some(&report), stop: Some(&stop) }));
+        Jobs::removals().finish(&stop);
+        let results = results?;
         for done in results.iter().filter(|done| matches!(done.outcome, crate::worktree_cleanup::Outcome::Removed | crate::worktree_cleanup::Outcome::AlreadyRemoved)) {
             state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
         }
@@ -3413,6 +3537,16 @@ pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_
     })
     .await
     .map_err(err)?
+}
+
+/// Stop the removal `run` once the worktree it is on is finished. The ones
+/// it has not started are left as they are and reported as not attempted.
+#[tauri::command]
+pub fn worktree_cleanup_stop(run: String) {
+    // An id is matched from its start; none at all would match every removal.
+    if !run.is_empty() {
+        crate::worktree_cleanup::Jobs::removals().cancel(&run);
+    }
 }
 
 /// What a workspace takes on disk. Asked for one workspace at a time, after

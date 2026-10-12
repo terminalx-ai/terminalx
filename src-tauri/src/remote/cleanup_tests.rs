@@ -218,3 +218,48 @@ async fn a_sessions_worktree_is_read_and_removed_by_its_session_and_the_main_dir
     assert_eq!(forced["deleted"], json!([wip.id]));
     assert!(!Path::new(&wip.cwd).exists() && f.root.join("README.md").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_tells_its_caller_how_far_it_is_and_nobody_else() {
+    let f = fixture();
+    let (manager, mut heard) = Peer::new("device-a".into(), Authority::Manage);
+    call(&f.rpc, &manager, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["cleanup/1"] })).await.unwrap();
+    let (other, mut overheard) = Peer::new("device-b".into(), Authority::Manage);
+    call(&f.rpc, &other, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["cleanup/1"] })).await.unwrap();
+    let one = f.worktree("one");
+    let two = f.worktree("two");
+    let scan = call(&f.rpc, &manager, "cleanup.scan", json!({})).await.unwrap();
+    // The second was measured by the review, so it is not walked again.
+    let mut second = item(&candidate(&scan, &two));
+    second["estimatedBytes"] = json!(2_048);
+    let items = json!([item(&candidate(&scan, &one)), second]);
+
+    let done = call(&f.rpc, &manager, "cleanup.remove", json!({ "clientRequestId": "request-0001", "items": items })).await.unwrap();
+    assert_eq!(done["results"][0]["outcome"], "removed");
+    assert_eq!((done["results"][1]["freedBytes"].as_u64(), done["results"][1]["freedEstimated"].as_bool()), (Some(2_048), Some(true)));
+    assert_eq!(done["results"][0]["freedEstimated"], false);
+
+    // The notifications were queued in order, before the answer was returned.
+    let mut told = Vec::new();
+    while let Ok(Some(notification)) = tokio::time::timeout(std::time::Duration::from_millis(50), heard.recv()).await {
+        if notification["event"] == "cleanup.progress" {
+            told.push(notification["params"].clone());
+        }
+    }
+    let words: Vec<String> = told.iter().map(|params| format!("{} {} {}", params["kind"].as_str().unwrap(), params["index"], params["step"].as_str().or(params["result"]["outcome"].as_str()).unwrap_or(""))).collect();
+    assert_eq!(
+        words,
+        ["started 0 ", "step 0 measuring", "step 0 checking", "step 0 removing", "step 0 sessions", "finished 0 removed", "started 1 ", "step 1 checking", "step 1 removing", "step 1 sessions", "finished 1 removed"]
+    );
+    assert!(told.iter().all(|params| params["run"] == "request-0001" && params["total"] == 2));
+    assert_eq!(told[0]["path"], one.to_str().unwrap());
+    assert_eq!(told[5]["result"], done["results"][0]);
+    while let Ok(Some(notification)) = tokio::time::timeout(std::time::Duration::from_millis(50), overheard.recv()).await {
+        assert_ne!(notification["event"], "cleanup.progress", "another connection hears nothing of it");
+    }
+
+    // A resend is answered from what was done, with nothing new to report.
+    let resent = call(&f.rpc, &manager, "cleanup.remove", json!({ "clientRequestId": "request-0001", "items": items })).await.unwrap();
+    assert_eq!(resent, done);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(50), heard.recv()).await.is_err());
+}

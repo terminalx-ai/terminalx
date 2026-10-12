@@ -821,7 +821,10 @@ point) beside the shell terminals' but apart from them, and
 - **Read-only** for a viewer, for a driver while someone else drives the tab,
   and for a driver who may not approve; the view says which, and sends no
   input, size or control request.
-- Escape is the agent's in this view (it does not stop the turn from here).
+- Escape is the agent's in this view: it is typed into the agent's screen
+  like every other key. In the chat it is the agent's too, sent as
+  `session.interrupt` (`CLOUD-AGENT-TABS.md`, `session/3`): whoever may stop
+  the tab may interrupt it, and neither ends the agent's process.
 - **Only what a person does is input.** Key presses, paste and IME text may
   wake a stopped workspace, take control or start the agent. What the
   terminal emulator says by itself (focus in and out, answers to cursor,
