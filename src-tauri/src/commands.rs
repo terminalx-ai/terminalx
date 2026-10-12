@@ -1989,7 +1989,7 @@ pub async fn send_message(
 }
 
 #[tauri::command]
-pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
 }
 
@@ -3383,11 +3383,16 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 }
 
 /// Delete the leftovers the person confirmed. Each is checked again first;
-/// anything in use, or not clean and merged, is left alone.
+/// anything in use, or not clean and merged, is left alone. How far it is
+/// goes out as `leftover_cleanup_progress` events carrying `run`.
 #[tauri::command]
-pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>) -> CmdResult<crate::cleanup::Removal> {
+pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
     tauri::async_runtime::spawn_blocking(move || {
-        let removal = crate::cleanup::remove(&ids).map_err(err)?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &crate::cleanup::Progress| {
+            let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
+        };
+        let removal = crate::cleanup::remove(&ids, &report).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
         for project in projects {
@@ -3429,7 +3434,7 @@ pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<Str
 pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: String, path: String) -> CmdResult<Option<u64>> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &format!("local:{job}"), &project_path, &path).map_err(err))?
+        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::Jobs::sizes(), &format!("local:{job}"), &project_path, &path).map_err(err))?
     })
     .await
     .map_err(err)?
@@ -3438,16 +3443,26 @@ pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: St
 /// Stop the size estimates whose job id starts with `prefix`.
 #[tauri::command]
 pub fn worktree_cleanup_cancel_sizes(prefix: String) {
-    crate::worktree_cleanup::SizeJobs::global().cancel(&format!("local:{prefix}"));
+    crate::worktree_cleanup::Jobs::sizes().cancel(&format!("local:{prefix}"));
 }
 
 /// Remove the worktrees the person confirmed. Each is checked again on the
 /// spot; one that changed, is in use or is protected is left and reported.
+/// How far it is goes out as `worktree_cleanup_progress` events carrying
+/// `run`; the list returned is what happened.
 #[tauri::command]
-pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+    use crate::worktree_cleanup::{Jobs, OfRun, Progress, Watch, PROGRESS_EVENT};
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items))?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &Progress| {
+            let _ = app.emit(PROGRESS_EVENT, OfRun { run: &run, progress });
+        };
+        let stop = Jobs::removals().start(&run);
+        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items, Watch { report: Some(&report), stop: Some(&stop) }));
+        Jobs::removals().finish(&stop);
+        let results = results?;
         for done in results.iter().filter(|done| matches!(done.outcome, crate::worktree_cleanup::Outcome::Removed | crate::worktree_cleanup::Outcome::AlreadyRemoved)) {
             state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
         }
@@ -3455,6 +3470,16 @@ pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_
     })
     .await
     .map_err(err)?
+}
+
+/// Stop the removal `run` once the worktree it is on is finished. The ones
+/// it has not started are left as they are and reported as not attempted.
+#[tauri::command]
+pub fn worktree_cleanup_stop(run: String) {
+    // An id is matched from its start; none at all would match every removal.
+    if !run.is_empty() {
+        crate::worktree_cleanup::Jobs::removals().cancel(&run);
+    }
 }
 
 /// What a workspace takes on disk. Asked for one workspace at a time, after

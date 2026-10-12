@@ -52,6 +52,82 @@
   ended, so a later dictation in the other window (main or floating) cannot
   add its words to it as well. (#428)
 
+### Cleaning up worktrees and leftovers
+
+- Removing worktrees ("Clean up worktrees…") now shows how far it is. After
+  the removal is confirmed the dialog has a progress bar and "N of M
+  worktrees done", the space freed so far against what the review measured
+  ("3.2 GB of about 11 GB", or "at least" when some sizes were never
+  measured), the worktree being handled with its host and the step it is on
+  (measuring, checking it again, removing, updating sessions), and each
+  worktree's outcome as soon as it is known. On this computer the counter
+  used to stay at "0 of N" until every worktree was done. When it finishes,
+  the same view is the result. (#426)
+- The dialog can be hidden while it runs, with Hide, Escape or the close
+  button. The clean-up carries on and the app stays usable. A small indicator
+  in the bottom-right corner then shows "Cleaning up 4 of 12" and the space
+  freed, sits below any notices and above the composer so a message can still
+  be written and sent, and opens the dialog again when it is clicked or
+  reached with the keyboard. If the run finishes while hidden the indicator
+  becomes its summary: one where everything was removed goes away by itself;
+  one with anything skipped, failed or not known stays until it is dismissed
+  or read. (#426)
+- Only one clean-up runs at a time: "Clean up worktrees…" during a run opens
+  that run instead of starting a new scan. Stop lets the worktree being
+  removed finish and leaves the rest, reported as "Not attempted"; it never
+  interrupts a removal half way. Hiding and stopping change nothing about
+  what is removed: each worktree is still checked again on its own machine
+  first, and git is never forced. (#426)
+- A worktree whose size the review already measured is no longer measured a
+  second time before it is removed. Its figure is then shown as "about";
+  one that was never measured is still measured, and shown exactly. (#426)
+- Deleting leftovers in Settings → Storage has the same treatment. It used
+  to show only a spinner on "Scan again" for the whole deletion; it now says
+  that everything is being checked again, then which leftover is being
+  deleted, how many are done and what was freed. It carries on when Settings
+  is left, with the same corner indicator leading back to Storage. (#426)
+- Quitting while a clean-up or a deletion of leftovers is running now asks
+  first: from the Quit menu item and ⌘Q, the tray's Quit and the main
+  window's close button. Quitting from the Dock, logging out and shutting
+  down cannot be asked about and end the app as before. (#426)
+
+### Escape interrupts the agent instead of ending it
+
+- Pressing Escape while an agent works no longer kills the agent and puts
+  "Session closed … Resume safely" over the tab. Escape is the agent's own
+  key. In the terminal view (local and cloud) it is typed into the agent's
+  screen like every other key, so it also closes the agent's menus and leaves
+  its modes; an Escape typed in any terminal is never taken by a shortcut. In
+  the chat it interrupts the running turn: the turn shows as "Stopped", the
+  agent's process stays, and the next message goes to it without a restart.
+  With nothing running, Escape does nothing. Dialogs, menus, pickers and the
+  editor still get the key first. (#427)
+- Queued follow-ups survive Escape. Claude Code and Codex keep their own
+  queue and, interrupted with a message queued, send it at once as the next
+  turn; the chat now shows that as the queued message becoming the next
+  prompt rather than drawing it twice. For agents with no queue of their own
+  the app's is kept, and the next message starts when the interrupted turn
+  has ended. A request the turn was waiting on (a permission or a question)
+  is withdrawn with it, so nothing you were still deciding about runs.
+- Stopping the session is now a separate, explicit action: "Stop session" in
+  the terminal view and on the recovery banner, and "Stop the session" in
+  Settings → Shortcuts, which has no keys until you give it some (never a bare
+  Escape). The composer's Stop interrupts first; if the agent does not answer,
+  the same button becomes "Stop session" and ends the process. Only that
+  shows the "Session closed" banner.
+- If you had moved "Stop the running turn" to other keys, they now interrupt
+  (that is what stopping a turn does now), and Escape stays free if you had
+  taken the action off it.
+- Cloud tabs: Escape in the chat is sent to the runtime as a live interrupt
+  (`session/3`), for whoever may stop the tab. A workspace whose runtime is
+  older than this leaves the key alone until it is updated; its Stop works as
+  before.
+- The same holds for the agents that are driven without a terminal, checked
+  against the real ones. On an OpenCode tab the first message no longer fails
+  with "The connection was lost" (it was sent before OpenCode had started),
+  the reply no longer begins with your own prompt, and a message queued
+  behind a turn is no longer cut short the moment it starts.
+
 ## 0.2.10
 
 Dialogs that keep their buttons in reach, and cloud workspaces that stay awake

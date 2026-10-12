@@ -19,6 +19,11 @@ shell. It is keystrokes, not commands: nothing is queued, receipted or
 replayed, it only works while the runtime is online, and it has its own
 authority rules. See "An agent tab's terminal view" in `CLOUD-SHARING.md`.
 
+Escape in the chat is the other live call (#427): `session.interrupt`
+(`session/3`), below. It is a keystroke in the same sense. A queued Escape
+would land in whatever turn runs when the runtime gets to it, so it is never
+a mailbox command.
+
 The server half is terminalx-saas #109 (`apps/api/docs/cloud-workspace-remote-runtime-contract.md`
 §11-14). This document is the runtime/app half of that contract.
 
@@ -65,7 +70,7 @@ Every plaintext is JSON with `"v": 1`. It is AES-256-GCM encrypted with AAD
 | --- | --- | --- |
 | `send` | `{ v, text, model?, effort?, mode? }` | Idle tab: the prompt goes to the agent now. Mid-turn: it joins the tab's durable follow-up queue and goes out when the turn ends. `model`/`effort`/`mode` are applied to the tab first. |
 | `steer` | `{ v, text }` | Mid-turn: typed into the running CLI now; Claude Code and Codex take it at their next step. Idle: like `send`. |
-| `stop` | `{ v }` | Interrupts the turn and drops the tab's queued follow-ups (listed in the receipt). |
+| `stop` | `{ v }` | The hard stop: ends the tab's agent process (the conversation resumes with the next message) and drops the tab's queued follow-ups (listed in the receipt). Escape is not this; see `session.interrupt`. |
 | `permission-decision` | `{ v, requestId, optionId }` or `{ v, requestId, answers }` | Answers that pending request. If it is no longer pending, the command is `rejected` with `request-not-pending`. |
 
 The receipt plaintext is `{ v: 1, outcome, category?, queued?, droppedFollowUps?, requestId?, message? }`. It is
@@ -117,6 +122,40 @@ with the same token; `stale-lease` is final; `stale-generation` leases again.
   upload. If the file is missing, the epoch is the current runtime generation.
   A `409 stale` moves to epoch + 1 and retries once.
 - Closing a tab with `remove` deletes its checkpoints.
+
+### `session/3`: Escape for a running turn (#427)
+
+| Method | Authority | Params → result |
+| --- | --- | --- |
+| `session.interrupt` | participate, **not** idempotent | `{ sessionId, tabId }` → `{ interrupted }` |
+
+The running turn is interrupted the way its agent takes that (a bare Escape
+typed into a Claude Code or Codex CLI, `session/cancel` for ACP, an abort for
+OpenCode) and the agent's process stays up, so the next message does not
+restart it. `interrupted` is false when the tab had nothing running; then
+nothing was typed.
+
+- **Who.** Whoever may stop the tab: a driver while nobody else holds its
+  lease (`lease_held` otherwise), a manager always, with or without the right
+  to approve. A viewer is refused. It claims no lease.
+- **The queue.** Follow-ups queued behind the turn are kept, and the next one
+  goes out when the interrupted turn has ended, as after a turn that
+  finished. Only the mailbox `stop` drops them. A message already typed into
+  the CLI mid-turn (a `steer`) is the CLI's: both CLIs send it at once when
+  interrupted (`PTY-FIRST.md`, "Escape interrupts; only Stop ends the
+  process").
+- **Open requests.** What the turn was asking is withdrawn (`permission_decided`,
+  label "Cancelled"), so nothing a person was still deciding about runs.
+- **Never replayed.** No `clientRequestId`, no idempotency cache, and the
+  client does not send it again after a dropped connection: each call is an
+  Escape for the turn running at that moment.
+- **Older runtimes.** A desktop offers Escape in a cloud tab's chat only on a
+  connection that granted `session/3`. Without it (an older runtime, or one
+  that is not connected) the key is left alone and the composer's Stop stays
+  the mailbox `stop`.
+
+In a cloud tab's terminal view Escape is typed into the agent's screen with
+`pty.write`, as before; `session.interrupt` is only what the chat sends.
 
 ### `session/1` additions (additive)
 

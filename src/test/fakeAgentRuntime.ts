@@ -10,7 +10,7 @@ import type { TerminalInstance } from "@/lib/terminal";
  * a viewer is refused, someone else's lease refuses input, only the
  * controller types and sizes, and nothing is ever started without `start`.
  */
-export const AGENT_PTY_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", "agent-pty/1"];
+export const AGENT_PTY_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "agents/1", "collab/1", "agent-pty/1"];
 
 export const agentTab = (fields: Partial<AgentTabInfo> = {}): AgentTabInfo => ({
   sessionId: "s-1",
@@ -200,6 +200,10 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         return ok({ sessions: this.sessions });
       case "session.subscribe":
         return ok({ subscriptionId: `sub-${++this.subscription}`, events: this.events.map((event, index) => ({ cursor: `${this.generation}:${index + 1}`, event })), cursor: `${this.generation}:${this.events.length}` });
+      // Escape for the running turn (`session/3`): the turn is interrupted, the agent's process stays.
+      case "session.interrupt":
+        if (!this.capabilities.includes("session/3")) return refusal(frame.id, "capability_not_granted");
+        return ok({ interrupted: this.tabs.some((tab) => tab.tabId === params.tabId && (tab.status === "in_progress" || tab.status === "waiting")) });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":

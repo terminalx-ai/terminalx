@@ -45,6 +45,12 @@ export interface SessionBackendCaps {
   images: boolean;
   /** The local recovery flows (retry safely, resume after a stop). */
   recovery: boolean;
+  /**
+   * `interrupt` reaches the agent: Escape in the chat does something. False
+   * on a cloud tab while its runtime is not connected, or is one from before
+   * `session/3`; there only the hard stop is offered.
+   */
+  interrupt: boolean;
 }
 
 /** Whether a tab's terminal view is offered, and why not when it is not. */
@@ -104,6 +110,13 @@ export interface SessionBackend {
    */
   send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
+  /**
+   * Escape, as the agent's own screen takes it (#427): the running turn is
+   * interrupted and the agent's process stays. Nothing is queued or dropped
+   * by it, and nothing is woken for it; with no turn running it does nothing.
+   */
+  interrupt(tabId: string): Promise<void>;
+  /** The hard stop: the agent's process is ended, and the conversation resumes with the next message. */
   stop(tabId: string): Promise<void>;
   respondPermission(tabId: string, requestId: string, optionId: string): Promise<void>;
   answerQuestions(tabId: string, requestId: string, answers: Record<string, string>): Promise<void>;
@@ -162,7 +175,7 @@ export interface SessionBackend {
   };
 }
 
-const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, recovery: true };
+const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, recovery: true, interrupt: true };
 const OFFERED: TerminalViewOffer = { available: true, reason: null };
 
 /** The terminal view switch for `tab` on `backend`: every local tab has one. */
@@ -188,6 +201,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     },
     send: (tabId, text, images) => agent.send(sessionId, tabId, text, images),
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
+    interrupt: (tabId) => agent.interrupt(sessionId, tabId).then(() => undefined),
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),
     answerQuestions: (tabId, requestId, answers) => agent.answerQuestions(sessionId, tabId, requestId, answers),
@@ -342,11 +356,13 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   };
   const agentPty = ctx.agentPty ?? null;
   const terminalBase = ctx.terminalBase;
+  // An interrupt is a live call: there is a turn to interrupt only on a runtime that is up.
+  const interrupts = write && !!client?.hasCapability("session/3");
   return {
     kind: "cloud",
     key: ctx.key,
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
-    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), recovery: false },
+    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
@@ -387,6 +403,11 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),
+    // Never through the mailbox: a queued Escape would land in some later turn. A runtime that cannot take it is left alone.
+    interrupt: async (tabId) => {
+      guard();
+      if (interrupts) await client!.interruptAgentTab({ sessionId: ctx.sessionId, tabId });
+    },
     // Stopping needs no compute: a sleeping workspace runs nothing to stop.
     stop: async (tabId) => {
       guard();

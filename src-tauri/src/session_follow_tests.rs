@@ -621,7 +621,8 @@ fn a_prompt_is_never_typed_into_the_shell_a_hand_started_cli_has_left() {
     // One sent after it left is refused outright, and says why.
     let refused = rig.manager.send(SESSION, &tab.id, "make clean".into(), Vec::new()).unwrap_err();
     assert!(format!("{refused:#}").contains("no longer running in this tab's terminal"), "{refused:#}");
-    rig.manager.interrupt(SESSION, &tab.id).unwrap();
+    // Nor is its shell sent the Escape that would have interrupted it.
+    assert!(!rig.manager.interrupt(SESSION, &tab.id).unwrap());
     assert_eq!(rig.typed(&pane), "");
 }
 

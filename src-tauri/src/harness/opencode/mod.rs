@@ -5,11 +5,24 @@
 //! `raccoon_http`. Everything here is pure, so it is tested on fixtures.
 //!
 //! Built against the documented API (sessions, `/session/:id/message`,
-//! `/session/:id/abort`, `/session/:id/permissions/:id`, `/event`). The
-//! copy installed on the development machine (0.1.150) never finished
-//! starting, so this has not yet been exercised against a live server.
+//! `/session/:id/abort`, `/session/:id/permissions/:id`, `/event`) and
+//! checked against a live `opencode serve` 1.19.0 (#427): the files under
+//! `fixtures/` are its event stream as recorded, around a turn, an abort, an
+//! abort with a message queued behind it and an abort with a permission
+//! request open. What that server does that the documentation does not say:
+//!
+//! - **Every idle is said twice**, as `session.status` and then as the older
+//!   `session.idle`. After an abort both are said again a moment later, once
+//!   the aborted request has unwound, unless a new prompt is running by then.
+//! - **A turn's events outlive it.** The aborted reply's last text and its
+//!   message record arrive after the idle that ended the turn, so in the
+//!   middle of the next turn when a message was queued.
+//! - **The prompt comes back** as a text part of the reader's own message.
+//!
+//! So a turn ends once (`idle`), and only what belongs to it is drawn
+//! (`belongs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
@@ -68,6 +81,21 @@ pub struct OpenCode {
     /// Open permission requests: our request id → the server's permission id.
     asks: HashMap<String, String>,
     turn_open: bool,
+    /// The app asked for the open turn to be aborted (`interrupt`): its idle
+    /// is a stopped turn, not a finished one.
+    aborting: bool,
+    /// The server has shown it is working on the open turn (it said busy, or
+    /// sent some of the reply). Until then an idle is the previous turn's.
+    acknowledged: bool,
+    /// This server reports `session.status`; its `session.idle` is the same
+    /// news a second time.
+    reports_status: bool,
+    /// The reader's own messages: their parts are the prompt, not a reply.
+    prompts: HashSet<String>,
+    /// The messages of the open turn, and of the turns before it. What still
+    /// arrives for an earlier turn's message is not part of this one.
+    messages: HashSet<String>,
+    retired: HashSet<String>,
     turn_started_at: Option<std::time::Instant>,
     last_usage: Option<(u64, Option<u64>)>,
 }
@@ -108,6 +136,8 @@ impl OpenCode {
             body["model"] = json!({"providerID": provider, "modelID": model});
         }
         self.turn_open = true;
+        self.aborting = false;
+        self.acknowledged = false;
         self.turn_started_at = Some(std::time::Instant::now());
         self.seen.clear();
         self.committed.clear();
@@ -126,11 +156,50 @@ impl OpenCode {
         self.begin_turn(&text, &images)
     }
 
+    /// Abort the open turn; the server keeps running. The turn ends when the
+    /// session goes idle (`idle`), not here.
     pub fn interrupt(&mut self) -> Vec<Action> {
+        if !self.turn_open {
+            return Vec::new();
+        }
         match &self.session_id {
-            Some(sid) => vec![self.http("abort", "POST", &format!("/session/{sid}/abort"), Some(json!({})))],
+            Some(sid) => {
+                self.aborting = true;
+                vec![self.http("abort", "POST", &format!("/session/{sid}/abort"), Some(json!({})))]
+            }
             None => Vec::new(),
         }
+    }
+
+    /// The session has nothing running: the open turn is over. It is a
+    /// stopped turn when the app asked for the abort.
+    ///
+    /// An idle heard before the server has taken the open turn up is about
+    /// the turn before it: an abort is followed by a second idle once the
+    /// aborted request has unwound, and a queued message may have started a
+    /// turn by then.
+    fn idle(&mut self) -> Vec<Action> {
+        if self.turn_open && self.reports_status && !self.acknowledged {
+            return Vec::new();
+        }
+        let status = if std::mem::take(&mut self.aborting) { TurnStatus::Aborted } else { TurnStatus::Ok };
+        self.end_turn(status, None, false)
+    }
+
+    /// Whether what the server says about `message` is part of the open
+    /// turn's reply, noting the message as this turn's when it is. Not the
+    /// reader's own message, and not one from a turn that has ended. A
+    /// server that names no message is taken at its word.
+    fn belongs(&mut self, message: &Value) -> bool {
+        let Some(id) = message.as_str() else { return true };
+        if self.prompts.contains(id) || self.retired.contains(id) {
+            return false;
+        }
+        if self.turn_open {
+            self.messages.insert(id.to_string());
+            self.acknowledged = true;
+        }
+        true
     }
 
     pub fn answer(&mut self, request_id: &str, option_id: &str) -> Option<Vec<Action>> {
@@ -154,6 +223,9 @@ impl OpenCode {
             return Vec::new();
         }
         self.turn_open = false;
+        // What it was asking went with it, and whatever still arrives for its messages is late.
+        self.asks.clear();
+        self.retired.extend(self.messages.drain());
         let duration_ms = self.turn_started_at.take().map(|t| t.elapsed().as_millis() as u64);
         let usage = self.last_usage.map(|(used, max)| Usage { context_used: Some(used), context_max: max, ..Default::default() });
         let mut out = self.commit_open_text();
@@ -226,6 +298,11 @@ impl OpenCode {
                 // reported the turn; only an error path needs it.
                 Vec::new()
             }
+            // The server did not take the abort: the turn goes on, and its end is its own.
+            "abort" if !ok => {
+                self.aborting = false;
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -235,13 +312,13 @@ impl OpenCode {
         match kind {
             "message.part.updated" => {
                 let part = &p["part"];
-                if !mine(&part["sessionID"]) {
+                if !mine(&part["sessionID"]) || !self.belongs(&part["messageID"]) {
                     return Vec::new();
                 }
                 self.on_part(part)
             }
             "message.part.delta" => {
-                if !mine(&p["sessionID"]) {
+                if !mine(&p["sessionID"]) || !self.belongs(&p["messageID"]) {
                     return Vec::new();
                 }
                 let id = p["partID"].as_str().unwrap_or("").to_string();
@@ -261,26 +338,40 @@ impl OpenCode {
             // server chose (#404).
             "message.updated" => {
                 let info = &p["info"];
-                if self.model.is_some() || !mine(&info["sessionID"]) || info["role"].as_str() != Some("assistant") {
+                if !mine(&info["sessionID"]) {
+                    return Vec::new();
+                }
+                if info["role"].as_str() == Some("user") {
+                    if let Some(id) = info["id"].as_str() {
+                        self.prompts.insert(id.to_string());
+                    }
+                    return Vec::new();
+                }
+                if info["role"].as_str() != Some("assistant") || !self.belongs(&info["id"]) || self.model.is_some() {
                     return Vec::new();
                 }
                 let (Some(provider), Some(model)) = (info["providerID"].as_str(), info["modelID"].as_str()) else { return Vec::new() };
                 // Not adopted as the model to send: the tab goes on following the server's choice.
                 Signal::current(Some(&format!("{provider}/{model}")), None).map(|signal| Action::Emit(Payload::ProviderSettings { signal })).into_iter().collect()
             }
+            // The older word for idle. A server that reports `session.status`
+            // has said it there already; this one would end the turn a queued
+            // message started in between.
             "session.idle" => {
-                if !mine(&p["sessionID"]) {
+                if !mine(&p["sessionID"]) || self.reports_status {
                     return Vec::new();
                 }
-                self.end_turn(TurnStatus::Ok, None, false)
+                self.idle()
             }
             "session.status" => {
                 if !mine(&p["sessionID"]) {
                     return Vec::new();
                 }
+                self.reports_status = true;
                 if p["status"]["type"].as_str() == Some("idle") {
-                    self.end_turn(TurnStatus::Ok, None, false)
+                    self.idle()
                 } else {
+                    self.acknowledged |= self.turn_open;
                     Vec::new()
                 }
             }
@@ -291,8 +382,13 @@ impl OpenCode {
                 let name = p["error"]["name"].as_str().unwrap_or("");
                 let message = p["error"]["data"]["message"].as_str().or_else(|| p["error"]["message"].as_str()).unwrap_or("OpenCode reported an error").to_string();
                 let auth = name.to_lowercase().contains("auth") || message.to_lowercase().contains("api key");
+                // An abort is reported twice, as this error and as the
+                // session's idle, in an order the server does not promise.
+                // The idle is the one that ends the turn: whichever of the
+                // two came second would otherwise end the turn after it, when
+                // a queued message has started one in between (#427).
                 if name == "MessageAbortedError" {
-                    self.end_turn(TurnStatus::Aborted, None, false)
+                    Vec::new()
                 } else {
                     self.end_turn(TurnStatus::Error, Some(message), auth)
                 }
@@ -304,15 +400,17 @@ impl OpenCode {
                 let id = p["id"].as_str().unwrap_or("").to_string();
                 let request_id = format!("oc:{id}");
                 self.asks.insert(request_id.clone(), id);
-                let tool = p["type"].as_str().unwrap_or("tool").to_string();
+                // 1.19 names the tool `permission`, puts the call under `tool` and lists `patterns`.
+                let tool = p["type"].as_str().or_else(|| p["permission"].as_str()).unwrap_or("tool").to_string();
+                let patterns = p["patterns"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|list| !list.is_empty());
                 let mut out = self.commit_open_text();
                 out.push(Action::Emit(Payload::PermissionRequested {
                     request_id,
-                    tool_use_id: p["callID"].as_str().unwrap_or("").into(),
+                    tool_use_id: p["callID"].as_str().or_else(|| p["tool"]["callID"].as_str()).unwrap_or("").into(),
                     tool_name: tool,
                     input: p["metadata"].clone(),
                     title: p["title"].as_str().map(String::from),
-                    description: p["pattern"].as_str().map(|s| format!("Pattern: {s}")),
+                    description: p["pattern"].as_str().map(String::from).or(patterns).map(|s| format!("Pattern: {s}")),
                     options: vec![
                         PermissionOption { id: "once".into(), label: "Allow once".into(), kind: PermissionOptionKind::AllowOnce },
                         PermissionOption { id: "always".into(), label: "Always allow".into(), kind: PermissionOptionKind::AllowAlways },
@@ -322,7 +420,7 @@ impl OpenCode {
                 out
             }
             "permission.replied" => {
-                let id = p["permissionID"].as_str().or_else(|| p["id"].as_str()).unwrap_or("");
+                let id = p["permissionID"].as_str().or_else(|| p["requestID"].as_str()).or_else(|| p["id"].as_str()).unwrap_or("");
                 self.asks.retain(|_, v| v != id);
                 Vec::new()
             }
@@ -399,6 +497,9 @@ impl OpenCode {
     }
 }
 
+/// How long a server that was just started is given to begin listening.
+const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Reads `/event` and hands each `data:` payload to `emit`, reconnecting
 /// while `alive` says the server should still be there. Returns when the
 /// server is gone.
@@ -407,7 +508,7 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
     let agent = ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(2)).build();
     // Wait for the server to answer at all.
     let started = std::time::Instant::now();
-    while alive() && started.elapsed() < std::time::Duration::from_secs(120) {
+    while alive() && started.elapsed() < STARTUP_WAIT {
         if agent.get(&format!("{base}/session")).call().is_ok() {
             break;
         }
@@ -416,7 +517,7 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
     if !alive() {
         return;
     }
-    if started.elapsed() >= std::time::Duration::from_secs(120) {
+    if started.elapsed() >= STARTUP_WAIT {
         emit(json!({"type": "session.error", "properties": {"error": {"name": "StartupError", "data": {"message": "The OpenCode server did not start within two minutes."}}}}).to_string());
         return;
     }
@@ -441,24 +542,36 @@ pub fn pump_events(base: &str, alive: impl Fn() -> bool, emit: impl Fn(String)) 
 }
 
 /// One request, blocking; the reply becomes a line the engine understands.
+///
+/// The first request of a tab, the one that opens its session, is made the
+/// moment its server is spawned, and a server takes a second or so to start
+/// listening. A refused connection is therefore tried again for as long as
+/// the event pump waits for the server. It used to be the answer, and the
+/// first message of every tab failed with it (found by the live test, #427).
 pub fn perform(tag: &str, method: &str, url: &str, body: Option<Value>) -> String {
     let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(600)).build();
-    let req = agent.request(method, url);
-    let resp = match body {
-        Some(b) => req.send_json(b),
-        None => req.call(),
-    };
-    let (status, body) = match resp {
-        Ok(r) => {
-            let status = r.status() as u64;
-            let text = r.into_string().unwrap_or_default();
-            (status, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
+    let started = std::time::Instant::now();
+    let (status, body) = loop {
+        let req = agent.request(method, url);
+        let resp = match &body {
+            Some(b) => req.send_json(b),
+            None => req.call(),
+        };
+        match resp {
+            Ok(r) => {
+                let status = r.status() as u64;
+                let text = r.into_string().unwrap_or_default();
+                break (status, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)));
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let text = r.into_string().unwrap_or_default();
+                break (code as u64, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)));
+            }
+            Err(ureq::Error::Transport(e)) if e.kind() == ureq::ErrorKind::ConnectionFailed && started.elapsed() < STARTUP_WAIT => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => break (0, Value::String(e.to_string())),
         }
-        Err(ureq::Error::Status(code, r)) => {
-            let text = r.into_string().unwrap_or_default();
-            (code as u64, serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
-        }
-        Err(e) => (0, Value::String(e.to_string())),
     };
     json!({"raccoon_http": {"tag": tag, "status": status, "body": body}}).to_string()
 }
@@ -558,5 +671,251 @@ mod tests {
         o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s2"}}}"#);
         let a = o.handle(r#"{"type":"session.error","properties":{"sessionID":"s2","error":{"name":"ProviderAuthError","data":{"message":"Invalid API key"}}}}"#);
         assert!(matches!(emits(&a)[0], Payload::TurnCompleted { status: TurnStatus::Error, auth_failed: true, .. }));
+    }
+
+    /// The request that opens a tab's session is made as its server is
+    /// spawned: it waits for the server to listen instead of failing.
+    #[test]
+    fn a_request_waits_for_a_server_that_is_still_starting() {
+        use std::io::{Read, Write};
+        // A port nothing listens on yet.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = r#"{"id":"ses_1"}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let line: Value = serde_json::from_str(&perform("session_new", "POST", &format!("http://127.0.0.1:{port}/session"), Some(json!({})))).unwrap();
+        server.join().unwrap();
+        assert_eq!(line["raccoon_http"], json!({ "tag": "session_new", "status": 200, "body": { "id": "ses_1" } }));
+    }
+
+    // ---- #427: Escape for a running turn, against a live server's own words
+
+    /// What `opencode serve` 1.19.0 said, recorded with a model that streams
+    /// one word a second (see the module's notes on what it does).
+    const TURN: &str = include_str!("fixtures/turn.jsonl");
+    const ABORT: &str = include_str!("fixtures/abort.jsonl");
+    const ABORT_THEN_NEXT: &str = include_str!("fixtures/abort_then_next.jsonl");
+    const PERMISSION_ABORT: &str = include_str!("fixtures/permission_abort.jsonl");
+    const PERMISSION_REJECT_ABORT: &str = include_str!("fixtures/permission_reject_abort.jsonl");
+
+    /// Run a recording through the engine the way the session manager drives
+    /// it: the server's lines in order, an abort (and a rejection) where the
+    /// recording made one, and the next of `queued` as a prompt the moment a
+    /// turn ends. Returns the chat as it is told, each turn's streamed text
+    /// just before its end, and what the engine asked of the server.
+    fn replay(recording: &str, queued: &[&str]) -> (OpenCode, Vec<String>, Vec<String>) {
+        let lines: Vec<Value> = recording.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let first = lines.iter().find(|line| line["probe"] == "prompt").unwrap()["text"].as_str().unwrap().to_string();
+        let mut queue: std::collections::VecDeque<String> = queued.iter().map(|text| text.to_string()).collect();
+        let (mut told, mut asked, mut streamed) = (Vec::new(), Vec::new(), String::new());
+        let mut o = OpenCode::new(1, "/w/proj", None, None, "auto");
+        let mut pending = o.start(first, vec![]);
+        let mut next = lines.iter();
+        loop {
+            for action in std::mem::take(&mut pending) {
+                match action {
+                    Action::Http { tag, body, .. } => asked.push(match tag.as_str() {
+                        "prompt" => format!("prompt: {}", body.unwrap()["parts"][0]["text"].as_str().unwrap()),
+                        _ => tag,
+                    }),
+                    Action::Emit(Payload::TurnStarted { .. }) => told.push("start".to_string()),
+                    Action::Emit(Payload::Delta(Delta::TextDelta { text, .. })) => streamed.push_str(&text),
+                    Action::Emit(Payload::AssistantText { text, .. }) => told.push(format!("text: {text}")),
+                    Action::Emit(Payload::ToolCallStarted { name, .. }) => told.push(format!("tool: {name}")),
+                    Action::Emit(Payload::ToolCallCompleted { result, .. }) => told.push(format!("tool ended: {}", if result.is_error { "error" } else { "ok" })),
+                    Action::Emit(Payload::PermissionRequested { tool_name, description, .. }) => told.push(format!("ask: {tool_name} ({})", description.unwrap_or_default())),
+                    Action::Emit(Payload::TurnCompleted { status, .. }) => {
+                        told.push(format!("streamed: {}", std::mem::take(&mut streamed)));
+                        told.push(format!("end: {status:?}"));
+                        // The session manager sends the next queued message here, before it hears anything more.
+                        if let Some(text) = queue.pop_front() {
+                            pending.extend(o.prompt(text, vec![]));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !pending.is_empty() {
+                continue;
+            }
+            let Some(line) = next.next() else { break };
+            pending = match line["probe"].as_str() {
+                // The recording's own prompts: the first is the one started above, a later one is `queued`.
+                Some("prompt") => Vec::new(),
+                Some("abort") => o.interrupt(),
+                Some("reject") => o.answer(&format!("oc:{}", line["id"].as_str().unwrap()), "reject").expect("the request is open"),
+                _ => o.handle(&line.to_string()),
+            };
+        }
+        (o, told, asked)
+    }
+
+    /// One turn, ended once: the server says idle twice, and the prompt it
+    /// echoes back as a part of the reader's message is not the reply.
+    #[test]
+    fn a_live_turn_ends_once_and_does_not_read_the_prompt_back() {
+        assert_eq!(TURN.matches(r#""status":{"type":"idle"}"#).count(), 1, "idle, as a status");
+        assert_eq!(TURN.matches(r#""type":"session.idle""#).count(), 1, "and idle again, the old way");
+        assert!(TURN.contains(r#""text":"TICKS=3 say hello""#), "the prompt, as a part of the reader's message");
+        let (o, told, asked) = replay(TURN, &[]);
+        assert_eq!(told, ["start", "text: tick0 tick1 tick2 ", "streamed: tick0 tick1 tick2 ", "end: Ok"]);
+        assert_eq!(asked, ["session_new", "prompt: TICKS=3 say hello"]);
+        assert!(!o.turn_open);
+    }
+
+    /// The same turn with a message queued behind it. The second idle used
+    /// to end the turn that message had just started.
+    #[test]
+    fn the_second_idle_of_a_finished_turn_does_not_end_the_queued_one() {
+        let (o, told, asked) = replay(TURN, &["then this"]);
+        assert_eq!(told, ["start", "text: tick0 tick1 tick2 ", "streamed: tick0 tick1 tick2 ", "end: Ok", "start"]);
+        assert_eq!(asked, ["session_new", "prompt: TICKS=3 say hello", "prompt: then this"]);
+        assert!(o.turn_open, "the queued message's turn is still running");
+    }
+
+    /// Escape: the abort is asked for, and the turn is a stopped one when the
+    /// server goes idle. The error, the second pair of idles and the aborted
+    /// reply's late records change nothing.
+    #[test]
+    fn an_interrupted_live_turn_ends_once_as_stopped() {
+        assert!(ABORT.contains("MessageAbortedError"));
+        let (o, told, asked) = replay(ABORT, &[]);
+        assert_eq!(told, ["start", "text: tick0 tick1 tick2 tick3 tick4 ", "streamed: tick0 tick1 tick2 tick3 tick4 ", "end: Aborted"]);
+        assert_eq!(asked, ["session_new", "prompt: TICKS=60 first", "abort"]);
+        assert!(!o.turn_open);
+    }
+
+    /// Escape with a message queued: the stopped turn hands over to it at
+    /// once, as the server allows. The queued turn is not ended by the idle
+    /// the server repeats, does not get the aborted reply's last text (which
+    /// arrives in the middle of it), and ends as its own, finished.
+    #[test]
+    fn an_interrupted_live_turn_hands_over_to_the_queued_message() {
+        let (o, told, asked) = replay(ABORT_THEN_NEXT, &["TICKS=4 second"]);
+        assert_eq!(
+            told,
+            [
+                "start",
+                "text: tick0 tick1 tick2 tick3 tick4 ",
+                "streamed: tick0 tick1 tick2 tick3 tick4 ",
+                "end: Aborted",
+                "start",
+                "text: tick0 tick1 tick2 tick3 ",
+                "streamed: tick0 tick1 tick2 tick3 ",
+                "end: Ok",
+            ]
+        );
+        assert_eq!(asked, ["session_new", "prompt: TICKS=60 first", "abort", "prompt: TICKS=4 second"]);
+        assert!(!o.turn_open);
+    }
+
+    /// Escape while the turn waits on a permission request. Aborted, the
+    /// server drops the request and never runs the tool; the engine forgets
+    /// the request with the turn.
+    #[test]
+    fn an_interrupted_live_turn_takes_its_permission_request_with_it() {
+        let (o, told, asked) = replay(PERMISSION_ABORT, &[]);
+        assert_eq!(told, ["start", "tool: bash", "ask: bash (Pattern: echo probe-tool-ran)", "streamed: ", "end: Aborted"]);
+        assert_eq!(asked, ["session_new", "prompt: TOOL please run the marker command", "abort"]);
+        assert!(o.asks.is_empty());
+
+        // As the app does it: the request is turned down first, then the turn aborted.
+        let (o, told, asked) = replay(PERMISSION_REJECT_ABORT, &[]);
+        assert_eq!(told, ["start", "tool: bash", "ask: bash (Pattern: echo probe-tool-ran)", "tool ended: error", "streamed: ", "end: Aborted"]);
+        assert_eq!(asked, ["session_new", "prompt: TOOL please run the marker command", "permission", "abort"]);
+        assert!(o.asks.is_empty());
+    }
+
+    // ---- the same rules on a server that only says `session.idle`
+
+    /// A tab with its session open and a turn running on `text`.
+    fn working(text: &str) -> OpenCode {
+        let mut o = OpenCode::new(1, "/tmp/x", None, None, "auto");
+        o.start(text.into(), vec![]);
+        o.handle(r#"{"raccoon_http":{"tag":"session_new","status":200,"body":{"id":"s"}}}"#);
+        o
+    }
+    fn ends(actions: &[Action]) -> Vec<TurnStatus> {
+        emits(actions).into_iter().filter_map(|p| if let Payload::TurnCompleted { status, .. } = p { Some(*status) } else { None }).collect()
+    }
+    const IDLE: &str = r#"{"type":"session.idle","properties":{"sessionID":"s"}}"#;
+    const BUSY: &str = r#"{"type":"session.status","properties":{"sessionID":"s","status":{"type":"busy"}}}"#;
+    const STATUS_IDLE: &str = r#"{"type":"session.status","properties":{"sessionID":"s","status":{"type":"idle"}}}"#;
+    const ABORTED: &str = r#"{"type":"session.error","properties":{"sessionID":"s","error":{"name":"MessageAbortedError","data":{"message":"The operation was aborted."}}}}"#;
+
+    #[test]
+    fn an_interrupt_aborts_the_session_and_the_turn_ends_as_stopped_when_it_goes_idle() {
+        let mut o = working("x");
+        let (tag, url, _) = https(&o.interrupt()).into_iter().next().unwrap();
+        assert_eq!(tag, "abort");
+        assert!(url.ends_with("/session/s/abort"));
+        // Asking is not the end of the turn: the server says when it has stopped.
+        assert!(o.turn_open);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Aborted]);
+        // A turn nobody interrupted still ends as finished.
+        o.prompt("y".into(), vec![]);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok]);
+    }
+
+    /// An abort is reported as an error and as an idle, in an order the
+    /// server does not promise. Only the idle ends a turn, so whichever comes
+    /// second cannot end the turn a queued message started in between.
+    #[test]
+    fn the_second_word_about_an_abort_never_ends_the_turn_that_followed_it() {
+        for order in [[IDLE, ABORTED], [ABORTED, IDLE]] {
+            let mut o = working("first");
+            o.interrupt();
+            let mut ended = Vec::new();
+            // The queued message is sent the moment the interrupted turn ends.
+            for line in order {
+                let now = ends(&o.handle(line));
+                if !now.is_empty() {
+                    assert_eq!(https(&o.prompt("second".into(), vec![]))[0].0, "prompt");
+                }
+                ended.extend(now);
+            }
+            assert_eq!(ended, [TurnStatus::Aborted], "{order:?}");
+            assert!(o.turn_open, "{order:?}: the next turn is still running");
+            // Its own end is its own, and it was not interrupted.
+            assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok], "{order:?}");
+        }
+    }
+
+    /// The idle a server repeats once an aborted request has unwound can
+    /// reach the app after the next message was sent. Until the server has
+    /// taken that message up, an idle is not about it.
+    #[test]
+    fn an_idle_heard_before_the_server_took_the_turn_up_is_the_turn_before() {
+        let mut o = working("first");
+        o.handle(BUSY);
+        o.interrupt();
+        assert_eq!(ends(&o.handle(STATUS_IDLE)), [TurnStatus::Aborted]);
+        o.prompt("second".into(), vec![]);
+        // The aborted turn's second idle, late.
+        assert_eq!(ends(&o.handle(STATUS_IDLE)), []);
+        assert_eq!(ends(&o.handle(IDLE)), []);
+        assert!(o.turn_open);
+        // The server takes the message up, and then its idle is this turn's.
+        o.handle(BUSY);
+        assert_eq!(ends(&o.handle(STATUS_IDLE)), [TurnStatus::Ok]);
+    }
+
+    #[test]
+    fn an_interrupt_with_no_turn_or_one_the_server_refused_changes_nothing() {
+        // Nothing running: nothing is asked of the server.
+        let mut o = working("x");
+        o.handle(IDLE);
+        assert!(o.interrupt().is_empty());
+        // The server did not take the abort: the turn goes on and ends as finished.
+        o.prompt("y".into(), vec![]);
+        assert_eq!(https(&o.interrupt())[0].0, "abort");
+        o.handle(r#"{"raccoon_http":{"tag":"abort","status":500,"body":{"message":"no"}}}"#);
+        assert_eq!(ends(&o.handle(IDLE)), [TurnStatus::Ok]);
     }
 }

@@ -123,6 +123,11 @@ vi.mock("@/components/ui/Toasts", () => ({ Toasts: () => null }));
 vi.mock("@/components/session/BypassDialog", () => ({ BypassDialog: () => null }));
 vi.mock("@/components/session/WorkspaceRemoveDialog", () => ({ WorkspaceRemoveDialog: () => null }));
 vi.mock("@/components/cleanup/WorktreeCleanupDialog", () => ({ WorktreeCleanupDialog: () => null }));
+vi.mock("@/components/cleanup/CleanupIndicator", () => ({
+  CleanupIndicator: ({ onOpenStorage }: { onOpenStorage: () => void }) => (
+    <button type="button" onClick={onOpenStorage}>Show the leftover clean-up</button>
+  ),
+}));
 
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
@@ -320,6 +325,18 @@ describe("settings page navigation", () => {
     close();
     pressSettingsShortcut();
     expect(await section()).toBe("account");
+  });
+
+  it("opens Storage from the corner's clean-up indicator, wherever the app is", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Show the leftover clean-up" }));
+    expect(await section()).toBe("storage");
+    // The indicator sits above Settings too: asked again from another section, it comes back to Storage.
+    close();
+    fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
+    expect(await section()).toBe("agents");
+    fireEvent.click(screen.getByRole("button", { name: "Show the leftover clean-up" }));
+    await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("storage"));
   });
 
   it("tells Settings each time it is asked for, so a section picked by hand gives way to the one asked for", async () => {

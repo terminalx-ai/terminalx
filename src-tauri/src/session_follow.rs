@@ -897,9 +897,7 @@ impl SessionManager {
         // not lapsed: a lapsed request is one the reader is owed a look at,
         // and reading the log again would raise that for a tab with nothing
         // wrong with it.
-        for request_id in rt.pending.drain().map(|(id, _)| id).collect::<Vec<_>>() {
-            self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
-        }
+        self.cancel_asks(rt);
         self.end_open_turn(rt, TurnStatus::Aborted, None);
         self.release_cli(rt);
         let text = match (gone, mid_turn) {

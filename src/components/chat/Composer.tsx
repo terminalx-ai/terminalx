@@ -113,6 +113,7 @@ export function Composer({
   settingsNote = null,
   settingsNoteWarning = false,
   canStop = true,
+  stopMode = "stop",
   autoFocus,
 }: {
   tab: TabEntry;
@@ -158,6 +159,13 @@ export function Composer({
   settingsNoteWarning?: boolean;
   /** False hides Stop (someone else drives this tab, or this reader may only watch). */
   canStop?: boolean;
+  /**
+   * What `onStop` does now, which is what the control says (#427).
+   * `interrupt`: Escape for the agent, and its process stays. `force`: the
+   * interrupt went unanswered, so this press ends the process. `stop`: the
+   * hard stop where there is no interrupt to send first.
+   */
+  stopMode?: "interrupt" | "force" | "stop";
   autoFocus?: boolean;
 }) {
   const { models: listed, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
@@ -449,6 +457,8 @@ export function Composer({
           "relative rounded-2xl bg-composer glass p-2.5 shadow-surface hairline focus-within:ring-1 focus-within:ring-ring/40",
           attach.dragging && "ring-2 ring-accent/60",
         )}
+        // What stays in the corner of the window (the clean-up indicator) keeps off this box.
+        data-composer-box
         {...attach.dropZoneProps}
       >
         {pickerOpen && (
@@ -647,8 +657,13 @@ export function Composer({
               </WithTooltip>
             )}
             {busy && canStop ? (
-              <WithTooltip label="Stop" keys={keysOf("session.stop")}>
-                <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
+              <WithTooltip label={stopMode === "force" ? "Stop session" : "Stop"} keys={keysOf(stopMode === "interrupt" ? "session.interrupt" : "session.stop")}>
+                <Button
+                  size="icon-sm"
+                  variant={stopMode === "force" ? "destructive" : "secondary"}
+                  aria-label={stopMode === "force" ? "Stop session" : "Stop"}
+                  onClick={onStop}
+                >
                   <Square className="size-3 fill-current" />
                 </Button>
               </WithTooltip>

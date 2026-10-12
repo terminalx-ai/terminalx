@@ -94,6 +94,8 @@ mod names;
 mod pairing;
 mod project_start;
 mod pty;
+#[cfg(feature = "desktop")]
+mod quit;
 mod relay_e2ee;
 pub mod remote;
 mod session;
@@ -594,6 +596,8 @@ pub fn run() {
             commands::worktree_cleanup_size,
             commands::worktree_cleanup_cancel_sizes,
             commands::worktree_cleanup_remove,
+            commands::worktree_cleanup_stop,
+            quit::set_quit_warning,
             commands::issues_list,
             commands::issue_details,
             commands::linear_status,
@@ -638,6 +642,10 @@ pub fn run() {
             if event.id().as_ref() == status::MENU_ID {
                 status::toggle_from_menu(app);
             }
+            // The same request as the tray's Quit: it can be held back, see below.
+            if event.id().as_ref() == quit::MENU_ID {
+                app.exit(0);
+            }
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(drag) = event {
@@ -651,6 +659,12 @@ pub fn run() {
                     floating::hide(window.app_handle());
                 }
                 return;
+            }
+            // The app goes with its main window, so closing it is a quit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && quit::held(window.app_handle()) {
+                    api.prevent_close();
+                }
             }
             if let tauri::WindowEvent::Destroyed = event {
                 if let Some(state) = window.try_state::<AppState>() {
@@ -681,6 +695,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            // A restart never returns to be told no, so it is not held back.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                if *code != Some(tauri::RESTART_EXIT_CODE) && quit::held(app) {
+                    api.prevent_exit();
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 let state = app.state::<AppState>();
                 state.stats_usage.shutdown();

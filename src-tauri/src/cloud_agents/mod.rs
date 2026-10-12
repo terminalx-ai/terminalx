@@ -130,6 +130,13 @@ pub trait AgentOps: Send + Sync {
         anyhow::bail!("this runtime cannot send images to an agent")
     }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
+    /// Escape for the tab's running turn (#427): the turn is interrupted, the
+    /// agent's process stays, and nothing queued is dropped. False when the
+    /// tab has nothing running to interrupt, as for an agent host with no
+    /// turns at all.
+    fn interrupt(&self, _session_id: &str, _tab_id: &str) -> Result<bool> {
+        Ok(false)
+    }
     fn respond(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<(), DecisionError>;
     fn answer(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<(), DecisionError>;
     fn configure(&self, session_id: &str, tab_id: &str, settings: &Settings) -> Result<()>;
@@ -293,6 +300,10 @@ impl AgentOps for ManagerOps {
 
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
         self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
+    }
+
+    fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
+        self.manager.interrupt(session_id, tab_id)
     }
 
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {

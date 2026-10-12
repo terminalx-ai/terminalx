@@ -1478,36 +1478,97 @@ impl SessionManager {
         }
     }
 
-    pub fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<()> {
+    /// Escape, as the agent's own screen takes it (#427): the running turn is
+    /// interrupted and the agent's process stays, so the next message does
+    /// not start a new one. Says whether there was anything to interrupt;
+    /// with nothing running it does nothing, and types nothing into a CLI
+    /// sitting at its prompt.
+    ///
+    /// Nothing is settled here. The turn closes as stopped, and the tab goes
+    /// idle, when the agent says it has stopped: a CLI's `Interrupt` hook or
+    /// its transcript, the cancelled prompt of an ACP agent, the idle of an
+    /// OpenCode session. An agent that does not answer keeps its turn, and
+    /// `stop` is what is left.
+    ///
+    /// What the turn was asking the reader is withdrawn first: an Escape
+    /// never lets a tool run that was still waiting for an answer.
+    ///
+    /// Queued follow-ups are not dropped; only `stop` drops them.
+    /// - Claude Code and Codex hold what was typed mid-turn themselves (the
+    ///   app keeps no queue for them), and Escape is theirs to act on.
+    /// - An ACP or OpenCode agent has no queue: the app's is kept, and its
+    ///   next message starts when the interrupted turn has ended (`apply`).
+    pub fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        rt.queued.clear();
-        self.observer.interrupted(&rt.key());
-        if rt.child.is_none() && !matches!(rt.engine, Engine::Cli(_)) {
-            return Ok(());
+        // A hard stop already under way is ending more than the turn.
+        if rt.stopping {
+            return Ok(false);
         }
-        self.record_activity(&rt, TabStatus::Idle, store::activity::Source::Live);
-        match &mut rt.engine {
+        let busy = rt.turn_open || !rt.pending.is_empty() || matches!(rt.status, TabStatus::InProgress | TabStatus::Waiting);
+        let running = match &rt.engine {
+            Engine::Cli(p) => self.terminals.is_running(&p.pane_id),
+            Engine::Acp(_) | Engine::OpenCode(_) => rt.child.is_some() && rt.turn_open,
+            Engine::None => false,
+        };
+        if !busy || !running {
+            return Ok(false);
+        }
+        let asked = !rt.pending.is_empty();
+        self.cancel_asks(&mut rt);
+        // Not waiting on the reader any more; still the agent's turn until it says otherwise.
+        if asked && rt.status == TabStatus::Waiting && rt.recovery.is_none() {
+            self.set_status(&mut rt, TabStatus::InProgress);
+        }
+        let sent = match &mut rt.engine {
             // The TUI reads a bare Escape as "stop"; nothing else can reach it.
             // One the reader started by hand that has left its terminal is
             // not there to read it, and its shell is not sent it.
             Engine::Cli(p) => {
                 let pane = p.pane_id.clone();
-                if self.left_the_terminal(&rt).is_none() {
-                    let _ = self.terminals.write(&pane, tui::ESCAPE);
-                }
+                self.left_the_terminal(&rt).is_none() && self.terminals.write(&pane, tui::ESCAPE).is_ok()
             }
             Engine::Acp(a) => {
                 let actions = a.interrupt();
+                let sent = !actions.is_empty();
                 self.apply_actions(&mut rt, actions);
+                sent
             }
             Engine::OpenCode(o) => {
                 let actions = o.interrupt();
+                let sent = !actions.is_empty();
                 self.apply_actions(&mut rt, actions);
+                sent
             }
-            Engine::None => {}
+            Engine::None => false,
+        };
+        if sent {
+            self.observer.interrupted(&rt.key());
         }
-        Ok(())
+        Ok(sent)
+    }
+
+    /// The turn that asked is being interrupted, or has ended as stopped:
+    /// what it was waiting to be told is no longer wanted. Each request is
+    /// turned down where the agent waits on it (a parked hook, an ACP
+    /// request, an OpenCode permission), and its card stops offering buttons.
+    fn cancel_asks(&self, rt: &mut TabRuntime) {
+        let asks: Vec<String> = rt.pending.drain().map(|(id, _)| id).collect();
+        let mut actions = Vec::new();
+        for request_id in &asks {
+            match &mut rt.engine {
+                // Dropping the sender wakes the hook, which finds its request
+                // gone and answers the CLI with a denial (`ask_permission`).
+                Engine::Cli(p) => drop(p.decisions.remove(request_id)),
+                Engine::Acp(a) => actions.extend(a.answer(request_id, "raccoon:cancel").unwrap_or_default()),
+                Engine::OpenCode(o) => actions.extend(o.answer(request_id, "reject").unwrap_or_default()),
+                Engine::None => {}
+            }
+        }
+        self.apply_actions(rt, actions);
+        for request_id in asks {
+            self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
+        }
     }
 
     pub fn cancel_queued(&self, session_id: &str, tab_id: &str, message_id: &str) -> Result<Option<QueuedMessage>> {
@@ -3321,6 +3382,9 @@ impl SessionManager {
                 }
                 reply_for(kind, gate, decision)
             }
+            // Withdrawn with its turn (`cancel_asks`), which has said so in the
+            // chat already: the tool is not run, and nothing has lapsed.
+            None if !rt.pending.contains_key(&request_id) => reply_for(kind, gate, Decision::Deny),
             None => {
                 // The CLI has stopped waiting on us and will ask in its own
                 // TUI; the card must stop offering buttons that go nowhere.
@@ -3481,15 +3545,33 @@ impl SessionManager {
             if let Engine::Cli(p) = &mut rt.engine {
                 p.awaiting_delivery = None;
                 p.transcript_end_owed = !p.transcript_turn.take().is_some_and(tui::TurnMark::ends);
-                // An interrupted CLI hands what was queued back to its own
-                // input rather than sending it. If it does send one after
-                // all, that is a second message — which is better than the
-                // same words typed into the terminal next going missing.
-                if aborted {
-                    p.echoed.retain(|prompt| !prompt.queued);
+                // What the reader queued behind a stopped turn is still
+                // expected (#427): interrupted with a message queued, both
+                // CLIs send it at once as their next prompt (Claude Code
+                // 2.1.296, Codex 0.153.4), and its record then starts the
+                // next turn as that same message rather than a second copy
+                // of it. One a CLI keeps in its input instead is flagged
+                // after `QUEUED_ECHO_GRACE`, as behind a turn that finished.
+                //
+                // That wait starts here, where the turn ends. Counted from
+                // when the message was sent, one queued behind a long, quiet
+                // turn had run out of time before the CLI could take it: the
+                // transcript says nothing while a reply streams, and a turn
+                // stopped by its hook closes with nothing new to read.
+                let now = Instant::now();
+                for prompt in p.echoed.iter_mut() {
+                    prompt.sent_at = now;
                 }
             }
-            if !aborted && rt.recovery.is_none() && !rt.queued.is_empty() {
+            // A stopped turn is not waiting for answers: an Escape pressed in
+            // the agent's own terminal ends it with a card still open here.
+            if aborted {
+                self.cancel_asks(rt);
+            }
+            // An interrupted turn hands over to the next queued message like
+            // one that finished (#427): Escape stops a turn, not the queue. A
+            // hard stop has emptied the queue before it closes the turn.
+            if !rt.stopping && rt.recovery.is_none() && !rt.queued.is_empty() {
                 let q = rt.queued.remove(0);
                 let actions = match &mut rt.engine {
                     Engine::Acp(a) => a.prompt(q.text.clone(), q.images.clone()),
