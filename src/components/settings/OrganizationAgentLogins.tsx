@@ -38,19 +38,30 @@ const MANAGERS_ONLY = "only workspaces that nobody but owners and admins can dri
 
 /**
  * Who may use a login that is about to be stored. The page offers no choice
- * of scope, so the app sends none and the account service decides: a new
- * login takes the service's default, and one that replaces a login of the
- * same kind keeps that login's scope (a login someone narrowed is not
- * widened by connecting again). A login of another kind counts as new.
+ * of scope, so the app sends none and the account service decides, and a
+ * replacement never widens: a first login takes the service's default, one
+ * that replaces a login of the same kind keeps that login's scope, and one
+ * of another kind gets that scope or a narrower one.
  */
-export function agentLoginReach(stored: AgentLogin | undefined, authKind: AgentLogin["authKind"], organization: string): { kept: boolean; lead: string; who: string; tail: string } {
-  const replaced = stored && stored.state !== "disconnected" && stored.authKind === authKind ? stored : undefined;
+export function agentLoginReach(
+  stored: AgentLogin | undefined,
+  authKind: AgentLogin["authKind"],
+  organization: string,
+): { rule: "default" | "kept" | "no-wider"; lead: string; who: string; tail: string; note: string } {
+  const replaced = stored && stored.state !== "disconnected" ? stored : undefined;
   const everyone = { who: "every member's", tail: ` cloud workspaces of ${organization}` };
-  if (!replaced) return { kept: false, lead: "By default, agents in ", ...everyone, tail: `${everyone.tail} may run on this login.` };
-  if (replaced.sharedUse === "managers") return { kept: true, lead: "This keeps who can use the login now: ", who: MANAGERS_ONLY, tail: ` in ${organization}.` };
+  if (!replaced) {
+    return { rule: "default", lead: "By default, agents in ", ...everyone, tail: `${everyone.tail} may run on this login.`, note: " The account service decides this, and the row above says who the login reaches once it is stored." };
+  }
+  const same = replaced.authKind === authKind;
+  // The same kind keeps the scope exactly. Another kind keeps it or gets the service's narrower default for its kind.
+  const rule = same ? "kept" : "no-wider";
+  const keeps = same ? "This keeps who can use the login now: " : "This keeps who can use the login now, or fewer: at most ";
+  const note = same ? "" : " The row above says who the login reaches once it is stored.";
+  if (replaced.sharedUse === "managers") return { rule, lead: keeps, who: same ? MANAGERS_ONLY : "workspaces that nobody but owners and admins can drive", tail: ` in ${organization}.`, note };
   // A server from before the scope existed says nothing, and shared every login with the organization.
-  if (!replaced.sharedUse || replaced.sharedUse === "organization") return { kept: true, lead: "This keeps who can use the login now: agents in ", ...everyone, tail: `${everyone.tail}.` };
-  return { kept: true, lead: "This keeps ", who: "who can use the login now", tail: `, as the account service has it for ${organization}.` };
+  if (!replaced.sharedUse || replaced.sharedUse === "organization") return { rule, lead: `${keeps}agents in `, ...everyone, tail: `${everyone.tail}.`, note };
+  return { rule, lead: "This keeps ", who: same ? "who can use the login now" : "who can use the login now, or fewer", tail: `, as the account service has it for ${organization}.`, note };
 }
 
 /** What the page says once a login is stored: who it reaches, from the service's own answer when there is one. */
@@ -435,7 +446,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                           {reach?.lead}
                           <strong>{reach?.who}</strong>
                           {reach?.tail}
-                          {reach && !reach.kept && " The account service decides this, and the row above says who the login reaches once it is stored."}
+                          {reach?.note}
                         </span>
                       </label>
                       <label className="flex items-start gap-2">

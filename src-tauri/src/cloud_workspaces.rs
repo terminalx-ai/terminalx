@@ -434,6 +434,9 @@ pub(crate) enum AgentLoginReach {
     /// A login of the same kind is replaced, and its scope stays as it is
     /// (`organization`, `managers`, or one this app does not know).
     Kept(String),
+    /// A login of another kind is replaced: the service never widens, so
+    /// the new login gets the stored scope or its kind's narrower default.
+    NoWider(String),
 }
 
 impl AgentLoginReach {
@@ -444,6 +447,9 @@ impl AgentLoginReach {
             Self::Kept(scope) if scope == "managers" => "This keeps who can use the login now: only workspaces that nobody but owners and admins can drive.",
             Self::Kept(scope) if scope == "organization" => "This keeps who can use the login now: agents in every member's cloud workspaces of the organization.",
             Self::Kept(_) => "This keeps who can use the login now, as the account service has it.",
+            Self::NoWider(scope) if scope == "managers" => "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(scope) if scope == "organization" => "This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces of the organization. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(_) => "This keeps who can use the login now, or fewer. Settings shows who the login reaches once it is stored.",
         }
     }
 }
@@ -458,13 +464,20 @@ impl AgentLoginAuthorization {
     }
 
     /// Who may use a login of `kind` stored under this authorization. A
-    /// stored login's scope is kept only by a login of the same kind; one
-    /// of another kind is a new login to the service.
+    /// replacement never widens: the same kind keeps the stored scope, and
+    /// another kind gets it or the narrower default of its own kind.
     pub(crate) fn reach(&self, kind: AgentLoginKind) -> AgentLoginReach {
         match &self.stored {
-            // A server from before the scope existed says nothing, and shared every login with the organization.
-            Some((stored_kind, scope)) if stored_kind == kind.as_str() => AgentLoginReach::Kept(scope.clone().unwrap_or_else(|| "organization".into())),
-            _ => AgentLoginReach::ServiceDefault,
+            None => AgentLoginReach::ServiceDefault,
+            Some((stored_kind, scope)) => {
+                // A server from before the scope existed says nothing, and shared every login with the organization.
+                let scope = scope.clone().unwrap_or_else(|| "organization".into());
+                if stored_kind == kind.as_str() {
+                    AgentLoginReach::Kept(scope)
+                } else {
+                    AgentLoginReach::NoWider(scope)
+                }
+            }
         }
     }
 
@@ -1934,8 +1947,8 @@ impl CloudWorkspaceService {
     /// Store a login for an agent. `secret` is sent once, to the service
     /// that validates and encrypts it, and cleared; the answer carries the
     /// login's public fields only. No `sharedUse` is sent: nobody chose one
-    /// here, so the service applies its default to a new login and keeps
-    /// the scope of one it replaces (`AgentLoginAuthorization::reach`).
+    /// here, so the service applies its default to a new login and never
+    /// widens one it replaces (`AgentLoginAuthorization::reach`).
     pub(crate) fn save_agent_login(
         &self,
         authorization: AgentLoginAuthorization,
@@ -3705,9 +3718,21 @@ mod tests {
         assert_eq!(reach(Some(("api-key", None)), AgentLoginKind::ApiKey), AgentLoginReach::Kept("organization".into()));
         // A scope this app does not know is kept without being described.
         assert!(!reach(Some(("api-key", Some("teams"))), AgentLoginKind::ApiKey).sentence().contains("every member"));
-        // Another kind of login is new to the service: the stored scope is not inherited.
-        assert_eq!(reach(Some(("api-key", Some("managers"))), AgentLoginKind::LoginDocument), AgentLoginReach::ServiceDefault);
-        assert_eq!(reach(Some(("oauth-credentials-json", Some("managers"))), AgentLoginKind::ApiKey), AgentLoginReach::ServiceDefault);
+        // Another kind of login never reaches more than the stored one and may reach fewer: not a first login, and
+        // not described as every member when the stored login is for managers.
+        for (was, becomes) in [("api-key", AgentLoginKind::LoginDocument), ("oauth-credentials-json", AgentLoginKind::ApiKey)] {
+            let narrowed = reach(Some((was, Some("managers"))), becomes);
+            assert_eq!(narrowed, AgentLoginReach::NoWider("managers".into()));
+            assert_eq!(
+                narrowed.sentence(),
+                "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored."
+            );
+            assert!(!narrowed.sentence().contains("every member") && !narrowed.sentence().contains("By default"));
+            let wide = reach(Some((was, Some("organization"))), becomes);
+            assert!(wide.sentence().starts_with("This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces"));
+            assert!(!wide.sentence().contains("By default"));
+            assert!(!reach(Some((was, Some("teams"))), becomes).sentence().contains("every member"));
+        }
     }
 
     // PRO-82 on the desktop: the account service's own sign-in for Claude.

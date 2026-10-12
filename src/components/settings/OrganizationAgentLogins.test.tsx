@@ -176,21 +176,32 @@ describe("agent logins in Settings (PRO-79)", () => {
   describe("who a login will reach", () => {
     const text = (reach: ReturnType<typeof agentLoginReach>) => `${reach.lead}${reach.who}${reach.tail}`;
 
-    it("is the service's default for a first login, and the stored scope for a replacement of the same kind", () => {
+    it("is the service's default for a first login, the stored scope for the same kind, and no wider for another kind", () => {
       expect(text(agentLoginReach(undefined, "oauth-credentials-json", "Acme"))).toBe("By default, agents in every member's cloud workspaces of Acme may run on this login.");
-      expect(agentLoginReach(login({ state: "disconnected", sharedUse: "managers" }), "oauth-credentials-json", "Acme").kept).toBe(false);
+      expect(agentLoginReach(login({ state: "disconnected", sharedUse: "managers" }), "oauth-credentials-json", "Acme").rule).toBe("default");
 
       const narrowed = agentLoginReach(login({ sharedUse: "managers" }), "oauth-credentials-json", "Acme");
       expect(text(narrowed)).toBe("This keeps who can use the login now: only workspaces that nobody but owners and admins can drive in Acme.");
       expect(text(narrowed)).not.toMatch(/every member|by default/i);
       expect(text(agentLoginReach(login({ sharedUse: "organization" }), "oauth-credentials-json", "Acme"))).toBe("This keeps who can use the login now: agents in every member's cloud workspaces of Acme.");
       // A revoked login is still the stored one; an older server names no scope; an unknown scope is not described.
-      expect(agentLoginReach(login({ state: "revoked", sharedUse: "managers" }), "oauth-credentials-json", "Acme").kept).toBe(true);
+      expect(agentLoginReach(login({ state: "revoked", sharedUse: "managers" }), "oauth-credentials-json", "Acme").rule).toBe("kept");
       expect(text(agentLoginReach(login({ sharedUse: undefined }), "oauth-credentials-json", "Acme"))).toContain("every member's");
       expect(text(agentLoginReach(login({ sharedUse: "teams" }), "oauth-credentials-json", "Acme"))).not.toContain("every member");
-      // Another kind of login is a new one to the service: the stored scope is not inherited.
-      expect(agentLoginReach(login({ sharedUse: "managers" }), "api-key", "Acme").kept).toBe(false);
-      expect(agentLoginReach(login({ authKind: "api-key", sharedUse: "managers" }), "oauth-credentials-json", "Acme").kept).toBe(false);
+      // Another kind of login never reaches more than the stored one, and may reach fewer (the service's default for
+      // its kind can be narrower). It is not described as a first login, and the row is where to see what was stored.
+      for (const [was, becomes] of [["oauth-credentials-json", "api-key"], ["api-key", "oauth-credentials-json"]] as const) {
+        const narrowedOther = agentLoginReach(login({ authKind: was, sharedUse: "managers" }), becomes, "Acme");
+        expect(narrowedOther.rule).toBe("no-wider");
+        expect(text(narrowedOther)).toBe("This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive in Acme.");
+        expect(text(narrowedOther)).not.toMatch(/every member|by default/i);
+        expect(narrowedOther.note).toBe(" The row above says who the login reaches once it is stored.");
+        const wideOther = agentLoginReach(login({ authKind: was, sharedUse: "organization" }), becomes, "Acme");
+        expect(text(wideOther)).toBe("This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces of Acme.");
+        expect(text(wideOther)).not.toMatch(/by default/i);
+      }
+      expect(text(agentLoginReach(login({ authKind: "api-key", sharedUse: "teams" }), "oauth-credentials-json", "Acme"))).toBe("This keeps who can use the login now, or fewer, as the account service has it for Acme.");
+      expect(narrowed.note).toBe("");
     });
 
     it("does not claim every member when a managers-only login is replaced by logging in again", async () => {
@@ -216,7 +227,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       expect(within(row("claude")).getByTestId("agent-login-status").textContent).toContain("grace@example.com · only workspaces that nobody but owners and admins can drive");
     });
 
-    it("says the default as a default for a first login, and for an API key over a narrowed subscription login", async () => {
+    it("says the default as a default for a first login, and no wider for an API key over a narrowed subscription login", async () => {
       await show();
       fireEvent.click(within(row("cursor")).getByRole("button", { name: "Connect with an API key" }));
       expect(within(row("cursor")).getByTestId("agent-login-reach").textContent).toBe(
@@ -227,7 +238,9 @@ describe("agent logins in Settings (PRO-79)", () => {
       vi.mocked(api.cloudAgentLoginConnect).mockImplementation(async () => login({ authKind: "api-key", sharedUse: "managers" }));
       await show();
       fireEvent.click(within(row("claude")).getByRole("button", { name: "Replace with an API key" }));
-      expect(within(row("claude")).getByTestId("agent-login-reach").textContent).toMatch(/^By default, agents in every member's/);
+      expect(within(row("claude")).getByTestId("agent-login-reach").textContent).toBe(
+        "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive in Acme Robotics. The row above says who the login reaches once it is stored.",
+      );
       // Whatever the service answers is what the notice says.
       consent(within(row("claude")).getByTestId("agent-login-consent"));
       fireEvent.click(within(row("claude")).getByRole("button", { name: "Enter the key" }));

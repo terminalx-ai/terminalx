@@ -50,10 +50,16 @@ The service then decides:
   `managers`. The page and the native dialogs say "this keeps who can use
   the login now: …" with the stored scope, read from the list at that
   moment.
-- **A login of another kind** (a sign-in over an API key, or the reverse)
-  is a new login to the service and takes the default (terminalx-saas
-  PRO-82 follow-up; a server without it keeps the stored scope instead,
-  which is never wider than what the dialog said).
+- **A login that replaces one of another kind** (a sign-in over an API
+  key, or the reverse) is never wider than the stored login: the service
+  gives it the narrower of the stored scope and the default for its kind
+  (terminalx-saas #187; a server without it keeps the stored scope, which
+  fits the same words). It is not described as a first login. The page and
+  the native dialogs say "this keeps who can use the login now, or fewer:
+  at most …" with the stored scope, and point at the row for what was
+  stored, because the desktop cannot see the service's default.
+
+In no case does a replacement from the desktop widen who can use a login.
 
 No client has a control for the scope yet; the service's routes accept
 `sharedUse`. If the desktop gets one, the value is sent only when the person
