@@ -355,6 +355,7 @@ pub fn run() {
             commands::organization_environment_version_cancel,
             commands::organization_environment_version_rollback,
             commands::organization_environment_recipes,
+            commands::organization_environment_recipe_propose,
             commands::organization_environment_recipe_apply,
             commands::organization_environment_recipe_dismiss,
             commands::workspace_config_organization,

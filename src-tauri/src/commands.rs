@@ -405,6 +405,16 @@ pub async fn organization_environment_recipes(provider: String, state: tauri::St
 }
 
 #[tauri::command]
+pub async fn organization_environment_recipe_propose(
+    provider: String,
+    recipe: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.propose_recipe(&provider, &recipe, &context_revision)).await
+}
+
+#[tauri::command]
 pub async fn organization_environment_recipe_apply(
     recipe_id: String,
     confirm_apply: bool,

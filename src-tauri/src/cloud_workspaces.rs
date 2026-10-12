@@ -698,6 +698,16 @@ pub struct CloudWorkspace {
     /// How many plain members hold a share; only for a caller with a role.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub shared_with: Option<u32>,
+    /// Present on a preparation workspace only (PRO-20): when the server
+    /// stops it, after which it cannot be started again.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<WorkspacePreparation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePreparation {
+    pub stop_after: i64,
 }
 
 /// `you` on a workspace list item (§21.2).
@@ -1129,6 +1139,11 @@ pub struct CloudWorkspaceCreateInput {
     /// The agent and first prompt (PRO-21, contract §19.1).
     #[serde(default)]
     pub launch: Option<CreateLaunch>,
+    /// A preparation workspace for "Configure with an agent" (PRO-20): the
+    /// server keeps it private to its admin, gives it none of the
+    /// organization's secrets and stops it at its own time limit.
+    #[serde(default)]
+    pub preparation: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2146,6 +2161,11 @@ impl CloudWorkspaceService {
             });
             if !input.repositories.is_empty() {
                 body["setup"] = setup_body(&input.repositories);
+            }
+            // Sent only when asked for: a server from before preparation
+            // workspaces refuses the key, and then nothing is created.
+            if input.preparation {
+                body["preparation"] = json!(true);
             }
             if let Some(launch) = &input.launch {
                 body["launch"] = launch_body(launch);
@@ -3889,6 +3909,7 @@ mod tests {
                 idempotency_key: "stable create key".into(),
                 repositories: Vec::new(),
                 launch: None,
+                preparation: false,
             })
             .unwrap();
         let captured = request.join().unwrap();
@@ -4192,6 +4213,7 @@ mod tests {
                     idempotency_key: "original-key".into(),
                     repositories: Vec::new(),
                     launch: None,
+                    preparation: false,
                 })
                 .unwrap_err();
             let captured = request.join().unwrap();
@@ -4244,6 +4266,7 @@ mod tests {
                     authority: None,
                     you: None,
                     shared_with: None,
+                    preparation: None,
                 },
                 latest_operation: None,
             }],
@@ -4289,6 +4312,7 @@ mod tests {
                         idempotency_key: "original-key".into(),
                         repositories: Vec::new(),
                         launch: None,
+                        preparation: false,
                     })
                     .map(|_| ()),
                 RequestRisk::Mutation => unreachable!(),
@@ -4353,6 +4377,7 @@ mod tests {
             idempotency_key: "launch key".into(),
             repositories,
             launch,
+            preparation: false,
         }
     }
 
@@ -4394,6 +4419,31 @@ mod tests {
         let launch = result.workspace.launch.expect("the launch view");
         assert_eq!((launch.phase.as_str(), launch.work_branch.as_str()), ("allocating", "terminalx/fix-login-3f9a2c1b7d4e"));
         assert_eq!(launch.timings.requested_at, Some(5));
+    }
+
+    #[test]
+    fn a_preparation_create_says_so_and_its_stop_time_reaches_the_page() {
+        let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        body["workspace"]["preparation"] = json!({ "stopAfter": 3_600_000, "somethingNewer": true });
+        let (base, _, request) = serve_once(response("202 Accepted", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let mut input = launch_input(vec![repo("app", Some("main"))], None);
+        input.preparation = true;
+        let result = service.create(None, input).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent["preparation"], json!(true));
+        assert_eq!(result.workspace.preparation, Some(WorkspacePreparation { stop_after: 3_600_000 }));
+        assert_eq!(serde_json::to_value(&result.workspace).unwrap()["preparation"], json!({ "stopAfter": 3_600_000 }));
+
+        // An ordinary create never carries the key, and an ordinary workspace has no such field.
+        let (base, _, request) = serve_once(response("202 Accepted", &snapshot_body(None), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.create(None, launch_input(vec![repo("app", Some("main"))], None)).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(sent.get("preparation").is_none());
+        assert!(serde_json::to_value(&result.workspace).unwrap().get("preparation").is_none());
     }
 
     #[test]

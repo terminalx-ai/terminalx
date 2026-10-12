@@ -12,6 +12,7 @@ import {
   type EnvironmentRecipe,
   type EnvironmentRepository,
   type RecipeCheck,
+  type RecipeObservations,
 } from "@/lib/organizationEnvironment";
 
 const scriptClass = "max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-well px-2 py-1 font-mono text-[11px]";
@@ -42,6 +43,79 @@ function RepositorySetup({ repository }: { repository: EnvironmentRepository }) 
   );
 }
 
+/** What a proposal would change and how its checks ended: the machine script and each repository apart, the five results on their own rows. */
+export function RecipeDetails({ definition, observations, current }: { definition: EnvironmentDefinition; observations: RecipeObservations; current: EnvironmentDefinition | null }) {
+  const comparison = compareDefinitions(current, definition);
+  return (
+    <>
+      <p className="rounded-md bg-well px-2 py-1 text-[11px]" aria-label="Who observed the results">
+        {observedByLabel(observations.observedBy)}
+      </p>
+
+      <section aria-label="Proposed machine setup" className="flex flex-col gap-1">
+        <div className="flex items-center justify-between gap-2 text-xs font-medium">
+          <span>Machine install script</span>
+          <span className="text-[11px] font-normal text-muted-foreground">{comparison.machineChanged ? "Changes the current script" : "Same as the current template"}</span>
+        </div>
+        {definition.installScript ? <pre className={scriptClass}>{definition.installScript}</pre> : <p className="text-[11px] text-muted-foreground">No machine install script.</p>}
+        {observations.machine && (
+          <p className={`text-[11px] ${checkFailed(observations.machine) ? failedClass : "text-muted-foreground"}`}>
+            Result: {checkStatusLabel({ ...observations.machine, preexisting: false })}
+            {exitNote(observations.machine) ? ` (${exitNote(observations.machine)})` : ""}
+          </p>
+        )}
+      </section>
+
+      {comparison.repositories.map(({ repository, change }) => {
+        const results = observations.repositories.find((candidate) => candidate.owner.toLowerCase() === repository.owner.toLowerCase() && candidate.name.toLowerCase() === repository.name.toLowerCase());
+        const label = `${repository.owner}/${repository.name}`;
+        return (
+          <section key={label} aria-label={`Proposed setup for ${label}`} className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-2 text-xs font-medium">
+              <span className="min-w-0 truncate">
+                {label} <span className="font-normal text-muted-foreground">on {repository.defaultBranch}</span>
+              </span>
+              <span className="shrink-0 text-[11px] font-normal text-muted-foreground">{CHANGE_NOTE[change]}</span>
+            </div>
+            <RepositorySetup repository={repository} />
+            {results ? (
+              <table className="w-full table-fixed text-left text-[11px]" aria-label={`Results for ${label}`}>
+                <thead className="text-muted-foreground">
+                  <tr>
+                    <th className="w-14 py-0.5 font-normal">Check</th>
+                    <th className="py-0.5 font-normal">Command</th>
+                    <th className="w-40 py-0.5 font-normal">Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.checks.map((check) => (
+                    <tr key={check.kind} className="align-top">
+                      <td className="py-0.5">{CHECK_LABEL[check.kind]}</td>
+                      <td className="break-all py-0.5 pr-2 font-mono">{check.command || "none"}</td>
+                      <td className={`py-0.5 ${checkFailed(check) ? failedClass : ""}`}>
+                        {checkStatusLabel(check)}
+                        {exitNote(check) ? ` (${exitNote(check)})` : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-[11px] text-muted-foreground">No results were recorded for this repository.</p>
+            )}
+          </section>
+        );
+      })}
+
+      {comparison.removed.length > 0 && (
+        <p className="text-[11px] text-amber-600 dark:text-amber-400">
+          Applying removes {comparison.removed.map((repository) => `${repository.owner}/${repository.name}`).join(", ")} from the template.
+        </p>
+      )}
+    </>
+  );
+}
+
 function RecipeCard({
   recipe,
   current,
@@ -61,7 +135,6 @@ function RecipeCard({
 }) {
   const [open, setOpen] = useState(recipe.state === "proposed");
   const [confirming, setConfirming] = useState(false);
-  const comparison = compareDefinitions(current, recipe.definition);
   const { observations } = recipe;
   const name = `Recipe from ${formatTime(recipe.createdAt)}`;
   // The template moved on since this was proposed: applying would overwrite
@@ -85,70 +158,7 @@ function RecipeCard({
       </p>
       {open && (
         <div className="mt-2 flex flex-col gap-3">
-          <p className="rounded-md bg-well px-2 py-1 text-[11px]" aria-label="Who observed the results">
-            {observedByLabel(observations.observedBy)}
-          </p>
-
-          <section aria-label="Proposed machine setup" className="flex flex-col gap-1">
-            <div className="flex items-center justify-between gap-2 text-xs font-medium">
-              <span>Machine install script</span>
-              <span className="text-[11px] font-normal text-muted-foreground">{comparison.machineChanged ? "Changes the current script" : "Same as the current template"}</span>
-            </div>
-            {recipe.definition.installScript ? <pre className={scriptClass}>{recipe.definition.installScript}</pre> : <p className="text-[11px] text-muted-foreground">No machine install script.</p>}
-            {observations.machine && (
-              <p className={`text-[11px] ${checkFailed(observations.machine) ? failedClass : "text-muted-foreground"}`}>
-                Result: {checkStatusLabel({ ...observations.machine, preexisting: false })}
-                {exitNote(observations.machine) ? ` (${exitNote(observations.machine)})` : ""}
-              </p>
-            )}
-          </section>
-
-          {comparison.repositories.map(({ repository, change }) => {
-            const results = observations.repositories.find((candidate) => candidate.owner.toLowerCase() === repository.owner.toLowerCase() && candidate.name.toLowerCase() === repository.name.toLowerCase());
-            const label = `${repository.owner}/${repository.name}`;
-            return (
-              <section key={label} aria-label={`Proposed setup for ${label}`} className="flex flex-col gap-1">
-                <div className="flex items-center justify-between gap-2 text-xs font-medium">
-                  <span className="min-w-0 truncate">
-                    {label} <span className="font-normal text-muted-foreground">on {repository.defaultBranch}</span>
-                  </span>
-                  <span className="shrink-0 text-[11px] font-normal text-muted-foreground">{CHANGE_NOTE[change]}</span>
-                </div>
-                <RepositorySetup repository={repository} />
-                {results ? (
-                  <table className="w-full table-fixed text-left text-[11px]" aria-label={`Results for ${label}`}>
-                    <thead className="text-muted-foreground">
-                      <tr>
-                        <th className="w-14 py-0.5 font-normal">Check</th>
-                        <th className="py-0.5 font-normal">Command</th>
-                        <th className="w-40 py-0.5 font-normal">Result</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {results.checks.map((check) => (
-                        <tr key={check.kind} className="align-top">
-                          <td className="py-0.5">{CHECK_LABEL[check.kind]}</td>
-                          <td className="break-all py-0.5 pr-2 font-mono">{check.command || "none"}</td>
-                          <td className={`py-0.5 ${checkFailed(check) ? failedClass : ""}`}>
-                            {checkStatusLabel(check)}
-                            {exitNote(check) ? ` (${exitNote(check)})` : ""}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground">No results were recorded for this repository.</p>
-                )}
-              </section>
-            );
-          })}
-
-          {comparison.removed.length > 0 && (
-            <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              Applying removes {comparison.removed.map((repository) => `${repository.owner}/${repository.name}`).join(", ")} from the template.
-            </p>
-          )}
+          <RecipeDetails definition={recipe.definition} observations={observations} current={current} />
 
           {recipe.state === "proposed" && (
             <div className="flex flex-col gap-1.5">

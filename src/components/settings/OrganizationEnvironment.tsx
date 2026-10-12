@@ -23,6 +23,7 @@ import {
   type EnvironmentVersion,
   type OrganizationEnvironmentError,
 } from "@/lib/organizationEnvironment";
+import { ConfigureEnvironmentWithAgent } from "./ConfigureEnvironmentWithAgent";
 import { EnvironmentRecipes } from "./EnvironmentRecipes";
 
 const inputClass = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
@@ -137,7 +138,7 @@ function RepositoryEditor({
   );
 }
 
-export function OrganizationEnvironment({ contextRevision }: { contextRevision: string }) {
+export function OrganizationEnvironment({ contextRevision, organizationId = null }: { contextRevision: string; organizationId?: string | null }) {
   const [providers, setProviders] = useState<ProviderOption[] | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
@@ -599,6 +600,9 @@ export function OrganizationEnvironment({ contextRevision }: { contextRevision: 
                   </p>
                 )}
               </section>
+
+              {/* Offered only where a recipe can be stored: a server with recipes on. */}
+              {recipes && <ConfigureEnvironmentWithAgent status={status} organizationId={organizationId} onSaved={() => provider && void load(provider)} />}
 
               {recipes && (
                 <EnvironmentRecipes

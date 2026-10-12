@@ -836,6 +836,8 @@ export interface CloudWorkspace {
   you?: { role: CloudCollaborationRole; canApprove: boolean; canManageShares?: boolean } | null;
   /** How many members it is shared with; only reported to someone with a role. */
   sharedWith?: number | null;
+  /** A preparation workspace (PRO-20): when the server stops it for good. Absent on every other workspace. */
+  preparation?: { stopAfter: number } | null;
 }
 
 /** One repository checkout of a workspace, as the enriched list reports it (S1). */
@@ -1011,6 +1013,8 @@ export interface CloudWorkspaceCreateInput {
   /** The primary repository first, then additional ones (at most five). */
   repositories?: CloudWorkspaceRepositoryInput[];
   launch?: CloudWorkspaceLaunchInput | null;
+  /** "Configure with an agent" (PRO-20): the server marks, isolates and time-limits the workspace. */
+  preparation?: boolean;
 }
 
 export interface CloudWorkspaceRepositoryInput {

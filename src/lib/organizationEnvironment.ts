@@ -290,6 +290,9 @@ export const organizationEnvironment = {
   cancel: (versionId: string, contextRevision: string) => invoke<unknown>("organization_environment_version_cancel", { versionId, contextRevision }).then(normalizeVersion),
   rollback: (versionId: string, contextRevision: string) => invoke<unknown>("organization_environment_version_rollback", { versionId, contextRevision }).then(contextOf),
   recipes: (provider: string) => invoke<unknown>("organization_environment_recipes", { provider }).then(normalizeRecipes),
+  /** Stores a proposal. It changes nothing by existing. `recipe` is the server's body, observations included. */
+  proposeRecipe: (provider: string, recipe: { baseRevision: number; definition: EnvironmentDefinition; observations: unknown; sourceWorkspaceId?: string }, contextRevision: string) =>
+    invoke<unknown>("organization_environment_recipe_propose", { provider, recipe, contextRevision }).then(normalizeRecipe),
   /** Writes the recipe's definition into the template. Builds nothing. */
   applyRecipe: (recipeId: string, confirmApply: boolean, contextRevision: string) =>
     invoke<unknown>("organization_environment_recipe_apply", { recipeId, confirmApply, contextRevision }).then(contextOf),
