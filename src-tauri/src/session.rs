@@ -3396,6 +3396,16 @@ impl SessionManager {
                 // next turn as that same message rather than a second copy
                 // of it. One a CLI keeps in its input instead is flagged
                 // after `QUEUED_ECHO_GRACE`, as behind a turn that finished.
+                //
+                // That wait starts here, where the turn ends. Counted from
+                // when the message was sent, one queued behind a long, quiet
+                // turn had run out of time before the CLI could take it: the
+                // transcript says nothing while a reply streams, and a turn
+                // stopped by its hook closes with nothing new to read.
+                let now = Instant::now();
+                for prompt in p.echoed.iter_mut() {
+                    prompt.sent_at = now;
+                }
             }
             // A stopped turn is not waiting for answers: an Escape pressed in
             // the agent's own terminal ends it with a card still open here.

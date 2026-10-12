@@ -788,6 +788,37 @@ fn a_queued_prompt_the_cli_sends_once_its_turn_was_stopped_starts_the_next_turn(
     }
 }
 
+/// Found in the app, with Codex: the message had been queued for a minute
+/// behind a reply that was still streaming when Escape was pressed. Nothing
+/// is written to the transcript while a reply streams, and the turn was
+/// closed by the `Interrupt` hook with nothing new to read, so the wait for
+/// the queued message, counted from when it was sent, had already run out.
+/// The tab said delivery could not be confirmed and then drew the message a
+/// second time when the CLI sent it. The wait starts when the turn ends.
+#[test]
+fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("continue", 0));
+        rig.enter_written();
+        // Queued five minutes ago, and the transcript has been quiet since.
+        if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+            p.echoed.back_mut().unwrap().sent_at = Instant::now() - Duration::from_secs(300);
+        }
+        rig.interrupt();
+        rig.tick();
+        assert_eq!(rig.banner(), None, "{kind:?}: the CLI has a moment to send it, counted from now");
+        assert!(!rig.kinds().iter().any(|k| k == "recovery"), "{kind:?}");
+
+        rig.cli_takes("continue");
+        rig.cli_replies("continuing");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "reply: continuing", "end"], "{kind:?}: one message, not two");
+        assert_eq!(rig.taken_as_prompts(), ["continue"], "{kind:?}");
+    }
+}
+
 /// A CLI that keeps what was queued in its own input when its turn is
 /// stopped (as Claude Code did before it sent it): the reader is told the
 /// message was not sent, and the same words typed into the terminal later

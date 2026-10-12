@@ -274,7 +274,10 @@ interrupted CLI hands its queue back to its input; with these versions every
 Escape with a message queued then drew that message twice.) A CLI that does
 keep it back is not left in silence: after `QUEUED_ECHO_GRACE` the tab says
 delivery could not be confirmed, exactly as for a message a finished turn
-never picked up.
+never picked up. That wait is counted from the end of the turn, not from
+when the message was sent: a message queued a minute earlier behind a reply
+that was still streaming used to have run out of time the moment its turn
+was stopped.
 
 One difference between the two CLIs is worth knowing and is theirs, not the
 app's: without Escape, Claude Code holds a queued message until its turn is
