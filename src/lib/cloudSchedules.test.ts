@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudScheduleEstimate } from "@/lib/api";
 
-const mocks = vi.hoisted(() => ({ cloudSchedules: vi.fn() }));
-vi.mock("@/lib/api", () => ({ api: { cloudSchedules: mocks.cloudSchedules } }));
+const mocks = vi.hoisted(() => ({ cloudSchedules: vi.fn(), cloudScheduleEstimate: vi.fn() }));
+vi.mock("@/lib/api", () => ({ api: { cloudSchedules: mocks.cloudSchedules, cloudScheduleEstimate: mocks.cloudScheduleEstimate } }));
 
 import { PERMISSION_MODES } from "@/lib/models";
 import {
@@ -11,9 +11,12 @@ import {
   costLines,
   describeTiming,
   formatMicros,
+  modeNote,
   pausedText,
   probeSchedules,
+  probeWorkspaceSchedules,
   resetSchedulesOffers,
+  resumeBlocked,
   runText,
   scheduleErrorMessage,
   scheduleFormErrors,
@@ -39,7 +42,7 @@ const filled = () => ({ ...blankScheduleForm(), name: " Nightly triage ", prompt
 describe("scheduled tasks: what the dialog says", () => {
   it("says when a task runs", () => {
     const timing = { hour: 9, minute: 5, weekdays: [] as string[], timezone: "Europe/Berlin" };
-    expect(describeTiming({ ...timing, preset: "hourly" })).toBe("Every hour at :05");
+    expect(describeTiming({ ...timing, preset: "hourly" })).toBe("Every hour at :05 (Europe/Berlin)");
     expect(describeTiming({ ...timing, preset: "daily" })).toBe("Daily at 09:05 (Europe/Berlin)");
     expect(describeTiming({ ...timing, preset: "weekdays" })).toBe("Monday to Friday at 09:05 (Europe/Berlin)");
     // Days in the week's order, whatever order they were picked in.
@@ -54,11 +57,47 @@ describe("scheduled tasks: what the dialog says", () => {
   });
 
   it("states the cost of a run, of a month and the daily cap", () => {
-    const lines = costLines(estimate(), 240);
-    expect(lines[0]).toBe("Each run wakes this workspace and costs up to $0.48 (240 minutes at $0.12 an hour).");
-    expect(lines[1]).toBe("About 30 runs a month: up to $14.40 a month.");
+    // The server's bound: the limit, the wait for the workspace and the grace after it.
+    const lines = costLines(estimate({ perRunMaxMinutes: 265, perRunMaxMicros: 530_000, monthlyMaxMicros: 15_900_000 }), 240);
+    expect(lines[0]).toBe(
+      "Each run wakes this workspace and can keep it on for up to 265 minutes (starting it, the 240-minute limit, and ending the run): up to $0.53 at $0.12 an hour. The moment it takes to stop afterwards is not counted.",
+    );
+    expect(lines[1]).toBe("About 30 runs a month: up to $15.90 a month.");
     expect(lines[2]).toContain("At most 24 runs in any 24 hours.");
     expect(lines[2]).toContain("running-workspace slots");
+  });
+
+  it("does not call a figure an upper bound when the server priced the time limit alone", () => {
+    const lines = costLines(estimate(), 240);
+    expect(lines[0]).toBe(
+      "Each run wakes this workspace and costs about $0.48 (240 minutes at $0.12 an hour). Starting and stopping the workspace can add up to 25 minutes to a run, which is not in these figures.",
+    );
+    expect(lines[1]).toBe("About 30 runs a month: about $14.40 a month.");
+    expect(lines.slice(0, 2).join(" ")).not.toContain("up to $");
+  });
+
+  it("says which paused tasks cannot be resumed, and why", () => {
+    expect(resumeBlocked({ state: "active" })).toBeNull();
+    expect(resumeBlocked({ state: "paused", pausedReason: "by-user" })).toBeNull();
+    expect(resumeBlocked({ state: "paused", pausedReason: "repeated-failures" }, true)).toBeNull();
+    expect(resumeBlocked({ state: "paused", pausedReason: "workspace-unavailable" })).toContain("archived or deleted");
+    expect(resumeBlocked({ state: "paused", pausedReason: "provider-disconnected" })).toContain("Connect the organization's compute provider");
+    expect(resumeBlocked({ state: "paused", pausedReason: "prompt-forbidden" })).toContain("different prompt");
+    // A runtime that cannot take a run refuses every resume.
+    expect(resumeBlocked({ state: "paused", pausedReason: "by-user" }, false)).toContain("Resume the workspace once");
+  });
+
+  it("says what a mode means with nobody watching", () => {
+    expect(modeNote("manual")).toContain("stops at the agent's first edit or command");
+    expect(modeNote("acceptEdits")).toContain("nobody to approve it");
+    expect(SCHEDULE_MODES.find((mode) => mode.id === "manual")?.hint).toContain("stops at the first one");
+    expect(runText({ state: "failed", category: "needs-approval" })).toBe(
+      "Failed: the agent asked for an approval and nobody was there to give it; a mode that asks less (Accept edits or Auto) may let it finish",
+    );
+    expect(pausedText({ state: "paused", pausedReason: "needs-approval" })).toContain("a mode that asks less");
+    // It may be resumed: someone may mean to be attached for the next run.
+    expect(resumeBlocked({ state: "paused", pausedReason: "needs-approval" })).toBeNull();
+    expect(scheduleErrorMessage("cloud_schedule_estimate_not_supported")).toContain("cannot say yet what a scheduled task costs");
   });
 
   it("says plainly that a workspace left running can cost a whole month", () => {
@@ -135,6 +174,19 @@ describe("scheduled tasks: whether they are offered", () => {
   beforeEach(() => {
     resetSchedulesOffers();
     mocks.cloudSchedules.mockReset();
+    mocks.cloudScheduleEstimate.mockReset();
+  });
+
+  it("asks the server about a private workspace itself, with a read that wakes nothing", async () => {
+    mocks.cloudScheduleEstimate.mockRejectedValue({ code: "cloud_workspace_not_found", status: 404 });
+    await probeWorkspaceSchedules("org-1", "ws-private", 1_000);
+    expect(schedulesOffer("org-1\nws-private")).toBe("not-offered");
+    expect(mocks.cloudScheduleEstimate).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-private" }), "org-1");
+    // The organization's own answer is another question.
+    expect(schedulesOffer("org-1")).toBe("unknown");
+    mocks.cloudScheduleEstimate.mockResolvedValue({ supported: true });
+    await probeWorkspaceSchedules("org-1", "ws-mine", 1_000);
+    expect(schedulesOffer("org-1\nws-mine")).toBe("offered");
   });
 
   it("offers them once the server has listed them, and asks only once", async () => {

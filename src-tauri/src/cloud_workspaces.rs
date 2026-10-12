@@ -1372,6 +1372,11 @@ pub struct CloudScheduleTiming {
 pub struct CloudScheduleEstimate {
     pub currency: String,
     pub hourly_micros: u64,
+    /// The longest a run can keep the machine on: the wait for the runtime
+    /// to take it, the limit, and the grace after it. A server that does not
+    /// state it priced the limit alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_run_max_minutes: Option<u32>,
     pub per_run_max_micros: u64,
     pub monthly_runs: u32,
     pub monthly_max_micros: u64,
@@ -1469,6 +1474,9 @@ pub struct CloudScheduleQuote {
     pub next_run_at: Option<i64>,
     /// Whether the workspace's runtime can take a scheduled run.
     pub supported: bool,
+    /// The refusal a create would get now, whatever the schedule says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2803,7 +2811,17 @@ impl CloudWorkspaceService {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         };
         let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
-        self.run_in(org, RequestRisk::Read, |client, context| client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read))
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
+                // A 404 that names no refusal is a server without the route
+                // (another person's private workspace says so by its code).
+                if error.status == Some(404) && error.code == "cloud_workspace_unavailable" {
+                    error.code = "cloud_schedule_estimate_not_supported".into();
+                    error.retryable = false;
+                }
+                error
+            })
+        })
     }
 
     /// Make a scheduled task. It starts billed compute by itself, which the
@@ -2813,7 +2831,8 @@ impl CloudWorkspaceService {
         let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
         let name = input.name.trim();
         let Some(timing) = schedule_timing_body(&input.schedule) else { return invalid("cloud_workspace_request_invalid") };
-        let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x20..=0x7e).contains(&byte)));
+        // As the server reads it: printable ASCII, no space.
+        let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x21..=0x7e).contains(&byte)));
         let effort_ok = input.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
         if !valid_resource_id(&input.workspace_id)
             || name.is_empty()
@@ -5525,6 +5544,8 @@ mod tests {
         };
         // Nobody watches a scheduled run: never bypass permissions, never no mode.
         assert_eq!(change(|input| input.mode = "bypassPermissions".into()), "cloud_workspace_request_invalid");
+        // A model the server would refuse (it takes no space) is not sent.
+        assert_eq!(change(|input| input.model = Some("opus 4".into())), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.mode = String::new()), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.name = "   ".into()), "cloud_workspace_request_invalid");
         assert_eq!(change(|input| input.name = "x".repeat(81)), "cloud_workspace_request_invalid");
@@ -5580,6 +5601,37 @@ mod tests {
         );
         assert!(quote.estimate.keeps_machine_running && !quote.supported);
         assert_eq!(quote.next_run_at, Some(1_792_713_600_000));
+        // A server from before the bound counted the wait and the grace.
+        assert_eq!((quote.estimate.per_run_max_minutes, quote.refusal), (None, None));
+
+        let body = json!({
+            "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMinutes": 265, "perRunMaxMicros": 530_000, "monthlyRuns": 30, "monthlyMaxMicros": 15_900_000, "runningSlots": 1, "maxRunsPerDay": 24 },
+            "supported": true, "refusal": "cloud_workspace_quota_exceeded"
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let quote = service.schedule_estimate(None, &input).unwrap();
+        request.join().unwrap();
+        assert_eq!((quote.estimate.per_run_max_minutes, quote.refusal.as_deref()), (Some(265), Some("cloud_workspace_quota_exceeded")));
+    }
+
+    #[test]
+    fn an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
+        let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "suspend", "maxRunMinutes": 60
+        }))
+        .unwrap();
+        let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedule_estimate(None, &input).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.retryable), ("cloud_schedule_estimate_not_supported", false));
+        // Another person's private workspace keeps its own answer.
+        let (base, _, request) = serve_once(response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedule_estimate(None, &input).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_not_found");
     }
 
     #[test]

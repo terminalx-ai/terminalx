@@ -936,6 +936,8 @@ export interface CloudScheduleTiming {
 export interface CloudScheduleEstimate {
   currency: string;
   hourlyMicros: number;
+  /** The longest a run can keep the workspace on: starting it, the time limit, and ending the run. Absent from a server that priced the time limit alone. */
+  perRunMaxMinutes?: number;
   perRunMaxMicros: number;
   monthlyRuns: number;
   monthlyMaxMicros: number;
@@ -990,6 +992,8 @@ export interface CloudScheduleDetail {
 export interface CloudScheduleQuote {
   estimate: CloudScheduleEstimate;
   nextRunAt?: number;
+  /** The refusal a create would get now, whatever the form says. */
+  refusal?: string;
   /** Whether the workspace's runtime can take a scheduled run. */
   supported: boolean;
 }

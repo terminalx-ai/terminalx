@@ -5,10 +5,10 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 // "Scheduled tasks…" is an owner's or admin's, on a server that has the
 // feature turned on. Nobody else is shown an item that would only be refused.
 
-const mocks = vi.hoisted(() => ({ cloudSchedules: vi.fn(), open: vi.fn() }));
+const mocks = vi.hoisted(() => ({ cloudSchedules: vi.fn(), cloudScheduleEstimate: vi.fn(), open: vi.fn() }));
 vi.mock("@/lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api")>()),
-  api: { cloudSchedules: mocks.cloudSchedules },
+  api: { cloudSchedules: mocks.cloudSchedules, cloudScheduleEstimate: mocks.cloudScheduleEstimate },
 }));
 vi.mock("@/components/cloud/CloudSchedulesDialog", () => ({ openSchedulesDialog: mocks.open }));
 
@@ -16,9 +16,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/compon
 import { resetSchedulesOffers } from "@/lib/cloudSchedules";
 import { WorkspaceActionItems } from "./WorkspaceActions";
 
-const item = (you: { role: string; canApprove: boolean }, state = "ready"): CloudWorkspaceListItem =>
+const item = (you: { role: string; canApprove: boolean }, state = "ready", accessMode = "organization"): CloudWorkspaceListItem =>
   ({
-    workspace: { id: "ws-1", orgId: "org-1", name: "Docs site", provider: "box", state, accessMode: "organization", createdAt: 1, updatedAt: 1, releaseDisposition: null, you },
+    workspace: { id: "ws-1", orgId: "org-1", name: "Docs site", provider: "box", state, accessMode, createdAt: 1, updatedAt: 1, releaseDisposition: null, you },
     latestOperation: null,
   }) as CloudWorkspaceListItem;
 
@@ -35,6 +35,7 @@ const menu = (workspace: CloudWorkspaceListItem) =>
 beforeEach(() => {
   resetSchedulesOffers();
   mocks.cloudSchedules.mockReset();
+  mocks.cloudScheduleEstimate.mockReset();
   mocks.open.mockReset();
 });
 afterEach(cleanup);
@@ -61,6 +62,31 @@ describe("the workspace menu's scheduled tasks", () => {
       expect(screen.queryByText("Scheduled tasks…")).toBeNull();
       cleanup();
     }
+  });
+
+  it("is not shown on a private workspace to an admin it is only shared with: its tasks are its creator's", async () => {
+    mocks.cloudSchedules.mockResolvedValue({ schedules: [] });
+    mocks.cloudScheduleEstimate.mockRejectedValue({ code: "cloud_workspace_not_found", status: 404 });
+    menu(item({ role: "manager", canApprove: true }, "ready", "private"));
+    await waitFor(() => expect(mocks.cloudScheduleEstimate).toHaveBeenCalledTimes(1));
+    expect(mocks.cloudScheduleEstimate).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1" }), "org-1");
+    await Promise.resolve();
+    expect(screen.queryByText("Scheduled tasks…")).toBeNull();
+    cleanup();
+
+    // Its creator is answered, and is offered them.
+    resetSchedulesOffers();
+    mocks.cloudScheduleEstimate.mockReset().mockResolvedValue({ supported: true });
+    menu(item({ role: "manager", canApprove: true }, "ready", "private"));
+    expect(await screen.findByText("Scheduled tasks…")).toBeTruthy();
+    cleanup();
+
+    // An organization-visible workspace needs no second question.
+    resetSchedulesOffers();
+    mocks.cloudScheduleEstimate.mockReset();
+    menu(item({ role: "manager", canApprove: true }));
+    expect(await screen.findByText("Scheduled tasks…")).toBeTruthy();
+    expect(mocks.cloudScheduleEstimate).not.toHaveBeenCalled();
   });
 
   it("is not asked about for someone who does not manage the workspace, or for a deleted one", async () => {

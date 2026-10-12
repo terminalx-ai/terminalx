@@ -61,7 +61,10 @@ export function WorkspaceActionItems({
   // Scheduled tasks (PRO-37) are an owner's or admin's, and exist only on a
   // server that has them turned on. Whether both hold is the server's to
   // say: the item appears once it has, and never for someone it would refuse.
-  const schedules = useSchedulesOffer(workspace.orgId, lifecycle && present) === "offered" && lifecycle && present;
+  // A private workspace's tasks are its creator's alone, so for one the
+  // server is asked about that workspace too: an admin it is only shared
+  // with is not shown the item.
+  const schedules = useSchedulesOffer(workspace.orgId, lifecycle && present, workspace.accessMode === "private" ? workspace.id : null) === "offered" && lifecycle && present;
   const offersLifecycle =
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");
   return (

@@ -19,11 +19,28 @@ import { api, type CloudSchedule, type CloudScheduleCreateInput, type CloudSched
  */
 export const SCHEDULE_MODES: { id: string; label: string; hint: string }[] = [
   { id: "plan", label: "Plan", hint: "Read and plan only; no edits or commands." },
-  { id: "manual", label: "Ask every time", hint: "Every edit and command waits for an approval." },
+  { id: "manual", label: "Ask every time", hint: "Every edit and command waits for an approval. With nobody watching, the run stops at the first one." },
   { id: "auto", label: "Auto", hint: "Routine actions are approved; risky ones ask." },
   { id: "acceptEdits", label: "Accept edits", hint: "File edits go through; commands still ask." },
 ];
 export const SCHEDULE_DEFAULT_MODE = "acceptEdits";
+
+/**
+ * What the chosen mode means for a run nobody watches: an approval the
+ * agent asks for has nobody to give it, so the run ends there.
+ */
+export function modeNote(mode: string): string {
+  switch (mode) {
+    case "manual":
+      return "Ask every time stops at the agent's first edit or command: nobody is there to approve it, and the run ends as failed. Pick it only for a task that needs neither.";
+    case "plan":
+      return "Plan reads and plans only; the run ends with the plan and changes nothing.";
+    case "acceptEdits":
+      return "Accept edits lets file edits through. A command the agent has to ask for has nobody to approve it, and the run ends there as failed.";
+    default:
+      return "Auto approves routine actions. One it has to ask about has nobody to approve it, and the run ends there as failed.";
+  }
+}
 
 export const SCHEDULE_LIMITS = { nameChars: 80, promptBytes: 32 * 1024, minRunMinutes: 5, maxRunMinutes: 240, defaultRunMinutes: 60 } as const;
 
@@ -51,7 +68,7 @@ export function describeTiming(timing: CloudScheduleTiming): string {
   const at = `${two(timing.hour)}:${two(timing.minute)} (${timing.timezone})`;
   switch (timing.preset) {
     case "hourly":
-      return `Every hour at :${two(timing.minute)}`;
+      return `Every hour at :${two(timing.minute)} (${timing.timezone})`;
     case "daily":
       return `Daily at ${at}`;
     case "weekdays":
@@ -74,18 +91,31 @@ export function formatMicros(micros: number, currency: string): string {
 }
 
 /**
- * What a schedule can cost and occupy, as the lines shown before it is saved
- * and next to it afterwards. They are upper bounds: a run that ends early
- * costs less, and a workspace someone already has running costs nothing extra.
+ * What a scheduled task can cost and occupy, as the lines shown before it is
+ * saved and next to it afterwards. They are upper bounds: a run that ends
+ * early costs less, and a workspace someone already has running costs
+ * nothing extra.
+ *
+ * "Up to" is the server's word: its figure covers every minute it lets a
+ * run keep the workspace on (`perRunMaxMinutes`: the wait for the workspace
+ * to start and take the run, the time limit, and the grace after it). A
+ * server that does not state those minutes priced the time limit alone,
+ * which is not a bound, and is not called one.
  */
 export function costLines(estimate: CloudScheduleEstimate, maxRunMinutes: number): string[] {
   const { currency } = estimate;
   const rate = `${formatMicros(estimate.hourlyMicros, currency)} an hour`;
-  const lines = [`Each run wakes this workspace and costs up to ${formatMicros(estimate.perRunMaxMicros, currency)} (${maxRunMinutes} minutes at ${rate}).`];
+  const bounded = typeof estimate.perRunMaxMinutes === "number" && estimate.perRunMaxMinutes >= maxRunMinutes;
+  const upTo = bounded ? "up to" : "about";
+  const lines = [
+    bounded
+      ? `Each run wakes this workspace and can keep it on for up to ${estimate.perRunMaxMinutes} minutes (starting it, the ${maxRunMinutes}-minute limit, and ending the run): up to ${formatMicros(estimate.perRunMaxMicros, currency)} at ${rate}. The moment it takes to stop afterwards is not counted.`
+      : `Each run wakes this workspace and costs about ${formatMicros(estimate.perRunMaxMicros, currency)} (${maxRunMinutes} minutes at ${rate}). Starting and stopping the workspace can add up to 25 minutes to a run, which is not in these figures.`,
+  ];
   lines.push(
     estimate.keepsMachineRunning
       ? `The workspace is left running after a run, so this can cost up to ${formatMicros(estimate.monthlyMaxMicros, currency)} a month (the machine on all month) unless someone stops it or it goes idle.`
-      : `About ${estimate.monthlyRuns} ${estimate.monthlyRuns === 1 ? "run" : "runs"} a month: up to ${formatMicros(estimate.monthlyMaxMicros, currency)} a month.`,
+      : `About ${estimate.monthlyRuns} ${estimate.monthlyRuns === 1 ? "run" : "runs"} a month: ${upTo} ${formatMicros(estimate.monthlyMaxMicros, currency)} a month.`,
   );
   lines.push(`At most ${estimate.maxRunsPerDay} runs in any 24 hours. A run holds one of the organization's running-workspace slots while it runs.`);
   return lines;
@@ -97,13 +127,34 @@ const PAUSED: Record<string, string> = {
   "creator-not-manager": "Paused: the person it ran for is no longer an owner or admin.",
   "provider-disconnected": "Paused: the organization's compute provider is not connected.",
   "workspace-unavailable": "Paused: the workspace is archived or deleted.",
-  "workspace-private": "Paused: the workspace became private and is not the schedule owner's.",
+  "workspace-private": "Paused: the workspace became private and is not the task owner's.",
   "repeated-failures": "Paused after several runs in a row failed.",
+  "needs-approval":
+    "Paused: a run stopped at a permission request and nobody was there to answer it, so it was ended. It would stop there every time. Make the task again with a mode that asks less (Accept edits or Auto), or a prompt that needs no approval.",
   "cleanup-failed": "Paused: the workspace a run started could not be stopped again. Check that it is not still running.",
   "prompt-forbidden": "Paused: its prompt would run as a command in the agent's CLI.",
 };
 
-/** Why a schedule is not running, or null for an active one. */
+/**
+ * Why a paused task cannot be resumed as it is, or null when it can. The
+ * server would refuse these, or pause the task again at its next run:
+ * nobody is offered a Resume that would only be refused.
+ */
+export function resumeBlocked(schedule: Pick<CloudSchedule, "state" | "pausedReason">, runtimeSupported: boolean | null = null): string | null {
+  if (schedule.state !== "paused") return null;
+  switch (schedule.pausedReason) {
+    case "workspace-unavailable":
+      return "Its workspace is archived or deleted, so it cannot run. Delete the task.";
+    case "provider-disconnected":
+      return "Connect the organization's compute provider first.";
+    case "prompt-forbidden":
+      return "Its prompt would be refused again. Delete the task and make it with a different prompt.";
+    default:
+      return runtimeSupported === false ? ERRORS.cloud_schedule_runtime_unsupported : null;
+  }
+}
+
+/** Why a task is not running, or null for an active one. */
 export function pausedText(schedule: Pick<CloudSchedule, "state" | "pausedReason">): string | null {
   if (schedule.state !== "paused") return null;
   return (schedule.pausedReason && PAUSED[schedule.pausedReason]) ?? "Paused.";
@@ -126,7 +177,8 @@ const RUN_CATEGORY: Record<string, string> = {
   missed: "its time had passed",
   "daily-cap": "24 runs had already started in 24 hours",
   "not-dispatched": "nothing picked it up in time",
-  "schedule-paused": "the schedule was paused",
+  "schedule-paused": "the task was paused",
+  "needs-approval": "the agent asked for an approval and nobody was there to give it; a mode that asks less (Accept edits or Auto) may let it finish",
   "agent-credential-required": "the agent has no login in this workspace",
   "agent-unavailable": "the agent is not installed in this workspace",
   "agent-start-failed": "the agent did not start",
@@ -167,6 +219,7 @@ const ERRORS: Record<string, string> = {
   cloud_workspace_request_invalid: "The server did not accept those settings.",
   cloud_workspace_prompt_too_long: "The prompt is empty or longer than 32 KB.",
   cloud_workspace_unavailable: "The server could not be reached. Nothing was changed.",
+  cloud_schedule_estimate_not_supported: "This server cannot say yet what a scheduled task costs, so a new one cannot be saved here. Tasks that exist can still be paused, resumed and deleted.",
 };
 
 export function scheduleErrorMessage(code: string): string {
@@ -312,23 +365,57 @@ export function probeSchedules(orgId: string, now = Date.now()): Promise<void> {
     );
 }
 
+/**
+ * A private workspace's tasks are its creator's alone, and the organization's
+ * list does not say whose a workspace is. So for a private workspace the
+ * server is asked about that workspace: an estimate, which reads and wakes
+ * nothing and answers "not found" to an admin it is merely shared with.
+ */
+const PROBE_TIMING: CloudScheduleTiming = { preset: "daily", hour: 9, minute: 0, weekdays: [], timezone: "UTC" };
+const workspaceKey = (orgId: string, workspaceId: string) => `${orgId}\n${workspaceId}`;
+
+export function probeWorkspaceSchedules(orgId: string, workspaceId: string, now = Date.now()): Promise<void> {
+  const key = workspaceKey(orgId, workspaceId);
+  const known = offers.get(key);
+  if (known && (known.offer === "offered" || now - known.askedAt < RECHECK_MS)) return Promise.resolve();
+  offers.set(key, { offer: known?.offer ?? "unknown", askedAt: now });
+  return Promise.resolve()
+    .then(() => api.cloudScheduleEstimate({ workspaceId, schedule: PROBE_TIMING, completionPolicy: "suspend", maxRunMinutes: SCHEDULE_LIMITS.defaultRunMinutes }, orgId))
+    .then(
+      () => setOffer(key, "offered", now),
+      () => setOffer(key, "not-offered", now),
+    );
+}
+
 export function resetSchedulesOffers() {
   offers.clear();
   for (const listener of [...listeners]) listener();
 }
 
-/** `schedulesOffer`, asked for when first needed. */
-export function useSchedulesOffer(orgId: string, enabled = true): SchedulesOffer {
-  const offer = useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+};
+
+/**
+ * `schedulesOffer`, asked for when first needed. With a private workspace's
+ * id, the offer also needs the server's word on that workspace.
+ */
+export function useSchedulesOffer(orgId: string, enabled = true, privateWorkspaceId: string | null = null): SchedulesOffer {
+  const organization = useSyncExternalStore(
+    subscribe,
     () => schedulesOffer(orgId),
     () => "unknown" as const,
   );
+  const workspace = useSyncExternalStore(
+    subscribe,
+    () => (privateWorkspaceId ? schedulesOffer(workspaceKey(orgId, privateWorkspaceId)) : ("offered" as const)),
+    () => "unknown" as const,
+  );
   useEffect(() => {
-    if (enabled) void probeSchedules(orgId);
-  }, [orgId, enabled]);
-  return offer;
+    if (!enabled) return;
+    void probeSchedules(orgId);
+    if (privateWorkspaceId && organization === "offered") void probeWorkspaceSchedules(orgId, privateWorkspaceId);
+  }, [orgId, enabled, privateWorkspaceId, organization]);
+  return organization === "offered" ? workspace : organization;
 }
