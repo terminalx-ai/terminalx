@@ -98,8 +98,8 @@ refuses without it (`cloud_agent_login_replace_unconfirmed`), and every
 native dialog (the lend's confirmation, the API-key prompt and the sign-in's
 code prompt) says what is replaced. If someone else stores a login while a
 sign-in is open, the open sign-in asks for the replace choice itself before
-the code can be entered again. The lend's confirmation also says and that agents in every workspace stop
-when the lent sign-in expires.
+the code can be entered again. The lend's confirmation also says that agents
+in every workspace stop when the lent sign-in expires.
 
 The steps, in order:
 
