@@ -5,6 +5,7 @@ import { api, type PullRequest } from "@/lib/api";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
+import { requestMergedSweep } from "@/lib/mergedCleanup";
 import { canDeleteMergedWorkspace } from "@/lib/workspaceRemoval";
 import {
   DropdownMenu,
@@ -148,6 +149,12 @@ export function PrPanel({
     }
   };
 
+  /** Merged from here: where workspaces are removed once merged, this one is looked at now rather than at the next pass. */
+  const merge = (number: number, method: "merge" | "squash" | "rebase") =>
+    void act("merge", () => source.mergePr(number, method)).then((done) => {
+      if (done) void requestMergedSweep();
+    });
+
   if (available === false) {
     return (
       <div className="px-3 py-4 text-xs text-muted-foreground">
@@ -239,9 +246,9 @@ export function PrPanel({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "merge"))}>Merge commit</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "squash"))}>Squash and merge</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => void act("merge", () => source.mergePr(pr.number, "rebase"))}>Rebase and merge</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => merge(pr.number, "merge")}>Merge commit</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => merge(pr.number, "squash")}>Squash and merge</DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => merge(pr.number, "rebase")}>Rebase and merge</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>}
                 </div>

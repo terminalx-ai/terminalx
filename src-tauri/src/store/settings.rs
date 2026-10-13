@@ -34,6 +34,53 @@ pub struct Settings {
     /// The floating chat window. The system-wide shortcut is registered, and
     /// the window made, by the Rust side, so these live here.
     pub floating: FloatingSettings,
+    /// Removing a workspace once its pull request has merged. The Rust side
+    /// does the removing, and reads for itself which projects it is on for.
+    pub merged_cleanup: MergedCleanupSettings,
+}
+
+/// Whether a workspace is removed by itself once its pull request has merged
+/// (`merged_cleanup.rs`). Off unless the reader turns it on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MergedCleanupSettings {
+    /// The default for every project.
+    pub enabled: bool,
+    /// One project's own answer, by its key: the path of a project on this
+    /// computer, or a cloud workspace's `cloud:<organization>:<workspace>`.
+    /// A project without one follows the default.
+    pub projects: std::collections::BTreeMap<String, bool>,
+    /// Delete the conversations of the sessions in the workspace too. Off:
+    /// they are kept and filed under the project.
+    pub delete_conversations: bool,
+    /// Minutes between the merge being seen (or the last thing done in the
+    /// workspace, if later) and the removal.
+    #[serde(deserialize_with = "grace_minutes")]
+    pub grace_minutes: u32,
+}
+
+/// The grace periods the settings control offers.
+pub const GRACE_MINUTES: [u32; 4] = [5, 10, 30, 60];
+const DEFAULT_GRACE_MINUTES: u32 = 10;
+
+/// A hand-edited or damaged value falls back to the default rather than
+/// removing a workspace sooner than anyone chose.
+fn grace_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<u32, D::Error> {
+    let minutes = serde_json::Value::deserialize(deserializer)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(minutes.filter(|value| GRACE_MINUTES.contains(value)).unwrap_or(DEFAULT_GRACE_MINUTES))
+}
+
+impl Default for MergedCleanupSettings {
+    fn default() -> Self {
+        Self { enabled: false, projects: Default::default(), delete_conversations: false, grace_minutes: DEFAULT_GRACE_MINUTES }
+    }
+}
+
+impl MergedCleanupSettings {
+    /// Whether it is on for the project with this key.
+    pub fn enabled_for(&self, key: &str) -> bool {
+        self.projects.get(key).copied().unwrap_or(self.enabled)
+    }
 }
 
 /// The longest an idle quick chat may be set to be kept, short of for ever.
@@ -133,6 +180,7 @@ impl Default for Settings {
             transcription_mute: false,
             status_bar: StatusBarSettings::default(),
             floating: FloatingSettings::default(),
+            merged_cleanup: MergedCleanupSettings::default(),
         }
     }
 }
@@ -182,6 +230,32 @@ mod tests {
         let written = serde_json::to_value(&off).unwrap();
         assert!(written["floating"]["shortcut"].is_null());
         assert_eq!(serde_json::from_value::<Settings>(written).unwrap().floating, off.floating);
+    }
+
+    #[test]
+    fn removing_merged_workspaces_is_off_until_turned_on_and_a_project_can_answer_for_itself() {
+        // A settings file written before the setting existed.
+        let older: Settings = serde_json::from_str(r#"{"notifications":true}"#).unwrap();
+        assert_eq!(older.merged_cleanup, MergedCleanupSettings::default());
+        assert!(!older.merged_cleanup.enabled && !older.merged_cleanup.delete_conversations);
+        assert_eq!(older.merged_cleanup.grace_minutes, 10);
+        assert!(!older.merged_cleanup.enabled_for("/repos/app"));
+
+        let chosen: Settings = serde_json::from_str(r#"{"mergedCleanup":{"enabled":true,"projects":{"/repos/kept":false},"graceMinutes":30}}"#).unwrap();
+        assert!(chosen.merged_cleanup.enabled_for("/repos/app"));
+        assert!(!chosen.merged_cleanup.enabled_for("/repos/kept"));
+        assert_eq!(chosen.merged_cleanup.grace_minutes, 30);
+        let written = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(serde_json::from_value::<Settings>(written).unwrap().merged_cleanup, chosen.merged_cleanup);
+
+        // On for one project only, with the default left off.
+        let one: Settings = serde_json::from_str(r#"{"mergedCleanup":{"projects":{"/repos/app":true}}}"#).unwrap();
+        assert!(one.merged_cleanup.enabled_for("/repos/app") && !one.merged_cleanup.enabled_for("/repos/other"));
+
+        for invalid in ["0", "1", "-10", "7.5", "\"10\"", "null", "99999999999"] {
+            let damaged: Settings = serde_json::from_str(&format!(r#"{{"mergedCleanup":{{"graceMinutes":{invalid}}}}}"#)).unwrap();
+            assert_eq!(damaged.merged_cleanup.grace_minutes, 10, "{invalid}");
+        }
     }
 
     #[test]

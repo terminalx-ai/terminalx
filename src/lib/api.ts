@@ -6,6 +6,9 @@ import {
   type CleanupProject,
   type CleanupRemoveItem,
   type CleanupResult,
+  type MergedRemovalView,
+  type MergedRestored,
+  type MergedSwept,
   type WorkspaceConnectionState,
   type WorkspaceTransport,
 } from "@terminalx/portable/workspace";
@@ -1541,6 +1544,48 @@ export const browser = {
 };
 
 // ---- the floating chat window
+/** Whether a workspace is removed by itself once its pull request has merged (`store/settings.rs`). */
+export interface MergedCleanupSettings {
+  /** The default for every project. */
+  enabled: boolean;
+  /** One project's own answer, by a local project's path or a cloud workspace's key. */
+  projects: Record<string, boolean>;
+  /** Delete the conversations of the sessions in the workspace too. */
+  deleteConversations: boolean;
+  /** Minutes between the merge being seen and the removal. */
+  graceMinutes: number;
+}
+
+/** What Settings offers for `graceMinutes`; the backend accepts no others. */
+export const MERGED_GRACE_MINUTES = [5, 10, 30, 60] as const;
+
+/** GitHub's own "Automatically delete head branches" for a repository. */
+export interface HeadBranchSetting {
+  /** `owner/name`. */
+  repository: string;
+  /** Null when GitHub does not tell this reader. */
+  enabled: boolean | null;
+  /** The reader may change it. */
+  admin: boolean;
+}
+
+export const mergedCleanup = {
+  settings: () => invoke<MergedCleanupSettings>("merged_cleanup_settings"),
+  /** `project.enabled: null` makes that project follow the default again. */
+  setSettings: (patch: { enabled?: boolean; deleteConversations?: boolean; graceMinutes?: number; project?: { key: string; enabled: boolean | null } }) =>
+    invoke<MergedCleanupSettings>("set_merged_cleanup_settings", { patch }),
+  /**
+   * One pass on this computer. Which projects it covers is read by the
+   * backend from the settings, so with the setting off this removes nothing.
+   */
+  sweep: () => invoke<MergedSwept>("merged_cleanup_sweep"),
+  hold: (path: string, held: boolean) => invoke<void>("merged_cleanup_hold", { path, held }),
+  records: () => invoke<MergedRemovalView[]>("merged_cleanup_records"),
+  restore: (id: string) => invoke<MergedRestored>("merged_cleanup_restore", { id }),
+  headBranchSetting: (projectPath: string) => invoke<HeadBranchSetting>("github_head_branch_setting", { projectPath }),
+  enableHeadBranchDeletion: (projectPath: string) => invoke<HeadBranchSetting>("github_enable_head_branch_deletion", { projectPath }),
+};
+
 export const floatingWindow = {
   status: () => invoke<FloatingStatus>("floating_status"),
   /** `shortcut: ""` turns the system-wide shortcut off. A binding the system cannot register is refused. */

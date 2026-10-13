@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Workspaces that go once their pull request is merged
+
+- A new setting, off unless you turn it on: **Delete the workspace when its
+  pull request is merged** (Settings → Storage). It has a default for every
+  project, and each Git project and cloud workspace can answer for itself.
+  When it is on and a workspace's pull request shows as merged, the worktree
+  is removed with its local branch, and with its branch on the remote while
+  that still points at the commit that was merged. Its conversations are
+  kept, filed under the project as from a removed workspace; deleting them
+  too is a separate switch, also off. (#432)
+- Nothing is forced, and no work is lost. The workspace goes through the same
+  checks and the same removal as the Delete workspace dialog and the worktree
+  clean-up: one with uncommitted work, commits that are not merged, ignored
+  local files other than build output, a Git operation in progress, a turn
+  running or a terminal open stays, and its row in the sidebar says why
+  ("kept: 2 uncommitted files"). Squash and rebase merges are recognised. A
+  remote branch that has moved since the merge is kept, and that is said; a
+  remote that cannot be reached leaves its branch and does not hold up the
+  rest. An agent that sits idle at its prompt does not keep a workspace: it
+  is stopped, as the dialog stops it. (#432)
+- It waits first: 10 minutes by default (5 minutes to 1 hour), counted from
+  when the merge is first seen and from the last thing done in the
+  workspace's sessions. A notice says the workspace will go and offers
+  **Keep workspace**; the row offers Keep too. After a removal a notice
+  offers **Undo**, which puts back the worktree, its branch, the branch on
+  the remote and the sessions that have not been used since. The grace
+  period runs only while the app is running, so nothing goes the moment the
+  app is opened again. (#432)
+- Every removal is recorded with its workspace, branch, commit and pull
+  request, and listed in Settings → Storage with **Restore** for as long as
+  its commit is still in the repository. (#432)
+- It never applies to a project's main directory, a worktree TerminalX did
+  not create, or a pull request that was closed without merging. For a cloud
+  workspace it runs on the workspace's own runtime, only for a manager and
+  only while the workspace is connected; a runtime from before this needs a
+  restart to offer it (`workspace/2`). (#432)
+- For a project the setting is on for, Settings also offers to turn on
+  GitHub's own "Automatically delete head branches" when you administer the
+  repository, which covers pull requests merged while TerminalX is closed.
+  (#432)
+
 ### Dictation
 
 - Text deleted from the composer while dictating stays deleted. Selecting

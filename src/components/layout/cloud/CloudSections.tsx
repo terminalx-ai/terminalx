@@ -31,6 +31,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
+import { MergedNote } from "@/components/layout/MergedNote";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AgentTabRow, ItemTitle, RowChip, RowTime, ShellTabRow, StatusStripe, TreeGroup, TreeNode, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
 import { archiveLine, deletionLine } from "@/components/cloud/CloudWorkspaceLifecycle";
@@ -49,6 +50,7 @@ import { NEW_SESSION_ADMIN_REASON, NEW_WORKSPACE_ADMIN_REASON } from "@/lib/clou
 import { useCloudConnection } from "@/lib/cloudConnections";
 import { bootCloudMirrors } from "@/lib/cloudMirror";
 import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText, purgeNoticeText } from "@/lib/cloudLifecycle";
+import { useMergedStatusOfSession } from "@/lib/mergedCleanup";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
@@ -72,7 +74,7 @@ import { resolveSessionTab, useVisibleSessionTab } from "@/lib/visibleTab";
 import { cn } from "@/lib/cn";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { getSessionStore, selectCloudProjectInSidebar, selectCloudSession, selectCloudWorkspace, selectSession, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
-import { orgSectionKey, parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
+import { cloudWorkspaceKey, orgSectionKey, parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 import { AddRepositoryDialog, NewBlankProjectDialog } from "./AddCloudProject";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { ShareBadge } from "@/components/cloud/CloudCollab";
@@ -1034,6 +1036,8 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
   const [error, setError] = useState<string | null>(null);
   const menu = useRowMenu();
   const status = cloudSessionStatus(row);
+  // Its worktree after its pull request merged: why it stays, or when it goes.
+  const merged = useMergedStatusOfSession(cloudWorkspaceKey(row.orgId, row.workspaceId), row.sessionId);
   useEffect(() => {
     if (selected) setExpanded(true);
   }, [selected, store.navigationVersion]);
@@ -1168,6 +1172,7 @@ function CloudSessionNode({ row, node, manage, location }: { row: CloudSessionRo
           )}
         </TreeRow>
         {error && <p className="ml-6 text-[10px] text-destructive">{error}</p>}
+        <MergedNote status={merged} className="ml-6 mb-0.5 text-[10px]" />
         <TreeGroup expanded={expanded} className="pl-5">
           {row.tabs.map((tab) => {
             const label = tab.title?.trim() || cloudAgentLabel(tab.harness);

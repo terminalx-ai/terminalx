@@ -3101,6 +3101,7 @@ mod command_tests {
             expected_sessions: None,
             direct: crate::git::DirectDelete::Allowed,
             fetch: crate::landed::Fetch::Skip,
+            guard: None,
         };
         crate::session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap().sessions
     }
@@ -3319,6 +3320,136 @@ pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_
     .map_err(err)?
 }
 
+// ---- removing a workspace once its pull request has merged ------------------
+
+pub(crate) const MERGED_CLEANUP_SETTINGS_EVENT: &str = "merged_cleanup_settings";
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedCleanupProjectPatch {
+    /// A local project's path, or a cloud workspace's key.
+    key: String,
+    /// `None` follows the default again.
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergedCleanupPatch {
+    enabled: Option<bool>,
+    delete_conversations: Option<bool>,
+    grace_minutes: Option<u32>,
+    project: Option<MergedCleanupProjectPatch>,
+}
+
+#[tauri::command]
+pub fn merged_cleanup_settings() -> crate::store::settings::MergedCleanupSettings {
+    store::settings::load().merged_cleanup
+}
+
+#[tauri::command]
+pub fn set_merged_cleanup_settings(app: AppHandle, patch: MergedCleanupPatch) -> CmdResult<crate::store::settings::MergedCleanupSettings> {
+    let mut settings = store::settings::load();
+    let cleanup = &mut settings.merged_cleanup;
+    if let Some(value) = patch.enabled {
+        cleanup.enabled = value;
+    }
+    if let Some(value) = patch.delete_conversations {
+        cleanup.delete_conversations = value;
+    }
+    if let Some(value) = patch.grace_minutes {
+        if !crate::store::settings::GRACE_MINUTES.contains(&value) {
+            return Err(format!("The grace period cannot be {value} minutes."));
+        }
+        cleanup.grace_minutes = value;
+    }
+    if let Some(project) = patch.project {
+        match project.enabled {
+            Some(enabled) => cleanup.projects.insert(project.key, enabled),
+            None => cleanup.projects.remove(&project.key),
+        };
+    }
+    store::settings::save(&settings).map_err(err)?;
+    let _ = app.emit(MERGED_CLEANUP_SETTINGS_EVENT, &settings.merged_cleanup);
+    Ok(settings.merged_cleanup)
+}
+
+/// One pass over the projects the setting is on for: what merged, what
+/// stays and why, and the removal of what is safe and due. Which projects
+/// those are is read here, from the settings file, so no caller can widen it:
+/// with the setting off this removes nothing.
+#[tauri::command]
+pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<crate::merged_cleanup::Swept> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        let settings = store::settings::load().merged_cleanup;
+        let swept = with_cleanup_host(&state, |host| {
+            let scope = crate::merged_cleanup::Scope {
+                projects: host.projects.iter().filter(|project| settings.enabled_for(&project.path)).map(|project| project.path.clone()).collect(),
+                delete_sessions: settings.delete_conversations,
+                grace_seconds: u64::from(settings.grace_minutes) * 60,
+            };
+            let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
+            let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd, branches);
+            let run = crate::merged_cleanup::Sweep { host, sink: &app, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
+            crate::merged_cleanup::sweep(&run, &scope).map_err(err)
+        })??;
+        for removed in swept.statuses.iter().filter(|status| status.phase == crate::merged_cleanup::Phase::Removed) {
+            state.browser.forget_workspace(&crate::browser::control::canonical(&removed.path));
+        }
+        Ok(swept)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Keep a workspace that is waiting to be removed, or let it go again.
+#[tauri::command]
+pub async fn merged_cleanup_hold(path: String, held: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || crate::merged_cleanup::hold(&path, held, chrono::Utc::now()).map_err(err)).await.map_err(err)?
+}
+
+/// What was removed by itself, newest first, with whether each can still be
+/// brought back.
+#[tauri::command]
+pub async fn merged_cleanup_records(app: AppHandle) -> CmdResult<Vec<crate::merged_cleanup::RecordView>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        with_cleanup_host(&state, |host| crate::merged_cleanup::records(host).map_err(err))?
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Undo one removal: the worktree, its branch and what else can be put back.
+#[tauri::command]
+pub async fn merged_cleanup_restore(app: AppHandle, id: String) -> CmdResult<crate::merged_cleanup::Restored> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        with_cleanup_host(&state, |host| crate::merged_cleanup::restore(host, &app, &id, chrono::Utc::now()).map_err(err))?
+    })
+    .await
+    .map_err(err)?
+}
+
+/// An attached project's directory, for a call that asks GitHub about it.
+fn attached_project(project_path: &str) -> CmdResult<std::path::PathBuf> {
+    let (all, _) = projects::list().map_err(err)?;
+    all.iter().find(|project| project.path == project_path).map(|project| std::path::PathBuf::from(&project.path)).ok_or_else(|| "That project is not attached.".to_string())
+}
+
+/// GitHub's own "Automatically delete head branches" for a project's
+/// repository, and whether the reader may change it.
+#[tauri::command]
+pub async fn github_head_branch_setting(project_path: String) -> CmdResult<crate::github::HeadBranchSetting> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::head_branch_setting(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn github_enable_head_branch_deletion(project_path: String) -> CmdResult<crate::github::HeadBranchSetting> {
+    tauri::async_runtime::spawn_blocking(move || crate::github::enable_head_branch_deletion(&attached_project(&project_path)?).map_err(err)).await.map_err(err)?
+}
+
 /// What a workspace takes on disk. Asked for one workspace at a time, after
 /// the list is shown, because walking a large checkout takes a while.
 #[tauri::command]
@@ -3400,6 +3531,7 @@ pub async fn remove_workspace(
             expected_sessions: Some(&expected_sessions),
             direct,
             fetch: crate::landed::Fetch::Fresh,
+            guard: None,
         };
         let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
         let removed = crate::session_ops::remove_workspace(&app, &request, &stop)?;
