@@ -254,6 +254,39 @@ try {
         "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.switches["Merge automatically by default"] === "false disabled",
         "closing the settings leaves the page usable": released,
       }, { ...dialogLayout, released });
+
+      // The merge closes the issue and the tracker stops listing it. It stays
+      // below the list for its pipeline, and its page says what the tracker says now.
+      await page.evaluate(() => {
+        const answers = window.__PW_STUB__.answers;
+        answers.issue_details = { ...answers.issue_details, state: "Closed", stateType: "completed" };
+        answers.issues_list = [];
+        window.__PIPELINE__ = { ...window.__PIPELINE__, stage: "merge", state: "merged", reason: null, note: "TerminalX merged pull request #7 at abc1234 into main." };
+        window.__PW_STUB__.emit("issue_pipeline", window.__PIPELINE__);
+      });
+      await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      const unlisted = page.getByTestId("issues-unlisted");
+      await unlisted.waitFor();
+      await page.getByText("Closed", { exact: true }).waitFor();
+      const unlistedLayout = await unlisted.evaluate((node) => {
+        const column = node.parentElement.getBoundingClientRect();
+        const heading = node.querySelector("h3").getBoundingClientRect();
+        const row = node.querySelector("button");
+        const box = row.getBoundingClientRect();
+        const empty = [...node.parentElement.children].find((child) => child.textContent === "No open issues match.")?.getBoundingClientRect();
+        return {
+          inside: [heading, box].every((part) => part.left >= column.left && part.right <= column.right),
+          stacked: empty != null && empty.bottom <= heading.top && heading.bottom <= box.top,
+          row: row.textContent,
+          page: document.querySelector("[data-testid=issue-pipeline]")?.textContent.slice(0, 6),
+        };
+      });
+      if (shots) await page.screenshot({ path: join(shots, `issue-pipeline-merged-${mode}-${provider}-${width}.png`) });
+      failed += report(`${mode}, ${provider}, ${width}px`, {
+        "an issue its merge closed stays below the list, under its own heading, and nothing overlaps": unlistedLayout.inside && unlistedLayout.stacked,
+        "its row says where the pipeline stands and claims no state of the issue": /Merged$/.test(unlistedLayout.row) && !/Open|Closed/.test(unlistedLayout.row),
+        "its page stays open on the record of the merge": unlistedLayout.page === "Merged",
+      }, unlistedLayout);
       await page.close();
     }
   }

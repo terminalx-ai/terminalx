@@ -1,6 +1,6 @@
 import "@testing-library/dom";
 import { StrictMode, type ReactNode } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import type { ModelInfo } from "@/lib/api";
@@ -193,7 +193,7 @@ function issueSwitch() {
 const MERGE_SWITCH = "Merge automatically when the review is addressed";
 const BRIEF = "End every reply with a status block.";
 
-function pipelineOf(issue: (typeof issues)[number], patch: Partial<IssuePipeline> = {}): IssuePipeline {
+function pipelineOf(issue: Pick<(typeof issues)[number], "provider" | "id" | "identifier" | "title" | "url">, patch: Partial<IssuePipeline> = {}): IssuePipeline {
   return {
     id: "pipeline-1", projectPath: "/repo",
     issue: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
@@ -513,6 +513,116 @@ describe("the pipeline an issue session starts", () => {
     await open();
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
+  });
+});
+
+describe("an issue its merge closed", () => {
+  // The tracker lists open issues, so this one is no longer among them.
+  const closed = { ...issues[0], id: "9", identifier: "#9", number: 9, title: "Ship the exporter", url: "https://example.test/issues/9", state: "CLOSED", stateType: "completed" as const, body: "Closed issue body." };
+  const merged = (issue: Parameters<typeof pipelineOf>[0], patch: Partial<IssuePipeline> = {}) =>
+    pipelineOf(issue, {
+      id: `pipeline-${issue.id}`, stage: "merge", state: "merged", round: 1, note: "TerminalX merged pull request #7 at abc1234 into main.",
+      pr: { number: 7, url: "https://example.test/pull/7", base: "main" },
+      ...patch,
+    });
+  /** The tracker as it answers once `gone` are closed. */
+  type Row = { id: string } & Record<string, unknown>;
+  function tracker(gone: Row[], open: Row[] = issues) {
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "issues_list") return open;
+      if (command === "issue_details") return [...gone, ...open].find((issue) => issue.id === args?.id);
+      return backend(command, args);
+    });
+  }
+  const calls = (command: string) => invoke.mock.calls.filter(([name]) => name === command).length;
+  const unlisted = () => screen.getByTestId("issues-unlisted");
+
+  it("stays reachable below the list, with its record and what the tracker says of it now", async () => {
+    tracker([closed]);
+    pipelineStore.pipelines = [merged(closed)];
+    render(<IssuesView />);
+    await screen.findByText("Fix login timeout");
+    const row = within(unlisted()).getByRole("button", { name: /Ship the exporter/ });
+    // The row says where the pipeline stands and claims nothing of the issue's own state.
+    expect(row.textContent).toContain("Merged");
+    expect(row.textContent).not.toMatch(/OPEN|CLOSED|·/);
+    // An issue the tracker still lists is not repeated there.
+    expect(within(unlisted()).queryByText("Fix login timeout")).toBeNull();
+
+    fireEvent.click(row);
+    await screen.findByText("Closed issue body.");
+    expect(invoke).toHaveBeenCalledWith("issue_details", { projectPath: "/repo", provider: "github", id: "9" });
+    expect(screen.getByText("CLOSED")).toBeTruthy();
+    expect(within(screen.getByTestId("issue-pipeline")).getByText("TerminalX merged pull request #7 at abc1234 into main.")).toBeTruthy();
+  });
+
+  it("is listed once, by its newest pipeline, and only for the tracker and project in view", async () => {
+    tracker([closed]);
+    pipelineStore.pipelines = [
+      merged(closed, { id: "older", state: "needsYou", note: "The review limit was reached.", created: "2026-09-01T00:00:00.000Z" }),
+      merged(closed, { id: "newer", created: "2026-09-03T00:00:00.000Z" }),
+      merged({ ...closed, id: "8", identifier: "#8", title: "Another project's issue", url: "https://example.test/issues/8" }, { projectPath: "/elsewhere" }),
+      merged({ ...linearIssues[0], id: "lin-7", identifier: "DEMO-7", title: "A Linear issue", url: "https://example.test/linear/DEMO-7" } as never),
+    ];
+    render(<IssuesView />);
+    await screen.findByText("Fix login timeout");
+    const rows = within(unlisted()).getAllByRole("button");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("Ship the exporter");
+    expect(rows[0].textContent).toContain("Merged");
+  });
+
+  it("follows the search like the list above it, and shows when no open issue matches", async () => {
+    tracker([closed], []);
+    pipelineStore.pipelines = [merged(closed)];
+    render(<IssuesView />);
+    expect(within(await screen.findByTestId("issues-unlisted")).getByText("Ship the exporter")).toBeTruthy();
+    expect(screen.getByText("No open issues match.")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "exporter" } });
+    expect(within(unlisted()).getByText("Ship the exporter")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "timeout" } });
+    expect(screen.queryByTestId("issues-unlisted")).toBeNull();
+  });
+
+  it("is read again, with the list, a moment after its pipeline merges", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      pipelineStore.pipelines = [pipelineOf(issues[0], { stage: "merge", state: "readyToMerge", round: 1 })];
+      const view = render(<IssuesView />);
+      fireEvent.click(await screen.findByText("Fix login timeout"));
+      await screen.findByText("First issue body.");
+      expect([calls("issues_list"), calls("issue_details")]).toEqual([1, 1]);
+
+      // The merge closes the issue on the tracker.
+      tracker([{ ...issues[0], state: "CLOSED", stateType: "completed" as const }], [issues[1]]);
+      pipelineStore.pipelines = [merged(issues[0], { id: "pipeline-1" })];
+      view.rerender(<IssuesView />);
+      await act(async () => void (await vi.advanceTimersByTimeAsync(2900)));
+      expect(calls("issues_list")).toBe(1);
+      await act(async () => void (await vi.advanceTimersByTimeAsync(500)));
+      await waitFor(() => expect([calls("issues_list"), calls("issue_details")]).toEqual([2, 2]));
+
+      // Its page stays open and now says what the tracker says; its row has moved below the list.
+      await screen.findByText("CLOSED");
+      expect(screen.getByText("First issue body.")).toBeTruthy();
+      expect(within(unlisted()).getByText("Fix login timeout")).toBeTruthy();
+      expect(screen.getByTestId("issue-pipeline")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the page as it is while a refresh reads the issue again", async () => {
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    // No blank page and no "Loading…" between the two answers.
+    expect(screen.getByText("First issue body.")).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
+    await waitFor(() => expect(calls("issue_details")).toBe(2));
+    expect(screen.getByText("First issue body.")).toBeTruthy();
   });
 });
 

@@ -103,6 +103,12 @@ Otherwise the issue shows one of two things, with the reason in a sentence:
 | *Ready to merge* | Reviewed, checks passed, mergeable, and TerminalX will not merge it itself: the switch is off, the project has a person merge, or the change is in a protected category. **Merge** on the issue page merges the reviewed commit, pinned the same way. |
 | *Needs you* | Something is not right: findings still open after the last review, a failed or stalled check, a head that moved after the verdict, conflicts, a draft, branch protection, a pull request closed without merging, a session that stopped, or a step that failed (a refused push, for instance). |
 
+A merge closes the issue, and the Issues view lists open issues. An issue with
+a pipeline that the list no longer holds, closed by its merge or outside the
+search, is shown below the list under *Pipelines on issues not listed above*,
+so its page and record stay within reach. The twenty most recent are shown;
+`terminalx pipelines list` has them all.
+
 **Stop** on the issue's page halts a pipeline where it is; while stopped, a
 session's report is not acted on, and after **Resume** the stage's own button
 (open the pull request, review the changes) carries it on.

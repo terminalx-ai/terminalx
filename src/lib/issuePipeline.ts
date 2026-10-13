@@ -91,6 +91,22 @@ export function pipelineForIssue(pipelines: IssuePipeline[], projectPath: string
   return pipelines.filter((value) => value.projectPath === projectPath && value.issue.url === issueUrl).sort(newest)[0] ?? null;
 }
 
+/**
+ * A project's pipelines on issues the tracker's list does not hold, one per
+ * issue, newest first. A merge closes its issue, and a closed issue leaves a
+ * list of open ones, while its page is where the record of that merge is read.
+ */
+export function unlistedPipelines(pipelines: IssuePipeline[], projectPath: string, provider: IssuePipeline["issue"]["provider"], listedUrls: Iterable<string>, limit = 20): IssuePipeline[] {
+  const seen = new Set(listedUrls);
+  const found: IssuePipeline[] = [];
+  for (const value of pipelines.filter((value) => value.projectPath === projectPath && value.issue.provider === provider).sort(newest)) {
+    if (seen.has(value.issue.url)) continue;
+    seen.add(value.issue.url);
+    found.push(value);
+  }
+  return found.slice(0, limit);
+}
+
 /** The pipeline a session takes part in, and as what. */
 export function pipelineForSession(pipelines: IssuePipeline[], sessionId: string): { pipeline: IssuePipeline; role: "author" | "reviewer" } | null {
   const found = pipelines.filter((value) => value.author.sessionId === sessionId || value.reviewer?.sessionId === sessionId).sort(newest)[0];

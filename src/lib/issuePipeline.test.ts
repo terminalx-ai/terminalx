@@ -168,6 +168,23 @@ describe("where a pipeline stands", () => {
     expect(pipelineForSession(all, "someone-else")).toBeNull();
   });
 
+  it("names the issues a tracker's list no longer holds, once each and newest first", async () => {
+    const { unlistedPipelines } = await load();
+    const on = (number: number, patch: Partial<IssuePipeline> = {}) => {
+      const issue = { provider: "github", id: String(number), identifier: `#${number}`, title: `Issue ${number}`, url: `https://github.com/acme/widgets/issues/${number}` };
+      return pipeline({ id: `p${number}`, issue, created: `2026-10-${String(number).padStart(2, "0")}T00:00:00.000Z`, ...patch });
+    };
+    const again = on(3, { id: "p3-again", created: "2026-10-20T00:00:00.000Z" });
+    const all = [on(1), on(2), on(3), again, on(4, { projectPath: "/other" }), on(5, { issue: { ...on(5).issue, provider: "linear" } })];
+    const ids = (found: IssuePipeline[]) => found.map((value) => value.id);
+    // Issue 2 is still listed; 4 is another project's; 5 is on the other tracker.
+    expect(ids(unlistedPipelines(all, "/repo", "github", [on(2).issue.url]))).toEqual(["p3-again", "p1"]);
+    expect(ids(unlistedPipelines(all, "/repo", "linear", []))).toEqual(["p5"]);
+    expect(ids(unlistedPipelines(all, "/repo", "github", [], 1))).toEqual(["p3-again"]);
+    // Asking does not reorder what the window holds.
+    expect(ids(all)).toEqual(["p1", "p2", "p3", "p3-again", "p4", "p5"]);
+  });
+
   it("fills a project's settings in with the defaults, which never merge", async () => {
     const { DEFAULT_PIPELINE_SETTINGS, pipelineSettings } = await load();
     expect(DEFAULT_PIPELINE_SETTINGS).toMatchObject({ enabled: true, autoMerge: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge" });

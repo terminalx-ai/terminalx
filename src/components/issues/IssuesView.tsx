@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -20,10 +20,27 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
-import { pipelineForIssue, pipelineSettings, startPipeline, useIssuePipelines } from "@/lib/issuePipeline";
+import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
+import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
 
 type Provider = "github" | "linear";
+
+/**
+ * GitHub closes an issue a moment after the pull request that closes it is
+ * merged. The list is read again once that has had time to happen.
+ */
+const AFTER_MERGE_MS = 3000;
+
+/**
+ * A row for an issue the tracker's list no longer holds, from what its
+ * pipeline remembers of it. What the tracker says of it now is read when the
+ * issue is opened, so the row claims no state.
+ */
+function issueOfPipeline(pipeline: IssuePipeline): Issue {
+  const { provider, id, identifier, title, url } = pipeline.issue;
+  return { provider: provider === "linear" ? "linear" : "github", id, identifier, number: Number(id) || 0, title, url, state: "", stateType: "completed", labels: [], updatedAt: pipeline.modified };
+}
 
 /**
  * Issues from the project's tracker, and a way to start a session on one.
@@ -51,6 +68,8 @@ export function IssuesView({
   const [teams, setTeams] = useState<IssueTeam[]>([]);
   const [search, setSearch] = useState("");
   const [list, setList] = useState<Issue[]>([]);
+  // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
+  const [listOf, setListOf] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
@@ -85,6 +104,28 @@ export function IssuesView({
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
     [store.sessions],
   );
+  // Issues with a pipeline here that the list does not hold: closed by their
+  // merge, or outside the search. They stay below it, so the record of what
+  // happened to them can still be read on their page.
+  const unlisted = useMemo(() => {
+    if (!project || listOf !== `${project.path}\n${provider}`) return [];
+    const words = search.trim().toLowerCase();
+    return unlistedPipelines(pipelines, project.path, provider, list.map((issue) => issue.url))
+      .filter((value) => !words || `${value.issue.identifier} ${value.issue.title}`.toLowerCase().includes(words))
+      .map((value) => ({ issue: issueOfPipeline(value), pipeline: value }));
+  }, [pipelines, project, provider, list, listOf, search]);
+  // A merge closes the issue on the tracker. The list and the open issue are
+  // read again when a pipeline of this project gets there.
+  const mergedHere = pipelines.filter((value) => value.projectPath === project?.path && value.state === "merged").length;
+  const mergedSeen = useRef({ project: project?.path, count: mergedHere });
+  useEffect(() => {
+    const before = mergedSeen.current;
+    mergedSeen.current = { project: project?.path, count: mergedHere };
+    // Another project's count is not a merge that happened in this one.
+    if (before.project !== project?.path || mergedHere <= before.count) return;
+    const timer = window.setTimeout(() => setTick((t) => t + 1), AFTER_MERGE_MS);
+    return () => window.clearTimeout(timer);
+  }, [mergedHere, project?.path]);
 
   useEffect(() => {
     onTargetProjectChange?.(selected && project ? project.path : null);
@@ -143,10 +184,14 @@ export function IssuesView({
       setError(null);
       try {
         const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
-        if (live) setList(r);
+        if (live) {
+          setList(r);
+          setListOf(`${project.path}\n${provider}`);
+        }
       } catch (e) {
         if (live) {
           setList([]);
+          setListOf(`${project.path}\n${provider}`);
           setError(errorMessage(e));
         }
       } finally {
@@ -159,16 +204,27 @@ export function IssuesView({
     };
   }, [project, provider, assignedToMe, teamId, search, linear?.connected, tick]);
 
-  // Body on demand: GitHub lists come without it.
+  // Body on demand: GitHub lists come without it. A refresh reads the open
+  // issue again as well, since its state may have moved; what is on the page
+  // stays there until the answer comes.
+  const shown = useRef<string | null>(null);
+  const selectedAtTick = useRef(tick);
   useEffect(() => {
-    setDetail(null);
+    const key = selected && project ? `${project.path}:${selected.provider}:${selected.id}` : null;
+    const again = key != null && shown.current === key;
+    shown.current = key;
+    if (!again) {
+      setDetail(null);
+      selectedAtTick.current = tick;
+    }
     if (!selected || !project) return;
-    if (selected.body != null && selected.provider === "linear") {
+    // A Linear row carries its body, and is as fresh as the list it came with.
+    if (selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick) {
       setDetail(selected);
       return;
     }
     let live = true;
-    setDetailLoading(true);
+    if (!again) setDetailLoading(true);
     issuesApi
       .details(project.path, selected.provider, selected.id)
       .then((d) => live && setDetail(d))
@@ -177,7 +233,7 @@ export function IssuesView({
     return () => {
       live = false;
     };
-  }, [selected, project]);
+  }, [selected, project, tick]);
 
   const start = useCallback(async () => {
     const issue = detail ?? selected;
@@ -232,6 +288,14 @@ export function IssuesView({
   }, [project, provider, ghOk, repo, linear]);
 
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
+  const open = (issue: Issue) => {
+    setSelected(issue);
+    setUseWorktree(prefs.useWorktree);
+    setAutoMerge(pipelineDefaults.autoMerge);
+  };
+  const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
+  // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
+  const current = detail && isOpen(detail) ? detail : selected;
   // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
@@ -362,14 +426,10 @@ export function IssuesView({
                     <ContextMenuTrigger className="block">
                       <IssueListItem
                         issue={i}
-                        selected={selected?.id === i.id && selected.provider === i.provider}
+                        selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
                         pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
-                        onSelect={() => {
-                          setSelected(i);
-                          setUseWorktree(prefs.useWorktree);
-                          setAutoMerge(pipelineDefaults.autoMerge);
-                        }}
+                        onSelect={() => open(i)}
                       />
                     </ContextMenuTrigger>
                     <ContextMenuContent>
@@ -392,6 +452,18 @@ export function IssuesView({
               ))}
             </ul>
           )}
+          {!emptyReason && unlisted.length > 0 && (
+            <section aria-label="Pipelines on issues not listed above" data-testid="issues-unlisted">
+              <h3 className="px-4 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-faint">Pipelines on issues not listed above</h3>
+              <ul className="px-2 pb-4">
+                {unlisted.map(({ issue, pipeline: its }) => (
+                  <li key={`${issue.provider}:${issue.id}`}>
+                    <IssueListItem issue={issue} selected={isOpen(issue)} pipeline={its} onSelect={() => open(issue)} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
       </div>
 
@@ -406,9 +478,9 @@ export function IssuesView({
                 <h2 className="min-w-0 flex-1 text-[15px] font-semibold leading-snug">{selected.title}</h2>
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                <span>{selected.state}</span>
-                {selected.team && <span>{selected.team.name}</span>}
-                {selected.assignee && <span>Assigned to {selected.assignee.name}</span>}
+                {current?.state && <span>{current.state}</span>}
+                {current?.team && <span>{current.team.name}</span>}
+                {current?.assignee && <span>Assigned to {current.assignee.name}</span>}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
                 </button>
