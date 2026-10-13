@@ -420,6 +420,38 @@ pub(crate) struct AgentLoginAuthorization {
     context: AccountContext,
     /// The kind of login stored for the agent now, which saving replaces.
     replaces: Option<AgentLoginKind>,
+    /// That login's kind and scope as the service names them, for `reach`.
+    stored: Option<(String, Option<String>)>,
+}
+
+/// Who may use a login once it is stored. The desktop offers no choice of
+/// scope and so sends none (`sharedUse` is left out of every request): the
+/// account service decides, and this is what it will decide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgentLoginReach {
+    /// Nothing of this kind is stored: the service's default for a new login.
+    ServiceDefault,
+    /// A login of the same kind is replaced, and its scope stays as it is
+    /// (`organization`, `managers`, or one this app does not know).
+    Kept(String),
+    /// A login of another kind is replaced: the service never widens, so
+    /// the new login gets the stored scope or its kind's narrower default.
+    NoWider(String),
+}
+
+impl AgentLoginReach {
+    /// One sentence for a native dialog.
+    pub(crate) fn sentence(&self) -> &'static str {
+        match self {
+            Self::ServiceDefault => "By default, agents in every member's cloud workspaces of the organization may run on it; the account service decides this, and Settings shows who the login reaches once it is stored.",
+            Self::Kept(scope) if scope == "managers" => "This keeps who can use the login now: only workspaces that nobody but owners and admins can drive.",
+            Self::Kept(scope) if scope == "organization" => "This keeps who can use the login now: agents in every member's cloud workspaces of the organization.",
+            Self::Kept(_) => "This keeps who can use the login now, as the account service has it.",
+            Self::NoWider(scope) if scope == "managers" => "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(scope) if scope == "organization" => "This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces of the organization. Settings shows who the login reaches once it is stored.",
+            Self::NoWider(_) => "This keeps who can use the login now, or fewer. Settings shows who the login reaches once it is stored.",
+        }
+    }
 }
 
 impl AgentLoginAuthorization {
@@ -429,6 +461,30 @@ impl AgentLoginAuthorization {
 
     pub(crate) fn replaces(&self) -> Option<AgentLoginKind> {
         self.replaces
+    }
+
+    /// Who may use a login of `kind` stored under this authorization. A
+    /// replacement never widens: the same kind keeps the stored scope, and
+    /// another kind gets it or the narrower default of its own kind.
+    pub(crate) fn reach(&self, kind: AgentLoginKind) -> AgentLoginReach {
+        match &self.stored {
+            None => AgentLoginReach::ServiceDefault,
+            Some((stored_kind, scope)) => {
+                // A server from before the scope existed says nothing, and shared every login with the organization.
+                let scope = scope.clone().unwrap_or_else(|| "organization".into());
+                if stored_kind == kind.as_str() {
+                    AgentLoginReach::Kept(scope)
+                } else {
+                    AgentLoginReach::NoWider(scope)
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(context: AccountContext, stored: Option<(&str, Option<&str>)>) -> Self {
+        let replaces = stored.map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+        Self { context, replaces, stored: stored.map(|(kind, scope)| (kind.to_owned(), scope.map(str::to_owned))) }
     }
 }
 
@@ -642,6 +698,16 @@ pub struct CloudWorkspace {
     /// How many plain members hold a share; only for a caller with a role.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub shared_with: Option<u32>,
+    /// Present on a preparation workspace only (PRO-20): when the server
+    /// stops it, after which it cannot be started again.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<WorkspacePreparation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePreparation {
+    pub stop_after: i64,
 }
 
 /// `you` on a workspace list item (§21.2).
@@ -1073,6 +1139,11 @@ pub struct CloudWorkspaceCreateInput {
     /// The agent and first prompt (PRO-21, contract §19.1).
     #[serde(default)]
     pub launch: Option<CreateLaunch>,
+    /// A preparation workspace for "Configure with an agent" (PRO-20): the
+    /// server keeps it private to its admin, gives it none of the
+    /// organization's secrets and stops it at its own time limit.
+    #[serde(default)]
+    pub preparation: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1293,6 +1364,214 @@ pub struct CloudWorkspaceShareChange {
     /// Only on a grant: false when an existing share was updated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<bool>,
+}
+
+/// When a scheduled task runs (saas contract §24.2). `hour` is not part of
+/// `hourly`; `weekdays` (`mon` … `sun`) only of `weekly`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleTiming {
+    pub preset: String,
+    #[serde(default)]
+    pub hour: u8,
+    pub minute: u8,
+    #[serde(default)]
+    pub weekdays: Vec<String>,
+    pub timezone: String,
+}
+
+/// Upper bounds on what a schedule costs and occupies, from the workspace's
+/// own rate.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleEstimate {
+    pub currency: String,
+    pub hourly_micros: u64,
+    /// The longest a run can keep the machine on: the wait for the runtime
+    /// to take it, the limit, and the grace after it. A server that does not
+    /// state it priced the limit alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_run_max_minutes: Option<u32>,
+    pub per_run_max_micros: u64,
+    pub monthly_runs: u32,
+    pub monthly_max_micros: u64,
+    /// Under `completionPolicy: "keep"` the machine a run starts stays on.
+    #[serde(default)]
+    pub keeps_machine_running: bool,
+    #[serde(default)]
+    pub running_slots: u32,
+    /// The most runs the schedule starts in any 24 hours.
+    pub max_runs_per_day: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleRun {
+    pub id: String,
+    pub scheduled_for: i64,
+    #[serde(default)]
+    pub trigger: String,
+    /// queued | provisioning | working | completed | failed | skipped |
+    /// canceled | expired.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+}
+
+/// A scheduled task as the API shows it. The prompt is never returned:
+/// `prompt_bytes` says how long it is.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSchedule {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub created_by: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub prompt_bytes: u64,
+    pub schedule: CloudScheduleTiming,
+    pub missed_run_policy: String,
+    pub completion_policy: String,
+    pub max_run_minutes: u32,
+    /// `active` or `paused`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
+    pub estimate: CloudScheduleEstimate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<CloudScheduleRun>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CloudSchedules {
+    pub schedules: Vec<CloudSchedule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CloudScheduleDetail {
+    pub schedule: CloudSchedule,
+    /// The newest runs first, at most 50.
+    #[serde(default)]
+    pub runs: Vec<CloudScheduleRun>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct CloudScheduleAnswer {
+    schedule: CloudSchedule,
+}
+
+/// What a schedule would cost and when it would first run, before it is saved.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudScheduleQuote {
+    pub estimate: CloudScheduleEstimate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<i64>,
+    /// Whether the workspace's runtime can take a scheduled run.
+    pub supported: bool,
+    /// The refusal a create would get now, whatever the schedule says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CloudSchedulesPaused {
+    pub paused: u32,
+}
+
+/// What the cost of a schedule depends on, asked before it is saved.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleEstimateInput {
+    pub workspace_id: String,
+    pub schedule: CloudScheduleTiming,
+    pub completion_policy: String,
+    pub max_run_minutes: u32,
+}
+
+/// A new scheduled task. The spend is confirmed by the person in the window
+/// before this is sent; the request says so itself.
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloudScheduleCreateInput {
+    pub workspace_id: String,
+    pub name: String,
+    pub agent: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    pub mode: String,
+    pub prompt: String,
+    pub schedule: CloudScheduleTiming,
+    pub missed_run_policy: String,
+    pub completion_policy: String,
+    pub max_run_minutes: u32,
+}
+
+/// The modes a schedule may start its agent in: every launch mode but
+/// bypass permissions, since nobody watches a scheduled run.
+const SCHEDULE_MODES: [&str; 4] = ["plan", "manual", "auto", "acceptEdits"];
+const SCHEDULE_PRESETS: [&str; 4] = ["hourly", "daily", "weekdays", "weekly"];
+const SCHEDULE_WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const SCHEDULE_NAME_CHARS: usize = 80;
+const SCHEDULE_RUN_MINUTES: std::ops::RangeInclusive<u32> = 5..=240;
+
+/// The `schedule` object as the server's strict parser takes it, or `None`
+/// for times it would refuse.
+fn schedule_timing_body(timing: &CloudScheduleTiming) -> Option<Value> {
+    let preset = timing.preset.as_str();
+    let weekly = preset == "weekly";
+    let mut days = timing.weekdays.clone();
+    days.sort();
+    days.dedup();
+    if !SCHEDULE_PRESETS.contains(&preset)
+        || timing.minute > 59
+        || timing.hour > 23
+        || timing.timezone.is_empty()
+        || timing.timezone.len() > 64
+        || (weekly && (timing.weekdays.is_empty() || days.len() != timing.weekdays.len()))
+        || !timing.weekdays.iter().all(|day| SCHEDULE_WEEKDAYS.contains(&day.as_str()))
+    {
+        return None;
+    }
+    let mut body = json!({ "preset": preset, "minute": timing.minute, "timezone": timing.timezone });
+    if preset != "hourly" {
+        body["hour"] = json!(timing.hour);
+    }
+    if weekly {
+        body["weekdays"] = json!(timing.weekdays);
+    }
+    Some(body)
+}
+
+fn valid_schedule_id(value: &str) -> bool {
+    value.len() == "schedule_".len() + 36
+        && value.strip_prefix("schedule_").is_some_and(|rest| rest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f' | b'-')))
+}
+
+fn valid_schedule_policies(missed: Option<&str>, completion: &str, minutes: u32) -> bool {
+    missed.is_none_or(|missed| matches!(missed, "skip" | "run-once")) && matches!(completion, "suspend" | "keep") && SCHEDULE_RUN_MINUTES.contains(&minutes)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1876,20 +2155,23 @@ impl CloudWorkspaceService {
         if !self.account.is_current(&context) {
             return Err(context_changed_error(RequestRisk::Read));
         }
-        let replaces = stored
+        let stored = stored
             .credentials
             .into_iter()
             .find(|login| login.provider == provider.as_str() && login.state.as_deref() != Some("disconnected"))
-            .map(|login| if login.auth_kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
+            .map(|login| (login.auth_kind, login.shared_use));
+        let replaces = stored.as_ref().map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
         if replaces.is_some() && !consent.replace_existing {
             return Err(CloudWorkspaceClientError::local("cloud_agent_login_replace_unconfirmed", false));
         }
-        Ok(AgentLoginAuthorization { context, replaces })
+        Ok(AgentLoginAuthorization { context, replaces, stored })
     }
 
     /// Store a login for an agent. `secret` is sent once, to the service
     /// that validates and encrypts it, and cleared; the answer carries the
-    /// login's public fields only.
+    /// login's public fields only. No `sharedUse` is sent: nobody chose one
+    /// here, so the service applies its default to a new login and never
+    /// widens one it replaces (`AgentLoginAuthorization::reach`).
     pub(crate) fn save_agent_login(
         &self,
         authorization: AgentLoginAuthorization,
@@ -1950,8 +2232,11 @@ impl CloudWorkspaceService {
         Ok(started)
     }
 
-    /// Finish a sign-in with the code the provider's page showed. A new
-    /// login is usable by the whole organization (the owner's default).
+    /// Finish a sign-in with the code the provider's page showed. No
+    /// `sharedUse` is sent, as nobody chose one here: sending the default
+    /// would widen a login an admin had narrowed to `managers` every time
+    /// someone logged in again. The service applies its default to a new
+    /// login and keeps the scope of a subscription login it replaces.
     pub(crate) fn complete_claude_login(
         &self,
         authorization: AgentLoginAuthorization,
@@ -1968,7 +2253,7 @@ impl CloudWorkspaceService {
         let escaped = zeroize::Zeroizing::new(serde_json::to_string(code.trim()).map_err(invalid)?);
         drop(code);
         let body = zeroize::Zeroizing::new(format!(
-            r#"{{"attemptId":{},"code":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true,"sharedUse":"organization"}}"#,
+            r#"{{"attemptId":{},"code":{},"confirmOrganizationSharing":true,"confirmMachineInstallation":true}}"#,
             serde_json::to_string(attempt_id).map_err(invalid)?,
             escaped.as_str()
         ));
@@ -2084,6 +2369,11 @@ impl CloudWorkspaceService {
             });
             if !input.repositories.is_empty() {
                 body["setup"] = setup_body(&input.repositories);
+            }
+            // Sent only when asked for: a server from before preparation
+            // workspaces refuses the key, and then nothing is created.
+            if input.preparation {
+                body["preparation"] = json!(true);
             }
             if let Some(launch) = &input.launch {
                 body["launch"] = launch_body(launch);
@@ -2502,6 +2792,143 @@ impl CloudWorkspaceService {
         })
     }
 
+    /// The organization's scheduled tasks, or one workspace's (saas contract
+    /// §24.2). For owners and admins; a server with the feature off answers
+    /// `cloud_workspace_unavailable` with status 404.
+    pub fn schedules(&self, org: Option<&str>, workspace_id: Option<&str>) -> Result<CloudSchedules, CloudWorkspaceClientError> {
+        if workspace_id.is_some_and(|id| !valid_resource_id(id)) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: CloudSchedules = client.request(context, &["cloud-schedules"], workspace_id.map(|id| ("workspaceId", id)), None, None, RequestRisk::Read)?;
+            // An answer about another workspace is not this workspace's list.
+            if result.schedules.iter().any(|schedule| !valid_schedule_id(&schedule.id) || workspace_id.is_some_and(|id| schedule.workspace_id != id)) {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    /// One scheduled task and its newest runs.
+    pub fn schedule(&self, org: Option<&str>, schedule_id: &str) -> Result<CloudScheduleDetail, CloudWorkspaceClientError> {
+        if !valid_schedule_id(schedule_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            let result: CloudScheduleDetail = client.request(context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Read)?;
+            if result.schedule.id != schedule_id {
+                return Err(invalid_response());
+            }
+            Ok(result)
+        })
+    }
+
+    /// What a schedule would cost and when it would first run. It writes
+    /// nothing on the server, so it is asked like a read.
+    pub fn schedule_estimate(&self, org: Option<&str>, input: &CloudScheduleEstimateInput) -> Result<CloudScheduleQuote, CloudWorkspaceClientError> {
+        let timing = schedule_timing_body(&input.schedule);
+        let (Some(timing), true) = (timing, valid_resource_id(&input.workspace_id) && valid_schedule_policies(None, &input.completion_policy, input.max_run_minutes)) else {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        };
+        let body = json!({ "workspaceId": input.workspace_id, "schedule": timing, "completionPolicy": input.completion_policy, "maxRunMinutes": input.max_run_minutes });
+        self.run_in(org, RequestRisk::Read, |client, context| {
+            client.request_as("POST", context, &["cloud-schedules", "estimate"], None, Some(body), None, RequestRisk::Read).map_err(|mut error: CloudWorkspaceClientError| {
+                // A 404 that names no refusal is a server without the route
+                // (another person's private workspace says so by its code).
+                if error.status == Some(404) && error.code == "cloud_workspace_unavailable" {
+                    error.code = "cloud_schedule_estimate_not_supported".into();
+                    error.retryable = false;
+                }
+                error
+            })
+        })
+    }
+
+    /// Make a scheduled task. It starts billed compute by itself, which the
+    /// person confirmed before this was called; the request says so. A mode
+    /// is always sent and is never bypass permissions.
+    pub fn schedule_create(&self, org: Option<&str>, input: &CloudScheduleCreateInput) -> Result<CloudSchedule, CloudWorkspaceClientError> {
+        let invalid = |code: &str| Err(CloudWorkspaceClientError::local(code, false));
+        let name = input.name.trim();
+        let Some(timing) = schedule_timing_body(&input.schedule) else { return invalid("cloud_workspace_request_invalid") };
+        // As the server reads it: printable ASCII, no space.
+        let model_ok = input.model.as_deref().is_none_or(|model| (1..=100).contains(&model.len()) && model.bytes().all(|byte| (0x21..=0x7e).contains(&byte)));
+        let effort_ok = input.effort.as_deref().is_none_or(|effort| (1..=16).contains(&effort.len()) && effort.bytes().all(|byte| byte.is_ascii_lowercase()));
+        if !valid_resource_id(&input.workspace_id)
+            || name.is_empty()
+            || name.chars().count() > SCHEDULE_NAME_CHARS
+            || name.chars().any(char::is_control)
+            || !crate::cloud_agents::launch::valid_agent(&input.agent)
+            || !model_ok
+            || !effort_ok
+            || !SCHEDULE_MODES.contains(&input.mode.as_str())
+            || !valid_schedule_policies(Some(&input.missed_run_policy), &input.completion_policy, input.max_run_minutes)
+        {
+            return invalid("cloud_workspace_request_invalid");
+        }
+        if input.prompt.trim().is_empty() || input.prompt.len() > MAX_PROMPT_BYTES || input.prompt.contains('\0') {
+            return invalid("cloud_workspace_prompt_too_long");
+        }
+        let mut body = json!({
+            "workspaceId": input.workspace_id,
+            "name": name,
+            "agent": input.agent,
+            "mode": input.mode,
+            "prompt": input.prompt,
+            "schedule": timing,
+            "missedRunPolicy": input.missed_run_policy,
+            "completionPolicy": input.completion_policy,
+            "maxRunMinutes": input.max_run_minutes,
+            "confirmProviderSpend": true,
+        });
+        if let Some(model) = input.model.as_deref() {
+            body["model"] = json!(model);
+        }
+        if let Some(effort) = input.effort.as_deref() {
+            body["effort"] = json!(effort);
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules"], None, Some(body), None, RequestRisk::Mutation)?;
+            if result.schedule.workspace_id != input.workspace_id || !valid_schedule_id(&result.schedule.id) {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result.schedule)
+        })
+    }
+
+    /// Pause a scheduled task, or resume a paused one. Resuming starts billed
+    /// compute by itself again and makes the schedule run for this person.
+    pub fn schedule_set_active(&self, org: Option<&str>, schedule_id: &str, active: bool) -> Result<CloudSchedule, CloudWorkspaceClientError> {
+        if !valid_schedule_id(schedule_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        let (action, body) = if active { ("resume", json!({ "confirmProviderSpend": true })) } else { ("pause", json!({})) };
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let result: CloudScheduleAnswer = client.request(context, &["cloud-schedules", schedule_id, action], None, Some(body), None, RequestRisk::Mutation)?;
+            if result.schedule.id != schedule_id {
+                return Err(post_send_error(RequestRisk::Mutation));
+            }
+            Ok(result.schedule)
+        })
+    }
+
+    /// Delete a scheduled task, its prompt and its runs.
+    pub fn schedule_delete(&self, org: Option<&str>, schedule_id: &str) -> Result<(), CloudWorkspaceClientError> {
+        if !valid_schedule_id(schedule_id) {
+            return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
+        }
+        self.run_in(org, RequestRisk::Mutation, |client, context| {
+            let _: Value = client.request_as("DELETE", context, &["cloud-schedules", schedule_id], None, None, None, RequestRisk::Mutation)?;
+            Ok(())
+        })
+    }
+
+    /// Pause every active scheduled task of the organization: nothing starts
+    /// from the next scheduler pass on. Each is resumed by hand.
+    pub fn schedules_pause_all(&self, org: Option<&str>) -> Result<CloudSchedulesPaused, CloudWorkspaceClientError> {
+        self.run_in(org, RequestRisk::Mutation, |client, context| client.request(context, &["cloud-schedules", "pause-all"], None, Some(json!({})), None, RequestRisk::Mutation))
+    }
+
     pub fn operation(
         &self,
         org: Option<&str>,
@@ -2674,6 +3101,11 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_teardown_not_found"
             | "cloud_teardown_preview_changed"
             | "cloud_workspace_quota_exceeded"
+            | "cloud_schedule_runtime_unsupported"
+            | "cloud_schedule_cleanup_pending"
+            | "cloud_schedule_prompt_shell_command"
+            | "cloud_schedule_prompt_slash_command"
+            | "cloud_schedule_prompt_file_mention"
             | "cloud_workspace_concurrency_exceeded"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
@@ -3580,7 +4012,7 @@ mod tests {
         let (_, service) = test_service(&base);
         let login = service
             .save_agent_login(
-                AgentLoginAuthorization { context: context(), replaces: None },
+                AgentLoginAuthorization::for_test(context(), None),
                 AgentLoginProvider::Claude,
                 AgentLoginKind::LoginDocument,
                 zeroize::Zeroizing::new(r#"{"claudeAiOauth":{"accessToken":"at-1"}}"#.to_string()),
@@ -3607,16 +4039,76 @@ mod tests {
         // An empty login is refused here, and an answer about another agent is not accepted.
         let (base, _, _request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let empty = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
+        let empty = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("  ".to_string()), None);
         assert_eq!(empty.err().unwrap().code, "cloud_workspace_request_invalid");
-        let other = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
+        let other = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None);
         assert!(other.is_err());
+    }
+
+    // Review of #429: the desktop sent `sharedUse: organization` with every sign-in, which widened a
+    // login an admin had narrowed to managers whenever someone logged in again.
+    #[test]
+    fn replacing_a_login_sends_no_scope_so_the_service_keeps_the_one_it_has() {
+        let narrowed = || AgentLoginAuthorization::for_test(context(), Some(("oauth-credentials-json", Some("managers"))));
+        let body_of = |text: &str| serde_json::from_str::<Value>(text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+
+        let done = r#"{"status":"complete","credential":{"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","version":2,"updatedAt":9,"state":"connected","sharedUse":"managers"}}"#;
+        let (base, _, request) = serve_once(response("200 OK", done, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let outcome = service.complete_claude_login(narrowed(), "attempt_1", zeroize::Zeroizing::new("the-code#the-state".to_string())).unwrap();
+        let sent = body_of(&request.join().unwrap().text);
+        assert!(sent.get("sharedUse").is_none(), "a sign-in that replaces a login must not name a scope: {sent}");
+        assert_eq!(sent.as_object().unwrap().len(), 4);
+        // What the service kept comes back, and is what the page shows.
+        assert_eq!(outcome.credential.unwrap().shared_use.as_deref(), Some("managers"));
+
+        // The same for a login that is PUT (an API key, a lent sign-in), replacing or new.
+        let stored = r#"{"id":"c1","provider":"claude","authKind":"api-key","fingerprint":"sha256:ab","version":3,"updatedAt":9,"state":"connected","sharedUse":"managers"}"#;
+        for authorization in [AgentLoginAuthorization::for_test(context(), Some(("api-key", Some("managers")))), AgentLoginAuthorization::for_test(context(), None)] {
+            let (base, _, request) = serve_once(response("200 OK", stored, ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            service.save_agent_login(authorization, AgentLoginProvider::Claude, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-1".to_string()), None).unwrap();
+            assert!(body_of(&request.join().unwrap().text).get("sharedUse").is_none());
+        }
+    }
+
+    #[test]
+    fn a_dialog_is_told_who_the_login_will_reach_new_or_kept() {
+        let reach = |stored, kind| AgentLoginAuthorization::for_test(context(), stored).reach(kind);
+        // Nothing stored: the service's default, said as a default.
+        assert_eq!(reach(None, AgentLoginKind::LoginDocument), AgentLoginReach::ServiceDefault);
+        assert!(AgentLoginReach::ServiceDefault.sentence().starts_with("By default, agents in every member's cloud workspaces"));
+        // The same kind is replaced: its scope stays, and a narrowed one is not described as everyone.
+        let kept = reach(Some(("oauth-credentials-json", Some("managers"))), AgentLoginKind::LoginDocument);
+        assert_eq!(kept, AgentLoginReach::Kept("managers".into()));
+        assert_eq!(kept.sentence(), "This keeps who can use the login now: only workspaces that nobody but owners and admins can drive.");
+        assert!(!kept.sentence().contains("every member"));
+        assert!(reach(Some(("api-key", Some("organization"))), AgentLoginKind::ApiKey).sentence().contains("keeps who can use the login now: agents in every member's"));
+        // An older server names no scope: it shared every login with the organization.
+        assert_eq!(reach(Some(("api-key", None)), AgentLoginKind::ApiKey), AgentLoginReach::Kept("organization".into()));
+        // A scope this app does not know is kept without being described.
+        assert!(!reach(Some(("api-key", Some("teams"))), AgentLoginKind::ApiKey).sentence().contains("every member"));
+        // Another kind of login never reaches more than the stored one and may reach fewer: not a first login, and
+        // not described as every member when the stored login is for managers.
+        for (was, becomes) in [("api-key", AgentLoginKind::LoginDocument), ("oauth-credentials-json", AgentLoginKind::ApiKey)] {
+            let narrowed = reach(Some((was, Some("managers"))), becomes);
+            assert_eq!(narrowed, AgentLoginReach::NoWider("managers".into()));
+            assert_eq!(
+                narrowed.sentence(),
+                "This keeps who can use the login now, or fewer: at most workspaces that nobody but owners and admins can drive. Settings shows who the login reaches once it is stored."
+            );
+            assert!(!narrowed.sentence().contains("every member") && !narrowed.sentence().contains("By default"));
+            let wide = reach(Some((was, Some("organization"))), becomes);
+            assert!(wide.sentence().starts_with("This keeps who can use the login now, or fewer: at most agents in every member's cloud workspaces"));
+            assert!(!wide.sentence().contains("By default"));
+            assert!(!reach(Some((was, Some("teams"))), becomes).sentence().contains("every member"));
+        }
     }
 
     // PRO-82 on the desktop: the account service's own sign-in for Claude.
     #[test]
     fn a_claude_sign_in_starts_completes_and_cancels_on_its_routes_and_opens_only_the_providers_page() {
-        let authorization = || AgentLoginAuthorization { context: context(), replaces: None };
+        let authorization = || AgentLoginAuthorization::for_test(context(), None);
         let (base, _, request) = serve_once(response("200 OK", r#"{"attemptId":"attempt_1","authorizeUrl":"https://claude.com/cai/oauth/authorize?state=s","expiresInSeconds":600,"mode":"paste"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         let started = service.start_claude_login(&authorization()).unwrap();
@@ -3642,10 +4134,10 @@ mod tests {
         let outcome = service.complete_claude_login(authorization(), "attempt_1", zeroize::Zeroizing::new("  the-code#the-state \n".to_string())).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-complete HTTP/1.1"));
-        // The whole organization may use a new login; both confirmations are sent; the code is trimmed and sent once.
+        // Both confirmations are sent; the code is trimmed and sent once. No scope is sent: nobody chose one.
         assert_eq!(
             serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(),
-            json!({ "attemptId": "attempt_1", "code": "the-code#the-state", "confirmOrganizationSharing": true, "confirmMachineInstallation": true, "sharedUse": "organization" })
+            json!({ "attemptId": "attempt_1", "code": "the-code#the-state", "confirmOrganizationSharing": true, "confirmMachineInstallation": true })
         );
         assert!(!captured.extra_request);
         let sent = serde_json::to_value(&outcome).unwrap();
@@ -3703,7 +4195,7 @@ mod tests {
         let (_, service) = test_service(&base);
         // Asked for another organization than the active one: nothing is sent.
         assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into()).err().unwrap().code, "account_context_changed");
-        let refused = service.save_agent_login(AgentLoginAuthorization { context: context(), replaces: None }, AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
+        let refused = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
         assert_eq!(refused.err().unwrap().code, "cloud_workspace_credential_invalid");
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("PUT ") && !captured.extra_request);
@@ -3767,6 +4259,7 @@ mod tests {
                 idempotency_key: "stable create key".into(),
                 repositories: Vec::new(),
                 launch: None,
+                preparation: false,
             })
             .unwrap();
         let captured = request.join().unwrap();
@@ -4070,6 +4563,7 @@ mod tests {
                     idempotency_key: "original-key".into(),
                     repositories: Vec::new(),
                     launch: None,
+                    preparation: false,
                 })
                 .unwrap_err();
             let captured = request.join().unwrap();
@@ -4122,6 +4616,7 @@ mod tests {
                     authority: None,
                     you: None,
                     shared_with: None,
+                    preparation: None,
                 },
                 latest_operation: None,
             }],
@@ -4167,6 +4662,7 @@ mod tests {
                         idempotency_key: "original-key".into(),
                         repositories: Vec::new(),
                         launch: None,
+                        preparation: false,
                     })
                     .map(|_| ()),
                 RequestRisk::Mutation => unreachable!(),
@@ -4231,6 +4727,7 @@ mod tests {
             idempotency_key: "launch key".into(),
             repositories,
             launch,
+            preparation: false,
         }
     }
 
@@ -4272,6 +4769,31 @@ mod tests {
         let launch = result.workspace.launch.expect("the launch view");
         assert_eq!((launch.phase.as_str(), launch.work_branch.as_str()), ("allocating", "terminalx/fix-login-3f9a2c1b7d4e"));
         assert_eq!(launch.timings.requested_at, Some(5));
+    }
+
+    #[test]
+    fn a_preparation_create_says_so_and_its_stop_time_reaches_the_page() {
+        let mut body: Value = serde_json::from_str(&snapshot_body(None)).unwrap();
+        body["workspace"]["preparation"] = json!({ "stopAfter": 3_600_000, "somethingNewer": true });
+        let (base, _, request) = serve_once(response("202 Accepted", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let mut input = launch_input(vec![repo("app", Some("main"))], None);
+        input.preparation = true;
+        let result = service.create(None, input).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(sent["preparation"], json!(true));
+        assert_eq!(result.workspace.preparation, Some(WorkspacePreparation { stop_after: 3_600_000 }));
+        assert_eq!(serde_json::to_value(&result.workspace).unwrap()["preparation"], json!({ "stopAfter": 3_600_000 }));
+
+        // An ordinary create never carries the key, and an ordinary workspace has no such field.
+        let (base, _, request) = serve_once(response("202 Accepted", &snapshot_body(None), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let result = service.create(None, launch_input(vec![repo("app", Some("main"))], None)).unwrap();
+        let captured = request.join().unwrap();
+        let sent: Value = serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(sent.get("preparation").is_none());
+        assert!(serde_json::to_value(&result.workspace).unwrap().get("preparation").is_none());
     }
 
     #[test]
@@ -4981,5 +5503,228 @@ mod tests {
         request.join().unwrap();
         assert_eq!((error.code.as_str(), error.status), ("cloud_workspace_concurrency_exceeded", Some(409)));
         assert!(!error.requires_original_account_context);
+    }
+    fn schedule_json(id: &str, workspace_id: &str) -> Value {
+        json!({
+            "id": id, "workspaceId": workspace_id, "name": "Nightly triage", "createdBy": "user-1",
+            "agent": "claude", "mode": "acceptEdits", "promptBytes": 41,
+            "schedule": { "preset": "daily", "hour": 9, "minute": 0, "weekdays": [], "timezone": "Europe/Berlin" },
+            "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 60,
+            "state": "active", "nextRunAt": 1_792_713_600_000i64,
+            "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMicros": 120_000, "monthlyRuns": 30, "monthlyMaxMicros": 3_600_000, "runningSlots": 1, "maxRunsPerDay": 24 },
+            "lastRun": { "id": "run-1", "scheduledFor": 1_792_627_200_000i64, "trigger": "schedule", "state": "failed", "category": "timed-out" }
+        })
+    }
+
+    const SCHEDULE: &str = "schedule_0b9d6b1e-3f5a-4c1d-9f2e-7a1b2c3d4e5f";
+
+    fn schedule_input() -> CloudScheduleCreateInput {
+        serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "name": "  Nightly triage ", "agent": "claude", "model": "sonnet", "mode": "acceptEdits",
+            "prompt": "Triage the new issues.",
+            "schedule": { "preset": "weekly", "hour": 9, "minute": 30, "weekdays": ["mon", "thu"], "timezone": "Europe/Berlin" },
+            "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 45
+        }))
+        .unwrap()
+    }
+
+    fn sent_body(captured: &CapturedRequest) -> Value {
+        serde_json::from_str(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn schedules_are_listed_for_one_workspace_and_an_answer_about_another_is_refused() {
+        let body = json!({ "schedules": [schedule_json(SCHEDULE, "workspace-1")] });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let listed = service.schedules(None, Some("workspace-1")).unwrap();
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-1/cloud-schedules?workspaceId=workspace-1 HTTP/1.1"));
+        let schedule = &listed.schedules[0];
+        assert_eq!((schedule.estimate.per_run_max_micros, schedule.estimate.max_runs_per_day, schedule.estimate.keeps_machine_running), (120_000, 24, false));
+        assert_eq!(schedule.last_run.as_ref().and_then(|run| run.category.as_deref()), Some("timed-out"));
+        // Serialized for the webview in camelCase.
+        let value = serde_json::to_value(&listed).unwrap();
+        assert_eq!(value["schedules"][0]["estimate"]["monthlyMaxMicros"], json!(3_600_000));
+        assert_eq!(value["schedules"][0]["nextRunAt"], json!(1_792_713_600_000i64));
+
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedules(None, Some("workspace-2")).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_invalid_response");
+    }
+
+    #[test]
+    fn a_server_with_scheduled_tasks_off_answers_not_found_and_nothing_is_retried() {
+        let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedules(None, None).unwrap_err();
+        assert!(!request.join().unwrap().extra_request);
+        assert_eq!(error.status, Some(404));
+    }
+
+    #[test]
+    fn a_schedule_is_created_with_a_mode_the_confirmed_spend_and_only_the_keys_the_server_takes() {
+        let body = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let created = service.schedule_create(None, &schedule_input()).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules HTTP/1.1"));
+        assert_eq!(
+            sent_body(&captured),
+            json!({
+                "workspaceId": "workspace-1", "name": "Nightly triage", "agent": "claude", "model": "sonnet", "mode": "acceptEdits",
+                "prompt": "Triage the new issues.",
+                "schedule": { "preset": "weekly", "hour": 9, "minute": 30, "weekdays": ["mon", "thu"], "timezone": "Europe/Berlin" },
+                "missedRunPolicy": "skip", "completionPolicy": "suspend", "maxRunMinutes": 45, "confirmProviderSpend": true
+            })
+        );
+        assert_eq!(created.id, SCHEDULE);
+        assert!(!captured.extra_request, "a create is never sent twice");
+    }
+
+    #[test]
+    fn a_schedule_that_the_server_would_refuse_is_not_sent() {
+        let (_, service) = test_service("http://127.0.0.1:1");
+        let change = |edit: fn(&mut CloudScheduleCreateInput)| {
+            let mut input = schedule_input();
+            edit(&mut input);
+            service.schedule_create(None, &input).unwrap_err().code
+        };
+        // Nobody watches a scheduled run: never bypass permissions, never no mode.
+        assert_eq!(change(|input| input.mode = "bypassPermissions".into()), "cloud_workspace_request_invalid");
+        // A model the server would refuse (it takes no space) is not sent.
+        assert_eq!(change(|input| input.model = Some("opus 4".into())), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.mode = String::new()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.name = "   ".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.name = "x".repeat(81)), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.max_run_minutes = 4), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.max_run_minutes = 241), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.completion_policy = "forever".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.preset = "cron".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.weekdays = Vec::new()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.weekdays = vec!["mon".into(), "mon".into()]), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.schedule.hour = 24), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.workspace_id = "../other".into()), "cloud_workspace_request_invalid");
+        assert_eq!(change(|input| input.prompt = " ".into()), "cloud_workspace_prompt_too_long");
+        assert_eq!(change(|input| input.prompt = "x".repeat(MAX_PROMPT_BYTES + 1)), "cloud_workspace_prompt_too_long");
+        // A body with a key this build does not know is not a schedule.
+        assert!(serde_json::from_value::<CloudScheduleCreateInput>(json!({ "organizationId": "org-2" })).is_err());
+    }
+
+    #[test]
+    fn schedule_times_are_sent_as_the_strict_parser_takes_them() {
+        let timing = |preset: &str, weekdays: &[&str]| CloudScheduleTiming {
+            preset: preset.into(),
+            hour: 7,
+            minute: 5,
+            weekdays: weekdays.iter().map(|day| day.to_string()).collect(),
+            timezone: "UTC".into(),
+        };
+        // `hourly` has no hour; days belong to `weekly` only.
+        assert_eq!(schedule_timing_body(&timing("hourly", &[])), Some(json!({ "preset": "hourly", "minute": 5, "timezone": "UTC" })));
+        assert_eq!(schedule_timing_body(&timing("daily", &[])), Some(json!({ "preset": "daily", "hour": 7, "minute": 5, "timezone": "UTC" })));
+        assert_eq!(schedule_timing_body(&timing("weekdays", &["mon"])), Some(json!({ "preset": "weekdays", "hour": 7, "minute": 5, "timezone": "UTC" })));
+        assert_eq!(schedule_timing_body(&timing("weekly", &["sun"])), Some(json!({ "preset": "weekly", "hour": 7, "minute": 5, "weekdays": ["sun"], "timezone": "UTC" })));
+        assert_eq!(schedule_timing_body(&timing("weekly", &["funday"])), None);
+    }
+
+    #[test]
+    fn an_estimate_is_asked_without_a_prompt_and_read_back() {
+        let body = json!({
+            "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMicros": 480_000, "monthlyRuns": 30, "monthlyMaxMicros": 86_400_000, "keepsMachineRunning": true, "runningSlots": 1, "maxRunsPerDay": 24 },
+            "nextRunAt": 1_792_713_600_000i64, "supported": false
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "keep", "maxRunMinutes": 240
+        }))
+        .unwrap();
+        let quote = service.schedule_estimate(None, &input).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules/estimate HTTP/1.1"));
+        assert_eq!(
+            sent_body(&captured),
+            json!({ "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "keep", "maxRunMinutes": 240 })
+        );
+        assert!(quote.estimate.keeps_machine_running && !quote.supported);
+        assert_eq!(quote.next_run_at, Some(1_792_713_600_000));
+        // A server from before the bound counted the wait and the grace.
+        assert_eq!((quote.estimate.per_run_max_minutes, quote.refusal), (None, None));
+
+        let body = json!({
+            "estimate": { "currency": "USD", "hourlyMicros": 120_000, "perRunMaxMinutes": 265, "perRunMaxMicros": 530_000, "monthlyRuns": 30, "monthlyMaxMicros": 15_900_000, "runningSlots": 1, "maxRunsPerDay": 24 },
+            "supported": true, "refusal": "cloud_workspace_quota_exceeded"
+        });
+        let (base, _, request) = serve_once(response("200 OK", &body.to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let quote = service.schedule_estimate(None, &input).unwrap();
+        request.join().unwrap();
+        assert_eq!((quote.estimate.per_run_max_minutes, quote.refusal.as_deref()), (Some(265), Some("cloud_workspace_quota_exceeded")));
+    }
+
+    #[test]
+    fn an_estimate_from_a_server_without_the_route_is_not_a_server_that_cannot_be_reached() {
+        let input: CloudScheduleEstimateInput = serde_json::from_value(json!({
+            "workspaceId": "workspace-1", "schedule": { "preset": "daily", "hour": 9, "minute": 0, "timezone": "UTC" }, "completionPolicy": "suspend", "maxRunMinutes": 60
+        }))
+        .unwrap();
+        let (base, _, request) = serve_once(response("404 Not Found", "404 Not Found", ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedule_estimate(None, &input).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.retryable), ("cloud_schedule_estimate_not_supported", false));
+        // Another person's private workspace keeps its own answer.
+        let (base, _, request) = serve_once(response("404 Not Found", r#"{"error":"cloud_workspace_not_found"}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedule_estimate(None, &input).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_workspace_not_found");
+    }
+
+    #[test]
+    fn pause_resume_delete_and_pause_all_send_what_the_server_expects() {
+        let answer = json!({ "schedule": schedule_json(SCHEDULE, "workspace-1") }).to_string();
+        let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.schedule_set_active(None, SCHEDULE, false).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/pause HTTP/1.1")));
+        assert_eq!(sent_body(&captured), json!({}));
+
+        // Resuming starts billed compute by itself again, and says so.
+        let (base, _, request) = serve_once(response("200 OK", &answer, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.schedule_set_active(None, SCHEDULE, true).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with(&format!("POST /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE}/resume HTTP/1.1")));
+        assert_eq!(sent_body(&captured), json!({ "confirmProviderSpend": true }));
+
+        let (base, _, request) = serve_once(response("200 OK", r#"{"ok":true}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        service.schedule_delete(None, SCHEDULE).unwrap();
+        assert!(request.join().unwrap().text.starts_with(&format!("DELETE /v1/desktop/orgs/org-1/cloud-schedules/{SCHEDULE} HTTP/1.1")));
+
+        let (base, _, request) = serve_once(response("200 OK", r#"{"paused":3}"#, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        assert_eq!(service.schedules_pause_all(None).unwrap().paused, 3);
+        assert!(request.join().unwrap().text.starts_with("POST /v1/desktop/orgs/org-1/cloud-schedules/pause-all HTTP/1.1"));
+
+        // An id that is not a schedule's never reaches a URL.
+        assert_eq!(service.schedule_delete(None, "../cloud-workspaces/workspace-1").unwrap_err().code, "cloud_workspace_request_invalid");
+        assert_eq!(service.schedule(None, "schedule_1").unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn a_refused_schedule_keeps_the_servers_reason() {
+        for code in ["cloud_schedule_runtime_unsupported", "cloud_schedule_cleanup_pending", "cloud_schedule_prompt_shell_command", "cloud_schedule_prompt_slash_command", "cloud_schedule_prompt_file_mention"] {
+            let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": code }).to_string(), ""), Duration::ZERO);
+            let (_, service) = test_service(&base);
+            let error = service.schedule_create(None, &schedule_input()).unwrap_err();
+            request.join().unwrap();
+            assert_eq!(error.code, code);
+        }
     }
 }

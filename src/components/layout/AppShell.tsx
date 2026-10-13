@@ -27,6 +27,7 @@ import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
+import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
@@ -36,9 +37,11 @@ import { bootFloating, showFloatingWindow } from "@/lib/floating";
 import { bootMergedCleanup } from "@/lib/mergedCleanup";
 import { WorkspaceRemoveDialog } from "@/components/session/WorkspaceRemoveDialog";
 import { WorktreeCleanupDialog } from "@/components/cleanup/WorktreeCleanupDialog";
+import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
+import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
@@ -88,6 +91,7 @@ export function AppShell() {
     void subscribeTabPty();
     void bootSessions();
     void bootAutomations();
+    void bootIssuePipelines();
     void loadModels();
     startNotifications();
     void bootStatus();
@@ -129,6 +133,11 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
+  const openStorageSettings = useCallback(() => {
+    setSettingsTab("storage");
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }, []);
   const newSession = useCallback(() => selectSession(null), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
@@ -162,10 +171,13 @@ export function AppShell() {
         <StarReminder />
         <MergedCleanupNotices />
         <Toasts />
+        {/* Last, so it keeps the corner and the toasts stack above it. */}
+        <CleanupIndicator onOpenStorage={openStorageSettings} />
       </div>
       <BypassDialog />
       <SessionDialogs />
       <CloudShareDialogHost />
+      <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />

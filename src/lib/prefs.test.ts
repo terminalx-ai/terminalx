@@ -122,3 +122,85 @@ describe("website browser preferences", () => {
     expect(getPrefs().linkBrowser).toBe("ask");
   });
 });
+
+// #427. "Stop the running turn" on Escape (`session.stop`) used to end the agent's process. It is now two actions:
+// the interrupt Escape sends (`session.interrupt`), and a hard stop that has no keys until the reader gives it some.
+describe("shortcuts saved before Escape was split into interrupt and stop", () => {
+  const KEY = "raccoon.prefs";
+  const load = async (saved: unknown) => {
+    localStorage.setItem(KEY, JSON.stringify(saved));
+    const prefs = await import("./prefs");
+    const { resolveKeymap } = await import("./shortcuts");
+    return { prefs: prefs.getPrefs(), keymap: resolveKeymap(prefs.getPrefs().shortcuts, false) };
+  };
+
+  it("moves the keys chosen for stopping a turn to the interrupt, once, and leaves the hard stop without any", async () => {
+    const write = vi.spyOn(Storage.prototype, "setItem");
+    const { prefs, keymap } = await load({ sounds: false, shortcuts: { "session.stop": ["shift+escape"], "app.toggleSidebar": ["mod+shift+b"] } });
+    expect(prefs.shortcuts).toEqual({ "session.interrupt": ["shift+escape"], "app.toggleSidebar": ["mod+shift+b"] });
+    expect(keymap["session.interrupt"]).toEqual(["shift+escape"]);
+    expect(keymap["session.stop"]).toEqual([]);
+    expect(prefs).toMatchObject({ sounds: false, shortcutsVersion: 2 });
+    // Saved, with its version, by the one write the migration makes (the first is the test's own).
+    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(prefs);
+    expect(write).toHaveBeenCalledTimes(2);
+
+    vi.resetModules();
+    const again = await import("./prefs");
+    expect(again.getPrefs().shortcuts).toEqual(prefs.shortcuts);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps Escape free for someone who had taken the action off it", async () => {
+    const { keymap } = await load({ shortcuts: { "session.stop": [] } });
+    expect(keymap["session.interrupt"]).toEqual([]);
+    expect(keymap["session.stop"]).toEqual([]);
+  });
+
+  it("never leaves Escape, or any key kept beside it, ending the agent's process", async () => {
+    const { keymap } = await load({ shortcuts: { "session.stop": ["escape", "mod+."] } });
+    expect(keymap["session.interrupt"]).toEqual(["escape", "mod+."]);
+    expect(keymap["session.stop"]).toEqual([]);
+  });
+
+  it("gives Escape to the interrupt for everyone who never changed it, and writes nothing", async () => {
+    const write = vi.spyOn(Storage.prototype, "setItem");
+    const { prefs, keymap } = await load({ sounds: false, shortcuts: { "app.toggleSidebar": ["mod+shift+b"] } });
+    expect(keymap["session.interrupt"]).toEqual(["escape"]);
+    expect(keymap["session.stop"]).toEqual([]);
+    expect(prefs.shortcuts).toEqual({ "app.toggleSidebar": ["mod+shift+b"] });
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a hard stop the reader set after the split where it is", async () => {
+    const { prefs, keymap } = await load({ shortcutsVersion: 2, shortcuts: { "session.stop": ["mod+."] } });
+    expect(prefs.shortcuts).toEqual({ "session.stop": ["mod+."] });
+    expect(keymap["session.stop"]).toEqual(["mod+."]);
+    expect(keymap["session.interrupt"]).toEqual(["escape"]);
+  });
+
+  it("does not migrate twice: a hard stop set in this version survives a restart", async () => {
+    await load({ shortcuts: { "session.stop": ["shift+escape"] } });
+    const { saveShortcut } = await import("./shortcuts");
+    expect(saveShortcut("session.stop", ["mod+."])).toEqual({ ok: true });
+
+    vi.resetModules();
+    const prefs = await import("./prefs");
+    expect(prefs.getPrefs().shortcuts).toEqual({ "session.interrupt": ["shift+escape"], "session.stop": ["mod+."] });
+  });
+
+  it("does not touch shortcuts written by a newer version", async () => {
+    const { prefs } = await load({ shortcutsVersion: 3, shortcuts: { "session.stop": ["mod+."] } });
+    expect(prefs).toMatchObject({ shortcutsVersion: 3, shortcuts: { "session.stop": ["mod+."] } });
+  });
+
+  it("survives anything stored in place of the shortcuts", async () => {
+    for (const shortcuts of [null, "escape", ["session.stop"], 7]) {
+      localStorage.clear();
+      vi.resetModules();
+      const { keymap } = await load({ shortcuts });
+      expect(keymap["session.interrupt"]).toEqual(["escape"]);
+      expect(keymap["session.stop"]).toEqual([]);
+    }
+  });
+});

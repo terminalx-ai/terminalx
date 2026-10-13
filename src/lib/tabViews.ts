@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { agent, errorMessage, type HandoffInfo, type TabPtyEvent } from "@/lib/api";
-import { adoptPane, agentPaneId, closeTerminal, openTerminal } from "@/lib/terminal";
+import { defaultTabView, tabPaneId, tabViewIn, type TabViewMode } from "@/lib/tabFront";
+import { adoptPane, closeTerminal, followShellToTab, openTerminal } from "@/lib/terminal";
 import type { SessionEntry, TabEntry } from "@/types/session";
 
 /**
@@ -21,8 +22,15 @@ import type { SessionEntry, TabEntry } from "@/types/session";
  * A cloud tab (`remote`, PRO-86) only flips the flag: its CLI runs on the VM
  * and its terminal view attaches to it there, so nothing local is started,
  * adopted or closed, and looking never wakes or starts anything.
+ *
+ * A tab follows what runs in its terminal (#437), and so does the face it
+ * shows when the reader has not picked one. A tab whose agent the app runs
+ * opens on its chat. One whose agent the reader started by hand opens on the
+ * terminal they started it in, with the chat one switch away. A tab that is
+ * a terminal shows the terminal; its chat is then the conversation it last
+ * held, to read and to resume, not a live one.
  */
-export type TabViewMode = "chat" | "terminal";
+export type { TabViewMode };
 
 /** Agents whose tab is the CLI itself. */
 export function isPtyFirst(harness: string): boolean {
@@ -54,13 +62,25 @@ export function useTabViews(): State {
   );
 }
 
-export function terminalPaneId(tabId: string): string {
-  return agentPaneId(tabId);
+/** The pane a tab's terminal view shows: its own, or the shell's it took over. */
+export function terminalPaneId(tab: Pick<TabEntry, "id" | "pane">): string {
+  return tabPaneId(tab);
 }
 
+export function tabViewOf(tab: Pick<TabEntry, "id" | "front">): TabViewMode {
+  return tabViewIn(state.views, tab);
+}
 
-export function tabViewOf(tabId: string): TabViewMode {
-  return state.views[tabId] ?? "chat";
+/**
+ * What is in the tab's terminal changed (an agent started, or exited): the
+ * face picked for what was there before no longer stands, and the tab shows
+ * the one that goes with what is there now.
+ */
+export function forgetTabView(tabId: string) {
+  if (!(tabId in state.views)) return;
+  const views = { ...state.views };
+  delete views[tabId];
+  set({ views });
 }
 
 export function clearTabViewError(tabId: string) {
@@ -81,6 +101,8 @@ async function registerTabPty() {
   try {
     await listen<TabPtyEvent>("tab_pty", (e) => {
       const { sessionId, tabId, paneId, command, harness } = e.payload;
+      // A shell an agent was started in is that agent's tab from here on, not a shell tab beside it.
+      followShellToTab(sessionId, paneId, tabId);
       void adoptPane({ id: paneId, sessionId, title: "Agent", hidden: true, owned: true });
       set({ info: { ...state.info, [tabId]: { command, harness } } });
     });
@@ -124,6 +146,7 @@ export async function startTabAgent(session: SessionEntry, tab: TabEntry) {
 async function adoptTabPane(sessionId: string, tabId: string) {
   const pane = await agent.tabPane(sessionId, tabId);
   if (!pane) return;
+  followShellToTab(sessionId, pane.paneId, tabId);
   await adoptPane({ id: pane.paneId, sessionId, title: "Agent", hidden: true, owned: true });
   set({ info: { ...state.info, [tabId]: { command: pane.command, harness: pane.harness } } });
 }
@@ -135,7 +158,7 @@ export interface TabViewPlace {
 
 /** Show the tab's CLI. For a headless agent this stops it and resumes it there. */
 export async function enterTerminalView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
-  if (state.switching[tab.id] || tabViewOf(tab.id) === "terminal") return;
+  if (state.switching[tab.id] || tabViewOf(tab) === "terminal") return;
   if (place.remote) {
     set({ views: { ...state.views, [tab.id]: "terminal" }, errors: { ...state.errors, [tab.id]: null } });
     return;
@@ -149,7 +172,7 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
       await adoptTabPane(session.id, tab.id);
     } else {
       const info = await agent.tabHandoff(session.id, tab.id);
-      await openTerminal(session.id, session.cwd, 100, 24, { id: terminalPaneId(tab.id), title: tab.title ?? tab.harness, command: info.command, hidden: true });
+      await openTerminal(session.id, session.cwd, 100, 24, { id: terminalPaneId(tab), title: tab.title ?? tab.harness, command: info.command, hidden: true });
       set({ info: { ...state.info, [tab.id]: info } });
     }
     set({ views: { ...state.views, [tab.id]: "terminal" } });
@@ -162,19 +185,23 @@ export async function enterTerminalView(session: SessionEntry, tab: TabEntry, pl
 
 /** Show the transcript again. A PTY-first tab leaves its CLI running. */
 export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
-  if (tabViewOf(tab.id) !== "terminal") return;
-  if (place.remote) {
+  if (tabViewOf(tab) !== "terminal") return;
+  // Said, not left unsaid: a tab that opens on its terminal has to be told to show its chat.
+  const shown = (): Record<string, TabViewMode> => {
     const views = { ...state.views };
-    delete views[tab.id];
-    set({ views });
+    if (defaultTabView(tab) === "chat") delete views[tab.id];
+    else views[tab.id] = "chat";
+    return views;
+  };
+  if (place.remote) {
+    set({ views: shown() });
     return;
   }
   set({ switching: { ...state.switching, [tab.id]: true } });
   try {
-    if (!isPtyFirst(tab.harness)) await closeTerminal(terminalPaneId(tab.id));
+    if (!isPtyFirst(tab.harness)) await closeTerminal(terminalPaneId(tab));
   } finally {
-    const views = { ...state.views };
-    delete views[tab.id];
+    const views = shown();
     const info = { ...state.info };
     if (!isPtyFirst(tab.harness)) delete info[tab.id];
     set({ views, info, switching: { ...state.switching, [tab.id]: false } });
@@ -182,7 +209,7 @@ export async function leaveTerminalView(_session: SessionEntry, tab: TabEntry, p
 }
 
 export async function toggleTabView(session: SessionEntry, tab: TabEntry, place: TabViewPlace = {}) {
-  if (tabViewOf(tab.id) === "terminal") await leaveTerminalView(session, tab, place);
+  if (tabViewOf(tab) === "terminal") await leaveTerminalView(session, tab, place);
   else await enterTerminalView(session, tab, place);
 }
 

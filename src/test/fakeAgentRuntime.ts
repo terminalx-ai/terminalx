@@ -10,7 +10,7 @@ import type { TerminalInstance } from "@/lib/terminal";
  * a viewer is refused, someone else's lease refuses input, only the
  * controller types and sizes, and nothing is ever started without `start`.
  */
-export const AGENT_PTY_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "collab/1", "agent-pty/1"];
+export const AGENT_PTY_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "agents/1", "collab/1", "agent-pty/1"];
 
 export const agentTab = (fields: Partial<AgentTabInfo> = {}): AgentTabInfo => ({
   sessionId: "s-1",
@@ -74,6 +74,22 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   private applied = new Map<string, number>();
   /** A numbered write was refused for its number (`conflict`). */
   conflicts = 0;
+  /** `session.commands` (`composer/1`), when the runtime is given that capability. */
+  commands: { name: string; description: string; source: string }[] = [];
+  /**
+   * Methods this runtime takes its time over. It answers one connection's
+   * requests in order, as a real one does for all but its slow methods: every
+   * request sent after one of these waits with it, until `release()`.
+   */
+  slow: string[] = [];
+  private held: unknown[] | null = null;
+
+  /** The slow answer is ready: it and everything that waited behind it arrive, in order. */
+  release() {
+    const held = this.held ?? [];
+    this.held = null;
+    for (const answer of held) for (const listener of this.messages) listener(answer);
+  }
 
   /**
    * The workspace stopped and woke: every attachment was revoked, so this
@@ -100,6 +116,14 @@ export class FakeAgentRuntime implements WorkspaceTransport {
     if (!this.up) return false;
     this.sent.push(frame);
     const answer = this.answer(frame);
+    if (this.held) {
+      this.held.push(answer);
+      return true;
+    }
+    if (this.slow.includes(frame.method)) {
+      this.held = [answer];
+      return true;
+    }
     queueMicrotask(() => {
       for (const listener of this.messages) listener(answer);
     });
@@ -200,6 +224,10 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         return ok({ sessions: this.sessions });
       case "session.subscribe":
         return ok({ subscriptionId: `sub-${++this.subscription}`, events: this.events.map((event, index) => ({ cursor: `${this.generation}:${index + 1}`, event })), cursor: `${this.generation}:${this.events.length}` });
+      // Escape for the running turn (`session/3`): the turn is interrupted, the agent's process stays.
+      case "session.interrupt":
+        if (!this.capabilities.includes("session/3")) return refusal(frame.id, "capability_not_granted");
+        return ok({ interrupted: this.tabs.some((tab) => tab.tabId === params.tabId && (tab.status === "in_progress" || tab.status === "waiting")) });
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":
@@ -212,6 +240,8 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         return ok({ notes: [], more: false });
       case "runtime.agents":
         return ok({ agents: this.agents });
+      case "session.commands":
+        return ok({ commands: this.commands, restricted: false });
       case "pty.list":
         // An agent's own terminal is never listed as a shell.
         return ok({ epoch: this.epoch, terminals: [] });

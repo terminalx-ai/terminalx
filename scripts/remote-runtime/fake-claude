@@ -63,6 +63,10 @@ def parse_args(argv):
         elif arg == "--permission-mode":
             opts["mode"] = value
             i += 2
+        elif arg == "--dangerously-skip-permissions":
+            # How a tab with no mode is launched: nothing is asked.
+            opts["mode"] = "bypassPermissions"
+            i += 1
         elif arg == "--name":
             i += 2
         elif arg == "--settings":

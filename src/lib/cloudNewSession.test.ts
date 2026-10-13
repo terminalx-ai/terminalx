@@ -188,6 +188,13 @@ describe("a member's new session only uses a workspace they manage (PRO-73)", ()
     expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "wake", node: { key: `cloud:${ORG}:own` } });
   });
 
+  it("never reuses or wakes a preparation workspace, even their own (PRO-20)", async () => {
+    await place([item("prep", { repositories: [api], lastActivityAt: 90, preparation: { stopAfter: 1 }, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    await place([item("prep", { repositories: [api], state: "suspended", lastActivityAt: 90, preparation: { stopAfter: 1 }, ...mine }), item("own", { repositories: [api], lastActivityAt: 10, ...mine })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:own` } });
+  });
+
   it("follows the attachment the server would grant where it reports no role", async () => {
     await place([item("theirs", { repositories: [api], accessMode: "organization", authority: "participate" })]);
     expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });

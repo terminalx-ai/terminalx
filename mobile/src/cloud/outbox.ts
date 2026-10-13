@@ -25,9 +25,16 @@ import type { BlobStorage } from "./transcripts";
  * held on the phone, and `sync` only reads states.
  *
  * With `wake: false` a post starts nothing: the server refuses a workspace
- * that is not running and stores nothing. A new command refused that way is
- * dropped (`OutboxError("stopped")`, so the person can be asked and it can be
- * sent again); one that was already held stays held.
+ * that is not running and stores nothing.
+ *
+ * - A new command refused as stopped leaves the outbox
+ *   (`OutboxError("stopped")`) so the person can be asked. Its envelope is
+ *   remembered: when the same thing is sent again, that envelope goes out,
+ *   under its one command id (contract §11.2.1).
+ * - One that was already held stays held.
+ * - `asleep`: the server has the command (an earlier post whose answer was
+ *   lost) but the workspace stopped since. Nothing wakes it until the person
+ *   agrees; it is then posted again with wake allowed.
  */
 
 export type OutboxState = "unsent" | "queued" | "leased" | "applied" | "rejected" | "cancelled" | "outcome-unknown";
@@ -50,6 +57,8 @@ interface Stored {
   updatedAt: number;
   /** The last delivery error code while unsent. */
   error: string | null;
+  /** Stored by the server, in a workspace that has stopped since, and posted so that it starts nothing. */
+  asleep?: boolean;
 }
 
 export interface OutboxEntry {
@@ -66,6 +75,8 @@ export interface OutboxEntry {
   createdAt: number;
   updatedAt: number;
   error: string | null;
+  /** The server has it, but the workspace stopped and nothing will start it until the person agrees. */
+  asleep: boolean;
 }
 
 export class OutboxError extends Error {
@@ -100,6 +111,8 @@ export class CloudOutbox {
   private readonly listeners = new Set<() => void>();
   /** Request ids a decision is being sealed for right now. */
   private readonly deciding = new Set<string>();
+  /** The last new command the server refused as stopped, and what it said; in memory only, nothing was sent. */
+  private refused: { item: Stored; said: string } | null = null;
   /** One write at a time, in order. */
   private saving: Promise<void> = Promise.resolve();
 
@@ -141,7 +154,7 @@ export class CloudOutbox {
 
   /** Whether a held entry was last refused because the workspace does not run. */
   get stopped(): boolean {
-    return this.items.some((item) => item.state === "unsent" && item.error === WORKSPACE_STOPPED);
+    return this.items.some((item) => (item.state === "unsent" && item.error === WORKSPACE_STOPPED) || (item.state === "queued" && item.asleep === true));
   }
 
   /** Whether anything has not left the phone. */
@@ -174,21 +187,27 @@ export class CloudOutbox {
       this.deciding.add(requestId);
     }
     try {
+      const said = JSON.stringify([tabId, kind, payload]);
+      // What was just refused as stopped, sent again: the same envelope. Anything else replaces it.
+      const again = this.refused?.said === said ? this.refused.item : null;
+      this.refused = null;
       const held = this.options.keys.current();
       // Without the workspace key nothing can be sealed: this phone has to connect to the running workspace once.
-      if (!held) throw new OutboxError("no-key");
+      if (!again && !held) throw new OutboxError("no-key");
       const random = this.options.random ?? secureRandom;
       const now = (this.options.now ?? Date.now)();
-      const envelope = sealCommand({ scope: this.options.scope, tabId, clientCommandId: uuid(random), kind, payload, keyId: held.keyId, key: held.key, iv: random.bytes(IV_LEN) });
-      const item: Stored = { envelope, state: "unsent", wake: null, category: null, resultIv: null, resultCiphertext: null, createdAt: now, updatedAt: now, error: null };
+      const item: Stored = again
+        ? { ...again, state: "unsent", error: null, updatedAt: now }
+        : { envelope: sealCommand({ scope: this.options.scope, tabId, clientCommandId: uuid(random), kind, payload, keyId: held!.keyId, key: held!.key, iv: random.bytes(IV_LEN) }), state: "unsent", wake: null, category: null, resultIv: null, resultCiphertext: null, createdAt: now, updatedAt: now, error: null };
       this.items = [...this.items, item];
       // On the phone before it is on the wire.
       await this.save();
       this.publish();
       if (options.post !== false) {
         if ((await this.post(item, options.wake !== false)) === "stopped") {
-          // The server stored nothing, so nothing is kept here: the person is asked, and it is sent again if they agree.
+          // The server stored nothing, so nothing is shown here: the person is asked, and this envelope is sent again if they agree.
           this.items = this.items.filter((entry) => entry !== item);
+          this.refused = { item, said };
           await this.save();
           this.publish();
           throw new OutboxError("stopped");
@@ -208,7 +227,7 @@ export class CloudOutbox {
    * `deliver` only while the workspace runs or the person agreed to start it.
    * Returns whether anything changed.
    */
-  async sync(options: { deliver?: boolean | (() => boolean); wake?: boolean } = {}): Promise<boolean> {
+  async sync(options: { deliver?: boolean | (() => boolean); wake?: boolean; rouse?: boolean } = {}): Promise<boolean> {
     await this.load();
     const before = this.fingerprint();
     const { deliver } = options;
@@ -218,6 +237,13 @@ export class CloudOutbox {
       if (!may()) break;
       // Stopped: the rest would be refused too. They stay held.
       if ((await this.post(item, options.wake !== false)) === "stopped") break;
+    }
+    // Only with the person's word (`rouse`): what the server holds for a workspace that stopped is posted again, to start it.
+    if (options.rouse) {
+      for (const item of this.items.filter((entry) => entry.asleep && entry.state === "queued")) {
+        if (!may()) break;
+        await this.post(item, true);
+      }
     }
     const open_ = this.items.filter((entry) => entry.state === "queued" || entry.state === "leased");
     if (open_.length) {
@@ -254,6 +280,7 @@ export class CloudOutbox {
   /** Forget everything of this workspace (deleted, access removed, signed out). */
   async clear(): Promise<void> {
     this.items = [];
+    this.refused = null;
     this.loaded = Promise.resolve();
     await this.options.storage.removeItem(itemName(this.options.scope)).catch(() => undefined);
     this.publish();
@@ -261,13 +288,24 @@ export class CloudOutbox {
 
   /** Post one entry. "stopped": it was posted with `wake: false` and the workspace does not run; it is still unsent. */
   private async post(item: Stored, wake: boolean): Promise<"posted" | "stopped"> {
+    const wasAsleep = item.asleep === true;
     try {
       const answer = await this.options.api.enqueue(this.options.scope.organizationId, this.options.scope.workspaceId, item.envelope, ...(wake ? [] : [{ wake: false }]));
       item.wake = answer.wake;
       item.error = null;
+      delete item.asleep;
       this.apply(item, answer.command);
+      // The server already had it (an answer was lost) and the workspace has stopped since: this post started
+      // nothing, so it waits for whoever wakes the workspace next. That is the person's decision (§11.2.1).
+      if (!wake && answer.existing && item.state === "queued" && answer.wake === "not-requested" && item.envelope.kind !== "stop") item.asleep = true;
     } catch (error) {
       const api = error instanceof CloudApiError ? error : new CloudApiError("cloud_workspace_unavailable", null);
+      // Posted again to wake it and the answer did not come: the server still has it, asleep.
+      if (wasAsleep) {
+        item.state = "queued";
+        item.asleep = true;
+        return "posted";
+      }
       if (!wake && api.code === WORKSPACE_STOPPED) {
         item.error = api.code;
         return "stopped";
@@ -288,6 +326,8 @@ export class CloudOutbox {
     const next = command.state as OutboxState;
     if (next !== item.state || (command.resultCiphertext && !item.resultCiphertext)) item.updatedAt = (this.options.now ?? Date.now)();
     item.state = next;
+    // A runtime has it: the workspace runs.
+    if (next !== "queued") delete item.asleep;
     item.category = command.outcomeCategory ?? item.category;
     if (command.resultIv && command.resultCiphertext) {
       item.resultIv = command.resultIv;
@@ -332,11 +372,12 @@ export class CloudOutbox {
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
       error: item.error,
+      asleep: item.state === "queued" && item.asleep === true,
     };
   }
 
   private fingerprint(): string {
-    return JSON.stringify(this.items.map((item) => [item.envelope.clientCommandId, item.state, item.updatedAt, item.error, item.resultCiphertext ? 1 : 0]));
+    return JSON.stringify(this.items.map((item) => [item.envelope.clientCommandId, item.state, item.updatedAt, item.error, item.resultCiphertext ? 1 : 0, item.asleep ? 1 : 0, item.wake]));
   }
 
   private save(): Promise<void> {

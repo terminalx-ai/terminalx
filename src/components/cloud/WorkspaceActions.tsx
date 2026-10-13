@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, Lock, Pause, Play, Trash2, Users } from "lucide-react";
+import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "lucide-react";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
+import { openSchedulesDialog } from "@/components/cloud/CloudSchedulesDialog";
 import { openShareDialog } from "@/components/cloud/CloudShareDialog";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
@@ -9,6 +10,7 @@ import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } f
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
+import { useSchedulesOffer } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectCloudWorkspace } from "@/lib/sessions";
 
@@ -16,6 +18,7 @@ import { selectCloudWorkspace } from "@/lib/sessions";
  * A cloud workspace's actions, used wherever the workspace shows: a
  * project's "…" menu, a VM group row, and a cloud session's location chip.
  * Sharing first (Share… for whoever manages shares, else a read-only list),
+ * then scheduled tasks for the owners and admins the server offers them to,
  * then the lifecycle (Stop, Resume, Archive, Delete) for the owners and
  * admins the server lets run it. Stop, Archive and Delete go through the
  * existing confirmation dialog; Resume is the one explicit wake.
@@ -55,6 +58,13 @@ export function WorkspaceActionItems({
   // who is a plain member manages shares only: they are told so here,
   // instead of being walked into a refusal.
   const shareBlocked = workspace.accessMode === "private" && authority.manageShares && !authority.lifecycle;
+  // Scheduled tasks (PRO-37) are an owner's or admin's, and exist only on a
+  // server that has them turned on. Whether both hold is the server's to
+  // say: the item appears once it has, and never for someone it would refuse.
+  // A private workspace's tasks are its creator's alone, so for one the
+  // server is asked about that workspace too: an admin it is only shared
+  // with is not shown the item.
+  const schedules = useSchedulesOffer(workspace.orgId, lifecycle && present, workspace.accessMode === "private" ? workspace.id : null) === "offered" && lifecycle && present;
   const offersLifecycle =
     (workspace.state === "suspended" && !archived) || (actions.includes("stop") && !archived) || actions.includes("archive") || archived || actions.includes("delete");
   return (
@@ -83,6 +93,11 @@ export function WorkspaceActionItems({
         >
           <Users /> {authority.manageShares ? "Share…" : "Who has access…"}
           {sharedWith > 0 && <span className="ml-auto text-[10px] text-faint">{sharedWith}</span>}
+        </DropdownMenuItem>
+      )}
+      {schedules && (
+        <DropdownMenuItem onSelect={() => openSchedulesDialog({ orgId: workspace.orgId, workspaceId: workspace.id, name: workspace.name })}>
+          <CalendarClock /> Scheduled tasks…
         </DropdownMenuItem>
       )}
       {lifecycle && workspace.state === "suspended" && !archived && (

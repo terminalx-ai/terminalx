@@ -21,6 +21,9 @@ import type { AgentTerminalTarget } from "@/lib/sessionBackend";
 import { getInstance } from "@/lib/terminal";
 import { terminalSize } from "@/lib/terminalFit";
 
+/** How long an attach may go unanswered before the view says it is still connecting. */
+const ATTACH_QUIET_MS = 1_000;
+
 /**
  * The terminal view of a cloud agent tab (PRO-86): the terminal the tab's own
  * CLI runs in on the VM, streamed through the runtime like a cloud shell.
@@ -30,6 +33,9 @@ import { terminalSize } from "@/lib/terminalFit";
  *   sending a message does; what was typed blind is not kept.
  * - It streams only while it shows, and attaching never starts the agent or
  *   takes it from anyone: the chat is the same conversation.
+ * - Until the runtime has answered the attach, the picture is the one from
+ *   before and nothing typed is sent. That is said as soon as a key is
+ *   dropped for it, or when the wait is longer than a moment (#449).
  * - One person types. `blocked` (a viewer, or someone else driving the tab)
  *   makes it read-only; otherwise the terminal's controller types, and
  *   everyone else sees who that is and may take control.
@@ -61,6 +67,8 @@ export function CloudAgentTerminal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [waking, setWaking] = useState(false);
+  /** The attach is not answered yet: null while that is not worth a line, else whether a key was dropped for it. */
+  const [attaching, setAttaching] = useState<"slow" | "dropped" | null>(null);
   const create = useCallback(() => cloudTerminalFactory(workspace, ensureAgentTerminal(workspace, tabId), base)(), [workspace, tabId, base]);
   const running = target.process(tabId) === "running";
 
@@ -74,9 +82,18 @@ export function CloudAgentTerminal({
     if (!active || !client) return;
     let cancelled = false;
     setError(null);
-    void attachAgentTerminal(workspace, client, tabId, base).catch((e: unknown) => !cancelled && setError(errorCode(e)));
+    setAttaching(null);
+    // Answered within a moment as a rule; a runtime busy with something else can take seconds.
+    const slow = setTimeout(() => !cancelled && setAttaching((now) => now ?? "slow"), ATTACH_QUIET_MS);
+    void attachAgentTerminal(workspace, client, tabId, base)
+      .catch((e: unknown) => !cancelled && setError(errorCode(e)))
+      .finally(() => {
+        clearTimeout(slow);
+        if (!cancelled) setAttaching(null);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(slow);
       detachAgentTerminal(workspace, tabId);
     };
   }, [active, client, generation, workspace, tabId, base]);
@@ -124,7 +141,11 @@ export function CloudAgentTerminal({
     }
     const now = agentTerminalOf(workspace, tabId);
     // Until it is attached, who controls it is not known; someone else's terminal is taken explicitly.
-    if (!now || now.gone || !now.live || now.control === "other") return false;
+    if (!now || now.gone || !now.live || now.control === "other") {
+      // Not attached yet: the key goes nowhere, and the view says so instead of looking ready.
+      if (now && !now.gone && !now.live) setAttaching("dropped");
+      return false;
+    }
     const runs = target.process(tabId) === "running";
     if (now.control === "none" || !runs) {
       const taken = await control(!runs);
@@ -162,7 +183,14 @@ export function CloudAgentTerminal({
     } else status = { text: "Connecting to the workspace…" };
   } else if (terminal?.gone === "closed") status = { text: "This terminal closed with its tab." };
   else if (blocked) status = { text: `Read-only. ${controller}${blocked}` };
-  else if (terminal && controlState === "other") status = { text: viewerText(terminal, false, true, you, nameOf), action: { label: "Take control", start: false } };
+  else if (!live && attaching && !error) {
+    status = {
+      text:
+        attaching === "dropped"
+          ? "Connecting to the agent's terminal: what you typed was not sent. Type it again once this line is gone."
+          : "Connecting to the agent's terminal: keys pressed now are not sent.",
+    };
+  } else if (terminal && controlState === "other") status = { text: viewerText(terminal, false, true, you, nameOf), action: { label: "Take control", start: false } };
   else if (!running) {
     status = {
       text: `${target.process(tabId) === "exited" ? "The agent is not running; its conversation is saved." : "The agent has not started yet."} Press a key here, or Start, to run it.`,

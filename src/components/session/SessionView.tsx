@@ -2,6 +2,7 @@ import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
+import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -47,6 +48,8 @@ import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
 import { SessionTabStrip } from "./SessionTabStrip";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
+import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
+import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
 
 /** Why a quick chat's panel has no Changes, Repo or PR. */
 const NO_REPOSITORY = "No repository here: Changes, Repo and PR need one. Point this chat at a repository, or move it to a project, to use them.";
@@ -306,6 +309,7 @@ export function SessionView({
   const compact = !!chrome?.compact;
   const isGit = useSessionIsGit(session);
   const quick = isQuickChat(session);
+  const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
   const backend = cloud?.backend ?? localSessionBackend(session.id);
@@ -314,14 +318,15 @@ export function SessionView({
   const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
   const terminals = useTerminals();
-  const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden) : [];
+  // A shell an agent was started in is that agent's tab (#437), drawn by its tab view and not as a shell beside it.
+  const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !session.tabs.some((tab) => tab.pane === pane.id)) : [];
   const cloudTerminals = cloud?.terminals ?? [];
   const browserState = useBrowser();
   const browserPages = local ? pagesFor(browserState.pages, session.cwd) : [];
   useEffect(() => {
     if (local) void bootBrowser();
   }, [local]);
-  const requested = terminals.selected[session.id];
+  const requested = followedSelection(session, terminals.selected[session.id]);
   const terminalIds = local ? shellPanes.map((pane) => pane.id) : cloudTerminals.map((terminal) => terminal.id);
   // A cloud session's active tab is the runtime's, shared by everyone in it: it moves to a new tab
   // when anyone adds one. It decides what this view opens on, once: from then the view stays on
@@ -353,7 +358,13 @@ export function SessionView({
   const tabViews = useTabViews();
   // The chat or terminal switch: every local tab has it; a cloud tab while its runtime serves the agent's terminal (PRO-86).
   const terminalOffer = activeTab && !cloud?.locked ? terminalViewOf(backend, activeTab) : null;
-  const activeInTerminal = !!activeTab && !!terminalOffer?.available && tabViews.views[activeTab.id] === "terminal";
+  const activeInTerminal = !!activeTab && !!terminalOffer?.available && tabViewIn(tabViews.views, activeTab) === "terminal";
+  // A tab that is a terminal (#437) has no live chat to go back to: its other face is the conversation it last held, when it held one.
+  const activeIsTerminal = !!activeTab && local && isTerminalTab(activeTab);
+  const terminalHasConversation = !!activeTab && (!!activeTab.providerSessionId || !!activeTab.history?.length);
+  const viewSwitch = activeIsTerminal
+    ? { toChat: "Show the last conversation", toTerminal: "Back to the terminal" }
+    : { toChat: "Back to chat", toTerminal: "Show terminal view" };
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
@@ -434,6 +445,20 @@ export function SessionView({
                 </button>
               </WithTooltip>
             )}
+            {pipelineRole && (
+              // The issue pipeline this session is part of, as its author or its reviewer.
+              <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${pipelineRole.pipeline.issue.identifier} · ${pipelineRole.pipeline.note ?? pipelineRole.pipeline.issue.title}`}>
+                <button
+                  type="button"
+                  onClick={() => (pipelineRole.pipeline.pr ? void openUrl(pipelineRole.pipeline.pr.url) : void openUrl(pipelineRole.pipeline.issue.url))}
+                  className="ml-1 flex shrink-0 items-center gap-1.5 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  data-testid="session-pipeline"
+                >
+                  {pipelineRole.role === "reviewer" && <span>Reviewer ·</span>}
+                  <PipelineStatus pipeline={pipelineRole.pipeline} />
+                </button>
+              </WithTooltip>
+            )}
             {session.automation && (
               <WithTooltip label={`Open ${session.automation.name} in Automations`}>
                 <button
@@ -508,12 +533,12 @@ export function SessionView({
                 </Button>
               </WithTooltip>
             )}
-            {activeTab && terminalOffer?.available && (
-              <WithTooltip label={activeInTerminal ? "Back to chat" : "Show terminal view"} shortcut="session.toggleTerminalView">
+            {activeTab && terminalOffer?.available && (!activeIsTerminal || terminalHasConversation) && (
+              <WithTooltip label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal} shortcut="session.toggleTerminalView">
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  aria-label={activeInTerminal ? "Back to chat" : "Show terminal view"}
+                  aria-label={activeInTerminal ? viewSwitch.toChat : viewSwitch.toTerminal}
                   aria-pressed={activeInTerminal}
                   disabled={switching}
                   onClick={() => void toggleTabView(session, activeTab, { remote: !local })}

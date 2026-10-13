@@ -21,6 +21,8 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * A newer version only adds to its namespace (CS-12):
  * - `session/2`: `session.update`, `session.addTab`, `session.delete` and the
  *   `session.sessions` notification;
+ * - `session/3` (#427): `session.interrupt`, Escape for an agent tab's
+ *   running turn. Live only, never queued or resent;
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
  * - `agents/1`: `runtime.agents`;
  * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
@@ -37,7 +39,9 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
  *   into its local mirror of the workspace;
  * - `cleanup/1`: the bulk worktree clean-up. The runtime inspects and removes
- *   its own worktrees; this client only names them;
+ *   its own worktrees; this client only names them. While `cleanup.remove`
+ *   runs, its caller is sent `cleanup.progress` notifications; a runtime
+ *   from before them sends none, and the answer is the same either way;
  * - `workspace/1`: one session's worktree, for the removal dialog:
  *   `workspace.disposition` and `workspace.remove`. The worktree is named by
  *   its session, never by a path;
@@ -47,7 +51,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -58,6 +62,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.update": "session/2",
   "session.addTab": "session/2",
   "session.delete": "session/2",
+  "session.interrupt": "session/3",
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
@@ -338,6 +343,8 @@ export interface CleanupRemoveItem {
   deleteSessions?: boolean;
   /** Remove it although it holds ignored local files. */
   acceptIgnored?: boolean;
+  /** What the review measured it at. When given it is not measured again, and the result reports this as an estimate. */
+  estimatedBytes?: number;
 }
 
 export interface CleanupResult {
@@ -346,10 +353,27 @@ export interface CleanupResult {
   outcome: "removed" | "alreadyRemoved" | "skipped" | "failed";
   reason: string | null;
   freedBytes: number;
+  /** `freedBytes` is the review's estimate, not a measurement made just before the removal. Absent from an older host, which always measures. */
+  freedEstimated?: boolean;
   keptBranch: string | null;
   sessionsKept: string[];
   sessionsDeleted: string[];
 }
+
+/** What a removal is doing to the worktree it is on. */
+export type CleanupStep = "measuring" | "checking" | "removing" | "sessions";
+
+/**
+ * How far one removal call is, as its host reports it while it runs
+ * (`cleanup.progress` from a runtime, `worktree_cleanup_progress` from the
+ * desktop). `index` counts from 0 over the `total` worktrees of that call. A
+ * worktree that was not attempted is only ever `finished`. The call's answer
+ * is what happened; this is how it gets there.
+ */
+export type CleanupProgress =
+  | { kind: "started"; index: number; total: number; projectPath: string; path: string }
+  | { kind: "step"; index: number; total: number; path: string; step: CleanupStep }
+  | { kind: "finished"; index: number; total: number; result: CleanupResult };
 
 /**
  * A session in the runtime's own index (`session.list`, `session.sessions`).
@@ -943,6 +967,17 @@ export class WorkspaceRpcClient {
     await this.call("session.markRead", { sessionId, tabId });
   }
 
+  /**
+   * Escape for a tab's running turn (`session/3`): the turn is interrupted
+   * and the agent's process stays. A plain call, sent once: if the connection
+   * drops it is not sent again, because by then it could reach a later turn.
+   * `interrupted` is false when the tab had nothing running.
+   */
+  async interruptAgentTab(params: { sessionId: string; tabId: string }): Promise<{ interrupted: boolean }> {
+    const result = await this.call<{ interrupted?: boolean }>("session.interrupt", params);
+    return { interrupted: result.interrupted === true };
+  }
+
   /** The sessions this connection may see (`session.list`). */
   async listSessions(): Promise<RuntimeSession[]> {
     const result = await this.call<{ sessions?: RuntimeSession[] }>("session.list");
@@ -1004,10 +1039,26 @@ export class WorkspaceRpcClient {
   /**
    * `cleanup.remove`: remove the named worktrees. The runtime inspects each
    * again and leaves alone whatever is not what its token stands for.
+   *
+   * `onProgress` hears the `cleanup.progress` notifications of this request
+   * while it runs. An older runtime sends none, and neither does a resend
+   * that is answered from what was already done: the answer never depends
+   * on them.
    */
-  async removeCleanup(items: CleanupRemoveItem[]): Promise<CleanupResult[]> {
-    const result = await this.mutate<{ results?: CleanupResult[] }>("cleanup.remove", { items });
-    return result.results ?? [];
+  async removeCleanup(items: CleanupRemoveItem[], onProgress?: (progress: CleanupProgress) => void): Promise<CleanupResult[]> {
+    const requestId = this.newRequestId();
+    const stop = onProgress
+      ? this.onNotification((notification) => {
+          if (notification.event !== "cleanup.progress" || notification.params.run !== requestId) return;
+          onProgress(notification.params as unknown as CleanupProgress);
+        })
+      : () => undefined;
+    try {
+      const result = await this.mutate<{ results?: CleanupResult[] }>("cleanup.remove", { items }, requestId);
+      return result.results ?? [];
+    } finally {
+      stop();
+    }
   }
 
   /**

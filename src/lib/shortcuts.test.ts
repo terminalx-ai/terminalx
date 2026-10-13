@@ -60,11 +60,19 @@ describe("the shortcut registry", () => {
   it("leaves every other default as it was", () => {
     const keymap = resolveKeymap({}, true);
     expect(keymap["app.commandPalette"]).toEqual(["mod+k"]);
-    expect(keymap["session.stop"]).toEqual(["escape"]);
     expect(keymap["session.previousTab"]).toEqual(["mod+shift+["]);
     expect(keymap["composer.send"]).toEqual(["enter"]);
     expect(keymap["composer.newLine"]).toEqual(["shift+enter"]);
     expect(keymap["composer.historyPrevious"]).toEqual(["up"]);
+  });
+
+  // #427: Escape is the agent's key. It interrupts; ending the process is a separate action with no keys.
+  it("puts Escape on the interrupt, and gives the hard stop no keys of its own", () => {
+    for (const mac of [true, false]) {
+      const keymap = resolveKeymap({}, mac);
+      expect(keymap["session.interrupt"]).toEqual(["escape"]);
+      expect(keymap["session.stop"]).toEqual([]);
+    }
   });
 
   it("shows a binding as keycaps for the platform", () => {
@@ -225,7 +233,21 @@ describe("keys that cannot be a shortcut", () => {
     expect(bindingProblem("app.toggleSidebar", "f5", true)).toBeNull();
     expect(bindingProblem("composer.send", "mod+enter", true)).toBeNull();
     expect(bindingProblem("composer.historyPrevious", "pageup", true)).toBeNull();
-    expect(bindingProblem("session.stop", "escape", true)).toBeNull();
+    expect(bindingProblem("session.interrupt", "escape", true)).toBeNull();
+    expect(bindingProblem("session.interrupt", "shift+escape", true)).toBeNull();
+  });
+
+  it("never lets a bare key, Escape least of all, end the agent's process", () => {
+    expect(bindingProblem("session.stop", "escape", true)).toMatch(/goes to the agent/);
+    expect(bindingProblem("session.stop", "escape", false)).toMatch(/goes to the agent/);
+    expect(bindingProblem("session.stop", "enter", true)).toMatch(/works everywhere/);
+    expect(saveShortcut("session.stop", ["escape"], { replace: true })).toMatchObject({ ok: false });
+    expect(bindingsOf("session.interrupt")).toEqual(["escape"]);
+    // With a modifier it is a deliberate chord, and it is the reader's to set.
+    expect(bindingProblem("session.stop", "mod+.", true)).toBeNull();
+    expect(bindingProblem("session.stop", "mod+shift+escape", true)).toBeNull();
+    expect(saveShortcut("session.stop", ["mod+."])).toEqual({ ok: true });
+    expect(bindingsOf("session.stop")).toEqual(["mod+."]);
   });
 
   it("lets only dictation be a held modifier key, on either side", () => {

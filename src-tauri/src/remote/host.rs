@@ -63,6 +63,11 @@ const SLOW_METHODS: &[&str] = &[
     "session.create",
     "session.send",
     "session.close",
+    // Starts the tab's CLI to ask it for its commands, which takes seconds on
+    // a machine that just woke and 15 s when the CLI never answers. In order
+    // it held up everything the connection asked next: the transcript, and
+    // the agent's terminal, whose keys the desktop drops until it is attached (#449).
+    "session.commands",
     // CS-12: removing a worktree, and the first read of Codex's model list.
     "session.delete",
     // Fetches, asks GitHub for the branch's pull request, removes a worktree.
@@ -1149,6 +1154,16 @@ mod tests {
             general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA"}"#),
             general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
         )
+    }
+
+    #[test]
+    fn asking_the_cli_for_its_commands_never_holds_up_the_connection() {
+        // #449: `session.commands` waits on the tab's CLI. Answered in order, a
+        // hidden chat tab's listing kept the terminal view's `pty.attach`
+        // waiting after a wake, and what was typed meanwhile was dropped.
+        assert!(SLOW_METHODS.contains(&"session.commands"));
+        // Terminal calls stay in order: that is what keeps keystrokes ordered.
+        assert!(!SLOW_METHODS.iter().any(|method| method.starts_with("pty.")));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CleanupCandidate, CleanupProject, CleanupRemoveItem, CleanupResult, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { CleanupCandidate, CleanupProgress, CleanupProject, CleanupRemoveItem, CleanupResult, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CloudCatalogState } from "@/lib/cloudCatalog";
 
 const local = {
@@ -7,21 +7,33 @@ const local = {
   size: vi.fn(),
   cancel: vi.fn(),
   remove: vi.fn(),
+  stop: vi.fn(),
 };
+/** The backend's progress events, as the removal that is listening hears them. */
+const events = { run: null as string | null, listener: null as ((progress: CleanupProgress) => void) | null };
+const emit = (progress: CleanupProgress) => events.listener?.(progress);
 
 vi.mock("@/lib/api", () => ({
   api: {
     worktreeCleanupScan: () => local.scan(),
     worktreeCleanupSize: (job: string, projectPath: string, path: string) => local.size(job, projectPath, path),
     worktreeCleanupCancelSizes: (prefix: string) => local.cancel(prefix),
-    worktreeCleanupRemove: (items: CleanupRemoveItem[]) => local.remove(items),
+    worktreeCleanupRemove: (items: CleanupRemoveItem[], run: string) => {
+      events.run = run;
+      return local.remove(items);
+    },
+    onWorktreeCleanupProgress: async (run: string, onProgress: (progress: CleanupProgress) => void) => {
+      events.listener = (progress) => events.run === run && onProgress(progress);
+      return () => (events.listener = null);
+    },
+    worktreeCleanupStop: async (run: string) => local.stop(run),
   },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 vi.mock("@/lib/cloudConnections", () => ({ connectedCloudClient: () => null }));
 vi.mock("@/lib/cloudSessions", () => ({ managesOf: (client: { manage?: boolean }) => client.manage !== false }));
 
-import { LOCAL_HOST, candidateKey, cleanupHosts, estimateSizes, runCleanup, scanHosts, selectable, totals, type CleanupSelection } from "./worktreeCleanup";
+import { LOCAL_HOST, STOPPED, candidateKey, cleanupHosts, estimateSizes, runCleanup, scanHosts, selectable, totals, type CleanupRunProgress, type CleanupSelection } from "./worktreeCleanup";
 
 function candidate(projectPath: string, name: string, verdict: CleanupCandidate["verdict"] = "eligible"): CleanupCandidate {
   return {
@@ -57,10 +69,16 @@ function runtime(options: { capabilities?: string[]; manage?: boolean; projects?
     scanCleanup: vi.fn(async () => options.projects ?? []),
     cleanupSize: vi.fn(async () => 2_000 as number | null),
     cancelCleanupSizes: vi.fn(async () => undefined),
-    removeCleanup: vi.fn(async (items: CleanupRemoveItem[]) => items.map((item) => removed(item))),
+    removeCleanup: vi.fn(async (items: CleanupRemoveItem[], _onProgress?: (progress: CleanupProgress) => void) => items.map((item) => removed(item))),
   };
   return client;
 }
+
+const pick = (hostId: string, name: string, root = "/w"): CleanupSelection => ({ hostId, candidate: candidate(root, name), deleteSessions: false });
+const leaf = (path: string) => path.split("/").pop()!;
+/** One line per report: what is known so far, then the worktree a host is on and its step. */
+const line = ({ outcomes, current }: CleanupRunProgress) =>
+  `${outcomes.map((outcome) => `${leaf(outcome.path)}:${outcome.outcome}`).join(",") || "-"} | ${current ? `${leaf(current.path)}${current.step ? `:${current.step}` : ""}` : "-"}`;
 
 function catalog(...workspaces: { id: string; name: string; state?: string }[]): CloudCatalogState {
   return {
@@ -78,6 +96,7 @@ const asClients = (clients: Record<string, ReturnType<typeof runtime> | null>) =
 describe("worktree clean-up across hosts", () => {
   beforeEach(() => {
     for (const mock of Object.values(local)) mock.mockReset();
+    events.run = events.listener = null;
   });
 
   it("lists this computer and every live cloud workspace, and says why one cannot be asked", () => {
@@ -116,7 +135,7 @@ describe("worktree clean-up across hosts", () => {
     expect(candidateKey("cloud:org:one", shared.path)).not.toBe(candidateKey("cloud:org:two", shared.path));
 
     const outcomes = await runCleanup(hosts, [{ hostId: "cloud:org:two", candidate: { ...shared, token: "token-two" }, deleteSessions: false }]);
-    expect(two.removeCleanup).toHaveBeenCalledWith([{ projectPath: "/home/dev/repo", path: shared.path, token: "token-two", deleteSessions: false, acceptIgnored: false }]);
+    expect(two.removeCleanup).toHaveBeenCalledWith([{ projectPath: "/home/dev/repo", path: shared.path, token: "token-two", deleteSessions: false, acceptIgnored: false }], expect.any(Function));
     expect(one.removeCleanup).not.toHaveBeenCalled();
     // A VM path is never handed to this computer.
     expect(local.remove).not.toHaveBeenCalled();
@@ -150,12 +169,11 @@ describe("worktree clean-up across hosts", () => {
     const steady = runtime();
     const hosts = cleanupHosts(catalog({ id: "flaky", name: "Flaky" }, { id: "steady", name: "Steady" }), asClients({ "cloud:org:flaky": flaky, "cloud:org:steady": steady }));
     local.remove.mockResolvedValue([{ ...removed({ projectPath: "/p", path: "/p/.raccoon/worktrees/l", token: "" }, 1_000), outcome: "skipped", reason: "It changed since it was reviewed, so it was left alone.", freedBytes: 0 }]);
-    const pick = (hostId: string, name: string, root = "/w"): CleanupSelection => ({ hostId, candidate: candidate(root, name), deleteSessions: false });
     const progress: number[] = [];
     const outcomes = await runCleanup(
       hosts,
       [pick("cloud:org:flaky", "a"), pick("cloud:org:flaky", "b"), pick("cloud:org:flaky", "c"), pick("cloud:org:steady", "d"), pick(LOCAL_HOST, "l", "/p")],
-      (done) => progress.push(done.length),
+      (done) => progress.push(done.outcomes.length),
     );
     const by = Object.fromEntries(outcomes.map((outcome) => [outcome.path.split("/").pop(), outcome]));
     expect(by.a).toMatchObject({ outcome: "removed", freedBytes: 500 });
@@ -165,8 +183,10 @@ describe("worktree clean-up across hosts", () => {
     expect(by.l).toMatchObject({ outcome: "skipped" });
     // The third was never sent to the host that stopped answering.
     expect(flaky.removeCleanup).toHaveBeenCalledTimes(2);
-    expect(totals(outcomes)).toEqual({ removed: 2, skipped: 2, failed: 1, freedBytes: 600 });
+    expect(totals(outcomes)).toEqual({ removed: 2, skipped: 2, failed: 1, freedBytes: 600, freedEstimated: false });
     expect(progress.at(-1)).toBe(5);
+    // What is known only ever grows, one host's worktrees after another's.
+    expect(progress).toEqual([...progress].sort((a, b) => a - b));
 
     // Tried again once it is back: the host says what it finds, and that is what is reported.
     flaky.removeCleanup.mockImplementation(async (items: CleanupRemoveItem[]) => items.map((item) => ({ ...removed(item, 0), outcome: "alreadyRemoved" as const, reason: "It was already removed." })));
@@ -185,13 +205,115 @@ describe("worktree clean-up across hosts", () => {
     ]);
     expect(outcomes.map((outcome) => outcome.outcome)).toEqual(["skipped", "skipped"]);
     expect(outcomes[0]!.reason).toMatch(/Not attempted: Not connected/);
-    expect(totals(outcomes)).toEqual({ removed: 0, skipped: 2, failed: 0, freedBytes: 0 });
+    expect(totals(outcomes)).toEqual({ removed: 0, skipped: 2, failed: 0, freedBytes: 0, freedEstimated: false });
   });
 
   it("an answer that leaves a worktree out is not taken as success", async () => {
     local.remove.mockResolvedValue([]);
     const outcomes = await runCleanup(cleanupHosts(catalog()), [{ hostId: LOCAL_HOST, candidate: candidate("/p", "silent"), deleteSessions: false }]);
     expect(outcomes).toEqual([expect.objectContaining({ outcome: "unknown" })]);
+  });
+
+  it("says which worktree a host is on, its step, and each outcome as soon as the host reports it", async () => {
+    const box = runtime();
+    box.removeCleanup.mockImplementation(async (items, onProgress) => {
+      const [item] = items;
+      onProgress?.({ kind: "started", index: 0, total: 1, projectPath: item!.projectPath, path: item!.path });
+      onProgress?.({ kind: "step", index: 0, total: 1, path: item!.path, step: "removing" });
+      onProgress?.({ kind: "finished", index: 0, total: 1, result: removed(item!) });
+      return [removed(item!)];
+    });
+    const hosts = cleanupHosts(catalog({ id: "box", name: "Box" }), asClients({ "cloud:org:box": box }));
+    let answer!: () => void;
+    local.remove.mockImplementation((items: CleanupRemoveItem[]) => new Promise((resolve) => (answer = () => resolve([removed(items[0]!, 700), { ...removed(items[1]!, 0), outcome: "skipped", reason: "It changed since it was reviewed." }]))));
+    const seen: string[] = [];
+    const running = runCleanup(hosts, [pick("cloud:org:box", "c"), pick(LOCAL_HOST, "a", "/p"), pick(LOCAL_HOST, "b", "/p")], (progress) => seen.push(line(progress)));
+    // This computer is asked first, in one call; it has not answered yet.
+    await vi.waitFor(() => expect(local.remove).toHaveBeenCalledTimes(1));
+    expect(seen).toEqual(["- | a"]);
+    const [a, b] = ["/p/.raccoon/worktrees/a", "/p/.raccoon/worktrees/b"];
+    emit({ kind: "started", index: 0, total: 2, projectPath: "/p", path: a });
+    emit({ kind: "step", index: 0, total: 2, path: a, step: "checking" });
+    emit({ kind: "step", index: 0, total: 2, path: a, step: "removing" });
+    // A worktree this removal was never asked about is nobody's progress.
+    emit({ kind: "step", index: 0, total: 2, path: "/p/.raccoon/worktrees/other", step: "removing" });
+    emit({ kind: "finished", index: 0, total: 2, result: removed({ projectPath: "/p", path: a, token: "" }, 700) });
+    emit({ kind: "started", index: 1, total: 2, projectPath: "/p", path: b });
+    expect(seen.slice(1)).toEqual(["- | a", "- | a:checking", "- | a:removing", "a:removed | -", "a:removed | b"]);
+    expect(box.removeCleanup).not.toHaveBeenCalled();
+
+    answer();
+    const outcomes = await running;
+    expect(seen.slice(6)).toEqual([
+      // The answer is what happened: it brings the second worktree's outcome, which no event had.
+      "a:removed,b:skipped | -",
+      "a:removed,b:skipped | c",
+      "a:removed,b:skipped | c",
+      "a:removed,b:skipped | c:removing",
+      "a:removed,b:skipped,c:removed | -",
+      "a:removed,b:skipped,c:removed | -",
+    ]);
+    expect(outcomes.map((outcome) => `${outcome.hostId} ${leaf(outcome.path)} ${outcome.outcome}`)).toEqual(["local a removed", "local b skipped", "cloud:org:box c removed"]);
+    // Nothing is heard for a removal once it has answered.
+    emit({ kind: "step", index: 1, total: 2, path: b, step: "removing" });
+    expect(seen).toHaveLength(12);
+  });
+
+  it("passes on what the review measured, so a host does not measure it twice, and says when a figure is an estimate", async () => {
+    local.remove.mockImplementation(async (items: CleanupRemoveItem[]) => items.map((item) => ({ ...removed(item, item.estimatedBytes ?? 40), freedEstimated: item.estimatedBytes !== undefined })));
+    const outcomes = await runCleanup(cleanupHosts(catalog()), [
+      { ...pick(LOCAL_HOST, "sized", "/p"), estimatedBytes: 2_000 },
+      { ...pick(LOCAL_HOST, "unsized", "/p"), estimatedBytes: null },
+    ]);
+    const sent = local.remove.mock.calls[0]![0] as CleanupRemoveItem[];
+    expect(sent[0]).toMatchObject({ estimatedBytes: 2_000 });
+    expect("estimatedBytes" in sent[1]!).toBe(false);
+    expect(totals(outcomes)).toMatchObject({ freedBytes: 2_040, freedEstimated: true });
+    expect(totals(outcomes.slice(1))).toMatchObject({ freedBytes: 40, freedEstimated: false });
+  });
+
+  it("stopping finishes the worktree under way and leaves every one that was not started", async () => {
+    const box = runtime();
+    const hosts = cleanupHosts(catalog({ id: "box", name: "Box" }), asClients({ "cloud:org:box": box }));
+    const stop = new AbortController();
+    // The backend is told to stop, finishes the one it is on, and answers for the rest itself.
+    let answer!: () => void;
+    local.remove.mockImplementation((items: CleanupRemoveItem[]) => new Promise((resolve) => (answer = () => resolve([removed(items[0]!), { ...removed(items[1]!, 0), outcome: "skipped", reason: STOPPED }]))));
+    const running = runCleanup(hosts, [pick(LOCAL_HOST, "a", "/p"), pick(LOCAL_HOST, "b", "/p"), pick("cloud:org:box", "c"), pick("cloud:org:box", "d")], undefined, stop.signal);
+    await vi.waitFor(() => expect(local.remove).toHaveBeenCalledTimes(1));
+    expect(local.stop).not.toHaveBeenCalled();
+    stop.abort();
+    expect(local.stop).toHaveBeenCalledWith(events.run);
+    answer();
+    const outcomes = await running;
+    expect(outcomes.map((outcome) => `${leaf(outcome.path)} ${outcome.outcome}`)).toEqual(["a removed", "b skipped", "c skipped", "d skipped"]);
+    expect(outcomes.slice(1).map((outcome) => outcome.reason)).toEqual([STOPPED, STOPPED, STOPPED]);
+    // The cloud workspace was never asked for anything.
+    expect(box.removeCleanup).not.toHaveBeenCalled();
+
+    // On a cloud host, asked one by one: the one that was sent is waited for, and no other is sent.
+    const again = new AbortController();
+    let finish!: () => void;
+    box.removeCleanup.mockImplementation((items: CleanupRemoveItem[]) => new Promise((resolve) => (finish = () => resolve([removed(items[0]!)]))));
+    const second = runCleanup(hosts, [pick("cloud:org:box", "c"), pick("cloud:org:box", "d")], undefined, again.signal);
+    await vi.waitFor(() => expect(box.removeCleanup).toHaveBeenCalledTimes(1));
+    again.abort();
+    finish();
+    expect((await second).map((outcome) => `${leaf(outcome.path)} ${outcome.outcome} ${outcome.reason ?? ""}`)).toEqual(["c removed ", `d skipped ${STOPPED}`]);
+    expect(box.removeCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("what a host said it finished before it went quiet is kept; only the rest is unknown or not attempted", async () => {
+    const flaky = runtime();
+    flaky.removeCleanup.mockImplementationOnce(async (items, onProgress) => {
+      onProgress?.({ kind: "finished", index: 0, total: 1, result: removed(items[0]!, 900) });
+      throw new Error("Workspace runtime did not reconnect");
+    });
+    const hosts = cleanupHosts(catalog({ id: "flaky", name: "Flaky" }), asClients({ "cloud:org:flaky": flaky }));
+    const outcomes = await runCleanup(hosts, [pick("cloud:org:flaky", "a"), pick("cloud:org:flaky", "b")]);
+    expect(outcomes[0]).toMatchObject({ outcome: "removed", freedBytes: 900, hostId: "cloud:org:flaky" });
+    expect(outcomes[1]).toMatchObject({ outcome: "skipped", reason: expect.stringMatching(/Not attempted/) });
+    expect(flaky.removeCleanup).toHaveBeenCalledTimes(1);
   });
 
   it("estimates sizes one at a time, skips protected directories, and stops when told to", async () => {

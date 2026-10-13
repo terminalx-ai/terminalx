@@ -2,17 +2,22 @@ import { CircleDot, Link2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { Issue } from "@/lib/api";
+import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
+import type { IssuePipeline } from "@/types/issuePipeline";
 
 /** The compact issue rendering shared by the Issues view and trigger preview. */
 export function IssueListItem({
   issue,
   selected = false,
   linked = false,
+  pipeline = null,
   onSelect,
 }: {
   issue: Issue;
   selected?: boolean;
   linked?: boolean;
+  /** The issue's pipeline, when a session was started from it. */
+  pipeline?: IssuePipeline | null;
   onSelect?: () => void;
 }) {
   return (
@@ -40,7 +45,7 @@ export function IssueListItem({
           ))}
           {issue.assignee && <span>· {issue.assignee.name}</span>}
           {issue.updatedAt && <span>· {relativeTime(issue.updatedAt)}</span>}
-          {linked && <span className="flex items-center gap-1 text-info"><Link2 className="size-3" /> Session</span>}
+          {pipeline ? <PipelineStatus pipeline={pipeline} /> : linked && <span className="flex items-center gap-1 text-info"><Link2 className="size-3" /> Session</span>}
         </div>
       </div>
     </button>

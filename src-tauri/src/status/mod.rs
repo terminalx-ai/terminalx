@@ -36,6 +36,10 @@ pub fn install_menu(app: &App) -> Result<()> {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Err(error) = crate::quit::own_quit_item(app.handle(), &menu) {
+        log::warn!("replace the Quit menu item: {error}");
+    }
     app.set_menu(menu)?;
     Ok(())
 }

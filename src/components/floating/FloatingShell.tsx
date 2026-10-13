@@ -116,8 +116,8 @@ export function FloatingShell() {
   }, [visible, selectedId]);
 
   // Escape puts the window away when nothing else wanted the key: a menu or a
-  // dialog closes first, a running turn is stopped first, and a terminal keeps
-  // its Escape. This listens after all of those (the bubble phase).
+  // dialog closes first, a running turn is interrupted first, and a terminal
+  // keeps its Escape. This listens after all of those (the bubble phase).
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;

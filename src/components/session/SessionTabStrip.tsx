@@ -5,6 +5,7 @@ import { pagesFor, useBrowser } from "@/lib/browser";
 import { cn } from "@/lib/cn";
 import { activatePeer, browserPageLabel, closePeer, peerOrder, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
 import { useSessionStore } from "@/lib/sessions";
+import { isTerminalTab, tabLabel, tabPaneId } from "@/lib/tabFront";
 import { useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TAB_STATUS_LABEL, type SessionEntry, type TabStatus } from "@/types/session";
 
@@ -23,23 +24,30 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
  * what selecting and closing one does are the same (`@/lib/sessionTabs`).
  */
 export function SessionTabStrip({ session, selected }: { session: SessionEntry; selected: SelectedSessionTab | null }) {
-  const { panes } = useTerminals();
+  const { panes, agents } = useTerminals();
   const browser = useBrowser();
   const harnesses = useSessionStore().harnesses;
+  const agentName = (harness: string) => harnesses.find((candidate) => candidate.id === harness)?.name || harness;
   const tabs = useMemo(() => peerOrder(session, panes, pagesFor(browser.pages, session.cwd)), [session, panes, browser.pages]);
   // One tab needs no strip: there is nothing to switch between.
   if (tabs.length < 2) return null;
   const labelOf = (tab: PeerTab): string => {
-    if (tab.kind === "agent") return tab.tab.title?.trim() || harnesses.find((harness) => harness.id === tab.tab.harness)?.name || tab.tab.harness;
+    if (tab.kind === "agent") return tabLabel(tab.tab, agentName, agents[tabPaneId(tab.tab)]);
     if (tab.kind === "terminal") return tab.pane.title;
     return browserPageLabel(tab.page);
+  };
+  // A tab is drawn as what its terminal holds now (#437): an agent's mark, or a terminal's.
+  const markOf = (tab: PeerTab): string | null => {
+    if (tab.kind === "agent") return isTerminalTab(tab.tab) ? (agents[tabPaneId(tab.tab)] ?? null) : tab.tab.harness;
+    return tab.kind === "terminal" ? (agents[tab.id] ?? null) : null;
   };
   return (
     <div role="tablist" aria-label="Session tabs" data-testid="session-tab-strip" className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-hairline px-2 py-1">
       {tabs.map((tab) => {
         const active = tab.kind === selected?.kind && tab.id === selected.id;
         const label = labelOf(tab);
-        const status = tab.kind === "agent" ? tab.tab.status : null;
+        const status = tab.kind === "agent" && !isTerminalTab(tab.tab) ? tab.tab.status : null;
+        const mark = markOf(tab);
         return (
           <div key={`${tab.kind}:${tab.id}`} className={cn("group/tab flex min-w-0 max-w-44 shrink-0 items-center rounded-md", active ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground")}>
             <button
@@ -52,7 +60,7 @@ export function SessionTabStrip({ session, selected }: { session: SessionEntry; 
               onClick={() => activatePeer(session.id, tab)}
               className="flex min-w-0 items-center gap-1.5 rounded-md py-1 pl-2 pr-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
-              {tab.kind === "agent" ? <AgentMark id={tab.tab.harness} className="size-3.5 shrink-0" decorative /> : tab.kind === "terminal" ? <TerminalSquare className="size-3.5 shrink-0" /> : <Globe className="size-3.5 shrink-0" />}
+              {mark ? <AgentMark id={mark} className="size-3.5 shrink-0" decorative /> : tab.kind === "browser" ? <Globe className="size-3.5 shrink-0" /> : <TerminalSquare className="size-3.5 shrink-0" />}
               <span className="truncate">{label}</span>
               {status && STATUS_DOT[status] && <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[status])} aria-label={TAB_STATUS_LABEL[status]} />}
             </button>

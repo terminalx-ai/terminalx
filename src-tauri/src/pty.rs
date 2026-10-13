@@ -42,6 +42,8 @@ struct Pane {
     last_output: Arc<Mutex<Option<Instant>>>,
     scrollback: Arc<Mutex<VecDeque<u8>>>,
     cwd: String,
+    /// When the pane was opened: where its tab stands among the session's.
+    created: String,
 }
 
 /// A direct line for one pane's raw output, beside the `pty_data` event: a
@@ -125,6 +127,10 @@ pub struct Terminals {
     /// gave it). Kept here so every window lists the same shells under the
     /// same names; a window's own memory would be known to that window only.
     titles: Mutex<HashMap<String, String>>,
+    /// The shell tabs whose name the reader chose, as against the "Terminal
+    /// N" each is opened with. A chosen name is kept whatever the tab goes
+    /// on to run (#437).
+    renamed: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A shell tab of a session: a pane the reader opened, as every window lists it.
@@ -134,8 +140,29 @@ pub struct ShellPane {
     pub id: String,
     pub session_id: String,
     pub title: Option<String>,
+    /// The reader named this tab; `title` is otherwise the one it was opened with.
+    pub renamed: bool,
     pub cwd: String,
     pub exited: bool,
+    /// When it was opened, so every window lists it in the same place.
+    pub created: String,
+}
+
+/// What a pane's terminal says is in front of it (#437).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneFront {
+    pub id: String,
+    /// The process the pane was opened with: a shell, or an agent's CLI.
+    pub pid: u32,
+    /// The process group the terminal gives its input to: the pane's own
+    /// process until something is started from it, and that job from then
+    /// until it ends or is suspended.
+    pub foreground: u32,
+    /// The terminal is read a key at a time and echoes nothing: a full-screen
+    /// program has it, not a command that prints and exits.
+    pub raw: bool,
+    /// The terminal's device, which is how its processes are listed.
+    pub tty: Option<std::path::PathBuf>,
 }
 
 /// The session a shell pane belongs to: shells are named `<session>:<n>`. An
@@ -144,7 +171,7 @@ pub fn is_shell_id(id: &str) -> bool {
     shell_session(id).is_some()
 }
 
-fn shell_session(id: &str) -> Option<&str> {
+pub fn shell_session(id: &str) -> Option<&str> {
     let (session, _) = id.split_once(':')?;
     (session != "tab" && !session.is_empty()).then_some(session)
 }
@@ -157,7 +184,7 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()) }
+        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default() }
     }
 }
 
@@ -272,6 +299,26 @@ impl Terminals {
     /// it to tell the CLI — and every hook the CLI spawns, since a hook is a
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
+        self.spawn_after(sink, id, spec, Vec::new())
+    }
+
+    /// Open a pane in the place of one whose program has exited, keeping what
+    /// that program printed: a tab whose agent exits goes on as a shell in
+    /// the same terminal (#437), and a window that shows it only afterwards
+    /// still finds the agent's last words above the prompt.
+    pub fn respawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
+        let printed = self.read_output(id).unwrap_or_default();
+        if let Some(pane) = self.panes.lock().unwrap().remove(id) {
+            // A program that has exited is not signalled: its pid may be
+            // another process's by now.
+            if let Some(pid) = pane.pid.filter(|_| *pane.alive.lock().unwrap()) {
+                crate::harness::host::terminate(pid);
+            }
+        }
+        self.spawn_after(sink, id, spec, printed)
+    }
+
+    fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
         if self.panes.lock().unwrap().contains_key(id) {
             return Ok(());
         }
@@ -322,6 +369,7 @@ impl Terminals {
         let alive = Arc::new(Mutex::new(true));
         let last_output = Arc::new(Mutex::new(None));
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
+        append_scrollback(&scrollback, &printed);
         let tap = self.tap_slot(id);
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
@@ -433,7 +481,7 @@ impl Terminals {
             })?;
         }
         let writer = Arc::new(Mutex::new(writer));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string(), created: crate::store::index::now() });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -717,17 +765,66 @@ impl Terminals {
         }
     }
 
+    /// The reader gave a shell tab a name of their own.
+    pub fn rename(&self, id: &str, title: &str) {
+        if self.panes.lock().unwrap().contains_key(id) {
+            self.titles.lock().unwrap().insert(id.to_string(), title.to_string());
+            self.renamed.lock().unwrap().insert(id.to_string());
+        }
+    }
+
+    /// What each running pane's terminal has in front, as the terminal itself
+    /// reports it: two calls on the PTY per pane, and no process is looked at.
+    /// Empty where a PTY cannot be asked.
+    pub fn fronts(&self) -> Vec<PaneFront> {
+        #[cfg(unix)]
+        {
+            let panes = self.panes.lock().unwrap();
+            panes
+                .iter()
+                .filter(|(_, pane)| *pane.alive.lock().unwrap())
+                .filter_map(|(id, pane)| {
+                    let foreground = pane.master.process_group_leader().and_then(|pgid| u32::try_from(pgid).ok())?;
+                    // SAFETY: tcgetattr fills the struct it is given; the fd is the pane's, which the lock keeps open.
+                    let raw = pane.master.as_raw_fd().is_some_and(|fd| unsafe {
+                        let mut mode: libc::termios = std::mem::zeroed();
+                        libc::tcgetattr(fd, &mut mode) == 0 && mode.c_lflag & (libc::ICANON | libc::ECHO) == 0
+                    });
+                    Some(PaneFront { id: id.clone(), pid: pane.pid?, foreground, raw, tty: pane.master.tty_name() })
+                })
+                .collect()
+        }
+        #[cfg(not(unix))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Where the pane was opened and when, if it is still listed.
+    pub fn opened(&self, id: &str) -> Option<(String, String)> {
+        let panes = self.panes.lock().unwrap();
+        let pane = panes.get(id)?;
+        Some((pane.cwd.clone(), pane.created.clone()))
+    }
+
+    /// What the reader calls a pane, and whether the name is theirs.
+    pub fn title(&self, id: &str) -> Option<(String, bool)> {
+        let title = self.titles.lock().unwrap().get(id).cloned()?;
+        Some((title, self.renamed.lock().unwrap().contains(id)))
+    }
+
     /// One shell tab, if `id` is one that exists.
     pub fn shell(&self, id: &str) -> Option<ShellPane> {
         let session_id = shell_session(id)?.to_string();
-        let (cwd, exited) = {
+        let (cwd, exited, created) = {
             let panes = self.panes.lock().unwrap();
             let pane = panes.get(id)?;
             let alive = *pane.alive.lock().unwrap();
-            (pane.cwd.clone(), !alive)
+            (pane.cwd.clone(), !alive, pane.created.clone())
         };
         let title = self.titles.lock().unwrap().get(id).cloned();
-        Some(ShellPane { id: id.to_string(), session_id, title, cwd, exited })
+        let renamed = self.renamed.lock().unwrap().contains(id);
+        Some(ShellPane { id: id.to_string(), session_id, title, renamed, cwd, exited, created })
     }
 
     /// Every session's shell tabs, oldest first: what a window that was not
@@ -822,6 +919,7 @@ impl Terminals {
         {
             let panes = self.panes.lock().unwrap();
             self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id));
+            self.renamed.lock().unwrap().retain(|id| panes.contains_key(id));
         }
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -1253,6 +1351,88 @@ mod tests {
         assert!(terminals.shell("session-a:2").is_none());
         assert_eq!(terminals.shells().len(), 2);
         assert!(!terminals.titles.lock().unwrap().contains_key("session-a:2"));
+        terminals.kill_all();
+    }
+
+    /// A tab whose agent exits goes on as a shell in the same pane (#437).
+    #[test]
+    fn a_pane_opened_again_keeps_what_the_program_before_it_printed() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        // A view that was there throughout sees one stream, with nothing repeated.
+        let (watching, watched) = collector();
+        terminals.attach("main", "pane", "watching", watching);
+        pane(&terminals, &sink, &dir, "pane", "sh -c 'printf last-words'");
+        read_until(&watched, "last-words");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while terminals.is_running("pane") {
+            assert!(Instant::now() < deadline, "the program never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let created = terminals.opened("pane").unwrap().1;
+        let spec = PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'printf shell-prompt; exec sleep 600'"), env: &[] };
+        terminals.respawn(sink.clone(), "pane", spec).unwrap();
+        assert!(read_until(&watched, "shell-prompt").matches("last-words").count() == 0, "what a view already drew is not sent to it again");
+        // A view that comes later is handed both, in order.
+        let (late, seen) = collector();
+        terminals.attach("floating", "pane", "late", late);
+        let all = read_until(&seen, "shell-prompt");
+        assert!(all.find("last-words").unwrap() < all.find("shell-prompt").unwrap(), "{all:?}");
+        assert!(terminals.is_running("pane"));
+        assert!(terminals.opened("pane").unwrap().1 >= created);
+        terminals.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_says_what_it_has_in_front_and_whether_it_is_read_a_key_at_a_time() {
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let dir = tempfile::tempdir().unwrap();
+        // The pane's own program, taking the terminal raw itself as a full-screen program does.
+        pane(&terminals, &sink, &dir, "s:1", "sh -c 'stty raw -echo; printf ready; exec sleep 600'");
+        let (view, output) = collector();
+        terminals.attach("main", "s:1", "view", view);
+        read_until(&output, "ready");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let fronts = terminals.fronts();
+            assert_eq!(fronts.len(), 1);
+            let front = &fronts[0];
+            // Nothing was started from it, so its own process has the terminal.
+            assert_eq!((front.id.as_str(), front.foreground), ("s:1", front.pid));
+            assert!(front.tty.is_some());
+            if front.raw {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the terminal never went raw");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // A pane whose program has gone has nothing in front.
+        terminals.kill_all();
+        assert!(terminals.fronts().is_empty());
+    }
+
+    #[test]
+    fn a_name_the_reader_gave_a_shell_is_told_apart_from_the_one_it_was_opened_with() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(8));
+        let dir = tempfile::tempdir().unwrap();
+        for id in ["session-a:1", "session-a:2"] {
+            pane(&terminals, &sink, &dir, id, "cat");
+            terminals.set_title(id, "Terminal");
+        }
+        terminals.rename("session-a:2", "dev server");
+        assert_eq!(terminals.title("session-a:1"), Some(("Terminal".into(), false)));
+        assert_eq!(terminals.title("session-a:2"), Some(("dev server".into(), true)));
+        let shells = terminals.shells();
+        assert_eq!(shells.iter().map(|shell| shell.renamed).collect::<Vec<_>>(), [false, true]);
+        assert!(shells.iter().all(|shell| chrono::DateTime::parse_from_rfc3339(&shell.created).is_ok()));
+        // The name goes with the shell.
+        terminals.kill("session-a:2");
+        assert_eq!(terminals.title("session-a:2"), None);
+        assert!(!terminals.renamed.lock().unwrap().contains("session-a:2"));
         terminals.kill_all();
     }
 

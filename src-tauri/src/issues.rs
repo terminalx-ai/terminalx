@@ -116,6 +116,42 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
+/// An issue as someone names it on a command line: `#433` or `433` for
+/// GitHub, `ENG-42` for Linear, or either tracker's URL for the issue. The
+/// answer is the provider and what its details call takes.
+pub fn parse_issue_reference(reference: &str, provider: Option<&str>) -> std::result::Result<(&'static str, String), String> {
+    let reference = reference.trim();
+    let is_number = |text: &str| !text.is_empty() && text.chars().all(|ch| ch.is_ascii_digit());
+    let is_key = |text: &str| {
+        text.split_once('-').is_some_and(|(team, number)| team.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic()) && team.chars().all(|ch| ch.is_ascii_alphanumeric()) && is_number(number))
+    };
+    let after = |marker: &str| reference.split_once(marker).map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or("").to_string());
+    let found = if reference.contains("github.com/") {
+        after("/issues/").filter(|number| is_number(number)).map(|number| ("github", number))
+    } else if reference.contains("linear.app/") {
+        after("/issue/").filter(|key| is_key(key)).map(|key| ("linear", key.to_ascii_uppercase()))
+    } else if is_number(reference.trim_start_matches('#')) {
+        Some(("github", reference.trim_start_matches('#').to_string()))
+    } else if is_key(reference) {
+        Some(("linear", reference.to_ascii_uppercase()))
+    } else {
+        None
+    };
+    let (found_provider, id) = found.ok_or_else(|| format!("{reference:?} is not an issue. Use #123 or a GitHub issue URL, or ENG-42 or a Linear issue URL."))?;
+    match provider {
+        Some(asked) if asked != found_provider => Err(format!("{reference} is a {} issue, not a {asked} one.", if found_provider == "github" { "GitHub" } else { "Linear" })),
+        _ => Ok((found_provider, id)),
+    }
+}
+
+/// The `owner/repo` a GitHub issue URL points into; `None` for anything else.
+pub fn github_issue_url_repo(reference: &str) -> Option<String> {
+    let (_, rest) = reference.trim().split_once("github.com/")?;
+    let mut parts = rest.split('/');
+    let (owner, repo, kind) = (parts.next()?, parts.next()?, parts.next()?);
+    (kind == "issues" && !owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
+}
+
 pub fn github_repo(cwd: &Path) -> Option<String> {
     crate::git::remote_url(cwd).and_then(|u| github_repo_from_url(&u))
 }
@@ -359,9 +395,116 @@ pub fn linear_details(key: &str, id: &str) -> Result<Issue> {
     Ok(issue)
 }
 
+/// A Linear state type that means the issue is finished with, one way or another.
+fn linear_closed(state_type: &str) -> bool {
+    matches!(state_type, "completed" | "canceled" | "cancelled" | "duplicate")
+}
+
+/// The team's workflow state an issue moves to once its pull request is open:
+/// the started state called "In Review", or failing that one with "review" in
+/// its name. A team with no such state has nowhere to move it.
+pub fn linear_review_state(data: &Value) -> Option<(String, String)> {
+    let states = data["issue"]["team"]["states"]["nodes"].as_array()?;
+    let named = |wanted: &dyn Fn(&str) -> bool| {
+        states.iter().find_map(|state| {
+            let name = state["name"].as_str()?;
+            let open = !linear_closed(state["type"].as_str().unwrap_or(""));
+            (open && wanted(&name.to_lowercase())).then(|| (state["id"].as_str().unwrap_or("").to_string(), name.to_string()))
+        })
+    };
+    named(&|name| name == "in review").or_else(|| named(&|name| name.contains("review"))).filter(|(id, _)| !id.is_empty())
+}
+
+/// What moving a Linear issue to review did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearReviewMove {
+    Moved(String),
+    /// Already there, or past it.
+    Unchanged(String),
+    NoReviewState,
+}
+
+/// Move a Linear issue to its team's review state. `id` is the issue's UUID
+/// or its identifier (`ENG-42`); Linear takes either.
+pub fn linear_move_to_review(key: &str, id: &str) -> Result<LinearReviewMove> {
+    let data = graphql(
+        key,
+        "query($id: String!) { issue(id: $id) { id state { id name type } team { states(first: 100) { nodes { id name type } } } } }",
+        json!({"id": id}),
+    )?;
+    let issue = &data["issue"];
+    let issue_id = issue["id"].as_str().ok_or_else(|| anyhow!("Linear did not return that issue."))?;
+    let Some((state_id, state_name)) = linear_review_state(&data) else {
+        return Ok(LinearReviewMove::NoReviewState);
+    };
+    let current = issue["state"]["name"].as_str().unwrap_or("").to_string();
+    // Never backwards: an issue someone already closed stays closed.
+    if issue["state"]["id"].as_str() == Some(state_id.as_str()) || linear_closed(issue["state"]["type"].as_str().unwrap_or("")) {
+        return Ok(LinearReviewMove::Unchanged(current));
+    }
+    let updated = graphql(
+        key,
+        "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
+        json!({"id": issue_id, "stateId": state_id}),
+    )?;
+    if updated["issueUpdate"]["success"].as_bool() != Some(true) {
+        bail!("Linear did not move the issue to {state_name}.");
+    }
+    Ok(LinearReviewMove::Moved(state_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_review_state_is_in_review_or_the_nearest_thing_to_it() {
+        let team = |states: Value| json!({"issue": {"team": {"states": {"nodes": states}}}});
+        // The states of a real team, in the order Linear returned them, with one more that also mentions review.
+        let usual = team(json!([
+            {"id": "s4", "name": "In Review", "type": "started"},
+            {"id": "s1", "name": "Todo", "type": "unstarted"},
+            {"id": "s5", "name": "Done", "type": "completed"},
+            {"id": "s6", "name": "Duplicate", "type": "duplicate"},
+            {"id": "s2", "name": "In Progress", "type": "started"},
+            {"id": "s0", "name": "Backlog", "type": "backlog"},
+            {"id": "s7", "name": "Canceled", "type": "canceled"},
+            {"id": "s3", "name": "Code Review", "type": "started"}
+        ]));
+        assert_eq!(linear_review_state(&usual), Some(("s4".into(), "In Review".into())));
+        let renamed = team(json!([{"id": "s2", "name": "In Progress", "type": "started"}, {"id": "s3", "name": "Peer review", "type": "started"}]));
+        assert_eq!(linear_review_state(&renamed), Some(("s3".into(), "Peer review".into())));
+        // A finished state that happens to mention review is not where work in review goes.
+        let closed = team(json!([{"id": "s9", "name": "Reviewed", "type": "completed"}, {"id": "s2", "name": "In Progress", "type": "started"}]));
+        assert_eq!(linear_review_state(&closed), None);
+        assert_eq!(linear_review_state(&json!({"issue": null})), None);
+    }
+
+    #[test]
+    fn an_issue_is_named_by_number_key_or_url() {
+        for (reference, provider, id) in [
+            ("#433", "github", "433"),
+            (" 433 ", "github", "433"),
+            ("https://github.com/acme/widgets/issues/433", "github", "433"),
+            ("https://github.com/acme/widgets/issues/433#issuecomment-1", "github", "433"),
+            ("ENG-42", "linear", "ENG-42"),
+            ("eng-42", "linear", "ENG-42"),
+            ("https://linear.app/acme/issue/PRO-89/reuse-the-envelope", "linear", "PRO-89"),
+        ] {
+            assert_eq!(parse_issue_reference(reference, None), Ok((provider, id.to_string())), "{reference}");
+        }
+        assert_eq!(parse_issue_reference("433", Some("github")), Ok(("github", "433".to_string())));
+        assert!(parse_issue_reference("433", Some("linear")).unwrap_err().contains("is a GitHub issue"));
+        for not_an_issue in ["", "fix the login", "https://github.com/acme/widgets/pull/433", "https://linear.app/acme/project/x", "-42", "ENG-", "#"] {
+            assert!(parse_issue_reference(not_an_issue, None).is_err(), "{not_an_issue}");
+        }
+        // A URL says which repository it is in; a bare number does not.
+        assert_eq!(github_issue_url_repo("https://github.com/acme/widgets/issues/433").as_deref(), Some("acme/widgets"));
+        assert_eq!(github_issue_url_repo(" https://github.com/Acme/Widgets/issues/433#issuecomment-1 ").as_deref(), Some("Acme/Widgets"));
+        for no_repo in ["433", "#433", "ENG-42", "https://github.com/acme/widgets/pull/433", "https://linear.app/acme/issue/ENG-42"] {
+            assert_eq!(github_issue_url_repo(no_repo), None, "{no_repo}");
+        }
+    }
 
     #[test]
     fn repo_from_remote_urls() {

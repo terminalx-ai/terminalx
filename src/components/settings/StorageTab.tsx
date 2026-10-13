@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage } from "@/lib/api";
 import { openWorktreeCleanup } from "@/lib/dialogs";
+import { leftoverTotals, startLeftoverRun, useLeftoverRun, watchLeftoverRun } from "@/lib/leftoverRun";
 import { formatSize } from "@/lib/workspaceSizes";
 import type { Leftover } from "@/types/session";
 
@@ -22,35 +23,44 @@ function describe(item: Leftover): string {
  * What earlier deletes left on disk, per project, with sizes. Nothing is
  * selected to begin with and nothing is deleted without the confirmation;
  * rows holding uncommitted or unpushed work cannot be selected at all.
+ *
+ * The deletion is a run that lives outside this tab (`leftoverRun.ts`): it
+ * is followed here while it goes, and carries on, shown in the corner of the
+ * window, when Settings is left.
  */
 export function StorageTab() {
   const [items, setItems] = useState<Leftover[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const [failures, setFailures] = useState<Record<string, string>>({});
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const run = useLeftoverRun();
+  const removing = run?.status === "running";
+  const busy = scanning || removing;
+  const done = run?.status === "done" ? run : null;
+
+  useEffect(() => watchLeftoverRun(), []);
 
   const scan = useCallback(async () => {
-    setBusy(true);
-    setError(null);
+    setScanning(true);
+    setScanError(null);
     try {
       const found = await api.scanLeftovers();
       setItems(found);
       const removable = new Set(found.filter((item) => !item.keptBecause).map((item) => item.id));
       setSelected((current) => new Set([...current].filter((id) => removable.has(id))));
     } catch (e) {
-      setError(errorMessage(e));
+      setScanError(errorMessage(e));
     } finally {
-      setBusy(false);
+      setScanning(false);
     }
   }, []);
 
+  // When the tab opens, and again once a deletion is over. Not during one: the list would be read mid-change.
   useEffect(() => {
-    void scan();
-  }, [scan]);
+    if (!removing) void scan();
+  }, [removing, scan]);
 
   const removable = useMemo(() => (items ?? []).filter((item) => !item.keptBecause), [items]);
   const chosen = removable.filter((item) => selected.has(item.id));
@@ -67,25 +77,23 @@ export function StorageTab() {
 
   const count = `${chosen.length} item${chosen.length === 1 ? "" : "s"}`;
 
-  const remove = async () => {
+  const remove = () => {
     setConfirming(false);
     if (!chosen.length) return;
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const removal = await api.removeLeftovers(chosen.map((item) => item.id));
-      setFailures(Object.fromEntries(removal.failed.map((failed) => [failed.id, failed.error])));
-      const kept = removal.failed.length ? ` ${removal.failed.length} could not be deleted and ${removal.failed.length === 1 ? "was" : "were"} kept.` : "";
-      setResult(`Deleted ${removal.removed.length} item${removal.removed.length === 1 ? "" : "s"} and freed ${formatSize(removal.freedBytes)}.${kept}`);
-      setSelected(new Set());
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setBusy(false);
-    }
-    await scan();
+    setScanError(null);
+    void startLeftoverRun(chosen.map((item) => ({ item, label: describe(item) })));
+    setSelected(new Set());
   };
+
+  const failures = useMemo(() => Object.fromEntries((done?.finished ?? []).flatMap((item) => (item.error ? [[item.id, item.error]] : []))), [done]);
+  const error = scanError ?? done?.error ?? null;
+  const result = useMemo(() => {
+    if (!done || done.error) return null;
+    const sum = leftoverTotals(done);
+    const kept = sum.kept ? ` ${sum.kept} could not be deleted and ${sum.kept === 1 ? "was" : "were"} kept.` : "";
+    return `Deleted ${sum.deleted} item${sum.deleted === 1 ? "" : "s"} and freed ${formatSize(sum.freedBytes)}.${kept}`;
+  }, [done]);
+  const progress = removing ? { ...leftoverTotals(run), finished: run.finished.length, total: run.items.length, current: run.items.find((item) => item.id === run.current) } : null;
 
   const projects = useMemo(() => {
     const groups = new Map<string, { name: string; items: Leftover[] }>();
@@ -122,7 +130,7 @@ export function StorageTab() {
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="secondary" size="sm" disabled={busy} onClick={() => void scan()}>
-          {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} Scan again
+          {scanning ? <Loader2 className="animate-spin" /> : <RefreshCw />} Scan again
         </Button>
         <Button variant="secondary" size="sm" disabled={busy || !removable.length} onClick={() => setSelected(new Set(removable.map((item) => item.id)))}>
           Select all removable
@@ -132,6 +140,38 @@ export function StorageTab() {
         </Button>
         {items && items.length > 0 && <span className="text-xs text-muted-foreground tabular-nums">{formatSize(totalBytes)} in total</span>}
       </div>
+
+      {progress && (
+        <div className="rounded-lg bg-well px-3 py-2.5" aria-label="Deleting leftovers">
+          <div
+            role="progressbar"
+            aria-label="Leftovers deleted"
+            aria-valuemin={0}
+            aria-valuemax={progress.total}
+            aria-valuenow={progress.finished}
+            aria-valuetext={`${progress.finished} of ${progress.total} done`}
+            className="h-1.5 overflow-hidden rounded-full bg-veil-strong"
+          >
+            <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${progress.total ? (progress.finished / progress.total) * 100 : 0}%` }} />
+          </div>
+          <div role="status" className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
+            <span className="text-foreground">
+              {progress.finished} of {progress.total} done
+            </span>
+            <span className="tabular-nums text-muted-foreground">{formatSize(progress.freedBytes)} freed so far</span>
+            <span className="tabular-nums text-muted-foreground">
+              {progress.deleted} deleted · {progress.kept} kept
+            </span>
+          </div>
+          <div className="mt-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 aria-hidden className="size-3.5 shrink-0 animate-spin" />
+            <span className="min-w-0 truncate">
+              {run?.checking ? "Checking everything again before anything is deleted…" : progress.current ? `Deleting ${progress.current.label}…` : "Working…"}
+            </span>
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">You can leave Settings: this carries on, and shows in the corner of the window.</p>
+        </div>
+      )}
 
       {error && (
         <div role="alert" className="text-xs text-destructive">
@@ -144,7 +184,7 @@ export function StorageTab() {
         </div>
       )}
 
-      {items === null && !error && <div className="text-xs text-muted-foreground">Looking for leftovers…</div>}
+      {items === null && !error && !removing && <div className="text-xs text-muted-foreground">Looking for leftovers…</div>}
       {items?.length === 0 && <div className="text-xs text-muted-foreground">Nothing left behind.</div>}
 
       {projects.map(([path, group]) => (
@@ -223,7 +263,7 @@ export function StorageTab() {
             <Button ref={cancelRef} variant="ghost" onClick={() => setConfirming(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={() => void remove()}>
+            <Button variant="destructive" onClick={remove}>
               <Trash2 /> Delete {count}
             </Button>
           </DialogFooter>

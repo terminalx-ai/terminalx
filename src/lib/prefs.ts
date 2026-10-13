@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
 
 /**
  * UI preferences that the frontend can read for itself live in localStorage.
@@ -63,6 +64,8 @@ export interface Prefs {
    * Kept per machine. An action not listed uses its defaults.
    */
   shortcuts: Record<string, string[]>;
+  /** Which version's action ids `shortcuts` is written in (see `@/lib/shortcutMigration`). */
+  shortcutsVersion: number;
   /**
    * The sidebar's session filter per person, by account email (`local` while
    * signed out). Only a filter that is on is kept; someone not listed sees
@@ -105,6 +108,7 @@ const DEFAULTS: Prefs = {
   cloudPinned: {},
   cloudCollapsed: {},
   shortcuts: {},
+  shortcutsVersion: SHORTCUTS_VERSION,
   sidebarFilters: {},
   projectsDir: null,
 };
@@ -120,11 +124,23 @@ function load(): Prefs {
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
+    let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
     // choices made in Settings or remembered in the chooser survive this migration.
     if (prefs.linkBrowser === "terminalx" && prefs.linkBrowserChosen !== true) {
       prefs.linkBrowser = "system";
+      migrated = true;
+    }
+    // Shortcuts saved under an older version's action ids, once. A newer version's are left as they are.
+    const version = shortcutsVersionOf(parsed.shortcutsVersion);
+    if (version < SHORTCUTS_VERSION) {
+      const shortcuts = migrateShortcuts(prefs.shortcuts, version);
+      migrated ||= shortcuts !== prefs.shortcuts;
+      prefs.shortcuts = shortcuts;
+      prefs.shortcutsVersion = SHORTCUTS_VERSION;
+    }
+    if (migrated) {
       try {
         localStorage.setItem(KEY, JSON.stringify(prefs));
       } catch {

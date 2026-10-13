@@ -349,11 +349,24 @@ export function AgentTabRow({ harness, label, status, mobileDriven, terminalView
   );
 }
 
-/** A shell terminal tab; an exited shell stays listed, struck through. */
-export function ShellTabRow({ title, exited, ...row }: TabRowBase & { title: string; exited: boolean }) {
+/**
+ * A terminal tab; an exited shell stays listed, struck through.
+ *
+ * `agent` is the agent in front of the terminal when that is one the app
+ * draws by its mark and has no chat for (#437): the row is then that agent's,
+ * and still a terminal's to open.
+ */
+export function ShellTabRow({ title, exited, agent, ...row }: TabRowBase & { title: string; exited: boolean; agent?: string | null }) {
   return (
-    <TabRow {...row} tone="peer" label={`${title}${exited ? ", exited" : ""}`} title={title} closeLabel={`Close ${title} terminal tab`}>
-      <Terminal className="size-3.5 shrink-0" />
+    <TabRow
+      {...row}
+      tone="peer"
+      label={`${title}${exited ? ", exited" : ""}`}
+      aria-description={agent ? `${agentName(agent)}, running in a terminal` : undefined}
+      title={agent ? `${title} · running in this terminal` : title}
+      closeLabel={`Close ${title} terminal tab`}
+    >
+      {agent ? <AgentMark id={agent} className="size-3.5 shrink-0" decorative /> : <Terminal className="size-3.5 shrink-0" />}
       <span className={cn("min-w-0 flex-1 truncate", exited && "text-faint line-through")}>{title}</span>
     </TabRow>
   );

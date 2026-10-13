@@ -64,6 +64,9 @@ pub fn from_history(events: &[crate::events::AgentEvent]) -> Option<RecoveryKind
             Payload::UserMessage { queued: false, .. } => { open = true; recovery = None; }
             Payload::TurnCompleted { .. } => open = false,
             Payload::Status { text } if text == SESSION_CLOSED_MESSAGE => { open = false; recovery = None; }
+            // Another conversation took the tab's terminal (#437): whatever
+            // was owed to the one before is not owed by this one.
+            Payload::Conversation { .. } => { open = false; recovery = None; }
             Payload::PermissionDecided { label, .. } if label == "Lapsed" => recovery = Some(RecoveryKind::PermissionExpired),
             _ => {}
         }
@@ -190,6 +193,20 @@ mod lifecycle_tests {
         events.push(event(Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }));
         assert_eq!(from_history(&events), None);
     }
+    /// A tab follows its terminal (#437): what was owed to the conversation
+    /// it held before is not owed by the one that took its place.
+    #[test]
+    fn another_conversation_in_the_tab_starts_with_nothing_to_recover() {
+        let moved_on = Payload::Conversation { id: Some("c2".into()), harness: "codex".into(), resumed: false };
+        let lapsed = event(Payload::PermissionDecided { request_id: "r".into(), tool_use_id: None, allowed: false, label: "Lapsed".into(), automatic: true });
+        assert_eq!(from_history(&[lapsed.clone(), event(moved_on.clone())]), None);
+        let unfinished = event(Payload::UserMessage { author: None, text: "p".into(), images: vec![], baseline: None, queued: false, cwd: None });
+        assert_eq!(from_history(std::slice::from_ref(&unfinished)), Some(RecoveryKind::Disconnected));
+        assert_eq!(from_history(&[unfinished, event(moved_on.clone())]), None);
+        // What goes wrong in the new one is its own.
+        assert_eq!(from_history(&[event(moved_on), lapsed]), Some(RecoveryKind::PermissionExpired));
+    }
+
     #[test]
     fn a_tool_failure_an_older_log_recorded_is_not_restored() {
         let events = vec![event(Payload::Recovery { kind: Some(RecoveryKind::Tool) })];

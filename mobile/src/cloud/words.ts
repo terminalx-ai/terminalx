@@ -134,6 +134,7 @@ export function outboxLine(entry: OutboxEntry, stopped = false, nameOf: NameOf =
     return { tone: "warn", text: `${typeof holder === "string" ? nameOf(holder) : "Someone else"} is driving. Your message was not sent.` };
   }
   if (entry.state === "rejected" && entry.category === "access-revoked") return { tone: "warn", text: "Not sent: your access changed." };
+  if (entry.asleep) return { tone: "warn", text: "Not started. This workspace is stopped, and sending starts it." };
   if (entry.state === "unsent") return { tone: "warn", text: stopped ? "Not sent. This workspace is stopped, and sending starts it." : "Not delivered yet. It is sent when the phone is back online." };
   if (entry.state === "queued") return { tone: "idle", text: entry.wake === "queued" || entry.wake === "in-progress" ? "Starting the workspace…" : entry.wake === "unavailable" ? "Waiting: the workspace could not be started." : "Sent. Waiting for the agent." };
   if (entry.state === "leased") return { tone: "idle", text: "Delivering…" };

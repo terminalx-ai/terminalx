@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ImageInput } from "@/lib/api";
-import { applyEvent, useTabLog } from "@/lib/agentEvents";
-import { buildTranscript, type Transcript } from "@/lib/transcript";
+import { agent as agentApi, errorMessage, type ImageInput } from "@/lib/api";
+import { applyEvent, getTabLog, useTabLog } from "@/lib/agentEvents";
+import { buildTranscript, conversationEvents, type Transcript } from "@/lib/transcript";
 import { getDraft, setDraft, useDraft } from "@/lib/drafts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
@@ -18,10 +18,15 @@ import { Composer, type Handoff } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
-import { MessageSquare } from "lucide-react";
+import { History, MessageSquare, Play } from "lucide-react";
+import { AgentMark } from "@/components/AgentMark";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
-import { clearTabViewError, isPtyFirst, leaveTerminalView, startTabAgent, terminalPaneId, useTabViews } from "@/lib/tabViews";
+import { clearTabViewError, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
+import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
+import { useSessionStore } from "@/lib/sessions";
 import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { ContinuationDialog } from "./ContinuationDialog";
@@ -29,7 +34,9 @@ import { useModels } from "@/lib/models";
 import { openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
-import { TAB_STATUS_LABEL, type SessionEntry, type TabEntry } from "@/types/session";
+import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
+
+const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
  * One tab: its event log, the transcript built from it, and the composer.
@@ -54,6 +61,14 @@ export function handoffsFor(t: Transcript, changed: boolean, deleteWorkspace?: (
       : [];
   const steps = deleteWorkspace ? [...prompts, { label: "Delete workspace", run: deleteWorkspace }] : prompts;
   return steps.length ? steps : undefined;
+}
+
+/** When a conversation ended, as a short local time; the day too when that was not today. */
+function endedAt(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  const today = new Date().toDateString() === at.toDateString();
+  return at.toLocaleString(undefined, today ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export function TabView({
@@ -86,19 +101,41 @@ export function TabView({
   // A cloud tab's terminal view (PRO-86) attaches to its CLI on the VM; it is
   // only there while the runtime serves it, else the tab shows its chat.
   const remoteTerminal = !local && terminalViewOf(backend, tab).available ? (backend.agentTerminal ?? null) : null;
-  const terminalMode = views.views[tab.id] === "terminal" && (local || !!remoteTerminal);
+  const terminalMode = tabViewIn(views.views, tab) === "terminal" && (local || !!remoteTerminal);
   const viewError = views.errors[tab.id] ?? null;
   const terms = useTerminals();
   const ptyFirst = local && isPtyFirst(tab.harness);
-  const paneId = terminalPaneId(tab.id);
+  const paneId = tabPaneId(tab);
   const pane = terms.panes.find((p) => p.id === paneId);
+  // A tab follows what runs in its terminal (#437). `terminalTab`: no agent is there, and the tab is a
+  // terminal whose chat is the conversation it last held, to read and to resume. `byHand`: its agent
+  // was started in the terminal by hand, and the chat is that CLI's conversation, followed.
+  const terminalTab = local && isTerminalTab(tab);
+  const byHand = local && isByHand(tab);
+  const harnesses = useSessionStore().harnesses;
+  const agentName = useCallback((harness: string) => harnesses.find((candidate) => candidate.id === harness)?.name ?? harness, [harnesses]);
+  const agentLabel = agentName(tab.harness);
+  // An earlier conversation of this tab that is being read, in place of the one it holds now.
+  const [viewing, setViewing] = useState<PastConversation | null>(null);
+  // The trigger is the button itself, so a mouse click, an accessibility press and Return all open it.
+  const conversationsMenu = useRowMenu();
+  const [resuming, setResuming] = useState(false);
+  const readOnly = terminalTab || !!viewing;
   const [answering, setAnswering] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const recoveryLock = useRef(false);
   const [stopped, setStopped] = useState(false);
   const [continueOpen, setContinueOpen] = useState(false);
   const { models, refresh: refreshPickerModels } = usePickerModels(useModels(tab.harness), !local, backend.modelClient, tab.harness);
-  const eventRecovery = useMemo(() => recoveryFromEvents(log.events), [log.events, log.version]);
+  // The tab's log holds every conversation it has held; the chat is one of them.
+  const conversation = viewing ? (viewing.id ?? null) : (tab.conversation ?? null);
+  const events = useMemo(() => conversationEvents(log.events, conversation), [log.events, log.version, conversation]);
+  // The ones before the current that have anything in them, newest first.
+  const earlier = useMemo(
+    () => (tab.history ?? []).filter((past) => conversationEvents(log.events, past.id ?? null).some((event) => event.payload.type === "user_message")).reverse(),
+    [tab.history, log.events, log.version],
+  );
+  const eventRecovery = useMemo(() => (readOnly ? null : recoveryFromEvents(events)), [events, log.version, readOnly]);
   // PRO-30: on a shared cloud workspace, who may send, stop and answer here.
   const shared = backend.collab ?? null;
   const collab = useCollab(shared?.key ?? `local:${session.id}`);
@@ -112,7 +149,8 @@ export function TabView({
   const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
-  const recovery = !backend.caps.recovery ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
+  // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
+  const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
   const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
   // A cloud command's refusal says what happened to it (queued, view only, no key yet).
   const commandError = (e: unknown) => {
@@ -127,9 +165,40 @@ export function TabView({
 
   // A PTY-first tab is its CLI, so opening the tab starts it. Idempotent, and
   // the pane it lands in is adopted from the backend's own event.
+  // Again when what is in its terminal changes: a tab that became a terminal is given its shell.
+  const front = tab.front ?? "agent";
   useEffect(() => {
     if (active && ptyFirst) void startTabAgent(session, tab);
-  }, [active, ptyFirst, session.id, tab.id]);
+  }, [active, ptyFirst, session.id, tab.id, front]);
+
+  // The face picked for what was in the terminal before does not stand for what is there now. Neither
+  // does "Session closed": that was said of the agent Stop ended, not of the one there since.
+  const shownFront = useRef(front);
+  useEffect(() => {
+    if (shownFront.current === front) return;
+    shownFront.current = front;
+    forgetTabView(tab.id);
+    setStopped(false);
+  }, [front, tab.id]);
+
+  // An earlier conversation is read until the tab moves on, or it is no longer one of the tab's.
+  useEffect(() => {
+    if (viewing && !(tab.history ?? []).some((past) => (past.id ?? null) === (viewing.id ?? null))) setViewing(null);
+  }, [tab.history, viewing]);
+
+  /** Start the tab's agent again on one of its conversations, in the place of the idle shell. */
+  const resume = useCallback(
+    (target: Resumable) => {
+      setResuming(true);
+      setError(null);
+      void agentApi
+        .resumeConversation(session.id, tab.id, target.harness, target.providerSessionId)
+        .then(() => setViewing(null))
+        .catch((e) => setError(errorMessage(e)))
+        .finally(() => setResuming(false));
+    },
+    [session.id, tab.id],
+  );
 
   // Viewing a finished tab marks it read.
   useEffect(() => {
@@ -139,11 +208,12 @@ export function TabView({
     }
   }, [active, tab.status, backend.key, tab.id]);
 
-  const live = tab.status === "in_progress" || tab.status === "waiting";
-  const transcript = useMemo(() => buildTranscript(log.events, live), [log.events, log.version, live]);
+  // Nothing is running in a conversation that is only being read.
+  const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
+  const transcript = useMemo(() => buildTranscript(events, live), [events, log.version, live]);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
-  const range = useMemo(() => changeRange(log.events, session.baseRef), [log.events, log.version, session.baseRef]);
+  const range = useMemo(() => changeRange(events, session.baseRef), [events, log.version, session.baseRef]);
   const changes = useChanges(local ? (session.cwd ? localGitSource(session.cwd) : undefined) : gitSource, range, isGit && active && !live);
 
   // Once the worktree's pull request has merged, the chat offers to delete
@@ -177,9 +247,37 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // The newest event when the last interrupt was sent. Until a turn has ended
+  // after it, the agent has not answered: the tab is still working on the turn
+  // Escape was meant for.
+  const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!live) setInterruptedAt(null);
+  }, [live]);
+  const interrupts = backend.caps.interrupt;
+  const unanswered = useMemo(
+    () => interrupts && live && interruptedAt !== null && !log.events.some((e) => e.seq > interruptedAt && e.payload.type === "turn_completed"),
+    [interrupts, live, interruptedAt, log.events, log.version],
+  );
+
+  // Escape, as the agent's own screen takes it (#427): the turn is
+  // interrupted and the agent's process stays, so nothing here is closed,
+  // settled or resumed. The turn shows as stopped when the agent says so.
+  const interrupt = useCallback(() => {
+    if (gate && !gate.mayStop) {
+      setError(STOP_REFUSED);
+      return;
+    }
+    // Read now, not at the last render: the turn this is for may have ended since.
+    const events = getTabLog(backend.logSessionId, tab.id).events;
+    setInterruptedAt(events.length ? events[events.length - 1].seq : 0);
+    void backend.interrupt(tab.id).catch((e) => setError(local ? safeError(e) : commandError(e)));
+  }, [backend, local, tab.id, gate?.mayStop]);
+
+  // The hard stop: the agent's process is ended and the banner offers to resume.
   const stop = useCallback(() => {
     if (gate && !gate.mayStop) {
-      setError("Only the person driving this tab or an admin can stop the agent.");
+      setError(STOP_REFUSED);
       return;
     }
     if (recoveryLock.current) return;
@@ -219,9 +317,15 @@ export function TabView({
     finally { recoveryLock.current = false; setRecovering(false); }
   };
 
-  // Editors, dialogs and pickers own Escape before the agent-stop shortcut.
-  // In a cloud tab's terminal view the stop key (Escape, unless remapped) belongs to the agent's own screen, as every other key does.
-  useShortcut("session.stop", () => (live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane") ? (stop(), true) : false), {
+  // Editors, dialogs and pickers own Escape before the agent does, and with nothing running the key is nobody's.
+  const takesKey = () => live && !hasEscapeOverlay() && !document.activeElement?.closest(".editor-pane");
+  // The chat's Escape is the agent's Escape. In the terminal view (local or cloud) the action is not bound at all:
+  // there the key is typed into the agent's own screen, like every other key.
+  useShortcut("session.interrupt", () => (takesKey() ? (interrupt(), true) : false), {
+    enabled: active && !continuationOpen && !terminalMode && interrupts,
+  });
+  // The hard stop has no keys unless the reader gives it some. A cloud tab's terminal view passes those through too.
+  useShortcut("session.stop", () => (takesKey() ? (stop(), true) : false), {
     enabled: active && !continuationOpen && !(remoteTerminal && terminalMode),
   });
 
@@ -264,6 +368,15 @@ export function TabView({
       setError(commandError(e));
     }
   }, [backend, draft, tab.id]);
+  // What cannot be changed from the chat for a CLI the reader started by hand, and why: said under the pickers too,
+  // since a disabled picker's own reason is only a tooltip.
+  const handLock = useMemo(() => byHandLock(tab, agentLabel), [tab, agentLabel]);
+  const byHandNote = byHand
+    ? `${agentLabel} was started by hand in this tab's terminal. ${handLock.model ? "Its model, effort and permission mode are" : "Its permission mode is"} changed there: TerminalX only restarts an agent it launched.`
+    : null;
+  // The conversation the chat is showing, when the app can start it again; and the one the tab holds, which its terminal offers.
+  const reading = resumable(viewing ?? tab);
+  const held = resumable(tab);
   const outbox = backend.outbox;
   // What became of the last model, effort or mode chosen here (a cloud tab).
   const settingsNotice = backend.settingsNotice?.(tab.id) ?? null;
@@ -281,11 +394,32 @@ export function TabView({
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
       live={live}
-      progressing={tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
+      progressing={live && tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
       answering={answering || deciding}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
       footer={
+        readOnly ? (
+          // A conversation that is not running is read, and resumed from here: there is nobody to send to.
+          <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
+            <span className="min-w-0 flex-1">
+              {viewing
+                ? `An earlier conversation in this tab, with ${agentName(viewing.harness)}. It is kept as it was.`
+                : `${agentLabel} is not running in this tab. Its conversation is kept here.`}
+              {error ? <span className="mt-1 block text-warning">{error}</span> : null}
+            </span>
+            {viewing ? (
+              <Button size="sm" variant="ghost" onClick={() => setViewing(null)}>
+                Back to the current one
+              </Button>
+            ) : null}
+            {reading && terminalTab ? (
+              <Button size="sm" variant="outline" disabled={resuming} onClick={() => resume(reading)} data-testid="conversation-resume">
+                <Play /> Resume here
+              </Button>
+            ) : null}
+          </div>
+        ) : (
         <>
         {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
@@ -298,7 +432,9 @@ export function TabView({
         <Composer
           tab={tab}
           cwd={local ? session.cwd : undefined}
-          commands={backend.commands?.(tab)}
+          // A tab that is not on screen asks its runtime for nothing: on a runtime that answers
+          // in order, its command list held up the terminal view of the tab that is (#449).
+          commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
           remote={!local}
           busy={live}
@@ -310,7 +446,9 @@ export function TabView({
           }}
           onSend={send}
           history={history}
-          onStop={stop}
+          // Stop is Escape first; once that went unanswered, the same control ends the process.
+          onStop={interrupts && !unanswered ? interrupt : stop}
+          stopMode={!interrupts ? "stop" : unanswered ? "force" : "interrupt"}
           onSetModel={(m) => {
             if (gate && !gate.mayConfigure) return;
             if (recovery) { void retry(m); return; }
@@ -335,13 +473,16 @@ export function TabView({
           handoffs={handoffsFor(transcript, isGit && changes.files.length > 0, deleteWorkspace)}
           disabled={!!gate?.blocked}
           settingsLockedReason={gate && !gate.mayConfigure ? SETTINGS_LOCKED_REASON : null}
-          settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : null}
+          modelLockedReason={handLock.model}
+          modeLockedReason={handLock.mode}
+          settingsNote={settingsNotice === "ignored" ? SETTINGS_IGNORED_REASON : settingsNotice === "pending" ? SETTINGS_WITH_NEXT_MESSAGE : byHandNote}
           settingsNoteWarning={settingsNotice === "ignored"}
           canStop={!gate || gate.mayStop}
           disabledReason={gate?.blocked ?? error ?? (viewError ? safeError(viewError) : null) ?? backend.readOnlyReason}
           autoFocus={active}
         />
         </>
+        )
       }
     />
   );
@@ -350,24 +491,46 @@ export function TabView({
   const terminal = (
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="shrink-0 text-foreground">Terminal view · {TAB_STATUS_LABEL[tab.status]}</span>
+        <span className="shrink-0 text-foreground" data-testid="terminal-view-title">{terminalTab ? "Terminal" : `Terminal view · ${TAB_STATUS_LABEL[tab.status]}`}</span>
         {live && !recovery && <Button size="xs" variant="outline" disabled={recovering} onClick={stop}>Stop session</Button>}
-        <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
-          {info?.command}
-        </span>
+        {!terminalTab && (
+          <span className="min-w-0 truncate font-mono text-[11px] text-faint" title={info?.command}>
+            {info?.command}
+          </span>
+        )}
         <span className="ml-auto min-w-0 text-faint">
-          {ptyFirst ? "The chat is the same conversation." : "The chat resumes when you switch back."}
-          {tab.harness === "claude" && (
+          {terminalTab
+            ? "No agent is running in this tab. Start one here and the tab becomes its tab."
+            : byHand
+              ? `${agentLabel} was started in this terminal. The chat is the same conversation.`
+              : ptyFirst
+                ? "The chat is the same conversation."
+                : "The chat resumes when you switch back."}
+          {tab.harness === "claude" && !terminalTab && (
             <> Claude Code may show its own diff sidebar. Type <code>/diff</code> in the terminal to hide or show it.</>
           )}
         </span>
+        {terminalTab && held && !pane?.exited && (
+          <Button size="xs" variant="outline" disabled={resuming} onClick={() => resume(held)} data-testid="terminal-resume">
+            <Play /> Resume {agentLabel}
+          </Button>
+        )}
       </div>
+      {terminalTab && error && (
+        <div role="alert" className="shrink-0 bg-warning/10 px-3 py-1.5 text-xs text-foreground">{error}</div>
+      )}
       {pane?.exited && (
         <div className="flex shrink-0 items-center gap-2 bg-warning/10 px-3 py-1.5 text-xs text-foreground">
-          The agent's terminal exited{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
-          <Button size="xs" variant="outline" className="ml-auto" onClick={() => void leaveTerminalView(session, tab)}>
-            <MessageSquare /> Back to chat
-          </Button>
+          {terminalTab ? "The shell exited" : "The agent's terminal exited"}{pane.exitCode != null ? ` (${pane.exitCode})` : ""}.
+          {terminalTab ? (
+            <Button size="xs" variant="outline" className="ml-auto" onClick={() => void startTabAgent(session, tab)}>
+              New shell
+            </Button>
+          ) : (
+            <Button size="xs" variant="outline" className="ml-auto" onClick={() => void leaveTerminalView(session, tab)}>
+              <MessageSquare /> Back to chat
+            </Button>
+          )}
         </div>
       )}
       <div className="relative min-h-0 flex-1">
@@ -416,7 +579,44 @@ export function TabView({
       />
     )}
     {outbox && <CloudOutbox entries={outbox.entries(tab.id)} followUps={outbox.followUps(tab.id)} nameOf={nameOf} onSendAgain={(entry) => void outbox.sendAgain(entry).catch((e) => setError(commandError(e)))} />}
-    {stopped && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
+    {earlier.length > 0 && (
+      // The tab held other conversations before this one: another agent was run in its terminal, or the same one on something else.
+      <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="tab-conversations">
+        <History className="size-3.5 shrink-0" />
+        <span className="min-w-0 truncate">
+          {viewing ? `Reading an earlier conversation with ${agentName(viewing.harness)}` : `${earlier.length} earlier conversation${earlier.length === 1 ? "" : "s"} in this tab`}
+        </span>
+        <DropdownMenu {...conversationsMenu.root}>
+          <DropdownMenuTrigger asChild {...conversationsMenu.trigger}>
+            <Button size="xs" variant="outline" className="ml-auto shrink-0">Conversations</Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-[16rem]">
+            <DropdownMenuLabel>This tab's conversations</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => setViewing(null)} data-testid="conversation-current">
+              <AgentMark id={tab.harness} decorative />
+              <span className="min-w-0 truncate">{tab.title?.trim() || agentLabel}</span>
+              <span className="ml-auto pl-3 text-[11px] text-faint">{terminalTab ? "last" : "current"}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {earlier.map((past) => (
+              <DropdownMenuItem
+                key={past.id ?? "first"}
+                onSelect={() => {
+                  setViewing(past);
+                  // It is read in the chat, whichever face the tab was showing.
+                  if (terminalMode) void leaveTerminalView(session, tab);
+                }}
+              >
+                <AgentMark id={past.harness} decorative />
+                <span className="min-w-0 truncate">{past.title?.trim() || agentName(past.harness)}</span>
+                {past.ended ? <span className="ml-auto pl-3 text-[11px] text-faint">{endedAt(past.ended)}</span> : null}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    )}
+    {stopped && !terminalTab && <div role="status" className="flex items-center gap-2 border-b border-hairline p-3 text-xs">
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}

@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CleanupCandidate, CleanupVerdict } from "@terminalx/portable/workspace";
 import { Cloud, Loader2, Lock, Monitor, RefreshCw, Trash2 } from "lucide-react";
+import { CleanupRunView } from "@/components/cleanup/CleanupRunView";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogScrollArea, DialogTitle } from "@/components/ui/dialog";
+import { clearCleanupRun, getCleanupRun, startCleanupRun, stopCleanupRun, useCleanupRun } from "@/lib/cleanupRun";
 import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { useCloudConnectionsVersion } from "@/lib/cloudConnections";
 import { closeWorktreeCleanup, useDialogs } from "@/lib/dialogs";
 import { relativeTime } from "@/lib/time";
-import { forgetWorkspaceSize, formatSize } from "@/lib/workspaceSizes";
-import { LOCAL_HOST, candidateKey, cleanupHosts, estimateSizes, runCleanup, scanHosts, selectable, totals, type CleanupHost, type CleanupOutcome, type CleanupSelection, type HostScan } from "@/lib/worktreeCleanup";
+import { formatSize } from "@/lib/workspaceSizes";
+import { candidateKey, cleanupHosts, estimateSizes, scanHosts, selectable, type CleanupHost, type CleanupSelection, type HostScan } from "@/lib/worktreeCleanup";
 
 const VERDICT_LABEL: Record<CleanupVerdict, string> = {
   eligible: "Safe to remove",
@@ -22,15 +24,8 @@ const VERDICT_LABEL: Record<CleanupVerdict, string> = {
   unverifiable: "Could not be verified",
 };
 
-const OUTCOME_LABEL: Record<CleanupOutcome["outcome"], string> = {
-  removed: "Removed",
-  alreadyRemoved: "Already removed",
-  skipped: "Skipped",
-  failed: "Failed",
-  unknown: "Not known",
-};
-
-type Stage = "review" | "confirm" | "running" | "done";
+/** Before anything is removed. Once a removal is confirmed, the run itself says where things stand. */
+type ReviewStage = "review" | "confirm";
 
 function plural(count: number, one: string, many: string) {
   return `${count} ${count === 1 ? one : many}`;
@@ -50,19 +45,25 @@ function sessionImpact(candidate: CleanupCandidate, deleteSessions: boolean): st
  * Opening it scans and nothing else. A worktree is removed only after it was
  * selected here, shown again in the review, and confirmed; each host then
  * checks its own worktrees once more and leaves alone whatever changed.
+ *
+ * The removal itself is a run that lives outside this dialog
+ * (`cleanupRun.ts`). While there is one, this shows it: hiding the dialog
+ * leaves it running, with the corner indicator as its other view, and
+ * opening the clean-up again comes back to it instead of scanning.
  */
 export function WorktreeCleanupDialog() {
   const { worktreeCleanup: open } = useDialogs();
   const catalog = useCloudCatalog();
   const connections = useCloudConnectionsVersion();
-  const [stage, setStage] = useState<Stage>("review");
+  const run = useCleanupRun();
+  const [reviewStage, setStage] = useState<ReviewStage>("review");
+  const stage = run ? (run.status === "running" ? "running" : "done") : reviewStage;
   const [scans, setScans] = useState<HostScan[] | null>(null);
   const [sizes, setSizes] = useState<Record<string, number>>({});
   const [estimating, setEstimating] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [includeIgnored, setIncludeIgnored] = useState(false);
   const [deleteSessions, setDeleteSessions] = useState(false);
-  const [outcomes, setOutcomes] = useState<CleanupOutcome[]>([]);
   const stopSizes = useRef<() => void>(() => undefined);
   const hostsRef = useRef<CleanupHost[]>([]);
   const scanId = useRef(0);
@@ -79,7 +80,6 @@ export function WorktreeCleanupDialog() {
     setScans(null);
     setSizes({});
     setSelected(new Set());
-    setOutcomes([]);
     const found = await scanHosts(hostsRef.current);
     if (id !== scanId.current) return;
     scanned.current = found.map((entry) => entry.host);
@@ -97,7 +97,8 @@ export function WorktreeCleanupDialog() {
     // Each opening starts from the safe defaults: neither switch is remembered.
     setIncludeIgnored(false);
     setDeleteSessions(false);
-    void scan();
+    // A run that is under way, or finished and not read yet, is what is shown: nothing is scanned over it.
+    if (!getCleanupRun()) void scan();
     return () => {
       scanId.current++;
       stopSizes.current();
@@ -128,35 +129,35 @@ export function WorktreeCleanupDialog() {
       return next;
     });
 
-  const remove = async () => {
+  const remove = () => {
     stopEstimating();
-    setStage("running");
-    setOutcomes([]);
-    const selections: CleanupSelection[] = chosen.map((row) => ({ hostId: row.host.id, candidate: row.candidate, deleteSessions }));
-    const done = await runCleanup(scanned.current, selections, setOutcomes);
-    for (const outcome of done) {
-      if (outcome.hostId === LOCAL_HOST && outcome.outcome === "removed") forgetWorkspaceSize(outcome.path);
-    }
-    setOutcomes(done);
-    setStage("done");
+    // What the review measured goes with each worktree, so its host does not walk it a second time.
+    const selections: CleanupSelection[] = chosen.map((row) => ({ hostId: row.host.id, candidate: row.candidate, deleteSessions, estimatedBytes: sizes[row.key] ?? null }));
+    startCleanupRun(scanned.current, selections);
+    // The next review starts from its list, not from this confirmation.
+    setStage("review");
   };
 
+  // Closing while it runs only hides it: the run carries on and the corner shows it. A result that was read is done with.
   const close = () => {
-    if (stage === "running") return;
+    clearCleanupRun();
     closeWorktreeCleanup();
   };
 
-  const sum = totals(outcomes);
+  const scanAgain = () => {
+    clearCleanupRun();
+    void scan();
+  };
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
-      <DialogContent width="max-w-[52rem]" layout="pinned" showClose={stage !== "running"} aria-describedby="worktree-cleanup-description">
+      <DialogContent width="max-w-[52rem]" layout="pinned" aria-describedby="worktree-cleanup-description">
         <DialogHeader>
           <DialogTitle className="text-sm font-medium">Clean up worktrees</DialogTitle>
           <DialogDescription id="worktree-cleanup-description" className="text-xs leading-relaxed text-muted-foreground">
             {stage === "review" && "Worktrees of the projects that are open, on this computer and on connected cloud workspaces. Scanning removes nothing. A project's main directory and its sessions are never removed."}
             {stage === "confirm" && "This is exactly what will be removed. Each worktree is checked again on its own machine first; one that changed since this scan is left alone."}
-            {stage === "running" && "Removing. Each worktree is checked again before it goes."}
+            {stage === "running" && "Removing. Each worktree is checked again before it goes. You can hide this and keep working: the clean-up carries on, and shows in the corner of the window."}
             {stage === "done" && "What happened to each worktree you selected."}
           </DialogDescription>
         </DialogHeader>
@@ -314,58 +315,29 @@ export function WorktreeCleanupDialog() {
               <Button variant="ghost" onClick={() => setStage("review")}>
                 Back
               </Button>
-              <Button variant="destructive" onClick={() => void remove()}>
+              <Button variant="destructive" onClick={remove}>
                 <Trash2 /> Remove {plural(chosen.length, "worktree", "worktrees")}
               </Button>
             </DialogFooter>
           </>
         )}
 
-        {(stage === "running" || stage === "done") && (
+        {run && (
           <>
-            {stage === "running" && (
-              <div role="status" className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" /> {outcomes.length} of {chosen.length} done…
-              </div>
-            )}
-            {stage === "done" && (
-              <p role="status" className="mb-2 text-xs text-foreground">
-                Removed {sum.removed} and freed {formatSize(sum.freedBytes)}. {sum.skipped} skipped, {sum.failed} failed.
-              </p>
-            )}
-            <DialogScrollArea aria-label="Results, scrollable">
-              <ul aria-label="Results" className="flex flex-col divide-y divide-hairline rounded-lg bg-well">
-                {outcomes.map((outcome) => {
-                  const row = rows.find((candidate) => candidate.key === candidateKey(outcome.hostId, outcome.path));
-                  const good = outcome.outcome === "removed" || outcome.outcome === "alreadyRemoved";
-                  return (
-                    <li key={candidateKey(outcome.hostId, outcome.path)} className="px-3 py-2">
-                      <div className="flex items-baseline gap-2">
-                        <span className={`text-xs ${good ? "text-foreground" : outcome.outcome === "skipped" ? "text-warning" : "text-destructive"}`}>{OUTCOME_LABEL[outcome.outcome]}</span>
-                        <span className="truncate text-xs text-foreground">{row?.candidate.name ?? outcome.path}</span>
-                        {row && <span className="text-[11px] text-muted-foreground">on {row.host.name}</span>}
-                        {outcome.freedBytes > 0 && <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">{formatSize(outcome.freedBytes)}</span>}
-                      </div>
-                      {outcome.reason && <div className="text-[11px] text-muted-foreground">{outcome.reason}</div>}
-                      {good && (
-                        <div className="text-[11px] text-muted-foreground">
-                          {[
-                            outcome.keptBranch && `Branch ${outcome.keptBranch} kept`,
-                            outcome.sessionsKept.length > 0 && `${plural(outcome.sessionsKept.length, "conversation", "conversations")} kept`,
-                            outcome.sessionsDeleted.length > 0 && `${plural(outcome.sessionsDeleted.length, "conversation", "conversations")} deleted`,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </DialogScrollArea>
-            {stage === "done" && (
+            <CleanupRunView run={run} />
+            {run.status === "running" ? (
               <DialogFooter>
-                <Button variant="secondary" onClick={() => void scan()}>
+                <Button variant="ghost" disabled={run.stopping} title="Finish the worktree being removed and leave the rest" onClick={stopCleanupRun}>
+                  {run.stopping ? "Stopping…" : "Stop"}
+                </Button>
+                {/* Focus lands here when the removal starts, so Enter hides it as Escape does. */}
+                <Button autoFocus onClick={close}>
+                  Hide
+                </Button>
+              </DialogFooter>
+            ) : (
+              <DialogFooter>
+                <Button variant="secondary" onClick={scanAgain}>
                   <RefreshCw /> Scan again
                 </Button>
                 <Button onClick={close}>Done</Button>

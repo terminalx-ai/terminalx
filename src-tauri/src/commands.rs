@@ -52,15 +52,21 @@ fn stop_agents_and_wait(state: &tauri::State<'_, crate::AppState>, session: &Ses
         .iter()
         .map(|tab| {
             state.host.kill(&format!("{}/{}", session.id, tab.id));
-            crate::session::SessionManager::pane_id(&tab.id)
+            tab.pane_id()
         })
         .collect();
     state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
 }
 
-fn kill_tab(state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
+fn kill_tab(app: &AppHandle, state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
     state.host.kill(&format!("{session_id}/{tab_id}"));
-    state.terminals.kill(&crate::session::SessionManager::pane_id(tab_id));
+    // The tab's own pane, or the shell's it took over (#437).
+    let pane = index::get(session_id).ok().and_then(|session| session.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| crate::session::SessionManager::pane_id(tab_id));
+    state.terminals.kill(&pane);
+    // A shell's pane is listed by every window, which is told it has gone.
+    if crate::pty::is_shell_id(&pane) {
+        let _ = app.emit(PTY_CLOSED_EVENT, &pane);
+    }
 }
 
 // ------------------------------------------------------------------ account
@@ -335,6 +341,100 @@ pub fn organization_github_app_open(url: String, app: tauri::AppHandle) -> Githu
         .map_err(|_| crate::organization_github_app::GithubAppError::local("github_app_browser_failed"))
 }
 
+// ------------------------------------------------ organization environment
+
+async fn environment_call(
+    state: tauri::State<'_, crate::AppState>,
+    operation: impl FnOnce(&crate::organization_environment::OrganizationEnvironmentService) -> ComputeResult + Send + 'static,
+) -> ComputeResult {
+    let service = state.organization_environment.clone();
+    tauri::async_runtime::spawn_blocking(move || operation(&service))
+        .await
+        .map_err(|_| crate::organization_compute::OrganizationComputeError::local("cloud_environment_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn organization_environment_status(provider: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.status(&provider)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_update(
+    provider: String,
+    expected_revision: u64,
+    definition: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.update(&provider, expected_revision, &definition, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_build(
+    provider: String,
+    idempotency_key: String,
+    confirm_provider_spend: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.build(&provider, &idempotency_key, confirm_provider_spend, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version(version_id: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.version(&version_id)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_retry(
+    version_id: String,
+    confirm_provider_spend: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.retry(&version_id, confirm_provider_spend, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_cancel(version_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.cancel(&version_id, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_version_rollback(version_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.rollback(&version_id, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipes(provider: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.recipes(&provider)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipe_propose(
+    provider: String,
+    recipe: serde_json::Value,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.propose_recipe(&provider, &recipe, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipe_apply(
+    recipe_id: String,
+    confirm_apply: bool,
+    context_revision: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> ComputeResult {
+    environment_call(state, move |service| service.apply_recipe(&recipe_id, confirm_apply, &context_revision)).await
+}
+
+#[tauri::command]
+pub async fn organization_environment_recipe_dismiss(recipe_id: String, context_revision: String, state: tauri::State<'_, crate::AppState>) -> ComputeResult {
+    environment_call(state, move |service| service.dismiss_recipe(&recipe_id, &context_revision)).await
+}
+
 // ------------------------------------------- cloud workspace configuration
 
 async fn config_call(
@@ -596,10 +696,11 @@ pub async fn cloud_agent_login_connect(
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             let title = format!("{} API key", agent_label(provider));
             let text = format!(
-                "{}Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again.",
+                "{}Enter the {} API key for organization {}. It is sent to the account service only for validation and encrypted storage, and is not shown again. {}",
                 replacement_notice(agent_label(provider), &organization, replaces),
                 agent_label(provider),
-                organization
+                organization,
+                authorization.reach(AgentLoginKind::ApiKey).sentence()
             );
             app.run_on_main_thread(move || {
                 let _ = sender.send(secure_prompt(&title, &text, "API key"));
@@ -618,7 +719,7 @@ pub async fn cloud_agent_login_connect(
             // account, and nothing is uploaded unless its own button is pressed. Every time.
             let expires = local_time(login.expires_at_ms);
             let account = login.account.clone().unwrap_or_else(|| "the Claude Code account signed in on this Mac (its name is not recorded here)".into());
-            let text = local_login_confirmation(&organization, &account, &expires, replaces);
+            let text = local_login_confirmation(&organization, &account, &expires, replaces, &authorization.reach(AgentLoginKind::LoginDocument));
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             app.run_on_main_thread(move || {
                 let _ = sender.send(native_confirm("Lend this Mac's Claude Code sign-in?", &text, "Upload access token"));
@@ -643,6 +744,17 @@ pub async fn cloud_agent_login_connect(
     tauri::async_runtime::spawn_blocking(move || service.save_agent_login(authorization, provider, kind, secret, identity.as_deref()))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?
+}
+
+/// What the native dialog for the sign-in's code says: what it finishes,
+/// what is replaced, and who the login reaches (a default for a new login,
+/// the stored scope for one that is replaced).
+fn claude_code_prompt(organization: &str, replaces: Option<crate::cloud_workspaces::AgentLoginKind>, reach: &crate::cloud_workspaces::AgentLoginReach) -> String {
+    format!(
+        "{}Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login and renews it. {}",
+        replacement_notice("Claude Code", organization, replaces),
+        reach.sentence()
+    )
 }
 
 /// What a native dialog says first when storing a login replaces one that
@@ -691,8 +803,15 @@ fn local_time(at_ms: i64) -> String {
 /// What the native confirmation says before a local sign-in is uploaded:
 /// which organization gets it, whose it is, what exactly leaves this Mac,
 /// who can use it, and when and how it ends.
-fn local_login_confirmation(organization: &str, account: &str, expires: &str, replaces: Option<crate::cloud_workspaces::AgentLoginKind>) -> String {
+fn local_login_confirmation(
+    organization: &str,
+    account: &str,
+    expires: &str,
+    replaces: Option<crate::cloud_workspaces::AgentLoginKind>,
+    reach: &crate::cloud_workspaces::AgentLoginReach,
+) -> String {
     use crate::cloud_workspaces::AgentLoginKind;
+    let reach = reach.sentence();
     let replacing = match replaces {
         Some(AgentLoginKind::ApiKey) => format!(
             "THIS REPLACES the API key now stored for Claude Code in {organization}. The key is removed; when the lent sign-in expires, Claude Code agents in every workspace of the organization stop until a login is connected again.\n\n"
@@ -706,8 +825,8 @@ fn local_login_confirmation(organization: &str, account: &str, expires: &str, re
         "Organization: {organization}\nAccount (as Claude Code on this Mac records it): {account}\n\n{replacing}\
          TerminalX will upload this sign-in's short-lived access token to the account service, for agents in the cloud workspaces of {organization}. \
          The refresh token stays on this Mac, so this Mac's sign-in keeps working and the uploaded token cannot be renewed: it stops working on {expires}.\n\n\
-         Until then, agents in every member's workspaces of this organization may run on your Claude subscription, \
-         and anyone who can drive one of those workspaces can read the token off its machine.\n\n\
+         Until then agents run on your Claude subscription. {reach} \
+         Anyone who can drive one of those workspaces can read the token off its machine.\n\n\
          To end it sooner, disconnect it in Settings (the service refuses while a workspace still uses the login)."
     )
 }
@@ -794,7 +913,7 @@ pub async fn cloud_agent_claude_login_complete(
     consent: crate::cloud_workspaces::AgentLoginConsent,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::cloud_workspaces::ClaudeLoginOutcome, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    use crate::cloud_workspaces::{AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
+    use crate::cloud_workspaces::{AgentLoginKind, AgentLoginProvider, CloudWorkspaceClientError, RequestRisk};
     static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = GUARD.try_lock().map_err(|_| CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
     let service = state.cloud_workspaces.clone();
@@ -808,10 +927,7 @@ pub async fn cloud_agent_claude_login_complete(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| authorization.organization_id().to_owned());
     let unavailable = || CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false);
-    let text = format!(
-        "{}Paste the code the Claude page showed after you approved. It finishes the sign-in for organization {organization}: the account service keeps the login, renews it, and agents in every member's cloud workspaces of the organization may run on it.",
-        replacement_notice("Claude Code", &organization, authorization.replaces())
-    );
+    let text = claude_code_prompt(&organization, authorization.replaces(), &authorization.reach(AgentLoginKind::LoginDocument));
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
         let _ = sender.send(secure_prompt("Log in with Claude", &text, "Code from the Claude page"));
@@ -1079,6 +1195,73 @@ pub async fn cloud_workspace_share_revoke(
 ) -> Result<crate::cloud_workspaces::CloudWorkspaceShareChange, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
         .share_revoke(org_id.as_deref(), &workspace_id, &user_id))
+}
+
+/// The organization's scheduled cloud tasks, or one workspace's (PRO-37).
+#[tauri::command]
+pub async fn cloud_schedules(
+    workspace_id: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedules, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedules(org_id.as_deref(), workspace_id.as_deref()))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule(
+    schedule_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudScheduleDetail, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule(org_id.as_deref(), &schedule_id))
+}
+
+/// What a schedule would cost, before it is saved. Writes nothing.
+#[tauri::command]
+pub async fn cloud_schedule_estimate(
+    input: crate::cloud_workspaces::CloudScheduleEstimateInput,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudScheduleQuote, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_estimate(org_id.as_deref(), &input))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_create(
+    input: crate::cloud_workspaces::CloudScheduleCreateInput,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_create(org_id.as_deref(), &input))
+}
+
+/// Pause a scheduled task (`active: false`) or resume a paused one.
+#[tauri::command]
+pub async fn cloud_schedule_set_active(
+    schedule_id: String,
+    active: bool,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_set_active(org_id.as_deref(), &schedule_id, active))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_delete(
+    schedule_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_delete(org_id.as_deref(), &schedule_id))
+}
+
+/// Pause every active scheduled task of the organization.
+#[tauri::command]
+pub async fn cloud_schedules_pause_all(
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudSchedulesPaused, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedules_pause_all(org_id.as_deref()))
 }
 
 /// Switch who may see a cloud workspace: `organization` so it can be shared,
@@ -1385,7 +1568,7 @@ pub fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, t
 #[tauri::command]
 pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let state = app.state::<crate::AppState>();
-    kill_tab(&state, &session_id, &tab_id);
+    kill_tab(&app, &state, &session_id, &tab_id);
     index::update_session(&session_id, |s| {
         s.tabs.retain(|t| t.id != tab_id);
         if s.active_tab.as_deref() == Some(&tab_id) {
@@ -1496,7 +1679,8 @@ fn sweep_quick_chats(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
     // A shell the reader left running in it is a use of it, whatever its date.
     let shells = state.terminals.shells();
-    let busy = |session: &SessionEntry| shells.iter().any(|shell| shell.session_id == session.id && !shell.exited);
+    let live: Vec<&str> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();
+    let busy = |session: &SessionEntry| crate::session_ops::has_shell_in_use(session, &live, |pane| state.terminals.is_running(pane));
     let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
     match crate::session_ops::sweep_idle_quick_chats(app, days, &busy, &stop) {
         Ok(removed) if !removed.is_empty() => log::info!("removed {} quick chat(s) idle for more than {days} day(s)", removed.len()),
@@ -1620,7 +1804,7 @@ pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<S
             return Err("session has no worktree".to_string());
         }
         for tab in &s.tabs {
-            kill_tab(&state, &s.id, &tab.id);
+            kill_tab(&app, &state, &s.id, &tab.id);
         }
         let branch = git::current_branch(Path::new(&s.project_path));
         let out = index::update_session(&session_id, |s| {
@@ -1882,7 +2066,7 @@ pub async fn send_message(
 }
 
 #[tauri::command]
-pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
     state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
 }
 
@@ -2277,12 +2461,30 @@ pub(crate) const PTY_RENAMED_EVENT: &str = "pty_renamed";
 /// they were opened (the floating one, a reload) lists them from this.
 #[tauri::command]
 pub fn pty_shells(state: State<'_, AppState>) -> Vec<crate::pty::ShellPane> {
-    state.terminals.shells()
+    // A shell an agent was started in is that agent's tab from then on
+    // (#437): the session lists it, and it is not also a shell tab.
+    let taken: std::collections::HashSet<String> = index::load().unwrap_or_default().iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.follow.pane.clone()).collect();
+    state.terminals.shells().into_iter().filter(|shell| !taken.contains(&shell.id)).collect()
+}
+
+/// The agents in front of terminals right now (#437), for a window that
+/// loads after they were started.
+#[tauri::command]
+pub fn pane_agents(state: State<'_, AppState>) -> Vec<crate::session::follow::PaneAgent> {
+    state.manager().map(|manager| manager.pane_agents()).unwrap_or_default()
+}
+
+/// Start a tab's agent again on one of the tab's conversations (#437): the
+/// one it holds, or one it held before another agent was run in its terminal.
+#[tauri::command]
+pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
+    let manager = app.state::<AppState>().manager().ok_or("not ready")?;
+    tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub fn pty_rename(app: AppHandle, state: State<'_, AppState>, id: String, title: String) {
-    state.terminals.set_title(&id, &title);
+    state.terminals.rename(&id, &title);
     if let Some(shell) = state.terminals.shell(&id) {
         let _ = app.emit(PTY_RENAMED_EVENT, &shell);
     }
@@ -2707,6 +2909,56 @@ pub fn github_repo(project_path: String) -> Option<String> {
     crate::issues::github_repo(Path::new(&project_path))
 }
 
+// ------------------------------------------------------------------ issue pipelines
+
+/// A pipeline as it starts, with what the author's first prompt must carry
+/// for the pipeline to hear when the work is done.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedIssuePipeline {
+    pub pipeline: crate::issue_pipeline::Pipeline,
+    pub author_brief: String,
+}
+
+#[tauri::command]
+pub fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>> {
+    crate::issue_pipeline::store::list().map_err(err)
+}
+
+/// Carry a session that was started from an issue on to a pull request, a
+/// review and a merge. Refused, with the reason, for a session the pipeline
+/// cannot serve: one on the default branch, or in a project that turned it off.
+#[tauri::command]
+pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: String, auto_merge: Option<bool>) -> CmdResult<StartedIssuePipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        let pipeline = crate::issue_pipeline::engine::start(&host, &session_id, &tab_id, auto_merge).map_err(err)?;
+        Ok(StartedIssuePipeline { pipeline, author_brief: crate::issue_pipeline::prompts::author_brief() })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn issue_pipeline_set_auto_merge(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        crate::issue_pipeline::engine::set_auto_merge(&host, &id, value).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+pub async fn issue_pipeline_act(app: AppHandle, id: String, action: crate::issue_pipeline::engine::Action) -> CmdResult<crate::issue_pipeline::Pipeline> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::issue_pipeline::desktop::LocalHost::of(&app).map_err(err)?;
+        crate::issue_pipeline::engine::act(&host, &id, action).map_err(err)
+    })
+    .await
+    .map_err(err)?
+}
+
 #[cfg(test)]
 mod command_tests {
     #[test]
@@ -2791,15 +3043,16 @@ mod command_tests {
     // PRO-79: the app's own confirmation before a local sign-in is uploaded.
     #[test]
     fn the_local_sign_in_confirmation_names_the_organization_the_account_and_the_expiry() {
-        use crate::cloud_workspaces::AgentLoginKind;
-        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", None);
+        use crate::cloud_workspaces::{AgentLoginKind, AgentLoginReach};
+        let new = AgentLoginReach::ServiceDefault;
+        let text = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", None, &new);
         assert!(text.starts_with("Organization: Acme Robotics\nAccount (as Claude Code on this Mac records it): ada@example.com\n"));
         assert!(!text.contains("REPLACES") && !text.contains("sign out of Claude Code"));
         // Review of #293: replacing a stored login is said, in the dialog too.
-        let replacing = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey));
+        let replacing = super::local_login_confirmation("Acme Robotics", "ada@example.com", "3 Oct 2026, 21:40", Some(AgentLoginKind::ApiKey), &new);
         assert!(replacing.contains("THIS REPLACES the API key now stored for Claude Code in Acme Robotics"));
         assert!(replacing.contains("agents in every workspace of the organization stop"));
-        assert!(super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument)).contains("THIS REPLACES the login now stored"));
+        assert!(super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument), &new).contains("THIS REPLACES the login now stored"));
         // Review of #293: the API-key and the sign-in dialogs say it too.
         assert_eq!(super::replacement_notice("Claude Code", "Acme", Some(AgentLoginKind::ApiKey)), "THIS REPLACES the API key now stored for Claude Code in Acme.\n\n");
         assert_eq!(super::replacement_notice("Cursor", "Acme", Some(AgentLoginKind::LoginDocument)), "THIS REPLACES the login now stored for Cursor in Acme.\n\n");
@@ -2809,8 +3062,20 @@ mod command_tests {
         assert_eq!(super::dialog_text(" Acme\u{202E}\n Robotics "), "Acme Robotics");
         assert!(text.contains("stops working on 3 Oct 2026, 21:40"));
         assert!(text.contains("The refresh token stays on this Mac"));
-        assert!(text.contains("every member's workspaces"));
-        assert!(text.contains("anyone who can drive one of those workspaces can read the token"));
+        // A new login: every member's workspaces, said as the service's default.
+        assert!(text.contains("By default, agents in every member's cloud workspaces of the organization may run on it"));
+        // Review of #429: a login narrowed to managers keeps that scope when it is replaced, and no dialog says otherwise.
+        let narrowed = AgentLoginReach::Kept("managers".into());
+        let kept = super::local_login_confirmation("Acme", "a@b.c", "x", Some(AgentLoginKind::LoginDocument), &narrowed);
+        assert!(kept.contains("This keeps who can use the login now: only workspaces that nobody but owners and admins can drive."));
+        assert!(!kept.contains("every member"));
+        let code = super::claude_code_prompt("Acme", Some(AgentLoginKind::LoginDocument), &narrowed);
+        assert!(code.starts_with("THIS REPLACES the login now stored for Claude Code in Acme.\n\nPaste the code"));
+        assert!(code.ends_with("This keeps who can use the login now: only workspaces that nobody but owners and admins can drive."));
+        assert!(!code.contains("every member"));
+        let first = super::claude_code_prompt("Acme", None, &new);
+        assert!(first.starts_with("Paste the code") && first.contains("By default, agents in every member's cloud workspaces"));
+        assert!(text.contains("Anyone who can drive one of those workspaces can read the token"));
         assert!(text.contains("the service refuses while a workspace still uses the login"));
     }
     use crate::session_ops::{
@@ -3246,11 +3511,16 @@ pub async fn scan_leftovers() -> CmdResult<Vec<crate::cleanup::Leftover>> {
 }
 
 /// Delete the leftovers the person confirmed. Each is checked again first;
-/// anything in use, or not clean and merged, is left alone.
+/// anything in use, or not clean and merged, is left alone. How far it is
+/// goes out as `leftover_cleanup_progress` events carrying `run`.
 #[tauri::command]
-pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>) -> CmdResult<crate::cleanup::Removal> {
+pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<String>) -> CmdResult<crate::cleanup::Removal> {
     tauri::async_runtime::spawn_blocking(move || {
-        let removal = crate::cleanup::remove(&ids).map_err(err)?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &crate::cleanup::Progress| {
+            let _ = app.emit(crate::cleanup::PROGRESS_EVENT, crate::worktree_cleanup::OfRun { run: &run, progress });
+        };
+        let removal = crate::cleanup::remove(&ids, &report).map_err(err)?;
         let projects: std::collections::BTreeSet<&str> =
             removal.removed.iter().filter_map(|id| id.strip_prefix("worktree:")).filter_map(|rest| rest.rsplit_once(':')).map(|(project, _)| project).collect();
         for project in projects {
@@ -3292,7 +3562,7 @@ pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<Str
 pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: String, path: String) -> CmdResult<Option<u64>> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::SizeJobs::global(), &format!("local:{job}"), &project_path, &path).map_err(err))?
+        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::Jobs::sizes(), &format!("local:{job}"), &project_path, &path).map_err(err))?
     })
     .await
     .map_err(err)?
@@ -3301,16 +3571,26 @@ pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: St
 /// Stop the size estimates whose job id starts with `prefix`.
 #[tauri::command]
 pub fn worktree_cleanup_cancel_sizes(prefix: String) {
-    crate::worktree_cleanup::SizeJobs::global().cancel(&format!("local:{prefix}"));
+    crate::worktree_cleanup::Jobs::sizes().cancel(&format!("local:{prefix}"));
 }
 
 /// Remove the worktrees the person confirmed. Each is checked again on the
 /// spot; one that changed, is in use or is protected is left and reported.
+/// How far it is goes out as `worktree_cleanup_progress` events carrying
+/// `run`; the list returned is what happened.
 #[tauri::command]
-pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
+    use crate::worktree_cleanup::{Jobs, OfRun, Progress, Watch, PROGRESS_EVENT};
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items))?;
+        let run = run.unwrap_or_default();
+        let report = |progress: &Progress| {
+            let _ = app.emit(PROGRESS_EVENT, OfRun { run: &run, progress });
+        };
+        let stop = Jobs::removals().start(&run);
+        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items, Watch { report: Some(&report), stop: Some(&stop) }));
+        Jobs::removals().finish(&stop);
+        let results = results?;
         for done in results.iter().filter(|done| matches!(done.outcome, crate::worktree_cleanup::Outcome::Removed | crate::worktree_cleanup::Outcome::AlreadyRemoved)) {
             state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
         }
@@ -3318,6 +3598,16 @@ pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_
     })
     .await
     .map_err(err)?
+}
+
+/// Stop the removal `run` once the worktree it is on is finished. The ones
+/// it has not started are left as they are and reported as not attempted.
+#[tauri::command]
+pub fn worktree_cleanup_stop(run: String) {
+    // An id is matched from its start; none at all would match every removal.
+    if !run.is_empty() {
+        crate::worktree_cleanup::Jobs::removals().cancel(&run);
+    }
 }
 
 // ---- removing a workspace once its pull request has merged ------------------

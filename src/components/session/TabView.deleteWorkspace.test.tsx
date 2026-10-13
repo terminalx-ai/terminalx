@@ -15,7 +15,7 @@ vi.mock("@/lib/quickChats", () => ({ useSessionIsGit: () => true }));
 vi.mock("@/lib/changes", () => ({ changeRange: () => ({}), useChanges: () => mocks.changed }));
 vi.mock("@/lib/tabViews", () => ({
   useTabViews: () => mocks.views, isPtyFirst: () => false, startTabAgent: vi.fn(), terminalPaneId: (id: string) => id,
-  clearTabViewError: vi.fn(), leaveTerminalView: vi.fn(),
+  clearTabViewError: vi.fn(), forgetTabView: vi.fn(), leaveTerminalView: vi.fn(),
 }));
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: () => null }));
 // The transcript is not under test; the real composer in its footer is.
@@ -227,7 +227,7 @@ describe("the chat's Delete workspace action", () => {
     const workspace = fakeWorkspace(async () => merged);
     const backend = {
       kind: "cloud", key: "cloud:org-1:ws-1:s1", generation: "g1", logSessionId: "s1", readOnlyReason: null,
-      caps: { local: false, write: true, steer: true, images: false, recovery: false },
+      caps: { local: false, write: true, steer: true, images: false, recovery: false, interrupt: false },
       openTab: () => undefined, markRead: async () => undefined, patchTab: () => undefined, setTabStatus: () => undefined,
     } as unknown as SessionBackend;
     // A cloud session's entry never names its worktree; its runtime does, through the host.
