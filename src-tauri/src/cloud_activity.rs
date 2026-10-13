@@ -70,6 +70,7 @@ static NOTED: AtomicU8 = AtomicU8::new(0);
 static ATTACHED: AtomicUsize = AtomicUsize::new(0);
 static REGISTRATIONS: AtomicU64 = AtomicU64::new(0);
 static LAUNCHING: AtomicUsize = AtomicUsize::new(0);
+static APPROVERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Something happened that counts as use of the workspace.
 pub fn note(kind: Kind) {
@@ -77,19 +78,39 @@ pub fn note(kind: Kind) {
 }
 
 /// A client that can type is attached over the relay until the guard drops.
+/// `approves`: it may also answer the agent's permission requests.
 #[must_use]
-pub fn attached() -> Attached {
+pub fn attached(approves: bool) -> Attached {
     ATTACHED.fetch_add(1, Ordering::Relaxed);
+    if approves {
+        APPROVERS.fetch_add(1, Ordering::Relaxed);
+    }
     note(Kind::Attachment);
-    Attached(())
+    Attached(approves)
 }
 
-pub struct Attached(());
+pub struct Attached(bool);
+
+impl Attached {
+    pub fn approves(&self) -> bool {
+        self.0
+    }
+}
 
 impl Drop for Attached {
     fn drop(&mut self) {
         ATTACHED.fetch_sub(1, Ordering::Relaxed);
+        if self.0 {
+            APPROVERS.fetch_sub(1, Ordering::Relaxed);
+        }
     }
+}
+
+/// Whether a client that may answer a permission request is attached now.
+/// A scheduled run that stops at one with nobody to answer is ended
+/// (`cloud_agents::scheduled`).
+pub fn approver_attached() -> bool {
+    APPROVERS.load(Ordering::Relaxed) > 0
 }
 
 /// The workspace's launch (cloning its repositories, starting its agent) is
@@ -104,7 +125,6 @@ pub fn launching() -> Launching {
 }
 
 /// Launches running now.
-#[cfg(test)]
 pub(crate) fn launches() -> usize {
     LAUNCHING.load(Ordering::Relaxed)
 }
@@ -351,6 +371,16 @@ mod tests {
         assert_eq!(sent, (65..1800).step_by(45).collect::<Vec<_>>(), "a keep-alive every {}s", KEEPALIVE.as_secs());
         let done = step(&mut schedule, secs(start, 1815), idle(1)).expect("the end of the turn is reported");
         assert_eq!(done["activeTurns"], 0);
+    }
+
+    #[test]
+    fn a_client_that_may_approve_is_counted_apart_from_one_that_only_types() {
+        // The counters are the process's, and other tests attach too: only
+        // what holds while these guards live is asserted.
+        let typist = attached(false);
+        assert!(!typist.approves());
+        let approver = attached(true);
+        assert!(approver.approves() && approver_attached());
     }
 
     #[test]

@@ -190,6 +190,7 @@ impl Rig {
                 answered: HashMap::new(),
                 command: "claude".into(),
                 origin: Origin { token: token.clone(), transcript_root: dir.path().to_path_buf(), conversation: None },
+                by_hand: None,
             }),
             pending: HashMap::new(),
             queued: Vec::new(),
@@ -203,6 +204,7 @@ impl Rig {
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
+            left_at: None,
             log_path: dir.path().join("tab.jsonl"),
             me: std::sync::Weak::new(),
         }));

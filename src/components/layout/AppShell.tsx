@@ -26,6 +26,7 @@ import { StarReminder } from "@/components/ui/StarReminder";
 import { Toasts } from "@/components/ui/Toasts";
 import { ShareSessionDialogHost } from "@/components/session/ShareSessionDialog";
 import { GuestSessionHost } from "@/components/session/GuestSession";
+import { CloudSchedulesDialogHost } from "@/components/cloud/CloudSchedulesDialog";
 import { CloudShareDialogHost } from "@/components/cloud/CloudShareDialog";
 import { NewCloudWorkspaceDialogHost } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { DEV_RUNTIME_KEY } from "@/lib/devRuntime";
@@ -38,6 +39,7 @@ import { CleanupIndicator } from "@/components/cleanup/CleanupIndicator";
 import { bootStatus, useStatus } from "@/lib/status";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
+import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
@@ -87,6 +89,7 @@ export function AppShell() {
     void subscribeTabPty();
     void bootSessions();
     void bootAutomations();
+    void bootIssuePipelines();
     void loadModels();
     startNotifications();
     void bootStatus();
@@ -170,6 +173,7 @@ export function AppShell() {
       <BypassDialog />
       <SessionDialogs />
       <CloudShareDialogHost />
+      <CloudSchedulesDialogHost />
       <ShareSessionDialogHost />
       <GuestSessionHost />
       <NewCloudWorkspaceDialogHost />

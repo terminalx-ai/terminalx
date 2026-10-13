@@ -35,6 +35,94 @@ pub struct Project {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+    /// How a session started from an issue is carried on to a pull request, a
+    /// review and a merge. Absent is every default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_pipeline: Option<IssuePipelineSettings>,
+}
+
+/// The kinds of change a project marks as always needing a person to merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProtectedCategories {
+    /// Database migrations and schema files.
+    pub migrations: bool,
+    /// Production deploy and CI configuration.
+    pub deploy: bool,
+    /// Anything the reviewer's security pass flagged.
+    pub security: bool,
+    /// The project's own patterns, in `.gitignore` syntax.
+    pub paths: Vec<String>,
+}
+
+impl Default for ProtectedCategories {
+    fn default() -> Self {
+        Self { migrations: true, deploy: true, security: true, paths: Vec::new() }
+    }
+}
+
+/// A project's issue pipeline. The Rust side reads it when a turn ends and
+/// when a merge is decided, with no window open, so it lives here and not in
+/// the webview's preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IssuePipelineSettings {
+    /// Off leaves a session started from an issue as it always was: the agent
+    /// writes code and nothing follows.
+    pub enabled: bool,
+    /// What "Merge automatically when the review is addressed" starts at for
+    /// a new issue session. Each issue has its own switch after that.
+    pub auto_merge: bool,
+    /// A person presses merge whatever the switch says: for a repository that
+    /// deploys from its default branch.
+    pub require_person: bool,
+    /// How many reviews a pull request gets before it is left to a person.
+    #[serde(deserialize_with = "review_rounds")]
+    pub max_rounds: u32,
+    /// `merge`, `squash` or `rebase`.
+    #[serde(deserialize_with = "merge_method")]
+    pub merge_method: String,
+    pub protected: ProtectedCategories,
+    /// Checks that never hold a merge, by a part of their name. Only for
+    /// checks branch protection does not require.
+    pub ignored_checks: Vec<String>,
+}
+
+pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
+pub const MAX_REVIEW_ROUNDS: u32 = 10;
+
+/// A hand-edited round count is kept inside the range the setting offers.
+fn review_rounds<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u32, D::Error> {
+    let rounds = serde_json::Value::deserialize(d)?.as_u64().and_then(|value| u32::try_from(value).ok());
+    Ok(rounds.filter(|value| (1..=MAX_REVIEW_ROUNDS).contains(value)).unwrap_or(DEFAULT_REVIEW_ROUNDS))
+}
+
+fn merge_method<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    let method = Option::<String>::deserialize(d)?.unwrap_or_default();
+    Ok(if matches!(method.as_str(), "merge" | "squash" | "rebase") { method } else { "merge".into() })
+}
+
+impl Default for IssuePipelineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_merge: false,
+            require_person: false,
+            max_rounds: DEFAULT_REVIEW_ROUNDS,
+            merge_method: "merge".into(),
+            protected: ProtectedCategories::default(),
+            ignored_checks: Vec::new(),
+        }
+    }
+}
+
+/// The pipeline settings of the project at `path`: every default for a
+/// project that set none. An error when the store cannot be read or the
+/// project is no longer attached, so that the defaults are never taken for
+/// the settings of a project that keeps the merge for a person.
+pub fn issue_pipeline_settings(path: &str) -> Result<IssuePipelineSettings> {
+    let project = load()?.projects.into_iter().find(|p| p.path == path).with_context(|| format!("The project at {path} is no longer attached."))?;
+    Ok(project.issue_pipeline.unwrap_or_default())
 }
 
 /// Fields a reader can change from the project menu. `Some(None)` clears.
@@ -53,6 +141,8 @@ pub struct ProjectPatch {
     pub pinned: Option<bool>,
     #[serde(default)]
     pub archived: Option<bool>,
+    #[serde(default)]
+    pub issue_pipeline: Option<IssuePipelineSettings>,
 }
 
 fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<String>>, D::Error> {
@@ -79,6 +169,11 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(v) = patch.archived {
         p.archived = v;
+    }
+    if let Some(v) = patch.issue_pipeline {
+        // Every default is stored as nothing, so a project nobody configured
+        // follows the defaults of whichever build reads it.
+        p.issue_pipeline = (v != IssuePipelineSettings::default()).then_some(v);
     }
     let out = p.clone();
     save(&f)?;
@@ -160,7 +255,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -217,6 +312,48 @@ mod tests {
         std::os::unix::fs::symlink(&folder, &alias).unwrap();
         assert_eq!(add(folder.to_str().unwrap()).unwrap().path, add(alias.to_str().unwrap()).unwrap().path);
         assert_eq!(list().unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn issue_pipeline_settings_default_to_no_merge_and_survive_a_damaged_file() {
+        let defaults = IssuePipelineSettings::default();
+        assert!(defaults.enabled && !defaults.auto_merge && !defaults.require_person);
+        assert_eq!((defaults.max_rounds, defaults.merge_method.as_str()), (3, "merge"));
+        assert!(defaults.protected.migrations && defaults.protected.deploy && defaults.protected.security);
+        // A project written before the pipeline existed.
+        let older: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
+        assert_eq!(older.issue_pipeline, None);
+        assert!(!serde_json::to_string(&older).unwrap().contains("issuePipeline"));
+        // A partial or hand-edited block: what is readable is kept, the rest is the default.
+        let partial: IssuePipelineSettings = serde_json::from_str(r#"{"autoMerge":true,"maxRounds":0,"mergeMethod":"force","protected":{"deploy":false,"paths":["db/"]}}"#).unwrap();
+        assert!(partial.auto_merge && partial.enabled);
+        assert_eq!((partial.max_rounds, partial.merge_method.as_str()), (3, "merge"));
+        assert!(partial.protected.migrations && !partial.protected.deploy);
+        assert_eq!(partial.protected.paths, ["db/"]);
+        assert_eq!(serde_json::from_str::<IssuePipelineSettings>(r#"{"maxRounds":5,"mergeMethod":"squash"}"#).map(|s| (s.max_rounds, s.merge_method)).unwrap(), (5, "squash".into()));
+        assert_eq!(serde_json::from_str::<IssuePipelineSettings>(r#"{"maxRounds":99}"#).unwrap().max_rounds, 3);
+    }
+
+    #[test]
+    fn a_project_stores_its_issue_pipeline_and_drops_it_when_it_is_all_defaults() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(issue_pipeline_settings(&project.path).unwrap(), IssuePipelineSettings::default());
+        let chosen = IssuePipelineSettings { auto_merge: true, require_person: true, ignored_checks: vec!["windows".into()], ..Default::default() };
+        let updated = update(&project.path, ProjectPatch { issue_pipeline: Some(chosen.clone()), ..Default::default() }).unwrap();
+        assert_eq!(updated.issue_pipeline, Some(chosen.clone()));
+        assert_eq!(issue_pipeline_settings(&project.path).unwrap(), chosen);
+        // Another patch leaves it alone.
+        update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(issue_pipeline_settings(&project.path).unwrap(), chosen);
+        let reset = update(&project.path, ProjectPatch { issue_pipeline: Some(IssuePipelineSettings::default()), ..Default::default() }).unwrap();
+        assert_eq!(reset.issue_pipeline, None);
+        // Settings that cannot be read are an error, never the defaults: a
+        // project that has a person merge must not be read as one that does not.
+        assert!(issue_pipeline_settings("/not/attached").unwrap_err().to_string().contains("no longer attached"));
+        std::fs::write(crate::store::root().unwrap().join("projects.json"), "{broken").unwrap();
+        assert!(issue_pipeline_settings(&project.path).is_err());
     }
 
     #[test]

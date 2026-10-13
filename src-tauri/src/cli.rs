@@ -40,6 +40,9 @@ Usage:
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
       [--title TEXT] [--name NAME]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+  terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
+      [--provider github|linear] [--auto-merge|--no-auto-merge] [--no-pipeline]
+      [--title TEXT] [--name NAME] [--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
       [--title TEXT] [--cwd DIRECTORY] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
@@ -75,6 +78,10 @@ Usage:
   terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
+  terminalx pipelines list [--project PROJECT] [--json]
+  terminalx pipelines show PIPELINE [--project PROJECT] [--json]
+  terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
+  terminalx pipelines stop|resume|advance|review|refresh PIPELINE [--project PROJECT] [--json]
   terminalx skills get terminalx-cli|computer-use [--full] [--json]
 
 Computer use (desktop apps on macOS, Linux and Windows):
@@ -388,6 +395,7 @@ fn parse_with_stdin(
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
         "issues" => parse_issues(&mut tokens),
+        "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "skills" => {
             expect_word(&mut tokens, "get", "skills")?;
@@ -506,7 +514,20 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "create" => {
             let project = tokens.required_option("--project")?;
             let agent = tokens.required_option("--agent")?;
-            let prompt = tokens.required_option("--prompt")?;
+            // An issue is its own prompt; anything given with it is added after.
+            let issue = tokens.option("--issue")?;
+            let prompt = if issue.is_some() { tokens.option("--prompt")?.unwrap_or_default() } else { tokens.required_option("--prompt")? };
+            let provider = tokens.option("--provider")?;
+            let auto_merge = match (tokens.flag("--auto-merge")?, tokens.flag("--no-auto-merge")?) {
+                (true, true) => return Err(invalid("--auto-merge and --no-auto-merge are mutually exclusive.")),
+                (true, false) => Some(true),
+                (false, true) => Some(false),
+                (false, false) => None,
+            };
+            let no_pipeline = tokens.flag("--no-pipeline")?;
+            if issue.is_none() && (provider.is_some() || auto_merge.is_some() || no_pipeline) {
+                return Err(invalid("--provider, --auto-merge, --no-auto-merge and --no-pipeline apply to a session started with --issue."));
+            }
             let title = tokens.option("--title")?;
             let name = tokens.option("--name")?;
             let model = tokens.option("--model")?;
@@ -520,22 +541,30 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             if name.is_some() && on_main {
                 return Err(invalid("--name requires a new worktree and cannot be used with --on-main."));
             }
-            rpc(
-                "sessions.create",
-                json!({
-                    "project": project,
-                    "agent": agent,
-                    "prompt": prompt,
-                    "title": title,
-                    "name": name,
-                    "useWorktree": !on_main,
-                    "onMain": on_main,
-                    "model": model.unwrap_or_default(),
-                    "effort": effort,
-                    "mode": mode,
-                }),
-                tokens,
-            )
+            let mut params = json!({
+                "project": project,
+                "agent": agent,
+                "prompt": prompt,
+                "title": title,
+                "name": name,
+                "useWorktree": !on_main,
+                "onMain": on_main,
+                "model": model.unwrap_or_default(),
+                "effort": effort,
+                "mode": mode,
+            });
+            // Only an issue start carries these, so every other request is
+            // word for word what it was.
+            if let Some(issue) = issue {
+                params["issue"] = json!(issue);
+                params["provider"] = json!(provider);
+                params["autoMerge"] = json!(auto_merge);
+                params["noPipeline"] = json!(no_pipeline);
+                tokens.finish()?;
+                // Reading the tracker comes before the session exists.
+                return Ok(Action::Rpc { command: "sessions.create".into(), params, timeout: Duration::from_secs(60) });
+            }
+            rpc("sessions.create", params, tokens)
         }
         other => Err(invalid(format!("Unknown sessions command {other}."))),
     }
@@ -683,6 +712,45 @@ fn parse_issues(tokens: &mut Tokens) -> Result<Action, ControlError> {
         tokens,
     )
 }
+
+/// Issue pipelines: what became of the sessions started from issues.
+fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let command = tokens.required_front("pipelines command")?;
+    match command.as_str() {
+        "list" => {
+            let project = tokens.option("--project")?;
+            rpc("pipelines.list", json!({"project": project}), tokens)
+        }
+        "show" => {
+            let project = tokens.option("--project")?;
+            let pipeline = tokens.required_front("pipeline")?;
+            rpc("pipelines.show", json!({"pipeline": pipeline, "project": project}), tokens)
+        }
+        "auto-merge" => {
+            let project = tokens.option("--project")?;
+            let pipeline = tokens.required_front("pipeline")?;
+            let value = match tokens.required_front("on or off")?.as_str() {
+                "on" => true,
+                "off" => false,
+                other => return Err(invalid(format!("auto-merge takes on or off, not {other}."))),
+            };
+            // Turning it on may merge there and then.
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "pipelines.autoMerge".into(), params: json!({"pipeline": pipeline, "project": project, "value": value}), timeout: PIPELINE_TIMEOUT })
+        }
+        "stop" | "resume" | "advance" | "review" | "refresh" => {
+            let project = tokens.option("--project")?;
+            let pipeline = tokens.required_front("pipeline")?;
+            tokens.finish()?;
+            Ok(Action::Rpc { command: "pipelines.act".into(), params: json!({"pipeline": pipeline, "project": project, "action": command}), timeout: PIPELINE_TIMEOUT })
+        }
+        other => Err(invalid(format!("Unknown pipelines command {other}."))),
+    }
+}
+
+/// A pipeline step pushes, opens a pull request or asks GitHub to merge
+/// before it answers.
+const PIPELINE_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn rpc(command: &str, params: Value, tokens: &mut Tokens) -> Result<Action, ControlError> {
     tokens.finish()?;
@@ -942,6 +1010,54 @@ mod tests {
         assert_eq!(rpc_of(&["wait", "raccoon-session"]).0, "wait");
         let error = parse(&args(&["send", "raccoon-session", "hello", "--tab", "t1"])).unwrap_err();
         assert!(error.message.contains("--tab applies to a cloud session"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_session_starts_from_an_issue_and_carries_the_merge_switch() {
+        let (command, params, timeout) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "claude", "--issue", "433"]);
+        assert_eq!(command, "sessions.create");
+        // The issue is the prompt; the switch is the project's default unless named.
+        assert_eq!((&params["issue"], &params["prompt"], &params["autoMerge"], &params["noPipeline"], &params["useWorktree"]), (&json!("433"), &json!(""), &json!(null), &json!(false), &json!(true)));
+        assert!(timeout >= Duration::from_secs(60));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--issue", "ENG-42", "--provider", "linear", "--auto-merge", "--prompt", "Keep the public API.", "--project", "raccoon", "--agent", "codex"]);
+        assert_eq!((&params["issue"], &params["provider"], &params["autoMerge"], &params["prompt"]), (&json!("ENG-42"), &json!("linear"), &json!(true), &json!("Keep the public API.")));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--issue", "433", "--no-auto-merge", "--no-pipeline", "--project", "raccoon", "--agent", "codex"]);
+        assert_eq!((&params["autoMerge"], &params["noPipeline"]), (&json!(false), &json!(true)));
+
+        // Without an issue the request is word for word what it was, and the issue's flags are refused.
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go"]);
+        assert!(params.get("issue").is_none() && params.get("autoMerge").is_none() && params.get("noPipeline").is_none());
+        for flag in ["--auto-merge", "--no-auto-merge", "--no-pipeline"] {
+            let error = parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", flag])).unwrap_err();
+            assert!(error.message.contains("apply to a session started with --issue"), "{flag}: {}", error.message);
+        }
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--provider", "linear"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "433", "--auto-merge", "--no-auto-merge"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex"])).is_err());
+    }
+
+    #[test]
+    fn pipelines_are_listed_shown_and_steered_but_not_merged_from_the_command_line() {
+        assert_eq!(rpc_of(&["pipelines", "list"]).0, "pipelines.list");
+        assert_eq!(rpc_of(&["pipelines", "list", "--project", "raccoon"]).1, json!({"project": "raccoon"}));
+        assert_eq!(rpc_of(&["pipelines", "show", "433"]), ("pipelines.show".to_string(), json!({"pipeline": "433", "project": null}), Duration::from_secs(30)));
+        let (command, params, timeout) = rpc_of(&["pipelines", "auto-merge", "ENG-42", "off"]);
+        assert_eq!((command.as_str(), params), ("pipelines.autoMerge", json!({"pipeline": "ENG-42", "project": null, "value": false})));
+        assert_eq!(timeout, PIPELINE_TIMEOUT);
+        assert_eq!(rpc_of(&["pipelines", "auto-merge", "ENG-42", "on"]).1["value"], json!(true));
+        for action in ["stop", "resume", "advance", "review", "refresh"] {
+            let (command, params, _) = rpc_of(&["pipelines", action, "433"]);
+            assert_eq!((command.as_str(), params), ("pipelines.act", json!({"pipeline": "433", "project": null, "action": action})));
+        }
+        // Two projects can each have a #12: the project says which is meant.
+        assert_eq!(rpc_of(&["pipelines", "auto-merge", "12", "on", "--project", "widgets"]).1, json!({"pipeline": "12", "project": "widgets", "value": true}));
+        assert_eq!(rpc_of(&["pipelines", "stop", "--project", "widgets", "12"]).1["project"], json!("widgets"));
+        assert_eq!(rpc_of(&["pipelines", "show", "12", "--project", "widgets"]).1["project"], json!("widgets"));
+        // Merging by hand is done on the issue page.
+        assert!(parse(&args(&["pipelines", "merge", "433"])).unwrap_err().message.contains("Unknown pipelines command merge"));
+        assert!(parse(&args(&["pipelines", "auto-merge", "433", "maybe"])).is_err());
+        assert!(parse(&args(&["pipelines", "auto-merge", "433"])).is_err());
+        assert!(parse(&args(&["pipelines", "show"])).is_err());
     }
 
     #[test]

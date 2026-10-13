@@ -149,6 +149,8 @@ class FakeRuntime implements WorkspaceTransport {
         this.cache.set(key!, result);
         return ok(result);
       }
+      case "session.interrupt":
+        return ok({ interrupted: true });
       case "session.nudge":
         return ok({});
       case "session.list":
@@ -653,6 +655,35 @@ describe("workspace RPC client", () => {
       await expect(before.scanCleanup()).rejects.toMatchObject({ code: "capability_not_granted" });
       await expect(before.removeCleanup([{ projectPath: "/w", path: "/w/a", token: "t" }])).rejects.toMatchObject({ code: "capability_not_granted" });
       expect(old.sent.some((frame) => frame.method.startsWith("cleanup."))).toBe(false);
+      before.close();
+    });
+
+    it("session/3: an interrupt is one live call, never resent after a drop, and an older runtime is never asked", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      const interrupts = () => runtime.sent.filter((frame) => frame.method === "session.interrupt");
+      expect(await client.interruptAgentTab({ sessionId: "s1", tabId: "t1" })).toEqual({ interrupted: true });
+      // Not a mutation: it carries no request id for the runtime to answer a second time from.
+      expect(interrupts().map((frame) => frame.params)).toEqual([{ sessionId: "s1", tabId: "t1" }]);
+      expect(MUTATING_METHODS.has("session.interrupt")).toBe(false);
+
+      // An Escape whose answer was lost with the connection is not typed again into whatever runs afterwards.
+      runtime.loseAnswers = true;
+      void client.interruptAgentTab({ sessionId: "s1", tabId: "t1" }).catch(() => undefined);
+      await settle();
+      runtime.drop();
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      await settle();
+      expect(interrupts()).toHaveLength(2);
+      client.close();
+
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect([...SESSION_1, "session/2"]);
+      expect(before.hasCapability("session/3")).toBe(false);
+      await expect(before.interruptAgentTab({ sessionId: "s1", tabId: "t1" })).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(old.sent.some((frame) => frame.method === "session.interrupt")).toBe(false);
       before.close();
     });
 

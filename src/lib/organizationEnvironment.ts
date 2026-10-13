@@ -112,7 +112,8 @@ export interface RecipeObservations {
 export interface EnvironmentRecipe {
   id: string;
   provider: string;
-  state: "proposed" | "applied" | "dismissed";
+  /** `unknown`: a state this build does not know. It is shown, and offers no action. */
+  state: "proposed" | "applied" | "dismissed" | "unknown";
   /** The template revision the proposal was made against. */
   baseRevision: number;
   definition: EnvironmentDefinition;
@@ -251,7 +252,8 @@ export function normalizeRecipe(value: unknown): EnvironmentRecipe {
   return {
     id: value.id,
     provider: text(value.provider),
-    state: value.state === "applied" || value.state === "dismissed" ? value.state : "proposed",
+    // Only a recipe the server calls proposed is offered for applying.
+    state: value.state === "proposed" || value.state === "applied" || value.state === "dismissed" ? value.state : "unknown",
     baseRevision: value.baseRevision,
     definition: normalizeDefinition(value.definition),
     observations: normalizeObservations(value.observations),
@@ -290,6 +292,9 @@ export const organizationEnvironment = {
   cancel: (versionId: string, contextRevision: string) => invoke<unknown>("organization_environment_version_cancel", { versionId, contextRevision }).then(normalizeVersion),
   rollback: (versionId: string, contextRevision: string) => invoke<unknown>("organization_environment_version_rollback", { versionId, contextRevision }).then(contextOf),
   recipes: (provider: string) => invoke<unknown>("organization_environment_recipes", { provider }).then(normalizeRecipes),
+  /** Stores a proposal. It changes nothing by existing. `recipe` is the server's body, observations included. */
+  proposeRecipe: (provider: string, recipe: { baseRevision: number; definition: EnvironmentDefinition; observations: unknown; sourceWorkspaceId?: string }, contextRevision: string) =>
+    invoke<unknown>("organization_environment_recipe_propose", { provider, recipe, contextRevision }).then(normalizeRecipe),
   /** Writes the recipe's definition into the template. Builds nothing. */
   applyRecipe: (recipeId: string, confirmApply: boolean, contextRevision: string) =>
     invoke<unknown>("organization_environment_recipe_apply", { recipeId, confirmApply, contextRevision }).then(contextOf),
@@ -416,18 +421,20 @@ export const changeLabel = (change: string) => CHANGE_LABEL[change] ?? change;
 export const CHECK_LABEL: Record<RecipeCheckKind, string> = { install: "Install", lint: "Lint", test: "Test", build: "Build", start: "Start" };
 
 /**
- * How a check ended, in words. A failure is always called a failure: one that
- * was already failing before the recipe says so, and is never softened into a
- * pass or left out.
+ * How a check ended, in words. A failure is always called a failure, never
+ * softened into a pass or left out. `preexisting` says what was observed and
+ * no more: the same command also fails in a copy of the repository that has
+ * none of the recipe's setup. That can be the repository's own fault or the
+ * recipe's (a dependency it forgot), so the words do not blame either.
  */
 export function checkStatusLabel(check: Pick<RecipeCheck, "status" | "preexisting">): string {
   switch (check.status) {
     case "passed":
       return "Passed";
     case "failed":
-      return check.preexisting ? "Failed (already failing before this recipe)" : "Failed";
+      return check.preexisting ? "Failed (also fails without this recipe's setup)" : "Failed";
     case "timed-out":
-      return check.preexisting ? "Timed out (already failing before this recipe)" : "Timed out";
+      return check.preexisting ? "Timed out (also fails without this recipe's setup)" : "Timed out";
     case "skipped":
       return "Skipped";
     default:
@@ -437,10 +444,47 @@ export function checkStatusLabel(check: Pick<RecipeCheck, "status" | "preexistin
 
 export const checkFailed = (check: Pick<RecipeCheck, "status">) => check.status === "failed" || check.status === "timed-out";
 
-/** Who stands behind a recipe's results. The two are never worded alike. */
+/**
+ * Who stands behind a recipe's results. The two are never worded alike, and
+ * neither is called independent: TerminalX's own runs happen on the machine
+ * the agent has just worked on.
+ */
 export function observedByLabel(observedBy: RecipeObservations["observedBy"]): string {
-  return observedBy === "verification" ? "Observed by TerminalX: it ran each command and recorded how it ended." : "Reported by the agent. TerminalX did not run these commands itself.";
+  return observedBy === "verification"
+    ? "Re-run by TerminalX on the preparation machine: it ran each command there, on a fresh copy fetched from GitHub, and recorded how it ended. The agent had worked on that machine first, so this is not an independent result. That comes only from building a version."
+    : "Reported by the agent. TerminalX did not run these commands itself.";
 }
+
+/** How many checks failed and how many never ran, the machine script included. */
+export function checkCounts(observations: RecipeObservations): { failed: number; notRun: number } {
+  const all = [...observations.repositories.flatMap((repository) => repository.checks), ...(observations.machine ? [observations.machine] : [])];
+  return { failed: all.filter(checkFailed).length, notRun: all.filter((check) => check.status === "not-run").length };
+}
+
+/** The one-line summary of a recipe's results. "Nothing failed" is never said of checks that did not run. */
+export function checkSummary(observations: RecipeObservations): string {
+  const { failed, notRun } = checkCounts(observations);
+  const ran = notRun ? ` ${notRun} check${notRun === 1 ? "" : "s"} did not run.` : "";
+  if (failed) return `${failed} check${failed === 1 ? "" : "s"} failed.${ran}`;
+  return notRun ? `No check failed, but ${notRun} did not run.` : "No check failed.";
+}
+
+// Characters that do not show, or that change how the text around them is
+// shown: controls other than tab and newline, zero-width and bidirectional
+// marks, and line separators a terminal would not break on.
+const HIDDEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202f\u2060-\u206f\ufeff\ufff9-\ufffb]/gu;
+
+/** A script as it is shown for review: every hidden character written out as its code point, so nothing is applied unseen. */
+export function visibleScript(script: string): string {
+  return script.replace(/\r\n/g, "\n").replace(HIDDEN, (character) => `\u27e6U+${character.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}\u27e7`);
+}
+
+/** How many hidden characters a script holds; a reviewer is told before applying it. */
+export function hiddenCharacterCount(script: string): number {
+  return script.replace(/\r\n/g, "\n").match(HIDDEN)?.length ?? 0;
+}
+
+export const lineCount = (script: string) => (script ? script.split("\n").length : 0);
 
 export function formatDuration(milliseconds: number | null): string {
   if (milliseconds === null) return "";

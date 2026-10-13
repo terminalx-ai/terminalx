@@ -50,6 +50,108 @@ pub enum TabStatus {
     Waiting,
 }
 
+/// What is in a tab's terminal (#437). A tab follows it: the same tab is an
+/// agent's while that agent runs there and a plain terminal when it does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Front {
+    /// The tab's agent, run by the app: running, or started when the tab is
+    /// next opened. What every tab was before tabs followed their terminal.
+    #[default]
+    Agent,
+    /// The tab's agent, started by hand in the tab's terminal. The app
+    /// follows the conversation that CLI is writing and never restarts it.
+    ByHand,
+    /// No agent: a shell, and whatever the reader runs in it.
+    Terminal,
+}
+
+impl Front {
+    fn is_agent(&self) -> bool {
+        *self == Self::Agent
+    }
+}
+
+/// A value this build does not know is read as an ordinary agent tab, so an
+/// entry a newer build wrote does not cost the reader the whole index.
+impl<'de> Deserialize<'de> for Front {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let front: Option<String> = Option::deserialize(d)?;
+        Ok(match front.as_deref() {
+            Some("by_hand") => Self::ByHand,
+            Some("terminal") => Self::Terminal,
+            _ => Self::Agent,
+        })
+    }
+}
+
+/// A conversation a tab held before the one it holds now (#437): another
+/// agent was started in the tab's terminal, or the same agent was started on
+/// something else. Its events stay in the tab's log, under `id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PastConversation {
+    /// What its events are marked with (`Payload::Conversation`); absent for
+    /// the conversation the tab began with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default = "default_mode", deserialize_with = "mode_or_default")]
+    pub permission_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_max: Option<u64>,
+    /// It was started outside the app's own launches (see `Follow::adopted`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted: bool,
+    /// When the tab moved on from it.
+    #[serde(default)]
+    pub ended: String,
+}
+
+/// How a tab follows its terminal (#437). Flattened into the tab's entry, and
+/// all of it left out for a tab that is simply the agent it was created for,
+/// so such an entry is written exactly as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Follow {
+    #[serde(default, skip_serializing_if = "Front::is_agent")]
+    pub front: Front,
+    /// The pane the tab lives in when that is not its own (`tab:<id>`): the
+    /// shell an agent was first started in by hand. It lasts as long as that
+    /// pane does; no pane survives the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// What the tab is called while it is a terminal ("Terminal 2").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    /// The reader chose the tab's `title`. It is then the tab's name whatever
+    /// runs in it, and no conversation renames it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_pinned: bool,
+    /// Which conversation the tab's events belong to now. Absent for the one
+    /// the tab began with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// The conversation the tab holds was started by hand, not by the app.
+    /// Its transcript is the reader's own, as one made in any other terminal
+    /// is: the app follows it and may resume it, and never deletes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted: bool,
+    /// The conversations before it, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<PastConversation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TabEntry {
@@ -95,7 +197,65 @@ pub struct TabEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from: Option<String>,
     #[serde(flatten, default)]
+    pub follow: Follow,
+    #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl TabEntry {
+    /// The terminal pane the tab lives in: its own, unless it took over a
+    /// shell's (#437).
+    pub fn pane_id(&self) -> String {
+        self.follow.pane.clone().unwrap_or_else(|| format!("tab:{}", self.id))
+    }
+
+    /// The pane the tab lived in is gone (the app restarted, or the tab was
+    /// closed): it has its own from here on, and an agent that was started
+    /// by hand went with the terminal it was started in. Its conversation is
+    /// the tab's, for the app to resume when the tab is opened. A tab that
+    /// was a terminal is still one.
+    pub fn lose_pane(&mut self) {
+        self.follow.pane = None;
+        if self.follow.front == Front::ByHand {
+            self.follow.front = Front::Agent;
+        }
+    }
+
+    /// Whether the tab is a plain terminal now, with no agent in it.
+    pub fn is_terminal(&self) -> bool {
+        self.follow.front == Front::Terminal
+    }
+
+    /// Whether the agent in the tab was started by hand in its terminal.
+    pub fn by_hand(&self) -> bool {
+        self.follow.front == Front::ByHand
+    }
+
+    /// The conversation the tab holds now, as a record to keep when it moves
+    /// on to another.
+    pub fn past(&self) -> PastConversation {
+        PastConversation {
+            id: self.follow.conversation.clone(),
+            harness: self.harness.clone(),
+            provider_session_id: self.provider_session_id.clone(),
+            title: (!self.follow.title_pinned).then(|| self.title.clone()).flatten(),
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+            permission_mode: self.permission_mode.clone(),
+            context_used: self.context_used,
+            context_max: self.context_max,
+            adopted: self.follow.adopted,
+            ended: now(),
+        }
+    }
+
+    /// Every agent conversation the tab holds or has held, as (harness, the
+    /// agent's own id for it, whether it was started outside the app).
+    pub fn conversations(&self) -> impl Iterator<Item = (&str, &str, bool)> {
+        let now = self.provider_session_id.as_deref().map(|id| (self.harness.as_str(), id, self.follow.adopted));
+        let before = self.follow.history.iter().filter_map(|past| Some((past.harness.as_str(), past.provider_session_id.as_deref()?, past.adopted)));
+        now.into_iter().chain(before)
+    }
 }
 
 fn default_mode() -> String {
@@ -263,6 +423,30 @@ impl TabLayout {
     fn is_empty(&self) -> bool {
         self.order.is_empty() && self.pinned.is_empty() && self.muted.is_empty() && self.titles.is_empty() && self.unknown.is_empty()
     }
+
+    /// Say of `to` what the layout said of `from`. False when it said nothing.
+    fn rename(&mut self, from: &str, to: &str) -> bool {
+        let mut renamed = false;
+        for keys in [&mut self.order, &mut self.pinned, &mut self.muted] {
+            if !keys.iter().any(|key| key == from) {
+                continue;
+            }
+            renamed = true;
+            // A layout that already names `to` keeps what it says of it.
+            if keys.iter().any(|key| key == to) {
+                keys.retain(|key| key != from);
+            } else {
+                for key in keys.iter_mut().filter(|key| *key == from) {
+                    *key = to.to_string();
+                }
+            }
+        }
+        if let Some(title) = self.titles.remove(from) {
+            renamed = true;
+            self.titles.entry(to.to_string()).or_insert(title);
+        }
+        renamed
+    }
 }
 
 const AGENT_TAB: &str = "agent:";
@@ -405,6 +589,22 @@ pub fn forget_shell_tabs() -> Result<()> {
     save_file(&mut file)
 }
 
+/// A shell became an agent's tab (#437), under the tab's own id. What the
+/// reader arranged for the shell (its place in the row, a pin, a mute, a
+/// title) is the tab's from here on. Returns whether any layout named it.
+pub fn shell_became_tab(pane: &str, tab_id: &str) -> Result<bool> {
+    let (shell, tab) = (format!("{SHELL_TAB}{pane}"), format!("{AGENT_TAB}{tab_id}"));
+    let mut file = load_file()?;
+    let mut renamed = false;
+    for layout in file.workspace_tabs.values_mut() {
+        renamed |= layout.rename(&shell, &tab);
+    }
+    if renamed {
+        save_file(&mut file)?;
+    }
+    Ok(renamed)
+}
+
 /// Take an agent tab out of its session. With `keep` it stays reopenable;
 /// returns the tabs (session id, tab id) whose logs nothing refers to any
 /// more: this one when it is not kept, and the closed tabs it pushed out.
@@ -449,8 +649,9 @@ pub fn reopen_tab(session_id: &str, tab_id: &str) -> Result<TabEntry> {
             .ok_or_else(|| anyhow!("tab {tab_id} is not a closed tab of session {session_id}"))?;
         let session = file.sessions.iter_mut().find(|s| s.id == session_id).ok_or_else(|| anyhow!("session {session_id} not found"))?;
         let mut tab = file.closed_tabs.remove(at).tab;
-        // Nothing ran while it was closed.
+        // Nothing ran while it was closed, and the pane it lived in went with it.
         tab.status = TabStatus::Idle;
+        tab.lose_pane();
         session.tabs.retain(|other| other.id != tab.id);
         session.tabs.push(tab.clone());
         session.active_tab = Some(tab.id.clone());
@@ -657,6 +858,68 @@ mod tests {
         assert!(!state.workspaces.contains_key("/q"), "a layout of shells alone is gone");
     }
 
+    /// A shell an agent is started in becomes that agent's tab (#437), and
+    /// what the reader arranged for the shell goes with it.
+    #[test]
+    fn a_shell_that_became_a_tab_keeps_its_place_pin_mute_and_title() {
+        let _home = crate::store::temp_home();
+        save(&[entry("a")]).unwrap();
+        let mut arranged = layout(&["agent:t1", "terminal:a:1", "browser:p1", "terminal:a:2"]);
+        arranged.pinned = vec!["terminal:a:1".into()];
+        arranged.muted = vec!["terminal:a:1".into()];
+        arranged.titles.insert("terminal:a:1".into(), "dev server".into());
+        set_tab_layout("/p", arranged).unwrap();
+        set_tab_layout("/q", layout(&["terminal:b:1"])).unwrap();
+
+        assert!(shell_became_tab("a:1", "typed").unwrap());
+
+        let state = tab_state().unwrap();
+        let now = &state.workspaces["/p"];
+        assert_eq!(now.order, ["agent:t1", "agent:typed", "browser:p1", "terminal:a:2"]);
+        assert_eq!(now.pinned, ["agent:typed"]);
+        assert_eq!(now.muted, ["agent:typed"]);
+        assert_eq!(now.titles.get("agent:typed").map(String::as_str), Some("dev server"));
+        assert!(!now.titles.contains_key("terminal:a:1"));
+        assert_eq!(state.workspaces["/q"].order, ["terminal:b:1"], "another workspace's shells are not touched");
+        // The app starts again: the other shells are forgotten, and the tab is still where the shell stood.
+        forget_shell_tabs().unwrap();
+        assert_eq!(tab_state().unwrap().workspaces["/p"].order, ["agent:t1", "agent:typed", "browser:p1"]);
+        // A shell no layout names changes nothing, and a layout that already names the tab keeps its own word.
+        assert!(!shell_became_tab("a:9", "other").unwrap());
+        let mut both = layout(&["agent:typed", "terminal:a:3"]);
+        both.titles.insert("agent:typed".into(), "mine".into());
+        both.titles.insert("terminal:a:3".into(), "older".into());
+        set_tab_layout("/p", both).unwrap();
+        assert!(shell_became_tab("a:3", "typed").unwrap());
+        let now = &tab_state().unwrap().workspaces["/p"];
+        assert_eq!(now.order, ["agent:typed"]);
+        assert_eq!(now.titles.get("agent:typed").map(String::as_str), Some("mine"));
+    }
+
+    /// The pane a tab lived in is killed when the tab is closed (#437): it
+    /// comes back in a pane of its own, with its conversation for the app to
+    /// resume, and one that was a terminal is still a terminal.
+    #[test]
+    fn a_reopened_tab_does_not_come_back_to_the_pane_it_lived_in() {
+        let _home = crate::store::temp_home();
+        let mut a = entry("a");
+        let mut typed = tab("typed");
+        typed.follow = Follow { front: Front::ByHand, pane: Some("a:1".into()), title_pinned: true, ..Default::default() };
+        let mut shell = tab("shell");
+        shell.follow = Follow { front: Front::Terminal, pane: Some("a:2".into()), terminal_title: Some("Terminal 2".into()), ..Default::default() };
+        a.tabs = vec![typed, shell, tab("t3")];
+        save(&[a]).unwrap();
+
+        close_tab("a", "typed", true).unwrap();
+        close_tab("a", "shell", true).unwrap();
+        let typed = reopen_tab("a", "typed").unwrap();
+        assert_eq!((typed.follow.front, typed.follow.pane.as_deref(), typed.follow.title_pinned), (Front::Agent, None, true));
+        assert_eq!(typed.pane_id(), "tab:typed");
+        let shell = reopen_tab("a", "shell").unwrap();
+        assert_eq!((shell.follow.front, shell.follow.pane.as_deref(), shell.follow.terminal_title.as_deref()), (Front::Terminal, None, Some("Terminal 2")));
+        assert_eq!(get("a").unwrap().tab("typed").unwrap().follow.pane, None);
+    }
+
     #[test]
     fn a_closed_tab_is_kept_and_comes_back_as_it_was() {
         let _home = crate::store::temp_home();
@@ -758,6 +1021,35 @@ mod tests {
         assert_eq!(requested_mode(Some(" ".into())), None);
         assert_eq!(requested_mode(None), None);
         assert_eq!(requested_mode(Some("plan".into())), Some("plan".into()));
+    }
+
+    #[test]
+    fn a_tab_that_only_ever_ran_its_own_agent_is_written_as_before_and_what_it_follows_round_trips() {
+        let plain: TabEntry = serde_json::from_value(serde_json::json!({ "id": "t1", "harness": "claude", "created": "x" })).unwrap();
+        assert_eq!(plain.follow, Follow::default());
+        assert_eq!(plain.pane_id(), "tab:t1");
+        let written = serde_json::to_value(&plain).unwrap();
+        for field in ["front", "pane", "terminalTitle", "titlePinned", "conversation", "adopted", "history"] {
+            assert!(written.get(field).is_none(), "{field} was written for a tab that follows nothing");
+        }
+
+        let mut followed = plain.clone();
+        followed.provider_session_id = Some("first".into());
+        followed.follow.history.push(followed.past());
+        followed.follow = Follow { front: Front::ByHand, pane: Some("s1:a".into()), terminal_title: Some("Terminal 2".into()), title_pinned: true, conversation: Some("c2".into()), adopted: true, history: followed.follow.history };
+        assert_eq!(followed.pane_id(), "s1:a");
+        let written = serde_json::to_value(&followed).unwrap();
+        assert_eq!((written["front"].as_str(), written["pane"].as_str(), written["conversation"].as_str()), (Some("by_hand"), Some("s1:a"), Some("c2")));
+        assert_eq!(written["history"][0]["providerSessionId"], "first");
+        // The first conversation has no id of its own: its events are the unmarked ones.
+        assert!(written["history"][0].get("id").is_none());
+        assert_eq!(serde_json::from_value::<TabEntry>(written).unwrap(), followed);
+        followed.provider_session_id = Some("second".into());
+        assert_eq!(followed.conversations().collect::<Vec<_>>(), [("claude", "second", true), ("claude", "first", false)]);
+
+        // A front this build has never heard of is an ordinary agent tab, not a lost index.
+        let newer: TabEntry = serde_json::from_value(serde_json::json!({ "id": "t1", "harness": "claude", "created": "x", "front": "hologram" })).unwrap();
+        assert_eq!(newer.follow.front, Front::Agent);
     }
 
     #[test]
@@ -873,6 +1165,7 @@ mod tests {
             context_used: None,
             context_max: None,
             fork_from: None,
+            follow: Follow::default(),
             unknown: BTreeMap::new(),
         });
 

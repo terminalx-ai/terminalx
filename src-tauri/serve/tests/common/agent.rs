@@ -122,6 +122,20 @@ impl Serve {
         })
     }
 
+    /// `wait_events` for something slower than the fake agent's usual pace.
+    #[allow(dead_code)]
+    pub fn wait_events_for(&self, tab: &str, what: &str, within: Duration, done: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+        let deadline = Instant::now() + within;
+        loop {
+            let events = self.events(tab);
+            if done(&events) {
+                return events;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

@@ -1275,6 +1275,17 @@ async fn two_agent_tabs_and_a_shell_survive_a_reattach_and_a_fenced_restart() {
     let resent = desk.ok("session.addTab", json!({ "sessionId": a_session, "agent": "claude", "mode": "manual", "clientRequestId": "pro12-add-tab" })).await;
     assert_eq!(resent["tabId"], added_tab.as_str(), "a resend adds nothing");
     assert_eq!(desk.ok("session.tabs", json!({})).await["tabs"].as_array().unwrap().len(), 3);
+    // #449: listing a tab's slash commands waits on its CLI (seconds on a
+    // machine that just woke; the fake never answers, so the full 15 s here).
+    // What the connection asks next is answered meanwhile: a terminal attach
+    // or a keystroke never waits behind a composer's command list.
+    desk.next += 1;
+    let commands_id = format!("test-{}", desk.next);
+    assert!(desk.supervisor.send(json!({ "id": commands_id, "method": "session.commands", "params": { "sessionId": a_session, "tabId": a_tab } })));
+    desk.ok("pty.list", json!({})).await;
+    assert!(!desk.notifications.iter().any(|message| message["id"] == commands_id.as_str()), "pty.list waited for session.commands");
+    let commands = desk.notification(|message| message["id"] == commands_id.as_str()).await;
+    assert!(commands["ok"].is_boolean(), "the command list is still answered: {commands}");
     let renamed = desk.ok("session.update", json!({ "sessionId": a_session, "title": "PRO-12 on Linux", "pinned": true, "clientRequestId": "pro12-update" })).await;
     assert_eq!((renamed["session"]["title"].as_str(), renamed["session"]["pinned"].as_bool()), (Some("PRO-12 on Linux"), Some(true)));
     let owned = desk.ok("pty.create", json!({ "sessionId": b_session, "cols": 100, "rows": 30, "clientRequestId": "pro12-session-shell" })).await;

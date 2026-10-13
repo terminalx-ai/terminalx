@@ -224,6 +224,39 @@ pub fn is_alive(pid: u32) -> bool {
 }
 
 /// Straight to SIGKILL, for a process that has been asked nicely and declined.
+/// The files process `pid` has open, as far as this user may see them. How
+/// a CLI the app did not launch is matched to the conversation it is writing
+/// (#437); empty when the process is gone or cannot be asked.
+pub fn open_files(pid: u32) -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir(format!("/proc/{pid}/fd")).into_iter().flatten().flatten().filter_map(|fd| std::fs::read_link(fd.path()).ok()).filter(|path| path.is_absolute()).collect()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // `-F n` prints one field per line; a file's name is the line that
+        // starts with `n`. `-n -P` leave addresses and ports as numbers: an
+        // agent has sockets open, and without them `lsof` looks each peer's
+        // name up, which took thirty seconds for one Codex (measured,
+        // 2026-10-12) and none of which is a file.
+        let listed = std::process::Command::new("lsof").env("LC_ALL", "C").args(["-n", "-P", "-a", "-p", &pid.to_string(), "-F", "n"]).stderr(std::process::Stdio::null()).output();
+        match listed {
+            Ok(output) => parse_lsof_names(&String::from_utf8_lossy(&output.stdout)),
+            Err(_) => Vec::new(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
+}
+
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
+fn parse_lsof_names(output: &str) -> Vec<std::path::PathBuf> {
+    output.lines().filter_map(|line| line.strip_prefix('n')).filter(|name| name.starts_with('/')).map(std::path::PathBuf::from).collect()
+}
+
 pub fn kill_now(pid: u32) {
     #[cfg(unix)]
     unsafe {
@@ -266,6 +299,26 @@ impl Drop for Host {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lsof_names_are_the_absolute_paths_among_its_fields() {
+        let listed = "p4100\nfcwd\nn/Users/me/work\nf0\nn/dev/ttys004\nf12\nn/Users/me/.codex/thread-writer-locks/01a0814c-460b-75d1-b691-d8c3ba980644.lock\nf13\nn->0x1f2e (a socket)\nf14\nnlocalhost:52311\n";
+        let names: Vec<String> = parse_lsof_names(listed).into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["/Users/me/work", "/dev/ttys004", "/Users/me/.codex/thread-writer-locks/01a0814c-460b-75d1-b691-d8c3ba980644.lock"]);
+    }
+
+    /// Against the system itself: a file this process holds open is among
+    /// its open files, and a process that does not exist has none.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_a_process_holds_open_is_listed_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap().join("held.lock");
+        let held = std::fs::File::create(&path).unwrap();
+        assert!(open_files(std::process::id()).contains(&path), "{path:?} is not among this process's open files");
+        drop(held);
+        assert!(open_files(2_000_000_003).is_empty());
+    }
     use std::sync::mpsc;
 
     struct S(Mutex<mpsc::Sender<String>>);

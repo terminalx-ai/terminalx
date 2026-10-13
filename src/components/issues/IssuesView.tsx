@@ -9,6 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { IssueListItem } from "@/components/issues/IssueListItem";
+import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -19,6 +20,7 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
+import { pipelineForIssue, pipelineSettings, startPipeline, useIssuePipelines } from "@/lib/issuePipeline";
 import type { WorkStatus } from "@/types/session";
 
 type Provider = "github" | "linear";
@@ -67,6 +69,16 @@ export function IssuesView({
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
   const isGit = project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
+  const pipelines = useIssuePipelines();
+  const pipelineDefaults = pipelineSettings(project);
+  // The issue's own switch, before its session exists. It starts at the project's default.
+  const [autoMerge, setAutoMerge] = useState(pipelineDefaults.autoMerge);
+  // A pull request needs a branch of its own, so a session on the project's checkout ends at the code.
+  const pipelineOffered = isGit && useWorktree && pipelineDefaults.enabled;
+  const pipeline = selected && project ? pipelineForIssue(pipelines, project.path, selected.url) : null;
+  // Once an issue has a pipeline its switch is the pipeline's, on the panel
+  // below; a session started on it again keeps what was chosen there.
+  const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
   const agentSelection = useSessionAgent(store.harnesses);
   const { harness, modelId, effort } = agentSelection;
   const linkedIssueUrls = useMemo(
@@ -188,14 +200,25 @@ export function IssuesView({
         },
       });
       upsertSession(s);
+      // The pipeline starts with the session, and tells the author how to hand
+      // its work over. A session it cannot serve still starts, as it always did.
+      let prompt = issuePrompt(issue);
+      if (pipelineOffered) {
+        try {
+          const started = await startPipeline(s.id, s.tabs[0].id, mergeChoice && !pipelineDefaults.requirePerson);
+          prompt = `${prompt}\n\n${started.authorBrief}`;
+        } catch (e) {
+          console.error("issue pipeline did not start", e);
+        }
+      }
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, issuePrompt(issue));
+      onCreated?.(s.id, s.tabs[0].id, prompt);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated]);
+  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -209,8 +232,9 @@ export function IssuesView({
   }, [project, provider, ghOk, repo, linear]);
 
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
+  // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
-    ? store.sessions.find((session) => session.issue?.url === selected.url)
+    ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
 
   if (automationPrefill) {
@@ -340,9 +364,11 @@ export function IssuesView({
                         issue={i}
                         selected={selected?.id === i.id && selected.provider === i.provider}
                         linked={linkedIssueUrls.has(i.url)}
+                        pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
                         onSelect={() => {
                           setSelected(i);
                           setUseWorktree(prefs.useWorktree);
+                          setAutoMerge(pipelineDefaults.autoMerge);
                         }}
                       />
                     </ContextMenuTrigger>
@@ -405,10 +431,12 @@ export function IssuesView({
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              <div className="flex items-center gap-2">
-                {!isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 items-center gap-2 text-[11px] text-faint">
+              {/* Where it runs, and the buttons. The buttons take a line of their own
+                  when the pane is too narrow for both, rather than sit on the words. */}
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5" data-testid="issue-start-row">
+                {!isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 flex-1 basis-56 items-center gap-2 text-[11px] text-faint">
                   <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
-                  <span className={cn("flex min-w-0 items-center gap-1", !useWorktree && "text-warning")}>
+                  <span className={cn("flex min-w-0 items-center gap-1 whitespace-nowrap", !useWorktree && "text-warning")}>
                     <GitBranch className="size-3.5 shrink-0" />
                     {useWorktree ? (
                       <>
@@ -422,20 +450,48 @@ export function IssuesView({
                     )}
                   </span>
                 </label>}
-                {linkedSession && (
-                  <Button variant="secondary" size="sm" onClick={() => selectSession(linkedSession.id)}>
-                    Open session
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                  {linkedSession && (
+                    <Button variant="secondary" size="sm" onClick={() => selectSession(linkedSession.id)}>
+                      Open session
+                    </Button>
+                  )}
+                  <Button size="sm" variant="accent" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
+                    {starting ? <Loader2 className="animate-spin" /> : null}
+                    Start session
                   </Button>
-                )}
-                <Button size="sm" variant="accent" className="ml-auto shrink-0" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
-                  {starting ? <Loader2 className="animate-spin" /> : null}
-                  Start session
-                </Button>
+                </div>
               </div>
+              {pipeline ? null : pipelineOffered ? (
+                <label className="flex min-w-0 items-start gap-2 text-[11px] text-faint">
+                  <Switch
+                    aria-label="Merge automatically when the review is addressed"
+                    size="sm"
+                    className="mt-px shrink-0"
+                    checked={autoMerge && !pipelineDefaults.requirePerson}
+                    disabled={pipelineDefaults.requirePerson}
+                    onCheckedChange={setAutoMerge}
+                  />
+                  <span className="min-w-0 text-muted-foreground">
+                    Merge automatically when the review is addressed
+                    <span className="block text-faint">
+                      {pipelineDefaults.requirePerson
+                        ? "A pull request is opened and reviewed when the work is done. This project has a person do the merge."
+                        : "A pull request is opened and reviewed when the work is done. Off, it stops at Ready to merge."}
+                    </span>
+                  </span>
+                </label>
+              ) : (
+                isGit && pipelineDefaults.enabled && <span className="text-[11px] text-faint">No pull request is opened for a session on the project’s own checkout.</span>
+              )}
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 scrollbar-thin">
-              {detailLoading && <div className="text-xs text-faint">Loading…</div>}
-              {detail && (detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>)}
+            {/* The pipeline scrolls with the issue: its findings and record can be long. */}
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+              {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
+              <div className="px-5 py-4">
+                {detailLoading && <div className="text-xs text-faint">Loading…</div>}
+                {detail && (detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>)}
+              </div>
             </div>
           </>
         )}

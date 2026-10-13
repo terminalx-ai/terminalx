@@ -155,6 +155,25 @@ describe("a tab's right-click menu", () => {
     }
   });
 
+  it("offers a tab what applies to what runs in its terminal now", async () => {
+    const entry = (id: string) => backend.sessions.find((session) => session.id === "a")!.tabs.find((candidate) => candidate.id === id)!;
+    // a2's agent left its terminal: the tab is a terminal. a3's agent was started by hand in its terminal.
+    Object.assign(entry("a2"), { front: "terminal", terminalTitle: "Terminal 4" });
+    Object.assign(entry("a3"), { front: "by_hand" });
+    await refreshSessions();
+    const terminal = render(<Menu tab="agent:a2" />);
+    // There is no agent in it to fork from, restart or give skills to.
+    for (const absent of ["Fork conversation", "Restart agent", "Skills for this agent…", "Switch to terminal view"]) expect(offered(absent)).toBe(false);
+    // It is the session's tab all the same: its last conversation is one switch away, and it floats and mutes like one.
+    for (const present of ["Rename…", "Switch to chat view", "Duplicate tab", "Open in floating window", "Mute notifications for this tab", "Pin tab", "Close tab"]) expect(offered(present)).toBe(true);
+    terminal.unmount();
+
+    render(<Menu tab="agent:a3" />);
+    // The reader started it, so the reader restarts it; everything else of an agent's applies.
+    expect(offered("Restart agent")).toBe(false);
+    for (const present of ["Switch to chat view", "Fork conversation", "Conversation id", "Skills for this agent…"]) expect(offered(present)).toBe(true);
+  });
+
   it("leaves out what does not apply at the ends of the row, and turns off a move that goes nowhere", () => {
     const first = render(<Menu tab="agent:a1" />);
     expect(offered("Close tabs to the left…")).toBe(false);

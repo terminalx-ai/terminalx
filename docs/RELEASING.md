@@ -316,6 +316,9 @@ matching server** (bootstrap, launch intents, the runtime API). Servers that
 do not implement the new protocol yet keep their last compatible runtime until
 they are upgraded to one whose `MAX_RUNTIME_PROTOCOL` includes it. Protocol 1 is the
 first runtime with launch intents and the serve bootstrap.
+Protocol 2 adds scheduled runs (PRO-37): the server's
+`CLOUD_SCHEDULED_RUNS_MIN_RUNTIME_PROTOCOL` names it, and a server must accept
+protocol 2 before a runtime built with it is released.
 
 The server only considers runtime prereleases. It picks the newest (by tag
 timestamp) whose protocol is within the range it implements, and never

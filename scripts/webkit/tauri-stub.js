@@ -33,6 +33,7 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     ] },
     list_automations: [],
     automations_list: [],
+    issue_pipelines_list: [],
     automation_issue_states: [],
     list_models: [],
     mobile_terminal_drivers: [],

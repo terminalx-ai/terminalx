@@ -2,8 +2,11 @@ import { agent, api, type TabLayout } from "@/lib/api";
 import type { SessionEntry } from "@/types/session";
 import { getBrowserState, navigateBrowserPage, openBrowserTab, refreshBrowserPages } from "@/lib/browser";
 import { getDraft } from "@/lib/drafts";
+import { MODE_SET_IN_TERMINAL } from "@/lib/models";
+import { getPrefs } from "@/lib/prefs";
 import { addTab, getSessionStore, reopenTab, selectSession } from "@/lib/sessions";
-import { activatePeer, endPeer, noteClosed, openPeer, peerIsLive, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { activatePeer, endPeer, isShellPeer, noteClosed, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { isByHand } from "@/lib/tabFront";
 import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveKey, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
 import { startTabAgent } from "@/lib/tabViews";
 import { openTerminal, type SelectedSessionTab } from "@/lib/terminal";
@@ -142,11 +145,26 @@ async function openPage(session: SessionEntry, url?: string | null): Promise<str
   return id;
 }
 
-/** A new tab of the same kind in the same folder, next to this one. An agent's is a fresh conversation with the same provider and model. */
+/**
+ * A new tab of the same kind in the same folder, next to this one. An
+ * agent's is a fresh conversation with the same provider and model; a tab
+ * that is a terminal now (#437) gives a terminal.
+ */
 export function duplicateTab(row: TabRow, tab: PeerTab): Promise<string> {
-  if (tab.kind === "agent") return newTab(row, { kind: "agent", harness: tab.tab.harness, model: tab.tab.model, effort: tab.tab.effort ?? null, mode: tab.tab.permissionMode }, tab);
-  if (tab.kind === "terminal") return newTab(row, { kind: "terminal" }, tab);
-  return newTab(row, { kind: "browser", url: tab.page.url }, tab);
+  if (tab.kind === "browser") return newTab(row, { kind: "browser", url: tab.page.url }, tab);
+  if (isShellPeer(tab) || tab.kind !== "agent") return newTab(row, { kind: "terminal" }, tab);
+  // A mode that was set in the terminal is not one the app can start an agent in.
+  const mode = tab.tab.permissionMode === MODE_SET_IN_TERMINAL ? getPrefs().lastMode : tab.tab.permissionMode;
+  return newTab(row, { kind: "agent", harness: tab.tab.harness, model: tab.tab.model, effort: tab.tab.effort ?? null, mode }, tab);
+}
+
+/**
+ * Whether the app can restart what runs in the tab: an agent it launched
+ * itself. One the reader started by hand in the tab's terminal is theirs to
+ * restart, and a tab that is a terminal has no agent (#437).
+ */
+export function canRestartAgent(tab: PeerTab): boolean {
+  return tab.kind === "agent" && !isShellPeer(tab) && !isByHand(tab.tab);
 }
 
 /** Reload a page, restart an agent's CLI (its conversation resumes), or start an exited shell again in its tab. */
@@ -157,6 +175,7 @@ export async function restartTab(row: TabRow, tab: PeerTab) {
   }
   const session = row.sessions.find((candidate) => candidate.id === tab.sessionId) ?? row.session;
   if (tab.kind === "agent") {
+    if (!canRestartAgent(tab)) return;
     await agent.stop(session.id, tab.id);
     await startTabAgent(session, tab.tab);
     return;
@@ -195,13 +214,14 @@ export interface ClosePlan {
  * The tabs a bulk close acts on, in the row as shown: every tab is a tab of
  * this workspace, so nothing else can be closed by it. `anchor` is the tab
  * the menu was opened on. "Idle" is a terminal that has exited or an agent
- * with nothing running.
+ * with nothing running; a tab is one or the other by what is in its terminal
+ * now (#437).
  */
 export function planBulkClose(action: BulkClose, tabs: readonly PeerTab[], anchor: PeerTab | null): ClosePlan {
   const at = anchor ? tabs.findIndex((tab) => tab.key === anchor.key) : -1;
   const reached = tabs.filter((tab, index) => {
     if (action === "all") return true;
-    if (action === "idle") return tab.kind === "terminal" ? tab.pane.exited : tab.kind === "agent" && !peerIsLive(tab);
+    if (action === "idle") return isShellPeer(tab) ? !!peerShell(tab)?.exited : tab.kind === "agent" && !peerIsLive(tab);
     if (at < 0) return false;
     return action === "others" ? index !== at : action === "right" ? index > at : index < at;
   });
@@ -216,13 +236,12 @@ export function planBulkClose(action: BulkClose, tabs: readonly PeerTab[], ancho
 export function busyTabs(tabs: readonly PeerTab[], running: ReadonlySet<string> = new Set()): BusyTab[] {
   return tabs.flatMap((tab) => {
     const reasons: string[] = [];
-    if (tab.kind === "agent") {
-      if (tab.tab.status === "in_progress") reasons.push("working");
-      else if (tab.tab.status === "waiting") reasons.push("waiting for an answer");
-      if (getDraft(tab.id).trim()) reasons.push("unsent draft");
-    } else if (tab.kind === "terminal" && !tab.pane.exited && running.has(tab.id)) {
-      reasons.push("running a command");
-    }
+    const status = peerStatus(tab);
+    if (status === "in_progress") reasons.push("working");
+    else if (status === "waiting") reasons.push("waiting for an answer");
+    // A tab that is a terminal now is asked about like any shell, by its pane.
+    if (isShellPeer(tab) && !peerShell(tab)?.exited && running.has(peerPaneId(tab) ?? "")) reasons.push("running a command");
+    if (tab.kind === "agent" && getDraft(tab.id).trim()) reasons.push("unsent draft");
     return reasons.length ? [{ tab, reasons }] : [];
   });
 }

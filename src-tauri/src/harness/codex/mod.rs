@@ -8,6 +8,7 @@
 //! how the hook trust Codex demands is computed.
 
 pub mod appserver;
+pub mod by_hand;
 pub mod home;
 pub mod models;
 pub mod pty;

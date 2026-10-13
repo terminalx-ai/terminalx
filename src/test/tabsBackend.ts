@@ -154,7 +154,8 @@ function create(): TabsBackend {
           if (!closed) throw new Error(`tab ${tabId} is not a closed tab`);
           backend.closed = backend.closed.filter((candidate) => candidate !== closed);
           const entry = find(sessionId)!;
-          const back = { ...closed.tab, status: "idle" as TabStatus };
+          // The pane it lived in went when it was closed, and a hand-started agent with it.
+          const back = { ...closed.tab, status: "idle" as TabStatus, pane: null, front: closed.tab.front === "by_hand" ? ("agent" as const) : closed.tab.front };
           entry.tabs.push(back);
           entry.activeTab = back.id;
           backend.emit("tab_state_changed", structuredClone(tabState()));
@@ -163,7 +164,8 @@ function create(): TabsBackend {
         case "rename_tab": {
           const { sessionId, tabId, title } = args as { sessionId: string; tabId: string; title: string | null };
           const renamed = find(sessionId)?.tabs.find((candidate) => candidate.id === tabId);
-          if (renamed) renamed.title = title;
+          // The reader's own title is the tab's name whatever runs in it.
+          if (renamed) Object.assign(renamed, { title, titlePinned: title != null });
           announceSession(sessionId);
           return null;
         }

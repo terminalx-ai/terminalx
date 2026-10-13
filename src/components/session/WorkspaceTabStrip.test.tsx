@@ -92,6 +92,26 @@ describe("the tab strip", () => {
     expect(rowNames("b")).toEqual(["Docs", "Page page-feature browser page"]);
   });
 
+  it("draws a tab as what runs in its terminal now, in the place it has always had", async () => {
+    const a2 = backend.sessions.find((session) => session.id === "a")!.tabs.find((candidate) => candidate.id === "a2")!;
+    // Its agent left the terminal in the middle of a turn: the tab is a terminal.
+    Object.assign(a2, { front: "terminal", terminalTitle: "Terminal 4" });
+    await refreshSessions();
+    render(<TabsHarness />);
+    expect(names()).toEqual([LONG, "Terminal 4", "Review", "Docs", "Page page-feature", "Terminal 1"]);
+    expect(tab("Terminal 4").getAttribute("aria-description")).toBe("Terminal");
+    // A terminal's icon, and nothing of the state its agent was last in.
+    expect(tab("Terminal 4").querySelector("svg")?.getAttribute("class")).toBe(tab("Terminal 1").querySelector("svg")?.getAttribute("class"));
+    expect(tab("Terminal 4").querySelector("span[aria-hidden].bg-info")).toBeNull();
+    expect(rowNames("a")).toEqual([LONG, "Terminal 4", "Review", "Page page-feature browser page", "Terminal 1"]);
+    // An agent is started in it again: the same tab, where it was, as that agent's.
+    Object.assign(a2, { front: "by_hand" });
+    await act(async () => void (await refreshSessions()));
+    expect(names()).toEqual([LONG, "Fix flaky test", "Review", "Docs", "Page page-feature", "Terminal 1"]);
+    expect(tab("Fix flaky test").getAttribute("aria-description")).toBe("Codex, working");
+    expect(tab("Fix flaky test").querySelector("span[aria-hidden].bg-info")).toBeTruthy();
+  });
+
   it("marks the open tab, and a tab's panel is named by its tab in the strip", () => {
     render(<TabsHarness />);
     expect(shown()).toEqual([LONG]);

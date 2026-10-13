@@ -59,6 +59,29 @@ const setup = ({ tabs, prefs }) => {
       { path: "/repos/p0", name: "main", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 },
       { path: WORKTREE, name: "tab-strip", branch: "raccoon/438-browser-style-tab-strip", head: "def", isMain: false, managed: true, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 },
     ],
+    // The session reviews its issue's pull request: the chip that says so is one more thing beside the tabs.
+    issue_pipelines_list: [
+      {
+        id: "pipeline",
+        projectPath: "/repos/p0",
+        issue: { provider: "github", id: "438", identifier: "#438", title: "Browser-style tab strip in the title bar", url: "https://example.test/438" },
+        branch: "raccoon/438-browser-style-tab-strip",
+        author: { sessionId: "s-author", tabId: "t" },
+        reviewer: { sessionId: "s-a", tabId: "a1" },
+        autoMerge: false,
+        stopped: false,
+        stage: "address",
+        state: "working",
+        note: "The author is addressing two findings.",
+        pr: { number: 453, url: "https://example.test/pull/453", base: "main" },
+        round: 1,
+        maxRounds: 3,
+        securityAreas: [],
+        events: [],
+        created: at(0),
+        modified: at(0),
+      },
+    ],
     load_tab_events: [],
     tab_pane: null,
     pty_shells: [],
@@ -152,6 +175,16 @@ const measure = (page) =>
       title: { visible: visible(title), hover: title?.getAttribute("title") ?? "", ...(rect(title) ?? {}) },
       issue: visible([...header.querySelectorAll("button")].find((button) => button.textContent.trim() === "#438")),
       automation: visible(header.querySelector('[data-testid="session-automation"]')),
+      pipeline: (() => {
+        const chip = header.querySelector('[data-testid="session-pipeline"]');
+        if (!chip) return null;
+        const box = chip.getBoundingClientRect();
+        const shown = (part) => !!part && part.width > 0 && part.top < box.bottom - 1 && part.right <= box.right + 1;
+        const dot = chip.querySelector("span.rounded-full").getBoundingClientRect();
+        const label = chip.querySelector("span.truncate").getBoundingClientRect();
+        // Its words are a label that is in view (whole, or cut with an ellipsis) or out of it; `slack` is what is left empty at the chip's end.
+        return { ...rect(chip), text: chip.textContent.trim(), dot: shown(dot), label: shown(label) ? Math.round(label.width) : 0, slack: Math.round(box.right - (shown(label) ? label.right : dot.right)) };
+      })(),
       branch: visible(header.querySelector('[data-testid="session-branch"]')),
     };
   });
@@ -167,6 +200,8 @@ function fits(layout, { sidebarHidden = false } = {}) {
     "the + follows the row of tabs": layout.plus.left >= layout.strip.right - SLACK && (!lastTab || layout.plus.left >= Math.min(lastTab.right, layout.list.right) - SLACK),
     ...(sidebarHidden ? { "the window controls' inset is left clear": layout.first.left >= 78 - SLACK } : {}),
     "the issue and automation chips are still there": layout.issue && layout.automation,
+    "the pipeline chip is still there, with the dot that says where it stands": !!layout.pipeline && layout.pipeline.dot,
+    "it is that dot alone, or the dot and its words up to the chip's edge": !!layout.pipeline && (layout.pipeline.label ? layout.pipeline.slack <= 7 : layout.pipeline.width <= 38),
     "a tab does not drag the window": layout.tabDrags === false,
   };
 }
@@ -195,6 +230,7 @@ function tier(layout) {
       "the workspace's tabs are listed in the sidebar's order, across its two sessions": layout.tabs.map((tab) => tab.key).join() === "agent:a1,agent:a2,agent:a3,agent:b1",
       "no tab of another workspace is listed": !layout.tabs.some((tab) => tab.name.includes("another workspace")),
       "each tab has an icon and a name": layout.tabs.every((tab) => tab.hasIcon && tab.name),
+      "the pipeline chip says the session's part and where the pipeline stands": layout.pipeline?.text === "Reviewer · Addressing findings" && layout.pipeline.label > 0,
       "the tabs are the same width": Math.max(...widths) - Math.min(...widths) <= SLACK,
       "a long title is cut and a short one is not": layout.tabs[0].cut && !layout.tabs[3].cut,
       "the open tab is marked": layout.tabs.filter((tab) => tab.selected).length === 1 && layout.tabs[0].selected,

@@ -294,6 +294,21 @@ impl OrganizationEnvironmentService {
         self.run(None, Method::Get, &["cloud-environments", provider, "recipes"], None, None)
     }
 
+    /// Stores a proposal: a definition with how its checks ended. It changes
+    /// nothing by existing; only applying it writes the template. The server
+    /// validates every field, this only refuses a body it would reject for
+    /// its shape.
+    pub fn propose_recipe(&self, provider: &str, recipe: &Value, context_revision: &str) -> Result<Value, EnvironmentError> {
+        let with_source = has_exact_keys(recipe, &["baseRevision", "definition", "observations", "sourceWorkspaceId"]);
+        if !is_provider(provider) || !(with_source || has_exact_keys(recipe, &["baseRevision", "definition", "observations"])) {
+            return Err(local(INVALID));
+        }
+        if with_source && !recipe["sourceWorkspaceId"].as_str().is_some_and(is_resource_id) {
+            return Err(local(INVALID));
+        }
+        self.run(Some(context_revision), Method::Post, &["cloud-environments", provider, "recipes"], Some(recipe.clone()), None)
+    }
+
     /// Writes a recipe's definition into the template. It builds nothing; the
     /// person confirms replacing the template, not provider spend.
     pub fn apply_recipe(&self, recipe_id: &str, confirm_apply: bool, context_revision: &str) -> Result<Value, EnvironmentError> {
@@ -472,6 +487,23 @@ mod tests {
             assert!(request.starts_with(&format!("POST /v1/desktop/orgs/org-1{path} ")), "{action}: {request}");
             assert!(request.ends_with(body), "{action}: {request}");
         }
+    }
+
+    #[test]
+    fn stores_a_proposal_as_given_and_refuses_another_shape() {
+        let recipe = json!({ "baseRevision": 3, "definition": { "installScript": "", "repositories": [] }, "observations": { "v": 1, "observedBy": "verification", "repositories": [] }, "sourceWorkspaceId": "workspace_1" });
+        let (base, server) = serve_once("201 Created", r#"{"id":"recipe-1","state":"proposed"}"#);
+        service(&base).propose_recipe("local-docker", &recipe, &revision()).unwrap();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("POST /v1/desktop/orgs/org-1/cloud-environments/local-docker/recipes "));
+        let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body, recipe);
+
+        let environment = service(&unreachable_base());
+        assert_eq!(environment.propose_recipe("local-docker", &json!({ "definition": {} }), &revision()).unwrap_err().code, INVALID);
+        let mut bad = recipe.clone();
+        bad["sourceWorkspaceId"] = json!("../x");
+        assert_eq!(environment.propose_recipe("local-docker", &bad, &revision()).unwrap_err().code, INVALID);
     }
 
     #[test]

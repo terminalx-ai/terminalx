@@ -1,0 +1,50 @@
+{
+  "id": "0199d3a0-0000-7000-8000-000000000433",
+  "projectPath": "/repo",
+  "issue": {
+    "provider": "github",
+    "id": "433",
+    "identifier": "#433",
+    "title": "Open a pull request",
+    "url": "https://github.com/acme/widgets/issues/433"
+  },
+  "branch": "raccoon/433-open-a-pull-request",
+  "author": { "sessionId": "author", "tabId": "t1" },
+  "reviewer": { "sessionId": "reviewer-1", "tabId": "t1" },
+  "autoMerge": true,
+  "stopped": false,
+  "stage": "review",
+  "state": "needsYou",
+  "reason": { "kind": "roundLimit", "rounds": 3, "count": 2, "worst": "high" },
+  "note": "Still not clean after 3 reviews: 2 findings of medium severity or higher remain (worst: high).",
+  "pr": { "number": 7, "url": "https://github.com/acme/widgets/pull/7", "base": "main" },
+  "round": 3,
+  "maxRounds": 3,
+  "reviewCommit": "3333333333333333333333333333333333333333",
+  "reviewRequestedAt": "2026-10-12T10:16:00.000Z",
+  "findingsSentRound": 2,
+  "verdict": {
+    "commit": "3333333333333333333333333333333333333333",
+    "decision": "changes",
+    "securityPass": "flagged",
+    "findings": [
+      { "severity": "high", "title": "Token is logged", "detail": "The bearer token reaches the log.", "file": "src/auth.rs", "line": 42, "security": true },
+      { "severity": "medium", "title": "Unchecked index", "file": "src/lib/format.ts", "security": false },
+      { "severity": "nit", "title": "Typo", "security": false }
+    ],
+    "round": 3,
+    "at": "2026-10-12T10:20:00.000Z"
+  },
+  "securityAreas": ["authorization"],
+  "summary": "Pads the minutes.",
+  "reminded": false,
+  "events": [
+    { "at": "2026-10-12T10:00:00.000Z", "stage": "work", "kind": "started", "message": "Session started on #433 Open a pull request.", "sessionId": "author" },
+    { "at": "2026-10-12T10:00:00.000Z", "stage": "work", "kind": "autoMerge", "message": "Automatic merge is on for this issue." },
+    { "at": "2026-10-12T10:05:00.000Z", "stage": "pullRequest", "kind": "pullRequest", "message": "Opened pull request #7. Merging it closes #433.", "url": "https://github.com/acme/widgets/pull/7" },
+    { "at": "2026-10-12T10:20:00.000Z", "stage": "review", "kind": "verdict", "message": "Review 3 of 3 of 3333333333: changes requested, 3 findings, 2 of medium severity or higher. Security pass: flagged.", "commit": "3333333333333333333333333333333333333333", "sessionId": "reviewer-1" },
+    { "at": "2026-10-12T10:20:01.000Z", "stage": "review", "kind": "needsYou", "message": "Still not clean after 3 reviews: 2 findings of medium severity or higher remain (worst: high)." }
+  ],
+  "created": "2026-10-12T10:00:00.000Z",
+  "modified": "2026-10-12T10:20:01.000Z"
+}

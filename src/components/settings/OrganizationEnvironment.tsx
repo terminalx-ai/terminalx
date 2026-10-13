@@ -23,6 +23,7 @@ import {
   type EnvironmentVersion,
   type OrganizationEnvironmentError,
 } from "@/lib/organizationEnvironment";
+import { ConfigureEnvironmentWithAgent } from "./ConfigureEnvironmentWithAgent";
 import { EnvironmentRecipes } from "./EnvironmentRecipes";
 
 const inputClass = "h-7 min-w-0 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
@@ -137,7 +138,7 @@ function RepositoryEditor({
   );
 }
 
-export function OrganizationEnvironment({ contextRevision }: { contextRevision: string }) {
+export function OrganizationEnvironment({ contextRevision, organizationId = null }: { contextRevision: string; organizationId?: string | null }) {
   const [providers, setProviders] = useState<ProviderOption[] | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
   const [status, setStatus] = useState<EnvironmentStatus | null>(null);
@@ -160,7 +161,9 @@ export function OrganizationEnvironment({ contextRevision }: { contextRevision: 
   dirtyRef.current = dirty;
   // One key for one intended build: pressing again after a lost response
   // replays the same build instead of starting a second builder machine.
-  const buildKey = useRef<string | null>(null);
+  // The key is for one template revision: a build asked for after the
+  // template changed is a different build and gets a key of its own.
+  const buildKey = useRef<{ key: string; revision: number } | null>(null);
 
   const load = useCallback(async (target: string, options: { keepError?: boolean; quiet?: boolean } = {}) => {
     const current = ++loadSeq.current;
@@ -175,7 +178,8 @@ export function OrganizationEnvironment({ contextRevision }: { contextRevision: 
         setDraft(next.template?.definition ?? emptyDefinition());
         setDraftRevision(next.template?.revision ?? 0);
       }
-      if (!options.keepError) setError(null);
+      // The quiet poll that follows a build must not wipe the message of an action that just failed.
+      if (!options.keepError && !options.quiet) setError(null);
       if (next.canManage && next.supported) {
         try {
           const listed = await organizationEnvironment.recipes(target);
@@ -290,8 +294,9 @@ export function OrganizationEnvironment({ contextRevision }: { contextRevision: 
     );
 
   const build = () => {
-    buildKey.current ??= crypto.randomUUID();
-    const key = buildKey.current;
+    const revision = status?.template?.revision ?? 0;
+    if (buildKey.current?.revision !== revision) buildKey.current = { key: crypto.randomUUID(), revision };
+    const key = buildKey.current.key;
     void act("build", (current) => organizationEnvironment.build(current.provider, key, true, current.contextRevision))
       .then(() => {
         buildKey.current = null;
@@ -599,6 +604,9 @@ export function OrganizationEnvironment({ contextRevision }: { contextRevision: 
                   </p>
                 )}
               </section>
+
+              {/* Offered only where a recipe can be stored: a server with recipes on. */}
+              {recipes && <ConfigureEnvironmentWithAgent status={status} organizationId={organizationId} onSaved={() => provider && void load(provider)} />}
 
               {recipes && (
                 <EnvironmentRecipes

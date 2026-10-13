@@ -70,6 +70,7 @@ mod drag_text;
 mod transcription;
 mod events;
 mod files;
+mod foreground;
 #[cfg(feature = "desktop")]
 mod floating;
 #[cfg(feature = "desktop")]
@@ -79,6 +80,8 @@ mod git;
 mod github;
 mod harness;
 pub mod hooks;
+#[cfg(feature = "desktop")]
+mod issue_pipeline;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
@@ -317,7 +320,11 @@ pub fn run() {
             });
             manager.follow_pane_exits();
             session::idle_orphaned_tabs();
+            // Tabs follow what runs in their terminal (#437). Only here: a
+            // cloud workspace's runtime does not.
+            manager.follow_terminals();
             automations::start_scheduler(app.handle().clone());
+            issue_pipeline::desktop::start(app.handle().clone());
             // The built-in browser: sweep daemons a crashed run left behind,
             // then keep this run's own daemons warm and its page list honest.
             browser.attach(app.handle().clone());
@@ -361,6 +368,7 @@ pub fn run() {
             commands::organization_environment_version_cancel,
             commands::organization_environment_version_rollback,
             commands::organization_environment_recipes,
+            commands::organization_environment_recipe_propose,
             commands::organization_environment_recipe_apply,
             commands::organization_environment_recipe_dismiss,
             commands::workspace_config_organization,
@@ -406,6 +414,13 @@ pub fn run() {
             commands::cloud_workspace_shares,
             commands::cloud_workspace_share_put,
             commands::cloud_workspace_share_revoke,
+            commands::cloud_schedules,
+            commands::cloud_schedule,
+            commands::cloud_schedule_estimate,
+            commands::cloud_schedule_create,
+            commands::cloud_schedule_set_active,
+            commands::cloud_schedule_delete,
+            commands::cloud_schedules_pause_all,
             commands::cloud_workspace_set_access,
             commands::cloud_workspace_operation,
             commands::cloud_workspace_operation_cancel,
@@ -482,6 +497,8 @@ pub fn run() {
             commands::rename_tab,
             commands::tab_state,
             commands::set_tab_layout,
+            commands::tab_resume_conversation,
+            commands::pane_agents,
             commands::rename_session,
             commands::set_session_archived,
             commands::set_session_pinned,
@@ -602,6 +619,10 @@ pub fn run() {
             commands::worktree_cleanup_stop,
             quit::set_quit_warning,
             commands::issues_list,
+            commands::issue_pipelines_list,
+            commands::issue_pipeline_start,
+            commands::issue_pipeline_set_auto_merge,
+            commands::issue_pipeline_act,
             commands::issue_details,
             commands::linear_status,
             commands::linear_set_api_key,
@@ -682,6 +703,11 @@ pub fn run() {
                         if let Some(floating) = window.app_handle().get_webview_window(floating::LABEL) {
                             let _ = floating.destroy();
                         }
+                    }
+                    // The panes that exit from here on were closed by the
+                    // app, and no tab is turned into a terminal for that.
+                    if let Some(manager) = state.manager() {
+                        manager.closing();
                     }
                     state.host.kill_all();
                     state.terminals.kill_all();

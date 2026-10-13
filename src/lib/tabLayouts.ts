@@ -33,10 +33,15 @@ export function workspaceKey(session: Pick<SessionEntry, "id" | "kind" | "cwd" |
   return canon(session.cwd);
 }
 
-/** The sessions whose tabs are listed with `session`'s: the ones open in the same workspace. */
+/**
+ * The sessions whose tabs are listed with `session`'s: the ones open in the
+ * same workspace. `session` is always one of them, known to `sessions` or not:
+ * a row never lacks the tabs of the session it is shown for.
+ */
 export function workspaceSessions(sessions: readonly SessionEntry[], session: SessionEntry): SessionEntry[] {
   const key = workspaceKey(session);
-  return sessions.filter((other) => other.id === session.id || (!other.archived && workspaceKey(other) === key));
+  const members = sessions.filter((other) => other.id === session.id || (!other.archived && workspaceKey(other) === key));
+  return members.some((member) => member.id === session.id) ? members : [session, ...members];
 }
 
 export const NO_LAYOUT: TabLayout = { order: [], pinned: [], muted: [], titles: {} };
@@ -89,6 +94,33 @@ export function layoutOf(tabs: TabState, workspace: string): TabLayout {
   const saved = tabs.workspaces[workspace];
   if (!saved) return NO_LAYOUT;
   return { order: saved.order ?? [], pinned: saved.pinned ?? [], muted: saved.muted ?? [], titles: saved.titles ?? {} };
+}
+
+const names = (layout: TabLayout, key: string) => layout.order.includes(key) || layout.pinned.includes(key) || layout.muted.includes(key) || key in layout.titles;
+
+/**
+ * A layout as it stands for these sessions. A shell an agent was started in
+ * is that agent's tab from then on, under the tab's id (#437): what the
+ * layout says of the shell (its place, a pin, a mute, the reader's title) is
+ * said of the tab. The backend rewrites the saved layout the same way; this
+ * is for the moment before a window hears of it, so the tab never leaves its
+ * place on the way.
+ */
+export function followedLayout(layout: TabLayout, sessions: readonly Pick<SessionEntry, "tabs">[]): TabLayout {
+  const became = new Map<string, string>();
+  for (const session of sessions) {
+    for (const tab of session.tabs) {
+      const shell = tab.pane ? tabKey("terminal", tab.pane) : null;
+      if (shell && names(layout, shell)) became.set(shell, tabKey("agent", tab.id));
+    }
+  }
+  if (!became.size) return layout;
+  // A layout that already names the tab keeps what it says of it.
+  const renamed = (keys: readonly string[]) => keys.flatMap((key) => (!became.has(key) ? [key] : keys.includes(became.get(key)!) ? [] : [became.get(key)!]));
+  const titles: Record<string, string> = {};
+  for (const [key, title] of Object.entries(layout.titles)) if (!became.has(key)) titles[key] = title;
+  for (const [key, title] of Object.entries(layout.titles)) if (became.has(key)) titles[became.get(key)!] ??= title;
+  return { order: renamed(layout.order), pinned: renamed(layout.pinned), muted: renamed(layout.muted), titles };
 }
 
 function receive(next: TabState | null | undefined) {
@@ -189,7 +221,7 @@ export function settleLayout(layout: TabLayout, visible: readonly string[], gone
 
 /** True when this agent tab raises nothing: the reader muted it. */
 export function isTabMuted(session: SessionEntry, tabId: string): boolean {
-  return layoutOf(state, workspaceKey(session)).muted.includes(tabKey("agent", tabId));
+  return followedLayout(layoutOf(state, workspaceKey(session)), [session]).muted.includes(tabKey("agent", tabId));
 }
 
 // ---------------------------------------------------------------- closed tabs

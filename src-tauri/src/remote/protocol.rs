@@ -19,6 +19,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// exactly as before.
 /// - `session/2`: `session.update`, `session.addTab`, `session.delete` and
 ///   the `session.sessions` notification.
+/// - `session/3` (#427): `session.interrupt`, Escape for an agent tab's
+///   running turn. Live only: it is never queued, receipted or resent.
 /// - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it.
 /// - `agents/1`: `runtime.agents`, the installed agents with their models,
 ///   efforts and modes.
@@ -45,9 +47,9 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `workspace/1`: one session's worktree, for the removal dialog a desktop
 ///   shows: `workspace.disposition` and `workspace.remove`. The worktree is
 ///   named by its session, never by a path.
-pub const CAPABILITIES: [&str; 18] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1",
-    "cleanup/1", "workspace/1",
+pub const CAPABILITIES: [&str; 19] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
+    "mirror/1", "cleanup/1", "workspace/1",
 ];
 
 /// The namespace that lets a connection address an agent tab's own terminal
@@ -114,6 +116,11 @@ pub const METHODS: &[Method] = &[
     method("session.update", "session/2", Manage, true),
     method("session.addTab", "session/2", Manage, true),
     method("session.delete", "session/2", Manage, true),
+    // #427: Escape for the running turn. Not idempotent on purpose: a call
+    // answered from a cache, or sent again after a drop, would interrupt
+    // nothing or the wrong turn. A participant needs to be the tab's driver
+    // (checked per call, as for a mailbox stop).
+    method("session.interrupt", "session/3", Participate, false),
     // What a new session or tab may run; read-only, like `harness::offered`.
     method("runtime.agents", "agents/1", Participate, false),
     // What the composer of an agent tab offers: read-only, and never more
@@ -215,7 +222,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "pty/1" | "pty/2" => &["pty."],
         "fs/1" => &["fs."],
         "git/1" => &["git."],
-        "session/1" | "session/2" => &["session."],
+        "session/1" | "session/2" | "session/3" => &["session."],
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
         "keys/1" => &["keys."],
@@ -461,6 +468,9 @@ mod tests {
         for name in ["pty.create", "fs.write", "git.commit", "session.send", "session.create", "notes.post"] {
             assert!(find_method(name).unwrap().idempotent, "{name}");
         }
+        // An interrupt is for the turn running now: never replayed from a cache.
+        let interrupt = find_method("session.interrupt").unwrap();
+        assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));
         assert!(find_method("runtime.exec").is_none());
         assert!(find_method("invoke").is_none());
     }
@@ -471,7 +481,7 @@ mod tests {
         assert_eq!(granted, vec!["pty/1", "session/1"]);
         // A session/1-only client is not handed the additions.
         let old = negotiate(&json!({"protocol": PROTOCOL, "want": ["pty/1", "fs/1", "git/1", "session/1", "keys/1", "lifecycle/1"]})).unwrap();
-        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "agents/1", AGENT_PTY].contains(&capability.as_str())));
+        assert!(!old.iter().any(|capability| ["pty/2", "session/2", "session/3", "agents/1", AGENT_PTY].contains(&capability.as_str())));
         let new = negotiate(&json!({"protocol": PROTOCOL, "want": CAPABILITIES})).unwrap();
         assert_eq!(new, CAPABILITIES.to_vec());
         assert!(CAPABILITIES.contains(&AGENT_PTY));

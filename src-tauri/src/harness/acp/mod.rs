@@ -705,4 +705,22 @@ mod tests {
         assert!(reply[0].get("result").is_some());
         assert_eq!(std::fs::read_to_string(out).unwrap(), "hi");
     }
+
+    /// #427. Escape for a running turn is the protocol's `session/cancel`, a
+    /// notification to the same process. The turn ends as stopped when the
+    /// agent answers the prompt as cancelled, and the session takes the next
+    /// prompt.
+    #[test]
+    fn an_interrupt_cancels_the_prompt_and_the_session_goes_on() {
+        let (mut a, opened) = opened(None, "auto");
+        let prompt = writes(&opened).into_iter().find(|line| line["method"] == "session/prompt").unwrap();
+        let cancel = writes(&a.interrupt());
+        assert_eq!(cancel.len(), 1);
+        assert_eq!((cancel[0]["method"].as_str(), cancel[0]["params"]["sessionId"].as_str()), (Some("session/cancel"), Some("s1")));
+        assert!(cancel[0].get("id").is_none(), "a notification: the agent answers the prompt, not this");
+        let ended = a.handle(&json!({"jsonrpc":"2.0","id":prompt["id"],"result":{"stopReason":"cancelled"}}).to_string());
+        assert!(emits(&ended).iter().any(|p| matches!(p, Payload::TurnCompleted { status: TurnStatus::Aborted, .. })));
+        let next = writes(&a.prompt("next".into(), vec![]));
+        assert_eq!(next.iter().find(|line| line["method"] == "session/prompt").unwrap()["params"]["prompt"][0]["text"], "next");
+    }
 }

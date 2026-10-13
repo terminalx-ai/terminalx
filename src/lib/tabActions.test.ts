@@ -13,12 +13,12 @@ const notifications = vi.hoisted(() => ({ send: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: notifications.send }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
 
-const { backend, FEATURE } = await import("@/test/tabsBackend");
+const { backend, FEATURE, tab: tabEntry } = await import("@/test/tabsBackend");
 const { bootSessions, refreshSessions, selectSession, getSessionStore } = await import("./sessions");
 const { bootBrowser, refreshBrowserPages } = await import("./browser");
-const { dropSessionTerminals, getTerminalState, openTerminal, setSelectedAgent } = await import("./terminal");
+const { adoptPane, dropSessionTerminals, getTerminalState, openTerminal, setSelectedAgent } = await import("./terminal");
 const { getTabState, isTabMuted, layoutOf, resetTabLayouts } = await import("./tabLayouts");
-const { closePeer, peerLabel, peerOrder, peerStateWords, workspaceRow } = await import("./sessionTabs");
+const { closePeer, hasOwnTitle, peerAgent, peerKind, peerLabel, peerOrder, peerStateWords, workspaceRow } = await import("./sessionTabs");
 const actions = await import("./tabActions");
 const { setDraft } = await import("./drafts");
 const { noteStatusChange } = await import("./notify");
@@ -337,5 +337,92 @@ describe("a muted tab", () => {
     change();
     await flush();
     expect(notifications.send).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a tab that follows what runs in its terminal (#437)", () => {
+  const entry = (id: string) => backend.sessions.find((session) => session.id === "a")!.tabs.find((candidate) => candidate.id === id)!;
+
+  it("keeps the place, the pin and the title of the shell an agent was started in", async () => {
+    actions.setTabPinned(row(), pick(`terminal:${shell}`), true);
+    await actions.renamePeer(row(), pick(`terminal:${shell}`), "dev server");
+    await flush();
+    expect(keys()[0]).toBe(`terminal:${shell}`);
+    // Codex is typed into it: the session lists the shell as a tab of its own, in the shell's pane.
+    backend.sessions.find((session) => session.id === "a")!.tabs.push(tabEntry("typed", 9, { harness: "codex", front: "by_hand", pane: shell, permissionMode: "terminal" }));
+    await refreshSessions();
+    expect(keys()[0]).toBe("agent:typed");
+    expect(keys()).not.toContain(`terminal:${shell}`);
+    const typed = pick("agent:typed");
+    expect(typed.pinned).toBe(true);
+    expect(peerLabel(typed, row().layout, harnessName)).toBe("dev server");
+    expect(hasOwnTitle(typed, row().layout)).toBe(true);
+    expect(peerKind(typed, harnessName)).toBe("Codex");
+    // Muted as the shell, it is muted as the tab, before anything is saved again.
+    backend.layouts = { [FEATURE]: { ...backend.layouts[FEATURE], muted: [`terminal:${shell}`] } };
+    backend.emit("tab_state_changed", { workspaces: backend.layouts, closed: [] });
+    expect(isTabMuted(sessionOf("a"), "typed")).toBe(true);
+    // The next thing saved is said of the tab, and nothing is left of the shell.
+    actions.moveTabBy(row(), pick("agent:a1"), "right");
+    await flush();
+    expect(backend.layouts[FEATURE].order[0]).toBe("agent:typed");
+    expect(backend.layouts[FEATURE].pinned).toEqual(["agent:typed"]);
+    expect(backend.layouts[FEATURE].titles).toEqual({ "agent:typed": "dev server" });
+    expect(JSON.stringify(backend.layouts[FEATURE])).not.toContain("terminal:");
+  });
+
+  it("is a terminal while no agent is in it: named, drawn and closed as one", async () => {
+    // Its agent was working when it left the terminal: the status it was last in says nothing now.
+    Object.assign(entry("a2"), { front: "terminal", terminalTitle: "Terminal 4" });
+    await refreshSessions();
+    const was = pick("agent:a2");
+    expect(peerLabel(was, row().layout, harnessName)).toBe("Terminal 4");
+    expect(peerKind(was, harnessName)).toBe("Terminal");
+    expect(peerAgent(was)).toBeNull();
+    expect(peerStateWords(was)).toBeNull();
+    expect(actions.canRestartAgent(was)).toBe(false);
+    expect(actions.busyTabs([was])).toEqual([]);
+    // Its shell is asked about like any other, by the pane it runs in.
+    expect(actions.busyTabs([was], new Set(["tab:a2"])).map((busy) => busy.reasons)).toEqual([["running a command"]]);
+    const idle = () => actions.planBulkClose("idle", row().tabs, null).targets.map((tab) => tab.key);
+    expect(idle()).not.toContain("agent:a2");
+    // Its shell has exited: nothing is left running in it.
+    await adoptPane({ id: "tab:a2", sessionId: "a", title: "Agent", hidden: true, owned: true });
+    backend.emit("pty_exit", { id: "tab:a2", code: 1 });
+    expect(peerStateWords(pick("agent:a2"))).toBe("exited (1)");
+    expect(idle()).toContain("agent:a2");
+    expect(actions.busyTabs([pick("agent:a2")], new Set(["tab:a2"]))).toEqual([]);
+    // An agent the app has no chat for is in front of it: the tab is drawn as that agent's, and is still a terminal.
+    expect(peerKind({ ...pick("agent:a2"), paneAgent: "opencode" } as PeerTab, () => "OpenCode")).toBe("OpenCode, running in a terminal");
+  });
+
+  it("duplicates as what it is now, and only restarts an agent the app started", async () => {
+    Object.assign(entry("a1"), { front: "terminal" });
+    Object.assign(entry("a3"), { front: "by_hand", permissionMode: "terminal" });
+    await refreshSessions();
+    expect(actions.canRestartAgent(pick("agent:a1"))).toBe(false);
+    expect(actions.canRestartAgent(pick("agent:a2"))).toBe(true);
+    expect(actions.canRestartAgent(pick("agent:a3"))).toBe(false);
+    const made = await actions.duplicateTab(row(), pick("agent:a1"));
+    expect(made.startsWith("terminal:")).toBe(true);
+    expect(backend.callsOf("add_tab")).toEqual([]);
+    expect(keys()[keys().indexOf("agent:a1") + 1]).toBe(made);
+    // An agent started by hand runs in a mode only its terminal knows: its duplicate is started in the reader's usual one.
+    await actions.duplicateTab(row(), pick("agent:a3"));
+    expect((backend.callsOf("add_tab").at(-1)!.tab as { permissionMode: string }).permissionMode).not.toBe("terminal");
+  });
+
+  it("goes by the reader's name whatever runs in it, until they take it back", async () => {
+    await actions.renamePeer(row(), pick("agent:a2"), "Flaky test hunt");
+    await refreshSessions();
+    expect(entry("a2").titlePinned).toBe(true);
+    Object.assign(entry("a2"), { front: "terminal", terminalTitle: "Terminal 4" });
+    await refreshSessions();
+    expect(peerLabel(pick("agent:a2"), row().layout, harnessName)).toBe("Flaky test hunt");
+    await actions.renamePeer(row(), pick("agent:a2"), null);
+    await refreshSessions();
+    expect(entry("a2").titlePinned).toBe(false);
+    expect(hasOwnTitle(pick("agent:a2"), row().layout)).toBe(false);
+    expect(peerLabel(pick("agent:a2"), row().layout, harnessName)).toBe("Terminal 4");
   });
 });

@@ -73,7 +73,8 @@ import {
   useSessionStore,
 } from "@/lib/sessions";
 import { useTabViews } from "@/lib/tabViews";
-import { activatePeer, closePeer, peerLabel, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { tabViewIn } from "@/lib/tabFront";
+import { activatePeer, closePeer, isShellPeer, peerLabel, peerShell, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { openBrowserTab } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { TabMenuItems } from "@/components/session/TabMenu";
@@ -385,7 +386,7 @@ export function SessionNode({
             // The same menu as on the title bar strip, on the tab that was clicked.
             <ContextMenu key={peer.key}>
               <ContextMenuTrigger asChild>
-                {peer.kind === "agent" ? (
+                {peer.kind === "agent" && !isShellPeer(peer) ? (
                   <AgentTabRow
                     nodeId={tabNodeId(peer)}
                     panelId={tabPanelId(peer)}
@@ -393,7 +394,7 @@ export function SessionNode({
                     label={labelOf(peer)}
                     status={peer.tab.status}
                     mobileDriven={mobileDriven.has(peer.id)}
-                    terminalView={tabViews[peer.id] === "terminal"}
+                    terminalView={tabViewIn(tabViews, peer.tab) === "terminal"}
                     pinned={peer.pinned}
                     selected={isActive(peer)}
                     onOpen={() => {
@@ -415,11 +416,14 @@ export function SessionNode({
                     onClose={close(peer)}
                   />
                 ) : (
+                  // A tab is drawn as what its terminal holds now (#437): a session's tab with no agent in it is a
+                  // terminal's row, with the mark of an agent the app has no chat for when one runs there.
                   <ShellTabRow
                     nodeId={tabNodeId(peer)}
                     panelId={tabPanelId(peer)}
                     title={labelOf(peer)}
-                    exited={peer.pane.exited}
+                    exited={!!peerShell(peer)?.exited}
+                    agent={peer.paneAgent}
                     pinned={peer.pinned}
                     selected={isActive(peer)}
                     onOpen={open(peer)}

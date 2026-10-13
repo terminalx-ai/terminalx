@@ -12,7 +12,8 @@ import { registerHotkey } from "@/lib/hotkeys";
 import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
-import { closePeer, openPeer, peerKind, peerLabel, peerStateWords, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { closePeer, isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { tabViewIn } from "@/lib/tabFront";
 import { landingIndex, moveTab } from "@/lib/tabActions";
 import { useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
@@ -41,10 +42,11 @@ const STATUS_DOT: Partial<Record<TabStatus, string>> = {
   in_progress: "bg-info animate-pulse-soft",
 };
 
-/** A tab's kind at a glance: its agent's mark, a terminal, a page. */
+/** What a tab is now, at a glance: the mark of the agent in it, a terminal, a page. */
 export function TabIcon({ tab, className = "size-3.5 shrink-0" }: { tab: PeerTab; className?: string }) {
-  if (tab.kind === "agent") return <AgentMark id={tab.tab.harness} className={className} decorative />;
-  return tab.kind === "terminal" ? <TerminalSquare className={className} /> : <Globe className={className} />;
+  const agent = peerAgent(tab);
+  if (agent) return <AgentMark id={agent} className={className} decorative />;
+  return tab.kind === "browser" ? <Globe className={className} /> : <TerminalSquare className={className} />;
 }
 
 /**
@@ -229,7 +231,7 @@ export function WorkspaceTabStrip({
   const describe = (tab: PeerTab) => {
     const label = peerLabel(tab, row.layout, harnessName);
     // "Needs attention" is a turn that stopped on a problem; "waiting for an answer" is one that asked.
-    const attention = tab.kind === "agent" && tab.tab.status === "waiting" && recoveryFromEvents(getTabLog(tab.sessionId, tab.id).events) != null;
+    const attention = tab.kind === "agent" && peerStatus(tab) === "waiting" && recoveryFromEvents(getTabLog(tab.sessionId, tab.id).events) != null;
     const state = peerStateWords(tab, attention);
     return { label, state, kind: peerKind(tab, harnessName), owner: several && tab.sessionId ? row.sessions.find((candidate) => candidate.id === tab.sessionId)?.title : undefined };
   };
@@ -268,8 +270,8 @@ export function WorkspaceTabStrip({
         {tabs.map((tab, index) => {
           const { label, state, kind, owner } = describe(tab);
           const isActive = tab.key === activeKey;
-          const status = tab.kind === "agent" ? tab.tab.status : null;
-          const exited = tab.kind === "terminal" && tab.pane.exited;
+          const status = peerStatus(tab);
+          const exited = !!peerShell(tab)?.exited;
           return (
             <ContextMenu key={tab.key}>
               <ContextMenuTrigger asChild>
@@ -317,7 +319,7 @@ export function WorkspaceTabStrip({
                         <TabIcon tab={tab} />
                         {tab.pinned ? null : <span className={cn("min-w-0 flex-1 truncate text-left", exited && "text-faint line-through")}>{label}</span>}
                         {!tab.pinned && tab.kind === "agent" && mobileDriven.has(tab.id) ? <Lock className="size-3 shrink-0 text-warning" aria-label="Mobile is driving this terminal" /> : null}
-                        {!tab.pinned && tab.kind === "agent" && tabViews.views[tab.id] === "terminal" ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
+                        {!tab.pinned && tab.kind === "agent" && !isShellPeer(tab) && tabViewIn(tabViews.views, tab.tab) === "terminal" ? <Terminal className="size-3 shrink-0 text-faint" aria-label="In terminal view" /> : null}
                         {!tab.pinned && tab.kind === "browser" && tab.page.active ? <span className="size-1.5 shrink-0 rounded-full bg-info" aria-label="Active page for agents" /> : null}
                       </button>
                     </TooltipTrigger>
@@ -376,7 +378,7 @@ function AllTabsMenu({ row, active, describe }: { row: TabRow; active: string | 
         <DropdownMenuLabel>Tabs in this workspace</DropdownMenuLabel>
         {row.tabs.map((tab) => {
           const { label, state, kind } = describe(tab);
-          const status = tab.kind === "agent" ? tab.tab.status : null;
+          const status = peerStatus(tab);
           return (
             <DropdownMenuItem key={tab.key} onSelect={() => openPeer(row.session.id, tab)} aria-current={tab.key === active ? "true" : undefined} className={cn("items-start whitespace-normal", tab.key === active && "bg-veil-raised")}>
               <TabIcon tab={tab} className="mt-0.5 size-4 shrink-0" />

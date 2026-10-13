@@ -30,6 +30,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
+import type { IssuePipeline, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import { noteCallFailure } from "@/lib/accountRoles";
@@ -211,8 +212,18 @@ export interface ShellPane {
   id: string;
   sessionId: string;
   title: string | null;
+  /** The reader named it; `title` is otherwise the name it was opened with. */
+  renamed?: boolean;
   cwd: string;
   exited: boolean;
+  /** When it was opened, so every window lists it in the same place. */
+  created?: string;
+}
+
+/** The agent in front of a pane's terminal (#437), or none once it has left. */
+export interface PaneAgent {
+  paneId: string;
+  harness: string | null;
 }
 
 /**
@@ -354,6 +365,22 @@ export const api = {
     invoke<CloudWorkspaceSnapshot>("cloud_workspace_unarchive", { workspaceId, orgId: orgId ?? null }),
   cloudWorkspaceDisposition: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceDisposition>("cloud_workspace_disposition", { workspaceId, orgId: orgId ?? null }),
+  /** Scheduled tasks (PRO-37, saas contract §24): the organization's, or one workspace's. Owners and admins only; a server with the feature off answers 404. */
+  cloudSchedules: (workspaceId?: string | null, orgId?: string | null) =>
+    invoke<{ schedules: CloudSchedule[] }>("cloud_schedules", { workspaceId: workspaceId ?? null, orgId: orgId ?? null }),
+  /** One scheduled task and its newest runs. */
+  cloudSchedule: (scheduleId: string, orgId?: string | null) => invoke<CloudScheduleDetail>("cloud_schedule", { scheduleId, orgId: orgId ?? null }),
+  /** What a schedule would cost and when it would first run, before it is saved. Writes nothing. */
+  cloudScheduleEstimate: (input: CloudScheduleEstimateInput, orgId?: string | null) =>
+    invoke<CloudScheduleQuote>("cloud_schedule_estimate", { input, orgId: orgId ?? null }),
+  /** Make a scheduled task. Only after the person confirmed that it starts billed compute by itself. */
+  cloudScheduleCreate: (input: CloudScheduleCreateInput, orgId?: string | null) => invoke<CloudSchedule>("cloud_schedule_create", { input, orgId: orgId ?? null }),
+  /** Pause a scheduled task, or resume a paused one (which then runs for the person resuming it). */
+  cloudScheduleSetActive: (scheduleId: string, active: boolean, orgId?: string | null) =>
+    invoke<CloudSchedule>("cloud_schedule_set_active", { scheduleId, active, orgId: orgId ?? null }),
+  cloudScheduleDelete: (scheduleId: string, orgId?: string | null) => invoke<void>("cloud_schedule_delete", { scheduleId, orgId: orgId ?? null }),
+  /** Pause every active scheduled task of the organization. */
+  cloudSchedulesPauseAll: (orgId?: string | null) => invoke<{ paused: number }>("cloud_schedules_pause_all", { orgId: orgId ?? null }),
   /** Who the workspace is shared with, and what the caller may do (PRO-30, docs/CLOUD-SHARING.md). */
   cloudWorkspaceShares: (workspaceId: string, orgId?: string | null) =>
     invoke<CloudWorkspaceShares>("cloud_workspace_shares", { workspaceId, orgId: orgId ?? null }),
@@ -479,7 +506,7 @@ export const api = {
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
   /** Bring a closed tab back into its session, with its conversation. */
   reopenTab: (sessionId: string, tabId: string) => invoke<TabEntry>("reopen_tab", { sessionId, tabId }),
-  /** Give an agent tab the reader's own title; `null` takes it away again. */
+  /** Give an agent tab the reader's own title. It stays the tab's name whatever runs in the tab (#437); `null` gives the naming back. */
   renameTab: (sessionId: string, tabId: string, title: string | null) => invoke<void>("rename_tab", { sessionId, tabId, title }),
   tabState: () => invoke<TabState>("tab_state"),
   /** Save one workspace's tab order, pins, mutes and titles for every window and device. */
@@ -899,6 +926,8 @@ export interface CloudWorkspace {
   you?: { role: CloudCollaborationRole; canApprove: boolean; canManageShares?: boolean } | null;
   /** How many members it is shared with; only reported to someone with a role. */
   sharedWith?: number | null;
+  /** A preparation workspace (PRO-20): when the server stops it for good. Absent on every other workspace. */
+  preparation?: { stopAfter: number } | null;
 }
 
 /** One repository checkout of a workspace, as the enriched list reports it (S1). */
@@ -967,6 +996,100 @@ export interface CloudWorkspaceShare {
   createdBy: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** When a scheduled task runs. `hour` is ignored for `hourly`; `weekdays` belong to `weekly`. */
+export interface CloudScheduleTiming {
+  preset: "hourly" | "daily" | "weekdays" | "weekly";
+  hour: number;
+  minute: number;
+  weekdays: string[];
+  /** IANA, e.g. `Europe/Berlin`. The local time holds across daylight-saving changes. */
+  timezone: string;
+}
+
+/** Upper bounds on what a scheduled task costs and occupies, from the workspace's own rate. */
+export interface CloudScheduleEstimate {
+  currency: string;
+  hourlyMicros: number;
+  /** The longest a run can keep the workspace on: starting it, the time limit, and ending the run. Absent from a server that priced the time limit alone. */
+  perRunMaxMinutes?: number;
+  perRunMaxMicros: number;
+  monthlyRuns: number;
+  monthlyMaxMicros: number;
+  /** The machine a run starts is left on afterwards. */
+  keepsMachineRunning: boolean;
+  runningSlots: number;
+  /** The most runs the schedule starts in any 24 hours. */
+  maxRunsPerDay: number;
+}
+
+export interface CloudScheduleRun {
+  id: string;
+  scheduledFor: number;
+  trigger: string;
+  /** queued | provisioning | working | completed | failed | skipped | canceled | expired */
+  state: string;
+  category?: string;
+  sessionId?: string;
+  tabId?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+/** A scheduled task. Its prompt is never returned. */
+export interface CloudSchedule {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdBy: string;
+  agent: string;
+  model?: string;
+  effort?: string;
+  mode?: string;
+  promptBytes: number;
+  schedule: CloudScheduleTiming;
+  missedRunPolicy: "skip" | "run-once";
+  completionPolicy: "suspend" | "keep";
+  maxRunMinutes: number;
+  state: "active" | "paused";
+  pausedReason?: string;
+  nextRunAt?: number;
+  lastRunAt?: number;
+  estimate: CloudScheduleEstimate;
+  lastRun?: CloudScheduleRun;
+}
+
+export interface CloudScheduleDetail {
+  schedule: CloudSchedule;
+  runs: CloudScheduleRun[];
+}
+
+export interface CloudScheduleQuote {
+  estimate: CloudScheduleEstimate;
+  nextRunAt?: number;
+  /** The refusal a create would get now, whatever the form says. */
+  refusal?: string;
+  /** Whether the workspace's runtime can take a scheduled run. */
+  supported: boolean;
+}
+
+export interface CloudScheduleEstimateInput {
+  workspaceId: string;
+  schedule: CloudScheduleTiming;
+  completionPolicy: "suspend" | "keep";
+  maxRunMinutes: number;
+}
+
+export interface CloudScheduleCreateInput extends CloudScheduleEstimateInput {
+  name: string;
+  agent: string;
+  model?: string;
+  effort?: string;
+  /** Never `bypassPermissions`: nobody watches a scheduled run. */
+  mode: string;
+  prompt: string;
+  missedRunPolicy: "skip" | "run-once";
 }
 
 export interface CloudWorkspaceShares {
@@ -1074,6 +1197,8 @@ export interface CloudWorkspaceCreateInput {
   /** The primary repository first, then additional ones (at most five). */
   repositories?: CloudWorkspaceRepositoryInput[];
   launch?: CloudWorkspaceLaunchInput | null;
+  /** "Configure with an agent" (PRO-20): the server marks, isolates and time-limits the workspace. */
+  preparation?: boolean;
 }
 
 export interface CloudWorkspaceRepositoryInput {
@@ -1456,6 +1581,10 @@ export interface TabPtyEvent {
   paneId: string;
   command: string;
   harness: string;
+  /** The CLI in the pane was started by hand in it (#437). */
+  byHand?: boolean;
+  /** The pane holds a shell and no agent: the tab is a terminal (#437). */
+  terminal?: boolean;
 }
 
 export const agent = {
@@ -1463,12 +1592,17 @@ export const agent = {
   loadEvents: (sessionId: string, tabId: string) => invoke<AgentEvent[]>("load_tab_events", { sessionId, tabId }),
   send: (sessionId: string, tabId: string, text: string, images?: ImageInput[], confirmDelivery = false) =>
     invoke<SendOutcome>("send_message", { sessionId, tabId, text, images: images ?? null, confirmDelivery }),
-  interrupt: (sessionId: string, tabId: string) => invoke<void>("interrupt_turn", { sessionId, tabId }),
+  /** Escape for the tab's running turn; the agent's process stays. False when there was nothing running to interrupt. */
+  interrupt: (sessionId: string, tabId: string) => invoke<boolean>("interrupt_turn", { sessionId, tabId }),
   tabHandoff: (sessionId: string, tabId: string) => invoke<HandoffInfo>("tab_handoff", { sessionId, tabId }),
   /** Start a tab's own CLI. Idempotent, and a no-op for headless harnesses. */
   ensureStarted: (sessionId: string, tabId: string) => invoke<void>("ensure_tab_started", { sessionId, tabId }),
   /** The pane a tab's CLI is running in, for a window that missed the event. */
   tabPane: (sessionId: string, tabId: string) => invoke<TabPtyEvent | null>("tab_pane", { sessionId, tabId }),
+  /** Start a tab's agent again on one of the tab's own conversations: the one it holds, or one it held before (#437). */
+  resumeConversation: (sessionId: string, tabId: string, harness: string, providerSessionId: string) =>
+    invoke<void>("tab_resume_conversation", { sessionId, tabId, harness, providerSessionId }),
+  /** The hard stop: ends the tab's agent process, keeping what it needs to resume. */
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
@@ -1627,6 +1761,8 @@ export const pty = {
     invoke<void>("pty_spawn", { id, cwd, cols, rows, command: command ?? null, title: title ?? null }),
   /** The shell tabs open in every session, for a window that was not there when they were opened. */
   shells: () => invoke<ShellPane[]>("pty_shells"),
+  /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
+  agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
   /** Which of these shell tabs are running a command now. */
   busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
@@ -1771,6 +1907,15 @@ export const issues = {
   linearSetApiKey: (key: string) => invoke<LinearStatus>("linear_set_api_key", { key }),
   linearTeams: () => invoke<IssueTeam[]>("linear_teams"),
   githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
+};
+
+/** Sessions started from an issue, carried on to a pull request, a review and a merge. */
+export const issuePipelines = {
+  list: () => invoke<IssuePipeline[]>("issue_pipelines_list"),
+  /** Rejects, with the reason, for a session the pipeline cannot serve (one on the default branch, a project that turned it off). */
+  start: (sessionId: string, tabId: string, autoMerge: boolean | null) => invoke<StartedIssuePipeline>("issue_pipeline_start", { sessionId, tabId, autoMerge }),
+  setAutoMerge: (id: string, value: boolean) => invoke<IssuePipeline>("issue_pipeline_set_auto_merge", { id, value }),
+  act: (id: string, action: PipelineAction) => invoke<IssuePipeline>("issue_pipeline_act", { id, action }),
 };
 
 // ---- transcription models and dictation input

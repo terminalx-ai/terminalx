@@ -207,8 +207,13 @@ export function pickerMode(id: string): { id: string; label: string; hint: strin
  * sandbox no mode of ours launches — and is named exactly as reported.
  */
 export function modeLabel(id: string): string {
+  // An agent started by hand in a terminal (#437) is in whatever mode it was started in, which it has not said.
+  if (id === MODE_SET_IN_TERMINAL) return "Set in the terminal";
   return pickerMode(id)?.label ?? id;
 }
+
+/** The mode of an agent the app did not launch, until the agent says what it is in. Mirrors `MODE_SET_IN_TERMINAL` in session_follow.rs. */
+export const MODE_SET_IN_TERMINAL = "terminal";
 
 /** Whether nothing stands between the agent and the machine in this mode: Bypass, or any Codex stance with no sandbox. */
 export function modeIsUnguarded(id: string): boolean {

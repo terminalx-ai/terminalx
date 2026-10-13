@@ -59,6 +59,7 @@ import { api, errorMessage, files, gh, issues, type FileHit, type Issue, type Pu
 import { openFile } from "@/lib/editors";
 import { runShortcut, useHotkey } from "@/lib/hotkeys";
 import { issuePrompt, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
+import { pipelineSettings, startPipeline } from "@/lib/issuePipeline";
 import { getPrefs } from "@/lib/prefs";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
@@ -569,7 +570,19 @@ export function CommandPalette({
       skipRestoreRef.current = true;
       setOpen(false);
       const tab = session.tabs[0];
-      if (tab) onCreated(session.id, tab.id, item.issue ? issuePrompt(item.issue) : pullRequestPrompt(item.pullRequest!));
+      if (tab) {
+        let prompt = item.issue ? issuePrompt(item.issue) : pullRequestPrompt(item.pullRequest!);
+        // An issue is carried on to a pull request and a review, with the
+        // project's default for the merge. A pull request already is one.
+        if (item.issue && pipelineSettings(item.project).enabled) {
+          try {
+            prompt = `${prompt}\n\n${(await startPipeline(session.id, tab.id, null)).authorBrief}`;
+          } catch (cause) {
+            console.error("issue pipeline did not start", cause);
+          }
+        }
+        onCreated(session.id, tab.id, prompt);
+      }
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {

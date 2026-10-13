@@ -342,19 +342,27 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
   const binding: Binding = { client, attachment: null, attaching: true };
   bindings.set(terminal.id, binding);
   const instance = getInstance(terminal.id, cloudTerminalFactory(workspace, terminal, create));
+  // An attach can still be on its way when the view leaves and comes back (a
+  // slow runtime, a second connect): the runtime then answers both, each with
+  // its replay. Only the attach of now draws and decides; the other would
+  // print the same history again and is detached as soon as it answers.
+  const mine = () => bindings.get(terminal.id) === binding;
   const attachment = await client
     .attachPty(terminal.ptyId, {
     since: cursors.get(terminal.id),
     onData: (bytes, _offset, replay) => {
+      if (!mine()) return;
       countTerminalData("cloud", bytes.length);
       show(terminal.id, instance, bytes, replay);
     },
-    onTruncated: () => instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
+    onTruncated: () => mine() && instance.term.write("\r\n\x1b[2m[earlier output was dropped while this view was away]\x1b[0m\r\n"),
     onExit: (code) => {
+      if (!mine()) return;
       const current = terminalOf(workspace, terminal.id);
       if (current && !current.exited) patch(workspace, terminal.id, { exited: true, exitCode: code });
     },
     onControl: (control, controllerId) => {
+      if (!mine()) return;
       patch(workspace, terminal.id, { control, ...(controllerId !== undefined ? { controllerId } : {}) });
       // A viewer shows the program at the controller's size.
       const current = terminalOf(workspace, terminal.id);
@@ -363,11 +371,13 @@ async function attach(workspace: string, client: WorkspaceRpcClient, terminal: C
       }
     },
     onResize: (cols, rows) => {
+      if (!mine()) return;
       patch(workspace, terminal.id, { cols, rows });
       const current = terminalOf(workspace, terminal.id);
       if (current?.control !== "you" && (instance.term.cols !== cols || instance.term.rows !== rows)) instance.term.resize(cols, rows);
     },
     onGone: (gone) => {
+      if (!mine()) return;
       cursors.delete(terminal.id);
       if (terminal.tabId && gone === "runtime-restarted") {
         // A tab outlives its runtime process: its terminal starts over on the

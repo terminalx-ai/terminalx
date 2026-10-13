@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { errorMessage, pty } from "@/lib/api";
 import { closeCloseTabs, closeRenameTab, useDialogs, type TabRequest } from "@/lib/dialogs";
 import { useSessionStore } from "@/lib/sessions";
-import { hasOwnTitle, peerLabel, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { hasOwnTitle, isShellPeer, peerLabel, peerPaneId, peerShell, useTabRow, type PeerTab } from "@/lib/sessionTabs";
 import { BULK_CLOSE_LABEL, busyTabs, closeTabs, planBulkClose, renamePeer, type BulkClose } from "@/lib/tabActions";
 import { useVisibleSessionTab } from "@/lib/visibleTab";
 import type { SessionEntry } from "@/types/session";
@@ -119,7 +119,7 @@ function CloseTabsDialog({ session, request, onClose }: { session: SessionEntry;
     return row.tabs.filter((tab) => reached.has(tab.key));
   }, [plan, row.tabs, withPinned]);
   // Which shells are in the middle of a command is the backend's to say.
-  const shells = closing.filter((tab) => tab.kind === "terminal" && !tab.pane.exited).map((tab) => tab.id).join("\n");
+  const shells = closing.filter((tab) => isShellPeer(tab) && !peerShell(tab)?.exited).map((tab) => peerPaneId(tab)).join("\n");
   useEffect(() => {
     if (!shells) return setRunning(new Set());
     let live = true;

@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
-import { pty, type ShellPane } from "@/lib/api";
+import { pty, type PaneAgent, type ShellPane } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
 
@@ -47,11 +47,18 @@ export interface TerminalState {
   active: Record<string, string>;
   /** session id → selected peer tab (agent or shell) */
   selected: Record<string, SelectedSessionTab>;
+  /**
+   * pane id → the agent in front of its terminal right now (#437), by
+   * harness id. Any agent the app knows: one it also has a chat for becomes
+   * the pane's tab (`TabEntry.front`), the others are only drawn as what
+   * they are.
+   */
+  agents: Record<string, string>;
 }
 
 export type SelectedSessionTab = { kind: "agent" | "terminal" | "browser"; id: string };
 
-let state: TerminalState = { panes: [], active: {}, selected: {} };
+let state: TerminalState = { panes: [], active: {}, selected: {}, agents: {} };
 const listeners = new Set<() => void>();
 function set(patch: Partial<TerminalState>) {
   state = { ...state, ...patch };
@@ -218,15 +225,20 @@ export function subscribeTerminals(): Promise<void> {
 function adoptShell(shell: ShellPane) {
   const known = state.panes.find((pane) => pane.id === shell.id);
   if (known) {
-    // Its name may have changed in the other window.
-    if (shell.title && known.title !== shell.title) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title: shell.title! } : pane)) });
+    // Its name may have changed in the other window. And the backend's word on when it was opened is
+    // the one every window goes by, the window that opened it included: a tab keeps its place when
+    // the shell becomes an agent's (#437), and that place is the backend's time for it.
+    const title = shell.title || known.title;
+    const created = shell.created || known.created;
+    if (known.title !== title || known.created !== created) set({ panes: state.panes.map((pane) => (pane.id === shell.id ? { ...pane, title, created } : pane)) });
     return;
   }
   const pane: TerminalPane = {
     id: shell.id,
     sessionId: shell.sessionId,
     title: shell.title ?? `Terminal ${nextTerminalNumber(shell.sessionId)}`,
-    created: new Date().toISOString(),
+    // When it was opened, not when this window heard of it: its place among the session's tabs is the same in every window.
+    created: shell.created ?? new Date().toISOString(),
     exited: shell.exited,
     exitCode: null,
   };
@@ -244,6 +256,7 @@ async function register() {
     await listen<ShellPane>("pty_renamed", (e) => adoptShell(e.payload));
     // Closed in another window: its process is already gone, so only this window's tab and xterm are left to drop.
     await listen<string>("pty_closed", (e) => forgetPane(e.payload));
+    await listen<PaneAgent>("pane_agent", (e) => notePaneAgent(e.payload));
   } catch {
     /* outside a webview */
   }
@@ -266,6 +279,41 @@ async function register() {
     .catch(() => {
       /* outside a webview, or a backend that does not list them */
     });
+  // The agents that were started in terminals before this page.
+  void Promise.resolve()
+    .then(() => pty.agents())
+    .then((agents) => {
+      for (const agent of agents ?? []) notePaneAgent(agent);
+    })
+    .catch(() => {
+      /* outside a webview, or a backend that does not follow terminals */
+    });
+}
+
+/** An agent came to the front of a pane's terminal, or the one that was there left. */
+function notePaneAgent({ paneId, harness }: PaneAgent) {
+  if ((state.agents[paneId] ?? null) === harness) return;
+  const agents = { ...state.agents };
+  if (harness) agents[paneId] = harness;
+  else delete agents[paneId];
+  set({ agents });
+}
+
+/**
+ * A shell became an agent's tab (#437): an agent was started in it, and the
+ * session now lists it as that tab. A window that had the shell selected has
+ * the tab selected; the shell is no longer one of the session's shells.
+ */
+export function followShellToTab(sessionId: string, paneId: string, tabId: string) {
+  const selected = state.selected[sessionId];
+  const wasSelected = selected?.kind === "terminal" && selected.id === paneId;
+  const wasActive = state.active[sessionId] === paneId;
+  if (!wasSelected && !wasActive) return;
+  const shells = state.panes.filter((pane) => pane.sessionId === sessionId && !pane.hidden && pane.id !== paneId);
+  set({
+    selected: wasSelected ? { ...state.selected, [sessionId]: { kind: "agent", id: tabId } } : state.selected,
+    active: wasActive ? { ...state.active, [sessionId]: shells.at(-1)?.id ?? "" } : state.active,
+  });
 }
 
 /** Settles once the shells that were already open are listed, or after a moment if the backend does not answer. */
@@ -378,7 +426,13 @@ export function dropSessionTerminals(sessionIds: readonly string[]) {
   const remembered = (record: Record<string, unknown>) => Object.keys(record).some((id) => gone.has(id));
   if (!doomed.length && !remembered(state.active) && !remembered(state.selected)) return;
   const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([id]) => !gone.has(id)));
-  set({ panes: state.panes.filter((pane) => !gone.has(pane.sessionId)), active: without(state.active), selected: without(state.selected) });
+  const doomedIds = new Set(doomed.map((pane) => pane.id));
+  set({
+    panes: state.panes.filter((pane) => !gone.has(pane.sessionId)),
+    active: without(state.active),
+    selected: without(state.selected),
+    agents: Object.fromEntries(Object.entries(state.agents).filter(([id]) => !doomedIds.has(id))),
+  });
   for (const pane of doomed) {
     void pty.kill(pane.id).catch(() => {});
     disposeInstance(pane.id);

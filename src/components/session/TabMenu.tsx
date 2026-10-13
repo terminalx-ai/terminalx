@@ -42,8 +42,9 @@ import { openSessionShare } from "@/lib/localSharing";
 import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
 import { archiveSession, forkSession, openSkills, useSessionStore } from "@/lib/sessions";
-import { closePeer, hasOwnTitle, peerIsLive, peerLabel, type PeerTab, type TabRow } from "@/lib/sessionTabs";
-import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, duplicateTab, moveTabBy, newTab, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
+import { closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
+import { tabViewIn } from "@/lib/tabFront";
 import { useTabState } from "@/lib/tabLayouts";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
@@ -59,9 +60,11 @@ const failed = (what: string) => (error: unknown) => console.error(`${what} fail
  * the sidebar's tab rows. It acts on the tab that was clicked, whether or
  * not it is the one on screen.
  *
- * An item that does not apply to the tab is left out. One this person may
- * not use (`readOnlyReason`: a viewer of a shared session) is shown, off,
- * under a line that says why.
+ * An item that does not apply to the tab is left out, and a tab is what
+ * runs in its terminal now (#437): one that is a terminal has a terminal's
+ * items, whatever it was opened as. An item this person may not use
+ * (`readOnlyReason`: a viewer of a shared session) is shown, off, under a
+ * line that says why.
  */
 export function TabMenuItems({
   row,
@@ -88,7 +91,10 @@ export function TabMenuItems({
   const off = !!readOnlyReason;
   const floating = isFloatingWindow();
   const muted = row.layout.muted.includes(tab.key);
-  const inTerminalView = tab.kind === "agent" && tabViews.views[tab.id] === "terminal";
+  const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
+  // What is in the tab now: an agent with a conversation, or a terminal.
+  const agentTab = tab.kind === "agent" && !isShellPeer(tab) ? tab.tab : null;
+  const drawnAs = peerAgent(tab);
   const bulk = BULK.map((action) => ({ action, plan: planBulkClose(action, row.tabs, tab) })).filter(({ plan }) => plan.targets.length + plan.pinned.length > 0);
   const open = (what: NewTabKind) => void newTab(row, what, tab).catch(failed("opening a tab"));
   const move = (how: TabMove, text: string, icon: ReactNode, shortcut?: string[]) => (
@@ -99,7 +105,7 @@ export function TabMenuItems({
   );
   const restart = async () => {
     // Restarting ends the turn in flight; that is asked about, not assumed.
-    if (peerIsLive(tab) && !(await ask(`${label} is ${tab.kind === "agent" && tab.tab.status === "waiting" ? "waiting for an answer" : "working"}. Restarting the agent stops this turn; the conversation is kept and resumes.`, { title: "Restart agent", kind: "warning", okLabel: "Restart", cancelLabel: "Cancel" }).catch(() => false))) return;
+    if (peerIsLive(tab) && !(await ask(`${label} is ${peerStatus(tab) === "waiting" ? "waiting for an answer" : "working"}. Restarting the agent stops this turn; the conversation is kept and resumes.`, { title: "Restart agent", kind: "warning", okLabel: "Restart", cancelLabel: "Cancel" }).catch(() => false))) return;
     await restartTab(row, tab);
   };
 
@@ -123,7 +129,7 @@ export function TabMenuItems({
       <ContextMenuItem disabled={off} onSelect={() => void duplicateTab(row, tab).catch(failed("duplicating the tab"))}>
         <CopyPlus /> Duplicate tab
       </ContextMenuItem>
-      {tab.kind === "agent" ? (
+      {agentTab ? (
         <ContextMenuItem disabled={off} onSelect={() => void forkSession(session.id, tab.id).catch(failed("forking the conversation"))}>
           <GitFork /> Fork conversation
         </ContextMenuItem>
@@ -138,12 +144,12 @@ export function TabMenuItems({
           <RotateCw /> Reload
         </ContextMenuItem>
       ) : null}
-      {tab.kind === "agent" ? (
+      {canRestartAgent(tab) ? (
         <ContextMenuItem disabled={off} onSelect={() => void restart().catch(failed("restarting the agent"))}>
           <RotateCw /> Restart agent
         </ContextMenuItem>
       ) : null}
-      {tab.kind === "terminal" && tab.pane.exited ? (
+      {tab.kind === "terminal" && peerShell(tab)?.exited ? (
         <ContextMenuItem disabled={off} onSelect={() => void restartTab(row, tab).catch(failed("restarting the shell"))}>
           <RotateCw /> Restart shell
         </ContextMenuItem>
@@ -164,8 +170,8 @@ export function TabMenuItems({
           <FolderOpen /> {isMac ? "Reveal working directory in Finder" : "Reveal working directory in the file manager"}
         </ContextMenuItem>
       ) : null}
-      {tab.kind === "agent" ? (
-        <ContextMenuItem onSelect={() => openSkills({ agent: tab.tab.harness, projectPath: session.cwd })}>
+      {drawnAs ? (
+        <ContextMenuItem onSelect={() => openSkills({ agent: drawnAs, projectPath: session.cwd })}>
           <Sparkles /> Skills for this agent…
         </ContextMenuItem>
       ) : null}

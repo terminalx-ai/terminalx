@@ -78,10 +78,22 @@ fn request_title(request: &str) -> Option<String> {
 }
 
 /// Read forwards: later requests and subagent prompts must never rename a tab.
-fn read_title(path: &Path) -> Option<String> {
-    let reader = BufReader::new(File::open(path).ok()?.take(MAX_SCAN));
+///
+/// A tab's log holds every conversation the tab has held (#437), each after
+/// its own marker, and the name is the first request of the one it holds
+/// now: `conversation` is that one's marker, absent for the conversation the
+/// tab began with. That conversation may start anywhere in the log, so one
+/// that is not the first is looked for through all of it.
+fn read_title(path: &Path, conversation: Option<&str>) -> Option<String> {
+    let scan = if conversation.is_some() { u64::MAX } else { MAX_SCAN };
+    let reader = BufReader::new(File::open(path).ok()?.take(scan));
+    let mut under: Option<String> = None;
     for line in reader.lines() {
         let line = line.ok()?;
+        // Most of a long log is neither a request nor a marker.
+        if conversation.is_some() && !line.contains(r#""type":"user_message""#) && !line.contains(r#""type":"conversation""#) {
+            continue;
+        }
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -89,6 +101,13 @@ fn read_title(path: &Path) -> Option<String> {
             continue;
         }
         let payload = &event["payload"];
+        if payload["type"] == "conversation" {
+            under = payload["id"].as_str().map(String::from);
+            continue;
+        }
+        if under.as_deref() != conversation {
+            continue;
+        }
         if payload["type"] == "user_message" {
             if let Some(title) = payload["text"].as_str().and_then(request_title) {
                 return Some(title);
@@ -105,7 +124,7 @@ pub fn backfill() -> Result<Vec<SessionEntry>> {
     let mut titles = Vec::new();
     for session in &sessions {
         for tab in session.tabs.iter().filter(|tab| unnamed(tab)) {
-            if let Some(title) = read_title(&super::log_path(&session.id, &tab.id)?) {
+            if let Some(title) = read_title(&super::log_path(&session.id, &tab.id)?, tab.follow.conversation.as_deref()) {
                 titles.push((session.id.clone(), tab.id.clone(), title));
             }
         }
@@ -134,10 +153,10 @@ pub fn backfill() -> Result<Vec<SessionEntry>> {
 /// messages. Return the updated session so the desktop sidebar can update live.
 pub fn name_tab(session_id: &str, tab_id: &str) -> Result<Option<SessionEntry>> {
     let session = index::get(session_id)?;
-    if !session.tab(tab_id).is_some_and(unnamed) {
+    let Some(tab) = session.tab(tab_id).filter(|tab| unnamed(tab)) else {
         return Ok(None);
-    }
-    let Some(title) = read_title(&super::log_path(session_id, tab_id)?) else {
+    };
+    let Some(title) = read_title(&super::log_path(session_id, tab_id)?, tab.follow.conversation.as_deref()) else {
         return Ok(None);
     };
     index::update(|sessions| {
@@ -243,6 +262,32 @@ mod tests {
         assert!(name_tab("session", "claude").unwrap().is_none());
     }
 
+    /// A tab that moved on to another conversation (#437) is named for the
+    /// first request of the one it holds, wherever in its log that starts.
+    #[test]
+    fn a_tab_is_named_for_the_conversation_it_holds_now() {
+        let _home = super::super::temp_home();
+        seed();
+        prompt("claude", "Fix the login redirect");
+        assert_eq!(name_tab("session", "claude").unwrap().unwrap().tab("claude").unwrap().title.as_deref(), Some("Fix the login redirect"));
+        // Codex is started in its terminal: another conversation, in the same log.
+        let path = super::super::log_path("session", "claude").unwrap();
+        super::super::append_line(&path, &json!({"payload":{"type":"conversation","id":"c2","harness":"codex"}}).to_string()).unwrap();
+        index::update_tab("session", "claude", |tab| {
+            tab.title = None;
+            tab.follow.conversation = Some("c2".into());
+            Ok(())
+        })
+        .unwrap();
+        assert!(name_tab("session", "claude").unwrap().is_none(), "nothing has been asked in it yet");
+        prompt("claude", "Write the release notes");
+        assert_eq!(name_tab("session", "claude").unwrap().unwrap().tab("claude").unwrap().title.as_deref(), Some("Write the release notes"));
+        assert_eq!(read_title(&path, None).as_deref(), Some("Fix the login redirect"));
+        // A name the tab already has is left alone, as ever.
+        prompt("claude", "Something else entirely");
+        assert!(name_tab("session", "claude").unwrap().is_none());
+    }
+
     #[test]
     fn backfill_preserves_custom_names_and_ignores_subagent_chatter() {
         let _home = super::super::temp_home();
@@ -273,8 +318,8 @@ mod tests {
     fn missing_and_oversized_logs_do_not_require_an_unbounded_scan() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        assert_eq!(read_title(&path), None);
+        assert_eq!(read_title(&path, None), None);
         std::fs::write(&path, " ".repeat(MAX_SCAN as usize + 1)).unwrap();
-        assert_eq!(read_title(&path), None);
+        assert_eq!(read_title(&path, None), None);
     }
 }

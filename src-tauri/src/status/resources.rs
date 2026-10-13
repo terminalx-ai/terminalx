@@ -220,28 +220,51 @@ fn project_name_of(session: &index::SessionEntry, project_names: &HashMap<String
     project_names.get(&session.project_path).cloned().unwrap_or_else(|| projects::project_name(&session.project_path))
 }
 
+/// The tab a pane is the terminal of: its own pane, or the shell's it took
+/// over when an agent was first started in it (#437).
+fn tab_of<'a>(pane_id: &str, sessions: &'a [index::SessionEntry]) -> Option<(&'a index::SessionEntry, &'a index::TabEntry)> {
+    sessions.iter().find_map(|session| session.tabs.iter().find(|tab| tab.pane_id() == pane_id).map(|tab| (session, tab)))
+}
+
+/// Whether a running pane holds an agent. A tab is what its terminal holds
+/// now (#437), so its pane is an agent's while one runs there and a shell
+/// while none does. A `tab:` pane with no tab left is an agent's that was
+/// orphaned.
+fn holds_agent(pane_id: &str, sessions: &[index::SessionEntry]) -> bool {
+    match tab_of(pane_id, sessions) {
+        Some((_, tab)) => !tab.is_terminal(),
+        None => pane_id.starts_with("tab:"),
+    }
+}
+
 fn bound_pane(pane: &PaneInfo, sessions: &[index::SessionEntry], project_names: &HashMap<String, String>, aggregate: Option<Aggregate>) -> ProcSample {
+    if let Some((session, tab)) = tab_of(&pane.id, sessions) {
+        let agent = !tab.is_terminal();
+        return ProcSample {
+            pane_id: pane.id.clone(),
+            tab_id: Some(tab.id.clone()),
+            tab_title: if agent {
+                tab.title.clone().unwrap_or_else(|| crate::harness::display_name(&tab.harness).into())
+            } else {
+                tab.title.clone().filter(|_| tab.follow.title_pinned).or_else(|| tab.follow.terminal_title.clone()).unwrap_or_else(|| "Terminal".into())
+            },
+            session_id: Some(session.id.clone()),
+            session_title: Some(session.title.clone()),
+            project_path: Some(session.project_path.clone()),
+            project_name: Some(project_name_of(session, project_names)),
+            cwd: pane.cwd.clone(),
+            kind: if agent { "agent" } else { "shell" }.into(),
+            harness: agent.then(|| tab.harness.clone()),
+            orphaned: false,
+            pid: pane.pid,
+            cpu_percent: aggregate.map(|sample| sample.cpu_percent),
+            rss_bytes: aggregate.map(|sample| sample.rss_bytes),
+            child_count: aggregate.map(|sample| sample.child_count),
+            // Agent or shell, the pane is its tab's: closing the tab is what ends it.
+            kill_rule: KillRule::None,
+        };
+    }
     if let Some(tab_id) = pane.id.strip_prefix("tab:") {
-        if let Some((session, tab)) = sessions.iter().find_map(|session| session.tab(tab_id).map(|tab| (session, tab))) {
-            return ProcSample {
-                pane_id: pane.id.clone(),
-                tab_id: Some(tab_id.to_string()),
-                tab_title: tab.title.clone().unwrap_or_else(|| if tab.harness == "claude" { "Claude".into() } else { "Codex".into() }),
-                session_id: Some(session.id.clone()),
-                session_title: Some(session.title.clone()),
-                project_path: Some(session.project_path.clone()),
-                project_name: Some(project_name_of(session, project_names)),
-                cwd: pane.cwd.clone(),
-                kind: "agent".into(),
-                harness: Some(tab.harness.clone()),
-                orphaned: false,
-                pid: pane.pid,
-                cpu_percent: aggregate.map(|sample| sample.cpu_percent),
-                rss_bytes: aggregate.map(|sample| sample.rss_bytes),
-                child_count: aggregate.map(|sample| sample.child_count),
-                kill_rule: KillRule::None,
-            };
-        }
         return ProcSample {
             pane_id: pane.id.clone(),
             tab_id: Some(tab_id.to_string()),
@@ -313,9 +336,10 @@ pub struct ResourceStore {
 impl ResourceStore {
     pub fn overview(&self, terminals: &Terminals) -> ResourceOverview {
         let panes = terminals.panes();
+        let sessions = index::load().unwrap_or_default();
         ResourceOverview {
-            agent_count: panes.iter().filter(|pane| pane.running && pane.id.starts_with("tab:")).count(),
-            orphan_count: orphan_count(&panes),
+            agent_count: panes.iter().filter(|pane| pane.running && holds_agent(&pane.id, &sessions)).count(),
+            orphan_count: orphan_count(&panes, &sessions),
             rss_bytes: *self.last_rss.lock().unwrap(),
             pressure: *self.last_pressure.lock().unwrap(),
         }
@@ -408,12 +432,8 @@ impl ResourceStore {
     }
 }
 
-fn orphan_count(panes: &[PaneInfo]) -> usize {
-    let tabs: HashSet<_> = index::load()
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|session| session.tabs.into_iter().map(|tab| tab.id))
-        .collect();
+fn orphan_count(panes: &[PaneInfo], sessions: &[index::SessionEntry]) -> usize {
+    let tabs: HashSet<_> = sessions.iter().flat_map(|session| session.tabs.iter().map(|tab| tab.id.as_str())).collect();
     panes
         .iter()
         .filter(|pane| pane.running && pane.id.strip_prefix("tab:").is_some_and(|tab| !tabs.contains(tab)))
@@ -469,6 +489,7 @@ mod tests {
             permission_mode: "auto".into(), provider_session_id: None, status: index::TabStatus::Idle,
             created: String::new(), modified: String::new(), context_used: None, context_max: None,
             fork_from: None, unknown: Default::default(),
+            follow: Default::default(),
         };
         let session = index::SessionEntry {
             id: "s1".into(), project_path: "/work".into(), cwd: "/work".into(), worktree_name: None,
@@ -480,6 +501,40 @@ mod tests {
         };
         let process = bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default()));
         assert_eq!(process.kill_rule, KillRule::None);
+    }
+
+    /// A tab is what its terminal holds now (#437): the pane of a tab whose
+    /// agent exited is a shell, and a shell an agent was started in by hand
+    /// is that agent's.
+    #[test]
+    fn a_pane_is_an_agents_or_a_shells_by_what_its_tab_holds() {
+        let tab = |id: &str, follow: serde_json::Value| -> index::TabEntry {
+            let mut entry = serde_json::json!({ "id": id, "harness": "codex", "created": "x" });
+            entry.as_object_mut().unwrap().extend(follow.as_object().unwrap().clone());
+            serde_json::from_value(entry).unwrap()
+        };
+        let session: index::SessionEntry = serde_json::from_value(serde_json::json!({ "id": "s1", "projectPath": "/work", "cwd": "/work", "title": "t", "created": "x", "modified": "y" })).unwrap();
+        let session = index::SessionEntry {
+            tabs: vec![
+                tab("app", serde_json::json!({})),
+                tab("exited", serde_json::json!({ "front": "terminal", "terminalTitle": "Terminal 2", "title": "An old conversation" })),
+                tab("typed", serde_json::json!({ "front": "by_hand", "pane": "s1:shell" })),
+            ],
+            ..session
+        };
+        let sessions = [session];
+        let sample = |pane: &str| bound_pane(&PaneInfo { id: pane.into(), pid: Some(400), running: true, cwd: "/work".into() }, &sessions, &HashMap::new(), Some(Aggregate::default()));
+        let seen = |pane: &str| {
+            let sample = sample(pane);
+            (sample.kind, sample.tab_id, sample.tab_title, sample.harness, sample.kill_rule)
+        };
+        assert_eq!(seen("tab:app"), ("agent".into(), Some("app".into()), "Codex".into(), Some("codex".into()), KillRule::None));
+        // Not called by the conversation it last held, and not an agent to count.
+        assert_eq!(seen("tab:exited"), ("shell".into(), Some("exited".into()), "Terminal 2".into(), None, KillRule::None));
+        assert_eq!(seen("s1:shell"), ("agent".into(), Some("typed".into()), "Codex".into(), Some("codex".into()), KillRule::None));
+        // A shell nothing was started in is a shell of its own, as before.
+        assert_eq!(seen("s1:other").0, "shell");
+        assert_eq!(["tab:app", "tab:exited", "s1:shell", "s1:other", "tab:gone"].map(|pane| holds_agent(pane, &sessions)), [true, false, true, false, true]);
     }
 
     #[test]

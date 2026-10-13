@@ -153,6 +153,13 @@ impl Peer {
         self.attached.lock().unwrap().is_some()
     }
 
+    /// Whether this connection is counted as one that may answer a
+    /// permission request.
+    #[cfg(test)]
+    pub(crate) fn counts_as_approver(&self) -> bool {
+        self.attached.lock().unwrap().as_ref().is_some_and(crate::cloud_activity::Attached::approves)
+    }
+
     pub fn for_user(device_id: String, authority: Authority, user_id: Option<String>) -> (Arc<Self>, Notifications) {
         Self::for_installation(device_id, authority, user_id, None)
     }
@@ -596,11 +603,17 @@ impl WorkspaceRpc {
         // Read access under the attachment lock: a concurrent hello must
         // not overwrite a role refresh with a decision from the old list.
         let mut attached = peer.attached.lock().unwrap();
-        let types = !self.collab.known() || self.access(peer).can_drive();
+        let access = self.access(peer);
+        let types = !self.collab.known() || access.can_drive();
+        // Whether it may answer the agent's permission requests; before
+        // there are roles to go by, as for typing.
+        let approves = !self.collab.known() || access.can_approve;
         if peer.phone.load(Ordering::SeqCst) || !types || peer.gone.load(Ordering::SeqCst) {
             *attached = None;
-        } else if attached.is_none() {
-            *attached = Some(crate::cloud_activity::attached());
+        } else if attached.as_ref().is_none_or(|current| current.approves() != approves) {
+            // The old count goes before the new one is taken.
+            *attached = None;
+            *attached = Some(crate::cloud_activity::attached(approves));
         }
     }
 
@@ -904,6 +917,8 @@ impl WorkspaceRpc {
         }
         let needed = match method {
             "pty.write" | "pty.resize" | "pty.control" | "lease.acquire" | "lease.release" => Role::Driver,
+            // Escape for a running turn is driving it, as a mailbox stop is.
+            "session.interrupt" => Role::Driver,
             // Bytes sent to a port are input to whatever listens there.
             "ports.list" | "ports.open" | "ports.write" => Role::Driver,
             "lease.takeOver" => Role::Manager,
@@ -1008,6 +1023,7 @@ impl WorkspaceRpc {
             "session.create" => self.session_create(params),
             "session.close" => self.session_close(params),
             "session.send" => self.session_send(peer, params),
+            "session.interrupt" => self.session_interrupt(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
@@ -2743,6 +2759,35 @@ impl WorkspaceRpc {
             let _ = self.collab.claim(&tab.id, user, now, busy, false);
         }
         Ok(json!({ "sessionId": session.id, "tabId": tab.id, "outcome": outcome }))
+    }
+
+    /// `session/3` (#427): Escape for a tab's running turn. The turn is
+    /// interrupted and the agent's process stays up. The follow-up queue is
+    /// not touched, so the next queued message goes out once the turn has
+    /// settled (a mailbox `stop` is what drops it). Live only, and never a
+    /// mailbox command: queued, it would land in some later turn.
+    ///
+    /// Whoever may stop the tab may interrupt it: a driver while nobody else
+    /// holds its lease, a manager always. It claims no lease and is not use
+    /// of the workspace that keeps it awake.
+    fn session_interrupt(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let access = self.access(peer);
+        if self.authority(peer) == Authority::Participate && !access.can_drive() {
+            return Err(RpcError::forbidden("interrupting needs driver access to the workspace"));
+        }
+        match peer.user_id.as_deref() {
+            Some(user) if access.role != Role::Manager => {
+                let busy = agents_busy(&self.agents, &tab.session_id, &tab.tab_id);
+                if let Some(held) = self.collab.held_by_other(&tab.tab_id, user, crate::cloud_agents::now_ms(), busy) {
+                    return Err(lease_refusal(LeaseRefusal::Held(held)));
+                }
+            }
+            None if self.authority(peer) == Authority::Participate => return Err(RpcError::forbidden("interrupting needs a signed-in person")),
+            _ => {}
+        }
+        let interrupted = self.agents()?.ops.interrupt(&tab.session_id, &tab.tab_id).map_err(RpcError::internal)?;
+        Ok(json!({ "interrupted": interrupted }))
     }
 
     /// Replay a tab's events after `sinceCursor`, then stream live ones.

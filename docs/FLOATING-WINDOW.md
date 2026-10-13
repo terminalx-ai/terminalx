@@ -145,7 +145,8 @@ neither shows a first-run trust prompt.
 The shortcut toggles: a window that is up and focused is hidden; otherwise it
 is shown and focused, with the caret in the composer. **Escape** hides the
 window when nothing else wanted the key. A menu or dialog closes first, a
-running turn is stopped first, and a terminal keeps its Escape.
+running turn is interrupted first (the agent's own Escape; its process stays,
+#427), and a terminal keeps its Escape.
 
 ### The system-wide shortcut
 

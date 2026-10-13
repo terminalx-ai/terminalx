@@ -15,6 +15,12 @@
 - The row is the workspace's: when several sessions share a worktree, all
   their tabs are in it, in one flat row, and opening a tab opens its session
   too. A tab of another workspace is never in it. (#438)
+- A tab in the row is what runs in its terminal, as its sidebar row is: an
+  agent's mark, name and state while one runs there, a terminal when none
+  does, with the menu items that apply to what it is now. A terminal an
+  agent is started in stays where you put it, with its pin, its mute and the
+  name you gave it, and a name you give a tab is kept whatever comes to run
+  in it. (#438)
 - Tabs share the width and shrink evenly; when they no longer fit, the row
   scrolls and a menu at its end lists every tab by its full title. The
   session's name and its chips give way to the tabs in a narrow window, and
@@ -46,6 +52,111 @@
 - Closing the last agent tab of a session no longer takes you off the
   terminal or page you were on, or opens a shell you did not ask for.
   (#438)
+
+## 0.2.11
+
+Issue sessions that carry through a pull request, review and optional merge;
+tabs that follow what runs in their terminal; Escape that interrupts instead
+of killing the agent; dictation that respects edits; live clean-up progress;
+scheduled tasks and an environment section for cloud workspaces; and cloud
+terminal, login and mobile fixes.
+
+### Issues
+
+- A session started from a GitHub or Linear issue no longer stops at the
+  code. When the agent reports the work done and its checks passing,
+  TerminalX opens a pull request that closes the issue, has a second session
+  that did not write the code review it, takes the findings back to the first
+  session, and has the new commit reviewed again, up to three times. The
+  issue's page shows the stage it is at, the open findings, and a record of
+  every stage, verdict and merge with links to the sessions and the pull
+  request. A Linear issue is moved to In Review when its pull request opens.
+  (#433)
+- It ends at *Ready to merge* unless **Merge automatically when the review is
+  addressed** is on for the issue. With it on, TerminalX merges only at the
+  exact commit the reviewer approved, with no finding of medium severity or
+  higher open, its checks passed, no conflicts, and nothing in a category the
+  project keeps for a person (database migrations, deploy configuration,
+  anything the security pass flagged). Otherwise the page says *Ready to
+  merge* or *Needs you*, and why. The merge uses your own `gh` credentials
+  and never bypasses branch protection. (#433)
+- Each project has its own settings under **Issue pipeline…** in its menu:
+  whether the pipeline runs at all, what the switch starts at, whether a
+  person always does the merge, the number of review rounds, the merge
+  method, and what is always left for a person. (#433)
+- `terminalx sessions create --issue <issue>` starts a session from an issue,
+  and `terminalx pipelines` lists and steers the pipelines. (#433)
+- With a session already on an issue, **Open session** and **Start session**
+  no longer cover the worktree choice in a narrow window. (#433)
+
+This covers workspaces on this computer. See
+[docs/ISSUE-PIPELINE.md](docs/ISSUE-PIPELINE.md).
+
+### Tabs follow their terminal
+
+- A tab is now what runs in its terminal. Type `claude` or `codex` into a
+  plain terminal and its sidebar row becomes that agent's tab, with its
+  status and a chat that shows the conversation from its first turn. Exit
+  the agent and the row is a terminal again. Start another agent there and
+  the same tab is that agent's. The tab keeps its place, its selection and
+  any name you gave it throughout. (#437)
+- The same goes for a tab created as an agent tab: exiting its CLI from the
+  terminal view leaves a shell in the same terminal, and the tab is a
+  terminal until an agent is started in it. (#437)
+- Exiting an agent is not an error. There is no "needs attention", no
+  recovery banner and no "Resume safely"; a turn that was cut short is
+  marked as interrupted, with one line saying so. (#437)
+- A tab keeps every conversation it has held. The chat shows the current
+  one; earlier ones are under **Conversations**, and a terminal's last
+  conversation can be resumed in place with **Resume here**. Starting an
+  agent by hand on a conversation the tab already holds (`claude --resume`,
+  `claude -c`, `codex resume`) picks it up instead of opening a second copy.
+  (#437)
+- Sending from the chat types into an agent you started by hand, as it does
+  for one the app started. What would need that agent restarted (its
+  permission mode, and for Codex its model and effort) is disabled there and
+  says why. (#437)
+- Cursor and OpenCode started in a terminal are shown on the terminal's row
+  by their mark; they have no chat. Cloud workspaces do not follow their
+  terminals yet. See [docs/TABS-FOLLOW-TERMINAL.md](docs/TABS-FOLLOW-TERMINAL.md).
+  (#437)
+
+### Escape interrupts the agent instead of ending it
+
+- Pressing Escape while an agent works no longer kills the agent and puts
+  "Session closed … Resume safely" over the tab. Escape is the agent's own
+  key. In the terminal view (local and cloud) it is typed into the agent's
+  screen like every other key, so it also closes the agent's menus and leaves
+  its modes; an Escape typed in any terminal is never taken by a shortcut. In
+  the chat it interrupts the running turn: the turn shows as "Stopped", the
+  agent's process stays, and the next message goes to it without a restart.
+  With nothing running, Escape does nothing. Dialogs, menus, pickers and the
+  editor still get the key first. (#427)
+- Queued follow-ups survive Escape. Claude Code and Codex keep their own
+  queue and, interrupted with a message queued, send it at once as the next
+  turn; the chat now shows that as the queued message becoming the next
+  prompt rather than drawing it twice. For agents with no queue of their own
+  the app's is kept, and the next message starts when the interrupted turn
+  has ended. A request the turn was waiting on (a permission or a question)
+  is withdrawn with it, so nothing you were still deciding about runs.
+- Stopping the session is now a separate, explicit action: "Stop session" in
+  the terminal view and on the recovery banner, and "Stop the session" in
+  Settings → Shortcuts, which has no keys until you give it some (never a bare
+  Escape). The composer's Stop interrupts first; if the agent does not answer,
+  the same button becomes "Stop session" and ends the process. Only that
+  shows the "Session closed" banner.
+- If you had moved "Stop the running turn" to other keys, they now interrupt
+  (that is what stopping a turn does now), and Escape stays free if you had
+  taken the action off it.
+- Cloud tabs: Escape in the chat is sent to the runtime as a live interrupt
+  (`session/3`), for whoever may stop the tab. A workspace whose runtime is
+  older than this leaves the key alone until it is updated; its Stop works as
+  before.
+- The same holds for the agents that are driven without a terminal, checked
+  against the real ones. On an OpenCode tab the first message no longer fails
+  with "The connection was lost" (it was sent before OpenCode had started),
+  the reply no longer begins with your own prompt, and a message queued
+  behind a turn is no longer cut short the moment it starts.
 
 ### Dictation
 
@@ -107,6 +218,57 @@
   window's close button. Quitting from the Dock, logging out and shutting
   down cannot be asked about and end the app as before. (#426)
 
+### Cloud workspaces
+
+- Scheduled tasks. On a server that has them turned on, an organization's
+  owners and admins find "Scheduled tasks…" in a cloud workspace's menu: a
+  task wakes the workspace at set times and sends one prompt to an agent.
+  The dialog shows what a task costs before it is saved (each run, a month,
+  and the limit of 24 runs in 24 hours), how its last run went, and lets
+  them pause, resume or delete it, or pause every task of the organization.
+  A scheduled agent never starts in bypass permissions. (PRO-37)
+- Settings → Account gains a **Cloud environment** section for the
+  organization's provider template: the machine install script and each
+  repository's setup, with revisions, a confirmed Build, the versions with
+  their state, log, cancel, retry and roll back, and recipe results labelled
+  as observed by TerminalX or reported by the agent. Members see the active
+  version only. A save names the revision it started from, so a draft cannot
+  overwrite someone else's save. (PRO-20, #442)
+- **Configure with an agent…** in that section, for owners and admins on a
+  server that offers recipes, asks first with the price and limits, starts a
+  private preparation workspace with a fixed first prompt, verifies the
+  agent's recipe itself in fresh clones (machine script, setup, lint, test,
+  build and start), stops the machine, and shows the proposal to save as a
+  recipe. It needs a server with preparation workspaces; without one the
+  create is refused and nothing starts. (PRO-20, #446)
+- A line typed into a cloud tab's terminal view just after a wake is no longer
+  lost without a word. The runtime answers a tab's slash-command list from its
+  own task so it no longer holds up the terminal, a cloud tab that is not on
+  screen does not ask for the list, the view says "Connecting to the agent's
+  terminal" while the attach is unanswered and tells you when a key was
+  dropped, and a replaced attach no longer prints the history again. The
+  runtime part needs a runtime release. (#449, #455)
+- The provider connection in Settings loads once when it opens, not twice,
+  so the controls no longer flash and a click in the gap is not lost. (#444)
+- Agent logins: every native dialog says when it replaces the login stored
+  for the agent, an open sign-in can choose Replace if someone else stores a
+  login meanwhile, and logging in again no longer widens a login an admin had
+  narrowed to managers; the dialogs say who the stored login reaches. (PRO-79,
+  #429, #435)
+- A command refused because the workspace is stopped is resent under the same
+  command id once you agree to wake it, from the CLI and the phone. (PRO-89,
+  #430)
+
+### Mobile companion
+
+These source changes require a separately updated mobile app.
+
+- A cloud session comes back to Live after the app was in the background or
+  the workspace was stopped and started, instead of staying on "waiting for
+  the runtime". (#448, #454)
+- The phone asks before waking a workspace for a command the server already
+  holds, and resends a refused command under its original id. (PRO-89, #430)
+
 ## 0.2.10
 
 Dialogs that keep their buttons in reach, and cloud workspaces that stay awake
@@ -139,6 +301,20 @@ through a silent turn and follow role changes.
   promoted to driver starts holding it without reconnecting. Phones are still
   not counted, and revoking access or the first member list revalidates the
   connections already open. (#423)
+- A line typed into a cloud agent tab's terminal view in the first seconds
+  after a wake is no longer lost without a word. With another tab of the
+  session left in chat, that tab asked the runtime for its slash commands on
+  every connect; the runtime answered nothing else until the tab's CLI had
+  answered (15 seconds when it never did), so the terminal was not attached
+  yet while the view already read "Idle", and keys typed then were dropped.
+  The runtime now answers the command list apart from everything else, a
+  tab that is not on screen no longer asks for it, and while the terminal is
+  still connecting the view says so, and says when something typed was not
+  sent. Needs the next runtime release for the first part; the rest is in
+  the desktop. (#449)
+- Opening a cloud agent tab's terminal view no longer prints its history
+  more than once when the view was left and shown again before the runtime
+  had answered. (#449)
 
 ## 0.2.9
 

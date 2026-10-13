@@ -95,7 +95,27 @@ pub struct State {
     pub fail_acks: HashMap<String, u32>,
     /// The workspace's launch intent (contract §19.3), when it has one.
     pub launch: Option<Launch>,
+    /// The workspace's scheduled runs (contract §24.4), oldest first.
+    pub scheduled: Vec<ScheduledRun>,
+    /// Claims of a scheduled run the runtime made.
+    pub scheduled_claims: u32,
+    /// Scheduled runs are turned off on this server: their routes answer
+    /// `404`, like routes that were never added.
+    pub scheduled_off: bool,
     next: u64,
+}
+
+/// A scheduled run as the server keeps it: handed out once, then `working`
+/// until the runtime reports its end or the server ends it itself.
+#[derive(Clone, Debug)]
+pub struct ScheduledRun {
+    /// The claim response's `run` object.
+    pub run: Value,
+    /// `provisioning`, `working`, or how it ended.
+    pub state: String,
+    pub category: Option<String>,
+    /// Every report the runtime made, answered `200` or not.
+    pub reports: Vec<Value>,
 }
 
 /// A launch intent as the server keeps it: one per workspace, claimed by a
@@ -154,6 +174,34 @@ impl FakeMailbox {
 
     pub fn launch(&self) -> Launch {
         self.state.lock().unwrap().launch.clone().expect("a launch intent")
+    }
+
+    /// Queue a scheduled run (§24.4): `run` is the claim's `run` object.
+    pub fn add_scheduled_run(&self, run: Value) {
+        self.state.lock().unwrap().scheduled.push(ScheduledRun { run, state: "provisioning".into(), category: None, reports: Vec::new() });
+    }
+
+    pub fn scheduled_run(&self, run_id: &str) -> ScheduledRun {
+        self.state.lock().unwrap().scheduled.iter().find(|run| run.run["runId"] == run_id).cloned().expect("a scheduled run")
+    }
+
+    pub fn scheduled_claims(&self) -> u32 {
+        self.state.lock().unwrap().scheduled_claims
+    }
+
+    pub fn turn_scheduled_runs_off(&self) {
+        self.state.lock().unwrap().scheduled_off = true;
+    }
+
+    pub fn lease_calls(&self) -> u64 {
+        self.state.lock().unwrap().lease_calls
+    }
+
+    /// End a run on the server, as a deleted or paused schedule does.
+    pub fn cancel_scheduled_run(&self, run_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let run = state.scheduled.iter_mut().find(|run| run.run["runId"] == run_id).expect("a scheduled run");
+        run.state = "canceled".into();
     }
 
     /// Encrypt and queue a command as a client would. Returns its client id.
@@ -312,6 +360,8 @@ fn route(method: &str, path: &str, body: &Value, state: &mut State) -> (u16, Val
         ("POST", "/launch-intent/claim") => claim_launch(body, state),
         ("POST", "/launch-intent/phase") => launch_phase(body, state),
         ("POST", "/launch-intent/complete") => complete_launch(body, state),
+        ("POST", "/scheduled-run/claim") => claim_scheduled_run(body, state),
+        ("POST", "/scheduled-run/report") => report_scheduled_run(body, state),
         ("PUT", rest) if rest.starts_with("/transcript-checkpoints/") => put_checkpoint(&rest["/transcript-checkpoints/".len()..], body, state),
         ("DELETE", rest) if rest.starts_with("/transcript-checkpoints/") => {
             let tab = rest["/transcript-checkpoints/".len()..].to_string();
@@ -390,6 +440,49 @@ fn complete_launch(body: &Value, state: &mut State) -> (u16, Value) {
         return (200, json!({ "v": 1, "state": launch.state }));
     }
     (409, json!({ "error": "cloud_workspace_launch_intent_settled", "state": launch.state }))
+}
+
+/// As the server: the oldest run waiting for this workspace moves to
+/// `working` and is never handed out again.
+fn claim_scheduled_run(body: &Value, state: &mut State) -> (u16, Value) {
+    if body != &json!({ "v": 1 }) {
+        return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
+    }
+    state.scheduled_claims += 1;
+    if state.scheduled_off {
+        return (404, json!({ "error": "not_found" }));
+    }
+    match state.scheduled.iter_mut().find(|run| run.state == "provisioning") {
+        Some(run) => {
+            run.state = "working".into();
+            (200, json!({ "v": 1, "run": run.run }))
+        }
+        None => (200, json!({ "v": 1, "run": null })),
+    }
+}
+
+fn report_scheduled_run(body: &Value, state: &mut State) -> (u16, Value) {
+    const KEYS: [&str; 6] = ["v", "runId", "outcome", "sessionId", "tabId", "category"];
+    let outcome = body["outcome"].as_str().unwrap_or_default().to_string();
+    let known = body.as_object().is_some_and(|fields| fields.keys().all(|key| KEYS.contains(&key.as_str())));
+    if !known || body["v"] != 1 || !["started", "completed", "failed"].contains(&outcome.as_str()) || (!body["category"].is_null() && outcome != "failed") {
+        return (401, json!({ "error": "cloud_workspace_bootstrap_invalid" }));
+    }
+    if state.scheduled_off {
+        return (404, json!({ "error": "not_found" }));
+    }
+    let Some(run) = state.scheduled.iter_mut().find(|run| run.run["runId"] == body["runId"]) else {
+        return (404, json!({ "error": "cloud_workspace_scheduled_run_not_found" }));
+    };
+    run.reports.push(body.clone());
+    if run.state != "working" {
+        return (409, json!({ "error": "cloud_workspace_scheduled_run_settled", "state": run.state }));
+    }
+    if outcome != "started" {
+        run.state = outcome;
+        run.category = body["category"].as_str().map(String::from);
+    }
+    (200, json!({ "v": 1, "state": run.state }))
 }
 
 fn token() -> String {

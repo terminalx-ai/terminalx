@@ -21,6 +21,8 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * A newer version only adds to its namespace (CS-12):
  * - `session/2`: `session.update`, `session.addTab`, `session.delete` and the
  *   `session.sessions` notification;
+ * - `session/3` (#427): `session.interrupt`, Escape for an agent tab's
+ *   running turn. Live only, never queued or resent;
  * - `pty/2`: `pty.create` takes a `sessionId`, and `pty.list` returns it;
  * - `agents/1`: `runtime.agents`;
  * - `agent-pty/1` (PRO-86): the terminal an agent tab's CLI runs in answers
@@ -46,7 +48,7 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -57,6 +59,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.update": "session/2",
   "session.addTab": "session/2",
   "session.delete": "session/2",
+  "session.interrupt": "session/3",
   "runtime.agents": "agents/1",
   "session.commands": "composer/1",
   "session.files": "composer/2",
@@ -874,6 +877,17 @@ export class WorkspaceRpcClient {
 
   async markAgentTabRead(sessionId: string, tabId: string): Promise<void> {
     await this.call("session.markRead", { sessionId, tabId });
+  }
+
+  /**
+   * Escape for a tab's running turn (`session/3`): the turn is interrupted
+   * and the agent's process stays. A plain call, sent once: if the connection
+   * drops it is not sent again, because by then it could reach a later turn.
+   * `interrupted` is false when the tab had nothing running.
+   */
+  async interruptAgentTab(params: { sessionId: string; tabId: string }): Promise<{ interrupted: boolean }> {
+    const result = await this.call<{ interrupted?: boolean }>("session.interrupt", params);
+    return { interrupted: result.interrupted === true };
   }
 
   /** The sessions this connection may see (`session.list`). */

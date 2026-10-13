@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeOrder, moveKey, settleLayout, sortByLayout, workspaceKey, workspaceSessions } from "./tabLayouts";
+import { followedLayout, mergeOrder, moveKey, settleLayout, sortByLayout, workspaceKey, workspaceSessions } from "./tabLayouts";
 import type { SessionEntry } from "@/types/session";
 
 const session = (id: string, patch: Partial<SessionEntry> = {}): SessionEntry => ({
@@ -28,6 +28,8 @@ describe("a workspace's tabs", () => {
     expect(workspaceSessions(all, a).map((s) => s.id)).toEqual(["a", "b"]);
     // The open session is in its own row even when it is archived.
     expect(workspaceSessions(all, all[2]).map((s) => s.id)).toEqual(["a", "b", "archived"]);
+    // And when the list has not heard of it yet: a row never lacks its own session's tabs.
+    expect(workspaceSessions(all, session("new", { cwd: "/repo/wt" })).map((s) => s.id)).toEqual(["new", "a", "b"]);
     expect(workspaceSessions(all, all[4]).map((s) => s.id)).toEqual(["q"]);
   });
 });
@@ -63,5 +65,31 @@ describe("the order of a workspace's tabs", () => {
   it("drops every trace of a tab that is closed for good, and nothing else", () => {
     const saved = { order: ["a", "gone", "hidden", "b"], pinned: ["gone", "a"], muted: ["gone", "hidden"], titles: { gone: "Old", b: "Mine" } };
     expect(settleLayout(saved, ["b", "a"], (key) => key === "gone")).toEqual({ order: ["b", "a", "hidden"], pinned: ["a"], muted: ["hidden"], titles: { b: "Mine" } });
+  });
+});
+
+describe("a shell an agent was started in (#437)", () => {
+  const typed = { id: "typed", harness: "codex", model: "", permissionMode: "terminal", status: "idle" as const, created: "", modified: "", pane: "a:shell" };
+  const withTab = [session("a", { tabs: [typed] })];
+
+  it("keeps its place, pin, mute and title as the tab it became", () => {
+    const saved = { order: ["agent:a1", "terminal:a:shell", "browser:p"], pinned: ["terminal:a:shell"], muted: ["terminal:a:shell"], titles: { "terminal:a:shell": "dev server", "browser:p": "Preview" } };
+    expect(followedLayout(saved, withTab)).toEqual({
+      order: ["agent:a1", "agent:typed", "browser:p"],
+      pinned: ["agent:typed"],
+      muted: ["agent:typed"],
+      titles: { "agent:typed": "dev server", "browser:p": "Preview" },
+    });
+  });
+
+  it("is named once when the saved layout has already been told", () => {
+    const saved = { order: ["agent:typed", "terminal:a:shell"], pinned: [], muted: [], titles: { "agent:typed": "mine", "terminal:a:shell": "older" } };
+    expect(followedLayout(saved, withTab)).toEqual({ order: ["agent:typed"], pinned: [], muted: [], titles: { "agent:typed": "mine" } });
+  });
+
+  it("leaves a layout alone that says nothing of the shell, and every other shell", () => {
+    const saved = layout(["agent:a1", "terminal:a:other"]);
+    expect(followedLayout(saved, withTab)).toBe(saved);
+    expect(followedLayout(saved, [session("a")])).toBe(saved);
   });
 });

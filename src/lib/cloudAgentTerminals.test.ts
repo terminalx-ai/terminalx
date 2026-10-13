@@ -86,6 +86,33 @@ describe("an agent tab's own terminal in the cloud terminal store", () => {
     expect(xterm.term.reset).not.toHaveBeenCalled();
   });
 
+  it("prints the replay once when the view left and came back before the runtime answered the first attach (#449)", async () => {
+    // A runtime busy with something else: both attaches are answered later, each with the whole screen.
+    runtime.slow = ["pty.attach"];
+    const first = attachAgentTerminal(WS, client, "t-1", base);
+    await settle();
+    detachAgentTerminal(WS, "t-1");
+    const second = attachAgentTerminal(WS, client, "t-1", base);
+    await settle();
+    expect(runtime.params("pty.attach")).toEqual([{ ptyId: "tab:t-1" }, { ptyId: "tab:t-1" }]);
+    expect(agentTerminalOf(WS, "t-1")?.live).toBe(false);
+    runtime.slow = [];
+    runtime.release();
+    await Promise.all([first, second]);
+    await settle();
+    expect(xterm.screen()).toBe("agent screen\r\n");
+    expect(agentTerminalOf(WS, "t-1")?.live).toBe(true);
+    // The attach nobody waits for any more is ended, and the one of now keeps streaming.
+    expect(runtime.methods("pty.detach")).toHaveLength(1);
+    runtime.output("more\r\n");
+    expect(xterm.screen()).toBe("agent screen\r\nmore\r\n");
+    // Leaving now keeps where the view is, so coming back replays nothing.
+    detachAgentTerminal(WS, "t-1");
+    await attachAgentTerminal(WS, client, "t-1", base);
+    expect(runtime.params("pty.attach")[2]).toMatchObject({ sinceOffset: "agent screen\r\nmore\r\n".length });
+    expect(xterm.screen()).toBe("agent screen\r\nmore\r\n");
+  });
+
   it("is untouched by the shell terminal list: never marked closed, never listed", async () => {
     await attachAgentTerminal(WS, client, "t-1", base);
     await syncCloudTerminals(WS, client, base);
@@ -476,12 +503,12 @@ describe("which view a tab shows", () => {
   it("a cloud tab's switch is only a flag, remembered per tab: nothing local is started or adopted", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     await toggleTabView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("terminal");
-    expect(tabViewOf("t-2")).toBe("chat");
+    expect(tabViewOf({ id: "t-1" })).toBe("terminal");
+    expect(tabViewOf({ id: "t-2" })).toBe("chat");
     await enterTerminalView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("terminal");
+    expect(tabViewOf({ id: "t-1" })).toBe("terminal");
     await toggleTabView(session, tab, { remote: true });
-    expect(tabViewOf("t-1")).toBe("chat");
+    expect(tabViewOf({ id: "t-1" })).toBe("chat");
     expect(invoke).not.toHaveBeenCalled();
   });
 });
