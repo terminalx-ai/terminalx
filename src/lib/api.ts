@@ -226,6 +226,35 @@ export interface PaneAgent {
   harness: string | null;
 }
 
+/**
+ * How one workspace's tabs are arranged: one row for the checkout, whatever
+ * session a tab belongs to. A tab is named `agent:<tab id>`,
+ * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
+ */
+export interface TabLayout {
+  /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
+  order: string[];
+  /** Kept at the left, drawn as an icon, and left open by the bulk closes. */
+  pinned: string[];
+  /** Tabs that raise no banner, notice or tone. */
+  muted: string[];
+  /** The reader's own title for a tab. */
+  titles: Record<string, string>;
+}
+
+/** An agent tab the reader closed, kept with its conversation so it can be reopened. */
+export interface ClosedTab {
+  sessionId: string;
+  tab: TabEntry;
+  closedAt: string;
+}
+
+/** What every window knows about tabs beyond the sessions: each workspace's layout, and the closed tabs. */
+export interface TabState {
+  workspaces: Record<string, TabLayout>;
+  closed: ClosedTab[];
+}
+
 /** How a workspace is removed. */
 export interface WorkspaceRemoveOptions {
   /** Settling: the conversations stay and move to the project. */
@@ -473,8 +502,15 @@ export const api = {
   /** What a session's scratch directory holds, for the delete confirmation. */
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
+  /** Close an agent tab. One that holds a conversation stays reopenable (`reopenTab`); nothing of it is deleted. */
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
-  /** Name a tab. The name stays whatever runs in the tab; an empty one gives the naming back (#437). */
+  /** Bring a closed tab back into its session, with its conversation. */
+  reopenTab: (sessionId: string, tabId: string) => invoke<TabEntry>("reopen_tab", { sessionId, tabId }),
+  /** Give an agent tab the reader's own title. It stays the tab's name whatever runs in the tab (#437); `null` gives the naming back. */
+  renameTab: (sessionId: string, tabId: string, title: string | null) => invoke<void>("rename_tab", { sessionId, tabId, title }),
+  tabState: () => invoke<TabState>("tab_state"),
+  /** Save one workspace's tab order, pins, mutes and titles for every window and device. */
+  setTabLayout: (workspace: string, layout: TabLayout) => invoke<void>("set_tab_layout", { workspace, layout }),
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
@@ -1728,6 +1764,8 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Which of these shell tabs are running a command now. */
+  busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
   /**
    * Receive pane `id`'s output as raw bytes, starting with what it has

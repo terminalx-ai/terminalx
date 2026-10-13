@@ -210,6 +210,11 @@ function GeneralTab() {
         control={<Switch checked={prefs.animations} onCheckedChange={(v) => setPrefs({ animations: v })} />}
       />
       <SettingRow
+        label="Tabs in the title bar"
+        description="A session's agents, terminals and browser pages as a row of tabs in the title bar, in the same order as the sidebar. Off leaves them in the sidebar only."
+        control={<Switch aria-label="Tabs in the title bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
+      />
+      <SettingRow
         label="Fold tool calls"
         description="Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded."
         control={<Switch checked={prefs.foldToolCalls} onCheckedChange={(v) => setPrefs({ foldToolCalls: v })} />}

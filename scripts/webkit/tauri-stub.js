@@ -42,6 +42,13 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     dictation_available: true,
     transcription_preferences: { model: "", inputDevice: null, muteWhileRecording: false },
     status_bar_settings: { visible: false },
+    // How the workspaces' tabs are arranged: nothing saved, and what a page saves is kept and announced as the backend does.
+    tab_state: { workspaces: {}, closed: [] },
+    set_tab_layout: ({ workspace, layout }) => {
+      answers.tab_state = { ...answers.tab_state, workspaces: { ...answers.tab_state.workspaces, [workspace]: layout } };
+      setTimeout(() => window.__PW_STUB__.emit("tab_state_changed", answers.tab_state), 0);
+      return null;
+    },
   };
   // `archived`: an archive that failed with a long reason, an archive whose
   // final save timed out, and a workspace deleted elsewhere (its notice).

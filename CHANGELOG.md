@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### Tabs
+
+- A session's tabs are a row in the title bar, as in a browser: one tab per
+  agent, terminal and browser page, each with its icon, a shortened title
+  and its state (working, waiting, an unread reply, exited). Click to
+  switch, middle-click or the close button to close, and the "+" at the end
+  of the row opens a new tab. Hover a tab, or move the keyboard focus to it,
+  for its full title, its agent and its state. Settings → General has "Tabs
+  in the title bar" to turn the row off and keep tabs in the sidebar only.
+  (#438)
+- The row is the workspace's: when several sessions share a worktree, all
+  their tabs are in it, in one flat row, and opening a tab opens its session
+  too. A tab of another workspace is never in it. (#438)
+- A tab in the row is what runs in its terminal, as its sidebar row is: an
+  agent's mark, name and state while one runs there, a terminal when none
+  does, with the menu items that apply to what it is now. A terminal an
+  agent is started in stays where you put it, with its pin, its mute and the
+  name you gave it, and a name you give a tab is kept whatever comes to run
+  in it. (#438)
+- Tabs share the width and shrink evenly; when they no longer fit, the row
+  scrolls and a menu at its end lists every tab by its full title. The
+  session's name and its chips give way to the tabs in a narrow window, and
+  the header's own buttons are never covered. Empty title bar still drags
+  the window; a tab does not. (#438)
+- Drag a tab to move it. The order is one order for the workspace, saved
+  with the sessions: the sidebar, next and previous tab and the numbered
+  shortcuts follow it, it survives a restart, and the CLI and a paired
+  phone list a session's tabs in it. "Move tab left" and "Move tab right"
+  do the same from the keyboard. (#438)
+- New shortcuts, all remappable in Settings → Shortcuts: the main modifier
+  and 1 to 8 switch to that tab, 9 to the last one, from the composer and
+  from a terminal as well; move tab left and right; and reopen closed tab.
+  (#438)
+- Right-click a tab, in the row or in the sidebar, for everything that can
+  be done to it: rename it, switch it between chat and terminal view,
+  duplicate it, fork its conversation, open it in the floating window,
+  reload or restart it, copy its title, folder, conversation id or address,
+  pin it (pinned tabs stay at the left as an icon), mute its notifications,
+  move it, act on its session, and open a new tab right after it. (#438)
+- Close other tabs, tabs to the right, tabs to the left, idle tabs or all
+  tabs from the same menu. Each says how many tabs it will close first, and
+  names any with an agent working or waiting, a terminal in the middle of a
+  command or a draft not sent, with the choice to close only the idle ones.
+  Pinned tabs are left open unless you include them. (#438)
+- A closed agent tab keeps its conversation, and "Reopen closed tab" brings
+  the last closed tab back where it was: an agent with its conversation, a
+  browser page at its address. (#438)
+- Closing the last agent tab of a session no longer takes you off the
+  terminal or page you were on, or opens a shell you did not ask for.
+  (#438)
+
 ### Stop from a guest or the phone interrupts too
 
 - A guest's Stop in a shared session no longer ends the host's agent and puts

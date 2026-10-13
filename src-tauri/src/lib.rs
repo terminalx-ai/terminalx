@@ -227,6 +227,10 @@ pub fn run() {
         .manage(cloud_remote.clone())
         .manage(cloud_agents)
         .setup(move |app| {
+            // Shells ended with the last run of the app; a tab layout that still names one names nothing.
+            if let Err(error) = store::index::forget_shell_tabs() {
+                log::warn!("forget the shell tabs of the last run: {error:#}");
+            }
             agent_keys.configure(&app.config().identifier);
             cloud_remote.watch_identity(app.handle().clone());
             account.configure(&app.config().identifier)?;
@@ -489,6 +493,10 @@ pub fn run() {
             floating::floating_open_in_main,
             commands::add_tab,
             commands::remove_tab,
+            commands::reopen_tab,
+            commands::rename_tab,
+            commands::tab_state,
+            commands::set_tab_layout,
             commands::tab_resume_conversation,
             commands::pane_agents,
             commands::rename_session,
@@ -566,6 +574,7 @@ pub fn run() {
             commands::pty_spawn,
             commands::pty_shells,
             commands::pty_rename,
+            commands::pty_busy,
             commands::pty_write,
             commands::pty_attach,
             commands::pty_detach,

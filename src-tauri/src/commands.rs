@@ -1565,22 +1565,56 @@ pub fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, t
     Ok(tab)
 }
 
+/// Tell every window how the workspaces' tabs are arranged now, and which closed tabs can be reopened.
+fn announce_tabs(app: &AppHandle) {
+    if let Ok(tabs) = index::tab_state() {
+        let _ = app.emit("tab_state_changed", &tabs);
+    }
+}
+
+/// Close an agent tab: its CLI is stopped and it leaves the session. A tab
+/// that holds a conversation stays reopenable ([`reopen_tab`]), log and all.
 #[tauri::command]
 pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let state = app.state::<crate::AppState>();
     kill_tab(&app, &state, &session_id, &tab_id);
-    index::update_session(&session_id, |s| {
-        s.tabs.retain(|t| t.id != tab_id);
-        if s.active_tab.as_deref() == Some(&tab_id) {
-            s.active_tab = s.tabs.last().map(|t| t.id.clone());
-        }
-        Ok(())
-    })
-    .map_err(err)?;
-    if let Ok(p) = store::log_path(&session_id, &tab_id) {
-        let _ = std::fs::remove_file(p);
-    }
+    crate::session_ops::close_tab_entry(&session_id, &tab_id)?;
     announce_session(&app, &session_id);
+    announce_tabs(&app);
+    Ok(())
+}
+
+/// Bring a closed tab back into its session, with its conversation.
+#[tauri::command]
+pub fn reopen_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<TabEntry> {
+    let tab = crate::session_ops::reopen_tab_entry(&session_id, &tab_id)?;
+    announce_session(&app, &session_id);
+    announce_tabs(&app);
+    Ok(tab)
+}
+
+/// Give an agent tab the reader's own title; `None` (or blank) takes it away,
+/// and the tab goes by its first request again.
+#[tauri::command]
+pub fn rename_tab(app: AppHandle, session_id: String, tab_id: String, title: Option<String>) -> CmdResult<()> {
+    crate::session_ops::rename_tab_entry(&session_id, &tab_id, title)?;
+    announce_session(&app, &session_id);
+    Ok(())
+}
+
+/// How every workspace's tabs are arranged, and the closed tabs that can be reopened.
+#[tauri::command]
+pub fn tab_state() -> CmdResult<index::TabState> {
+    index::tab_state().map_err(err)
+}
+
+/// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
+#[tauri::command]
+pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {
+    for session in index::set_tab_layout(&workspace, layout).map_err(err)? {
+        let _ = app.emit("session_updated", &session);
+    }
+    announce_tabs(&app);
     Ok(())
 }
 
@@ -2456,6 +2490,12 @@ pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: St
 pub(crate) const PTY_OPENED_EVENT: &str = "pty_opened";
 pub(crate) const PTY_CLOSED_EVENT: &str = "pty_closed";
 pub(crate) const PTY_RENAMED_EVENT: &str = "pty_renamed";
+
+/// Which of these shell tabs are running a command now, for a close that would end it.
+#[tauri::command]
+pub fn pty_busy(state: State<'_, AppState>, ids: Vec<String>) -> Vec<String> {
+    ids.into_iter().filter(|id| state.terminals.is_busy(id)).collect()
+}
 
 /// The shell tabs that are open, in every session: a window loaded after
 /// they were opened (the floating one, a reload) lists them from this.

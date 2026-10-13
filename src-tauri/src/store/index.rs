@@ -209,6 +209,18 @@ impl TabEntry {
         self.follow.pane.clone().unwrap_or_else(|| format!("tab:{}", self.id))
     }
 
+    /// The pane the tab lived in is gone (the app restarted, or the tab was
+    /// closed): it has its own from here on, and an agent that was started
+    /// by hand went with the terminal it was started in. Its conversation is
+    /// the tab's, for the app to resume when the tab is opened. A tab that
+    /// was a terminal is still one.
+    pub fn lose_pane(&mut self) {
+        self.follow.pane = None;
+        if self.follow.front == Front::ByHand {
+            self.follow.front = Front::Agent;
+        }
+    }
+
     /// Whether the tab is a plain terminal now, with no agent in it.
     pub fn is_terminal(&self) -> bool {
         self.follow.front == Front::Terminal
@@ -379,31 +391,273 @@ impl SessionEntry {
     }
 }
 
+/// How one workspace's tabs are arranged. A workspace is one checkout, and its
+/// tabs are the agent tabs of every session that runs there, its shells and
+/// its browser pages: one row, whatever session a tab belongs to.
+///
+/// A tab is named by its kind and id: `agent:<tab id>`, `terminal:<pane id>`,
+/// `browser:<page id>`. The key of a workspace is the window's to choose (the
+/// checkout's path, or a quick chat's own id); it is opaque here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabLayout {
+    /// The tabs in the order the reader put them in. A tab not listed comes
+    /// after these, oldest first.
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Tabs kept at the left, drawn as an icon and left open by the bulk closes.
+    #[serde(default)]
+    pub pinned: Vec<String>,
+    /// Tabs that raise no banner, notice or tone.
+    #[serde(default)]
+    pub muted: Vec<String>,
+    /// The reader's own title for a tab. An agent tab's is also its
+    /// `TabEntry::title`, so everything that lists a session's tabs shows it.
+    #[serde(default)]
+    pub titles: BTreeMap<String, String>,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+impl TabLayout {
+    fn is_empty(&self) -> bool {
+        self.order.is_empty() && self.pinned.is_empty() && self.muted.is_empty() && self.titles.is_empty() && self.unknown.is_empty()
+    }
+
+    /// Say of `to` what the layout said of `from`. False when it said nothing.
+    fn rename(&mut self, from: &str, to: &str) -> bool {
+        let mut renamed = false;
+        for keys in [&mut self.order, &mut self.pinned, &mut self.muted] {
+            if !keys.iter().any(|key| key == from) {
+                continue;
+            }
+            renamed = true;
+            // A layout that already names `to` keeps what it says of it.
+            if keys.iter().any(|key| key == to) {
+                keys.retain(|key| key != from);
+            } else {
+                for key in keys.iter_mut().filter(|key| *key == from) {
+                    *key = to.to_string();
+                }
+            }
+        }
+        if let Some(title) = self.titles.remove(from) {
+            renamed = true;
+            self.titles.entry(to.to_string()).or_insert(title);
+        }
+        renamed
+    }
+}
+
+const AGENT_TAB: &str = "agent:";
+const SHELL_TAB: &str = "terminal:";
+
+/// An agent tab the reader closed, kept so it can be reopened with its
+/// conversation: the entry as it was, and the log that goes with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedTab {
+    pub session_id: String,
+    pub tab: TabEntry,
+    pub closed_at: String,
+}
+
+/// How many closed tabs a session keeps; the oldest goes when one more is closed.
+pub const CLOSED_TABS_KEPT: usize = 10;
+
+/// What every window needs about tabs beyond the sessions themselves.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TabState {
+    /// Workspace key to its layout; a workspace nobody arranged has none.
+    pub workspaces: BTreeMap<String, TabLayout>,
+    /// Closed agent tabs, oldest first.
+    pub closed: Vec<ClosedTab>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IndexFile {
     #[serde(default)]
     sessions: Vec<SessionEntry>,
+    /// Left out of the file until a workspace is arranged, so an index nobody
+    /// reordered is written exactly as before.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    workspace_tabs: BTreeMap<String, TabLayout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    closed_tabs: Vec<ClosedTab>,
+    #[serde(flatten, default)]
+    unknown: BTreeMap<String, serde_json::Value>,
 }
 
 fn file_path() -> Result<PathBuf> {
     Ok(super::sessions_dir()?.join("index.json"))
 }
 
-pub fn load() -> Result<Vec<SessionEntry>> {
-    Ok(super::read_json::<IndexFile>(&file_path()?)?.unwrap_or_default().sessions)
+fn load_file() -> Result<IndexFile> {
+    Ok(super::read_json::<IndexFile>(&file_path()?)?.unwrap_or_default())
 }
 
+fn save_file(file: &mut IndexFile) -> Result<()> {
+    // A closed tab goes with its session: there is nothing left to reopen it into.
+    let IndexFile { sessions, closed_tabs, .. } = file;
+    closed_tabs.retain(|closed| sessions.iter().any(|session| session.id == closed.session_id));
+    super::write_json(&file_path()?, &*file)
+}
+
+fn update_file<R>(f: impl FnOnce(&mut IndexFile) -> Result<R>) -> Result<R> {
+    let mut file = load_file()?;
+    let r = f(&mut file)?;
+    save_file(&mut file)?;
+    Ok(r)
+}
+
+pub fn load() -> Result<Vec<SessionEntry>> {
+    Ok(load_file()?.sessions)
+}
+
+/// Replace the sessions. What the file holds besides them (tab layouts,
+/// closed tabs, fields a newer build wrote) is kept. Everything outside
+/// tests goes through [`update`]; tests lay an index down with this.
+#[cfg(test)]
 pub fn save(sessions: &[SessionEntry]) -> Result<()> {
-    super::write_json(&file_path()?, &IndexFile { sessions: sessions.to_vec() })
+    // The sessions are written whatever the file held before, as they always were.
+    let mut file = load_file().unwrap_or_default();
+    file.sessions = sessions.to_vec();
+    save_file(&mut file)
 }
 
 /// Apply `f` to the whole index under the write lock and persist it.
 pub fn update<R>(f: impl FnOnce(&mut Vec<SessionEntry>) -> Result<R>) -> Result<R> {
-    let mut sessions = load()?;
-    let r = f(&mut sessions)?;
-    save(&sessions)?;
-    Ok(r)
+    update_file(|file| f(&mut file.sessions))
+}
+
+pub fn tab_state() -> Result<TabState> {
+    let file = load_file()?;
+    Ok(TabState { workspaces: file.workspace_tabs, closed: file.closed_tabs })
+}
+
+/// Save how a workspace's tabs are arranged; an empty layout forgets it.
+///
+/// Each session's own `tabs` are put in the same relative order, so whatever
+/// lists a session's tabs without knowing about layouts (the CLI, a phone, a
+/// paired device) shows them the way the strip does. Returns the sessions
+/// whose tabs moved. No session's `modified` changes: arranging tabs is not
+/// activity, and must not reorder the sidebar.
+pub fn set_tab_layout(workspace: &str, mut layout: TabLayout) -> Result<Vec<SessionEntry>> {
+    let mut seen = std::collections::HashSet::new();
+    layout.order.retain(|key| seen.insert(key.clone()));
+    update_file(|file| {
+        let rank: std::collections::HashMap<&str, usize> =
+            layout.order.iter().enumerate().filter_map(|(at, key)| key.strip_prefix(AGENT_TAB).map(|id| (id, at))).collect();
+        let mut moved = Vec::new();
+        for session in &mut file.sessions {
+            let before: Vec<String> = session.tabs.iter().map(|tab| tab.id.clone()).collect();
+            // Stable: tabs the layout does not name keep their places after the ones it does.
+            session.tabs.sort_by_key(|tab| rank.get(tab.id.as_str()).copied().unwrap_or(usize::MAX));
+            if session.tabs.iter().map(|tab| &tab.id).ne(before.iter()) {
+                moved.push(session.clone());
+            }
+        }
+        if layout.is_empty() {
+            file.workspace_tabs.remove(workspace);
+        } else {
+            file.workspace_tabs.insert(workspace.to_string(), layout);
+        }
+        Ok(moved)
+    })
+}
+
+/// Shells do not outlive the app, so a layout that still names one is naming
+/// a tab that cannot come back. Called once when the app starts.
+pub fn forget_shell_tabs() -> Result<()> {
+    let mut file = load_file()?;
+    let mut changed = false;
+    for layout in file.workspace_tabs.values_mut() {
+        let before = layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
+        let shell = |key: &String| key.starts_with(SHELL_TAB);
+        layout.order.retain(|key| !shell(key));
+        layout.pinned.retain(|key| !shell(key));
+        layout.muted.retain(|key| !shell(key));
+        layout.titles.retain(|key, _| !shell(key));
+        changed |= before != layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
+    }
+    if !changed {
+        return Ok(());
+    }
+    file.workspace_tabs.retain(|_, layout| !layout.is_empty());
+    save_file(&mut file)
+}
+
+/// A shell became an agent's tab (#437), under the tab's own id. What the
+/// reader arranged for the shell (its place in the row, a pin, a mute, a
+/// title) is the tab's from here on. Returns whether any layout named it.
+pub fn shell_became_tab(pane: &str, tab_id: &str) -> Result<bool> {
+    let (shell, tab) = (format!("{SHELL_TAB}{pane}"), format!("{AGENT_TAB}{tab_id}"));
+    let mut file = load_file()?;
+    let mut renamed = false;
+    for layout in file.workspace_tabs.values_mut() {
+        renamed |= layout.rename(&shell, &tab);
+    }
+    if renamed {
+        save_file(&mut file)?;
+    }
+    Ok(renamed)
+}
+
+/// Take an agent tab out of its session. With `keep` it stays reopenable;
+/// returns the tabs (session id, tab id) whose logs nothing refers to any
+/// more: this one when it is not kept, and the closed tabs it pushed out.
+pub fn close_tab(session_id: &str, tab_id: &str, keep: bool) -> Result<Vec<(String, String)>> {
+    update_file(|file| {
+        let session = file.sessions.iter_mut().find(|s| s.id == session_id).ok_or_else(|| anyhow!("session {session_id} not found"))?;
+        let Some(at) = session.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Ok(Vec::new());
+        };
+        session.modified = now();
+        let tab = session.tabs.remove(at);
+        if session.active_tab.as_deref() == Some(tab_id) {
+            session.active_tab = session.tabs.last().map(|t| t.id.clone());
+        }
+        if !keep {
+            return Ok(vec![(session_id.to_string(), tab.id)]);
+        }
+        file.closed_tabs.push(ClosedTab { session_id: session_id.to_string(), tab, closed_at: now() });
+        let mine = file.closed_tabs.iter().filter(|closed| closed.session_id == session_id).count();
+        let mut over = mine.saturating_sub(CLOSED_TABS_KEPT);
+        let mut dropped = Vec::new();
+        file.closed_tabs.retain(|closed| {
+            if over == 0 || closed.session_id != session_id {
+                return true;
+            }
+            over -= 1;
+            dropped.push((closed.session_id.clone(), closed.tab.id.clone()));
+            false
+        });
+        Ok(dropped)
+    })
+}
+
+/// Put a closed tab back into its session, as its active tab. Its log and the
+/// agent's own conversation were never touched, so it resumes where it was.
+pub fn reopen_tab(session_id: &str, tab_id: &str) -> Result<TabEntry> {
+    update_file(|file| {
+        let at = file
+            .closed_tabs
+            .iter()
+            .position(|closed| closed.session_id == session_id && closed.tab.id == tab_id)
+            .ok_or_else(|| anyhow!("tab {tab_id} is not a closed tab of session {session_id}"))?;
+        let session = file.sessions.iter_mut().find(|s| s.id == session_id).ok_or_else(|| anyhow!("session {session_id} not found"))?;
+        let mut tab = file.closed_tabs.remove(at).tab;
+        // Nothing ran while it was closed, and the pane it lived in went with it.
+        tab.status = TabStatus::Idle;
+        tab.lose_pane();
+        session.tabs.retain(|other| other.id != tab.id);
+        session.tabs.push(tab.clone());
+        session.active_tab = Some(tab.id.clone());
+        session.modified = now();
+        Ok(tab)
+    })
 }
 
 pub fn get(session_id: &str) -> Result<SessionEntry> {
@@ -504,6 +758,231 @@ mod tests {
             active_tab: None,
             unknown: BTreeMap::new(),
         }
+    }
+
+    fn tab(id: &str) -> TabEntry {
+        serde_json::from_value(serde_json::json!({"id": id, "harness": "claude", "created": "x"})).unwrap()
+    }
+
+    fn layout(order: &[&str]) -> TabLayout {
+        TabLayout { order: order.iter().map(|key| key.to_string()).collect(), ..Default::default() }
+    }
+
+    fn tab_ids(session_id: &str) -> Vec<String> {
+        get(session_id).unwrap().tabs.into_iter().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn a_tab_layout_is_saved_and_puts_each_sessions_tabs_in_the_same_order() {
+        let _home = crate::store::temp_home();
+        let (mut a, mut b) = (entry("a"), entry("b"));
+        a.tabs = vec![tab("a1"), tab("a2"), tab("a3")];
+        b.tabs = vec![tab("b1"), tab("b2")];
+        a.modified = "before".into();
+        save(&[a, b]).unwrap();
+
+        // One order for the whole workspace: tabs of two sessions interleaved, with a shell between them.
+        let mut wanted = layout(&["agent:b2", "agent:a3", "terminal:a:1", "agent:a1", "agent:b1", "agent:a3"]);
+        wanted.pinned = vec!["agent:b2".into()];
+        wanted.titles.insert("browser:p1".into(), "Docs".into());
+        let moved = set_tab_layout("/p", wanted).unwrap();
+
+        assert_eq!(moved.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        // A tab the layout does not name (a2) keeps its place after the ones it does.
+        assert_eq!(tab_ids("a"), ["a3", "a1", "a2"]);
+        assert_eq!(tab_ids("b"), ["b2", "b1"]);
+        // Arranging tabs is not activity.
+        assert_eq!(get("a").unwrap().modified, "before");
+
+        let saved = &tab_state().unwrap().workspaces["/p"];
+        assert_eq!(saved.order, ["agent:b2", "agent:a3", "terminal:a:1", "agent:a1", "agent:b1"], "a key listed twice is kept once");
+        assert_eq!(saved.pinned, ["agent:b2"]);
+        assert_eq!(saved.titles["browser:p1"], "Docs");
+
+        // Saving the same order again moves nothing.
+        assert!(set_tab_layout("/p", saved.clone()).unwrap().is_empty());
+        // An empty layout forgets the workspace.
+        set_tab_layout("/p", TabLayout::default()).unwrap();
+        assert!(tab_state().unwrap().workspaces.is_empty());
+        assert_eq!(tab_ids("a"), ["a3", "a1", "a2"], "the sessions keep the order they were given");
+    }
+
+    #[test]
+    fn writing_sessions_keeps_the_layouts_and_an_untouched_index_gains_no_field() {
+        let _home = crate::store::temp_home();
+        save(&[entry("a")]).unwrap();
+        let text = std::fs::read_to_string(file_path().unwrap()).unwrap();
+        assert!(!text.contains("workspaceTabs") && !text.contains("closedTabs"));
+
+        set_tab_layout("/p", layout(&["agent:t1"])).unwrap();
+        // Every other write of the index goes through these two.
+        save(&[entry("a"), entry("b")]).unwrap();
+        update_session("a", |s| {
+            s.title = "renamed".into();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(tab_state().unwrap().workspaces["/p"].order, ["agent:t1"]);
+        assert_eq!(load().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_layout_field_a_newer_build_wrote_survives() {
+        let _home = crate::store::temp_home();
+        let raw = r#"{"sessions":[],"futureTop":1,"workspaceTabs":{"/p":{"order":["agent:t1"],"groups":[["agent:t1"]]}}}"#;
+        std::fs::write(file_path().unwrap(), raw).unwrap();
+        save(&[entry("a")]).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file_path().unwrap()).unwrap()).unwrap();
+        assert_eq!(stored["futureTop"], 1);
+        assert_eq!(stored["workspaceTabs"]["/p"]["groups"][0][0], "agent:t1");
+    }
+
+    #[test]
+    fn shell_tabs_are_forgotten_when_the_app_starts() {
+        let _home = crate::store::temp_home();
+        save(&[entry("a")]).unwrap();
+        let mut mixed = layout(&["terminal:a:1", "agent:t1", "browser:p1"]);
+        mixed.pinned = vec!["terminal:a:1".into(), "browser:p1".into()];
+        mixed.muted = vec!["terminal:a:1".into()];
+        mixed.titles.insert("terminal:a:1".into(), "server".into());
+        set_tab_layout("/p", mixed).unwrap();
+        set_tab_layout("/q", layout(&["terminal:b:1"])).unwrap();
+
+        forget_shell_tabs().unwrap();
+
+        let state = tab_state().unwrap();
+        let kept = &state.workspaces["/p"];
+        assert_eq!(kept.order, ["agent:t1", "browser:p1"]);
+        assert_eq!(kept.pinned, ["browser:p1"]);
+        assert!(kept.muted.is_empty() && kept.titles.is_empty());
+        assert!(!state.workspaces.contains_key("/q"), "a layout of shells alone is gone");
+    }
+
+    /// A shell an agent is started in becomes that agent's tab (#437), and
+    /// what the reader arranged for the shell goes with it.
+    #[test]
+    fn a_shell_that_became_a_tab_keeps_its_place_pin_mute_and_title() {
+        let _home = crate::store::temp_home();
+        save(&[entry("a")]).unwrap();
+        let mut arranged = layout(&["agent:t1", "terminal:a:1", "browser:p1", "terminal:a:2"]);
+        arranged.pinned = vec!["terminal:a:1".into()];
+        arranged.muted = vec!["terminal:a:1".into()];
+        arranged.titles.insert("terminal:a:1".into(), "dev server".into());
+        set_tab_layout("/p", arranged).unwrap();
+        set_tab_layout("/q", layout(&["terminal:b:1"])).unwrap();
+
+        assert!(shell_became_tab("a:1", "typed").unwrap());
+
+        let state = tab_state().unwrap();
+        let now = &state.workspaces["/p"];
+        assert_eq!(now.order, ["agent:t1", "agent:typed", "browser:p1", "terminal:a:2"]);
+        assert_eq!(now.pinned, ["agent:typed"]);
+        assert_eq!(now.muted, ["agent:typed"]);
+        assert_eq!(now.titles.get("agent:typed").map(String::as_str), Some("dev server"));
+        assert!(!now.titles.contains_key("terminal:a:1"));
+        assert_eq!(state.workspaces["/q"].order, ["terminal:b:1"], "another workspace's shells are not touched");
+        // The app starts again: the other shells are forgotten, and the tab is still where the shell stood.
+        forget_shell_tabs().unwrap();
+        assert_eq!(tab_state().unwrap().workspaces["/p"].order, ["agent:t1", "agent:typed", "browser:p1"]);
+        // A shell no layout names changes nothing, and a layout that already names the tab keeps its own word.
+        assert!(!shell_became_tab("a:9", "other").unwrap());
+        let mut both = layout(&["agent:typed", "terminal:a:3"]);
+        both.titles.insert("agent:typed".into(), "mine".into());
+        both.titles.insert("terminal:a:3".into(), "older".into());
+        set_tab_layout("/p", both).unwrap();
+        assert!(shell_became_tab("a:3", "typed").unwrap());
+        let now = &tab_state().unwrap().workspaces["/p"];
+        assert_eq!(now.order, ["agent:typed"]);
+        assert_eq!(now.titles.get("agent:typed").map(String::as_str), Some("mine"));
+    }
+
+    /// The pane a tab lived in is killed when the tab is closed (#437): it
+    /// comes back in a pane of its own, with its conversation for the app to
+    /// resume, and one that was a terminal is still a terminal.
+    #[test]
+    fn a_reopened_tab_does_not_come_back_to_the_pane_it_lived_in() {
+        let _home = crate::store::temp_home();
+        let mut a = entry("a");
+        let mut typed = tab("typed");
+        typed.follow = Follow { front: Front::ByHand, pane: Some("a:1".into()), title_pinned: true, ..Default::default() };
+        let mut shell = tab("shell");
+        shell.follow = Follow { front: Front::Terminal, pane: Some("a:2".into()), terminal_title: Some("Terminal 2".into()), ..Default::default() };
+        a.tabs = vec![typed, shell, tab("t3")];
+        save(&[a]).unwrap();
+
+        close_tab("a", "typed", true).unwrap();
+        close_tab("a", "shell", true).unwrap();
+        let typed = reopen_tab("a", "typed").unwrap();
+        assert_eq!((typed.follow.front, typed.follow.pane.as_deref(), typed.follow.title_pinned), (Front::Agent, None, true));
+        assert_eq!(typed.pane_id(), "tab:typed");
+        let shell = reopen_tab("a", "shell").unwrap();
+        assert_eq!((shell.follow.front, shell.follow.pane.as_deref(), shell.follow.terminal_title.as_deref()), (Front::Terminal, None, Some("Terminal 2")));
+        assert_eq!(get("a").unwrap().tab("typed").unwrap().follow.pane, None);
+    }
+
+    #[test]
+    fn a_closed_tab_is_kept_and_comes_back_as_it_was() {
+        let _home = crate::store::temp_home();
+        let mut a = entry("a");
+        let mut talked = tab("t1");
+        talked.provider_session_id = Some("conversation".into());
+        talked.title = Some("Fix login".into());
+        talked.status = TabStatus::Completed;
+        a.tabs = vec![talked, tab("t2")];
+        a.active_tab = Some("t1".into());
+        save(&[a]).unwrap();
+
+        assert!(close_tab("a", "t1", true).unwrap().is_empty(), "nothing of a kept tab is deleted");
+        let session = get("a").unwrap();
+        assert_eq!(tab_ids("a"), ["t2"]);
+        assert_eq!(session.active_tab.as_deref(), Some("t2"));
+        let closed = tab_state().unwrap().closed;
+        assert_eq!(closed.len(), 1);
+        assert_eq!((closed[0].session_id.as_str(), closed[0].tab.id.as_str()), ("a", "t1"));
+
+        let back = reopen_tab("a", "t1").unwrap();
+        assert_eq!(back.provider_session_id.as_deref(), Some("conversation"));
+        assert_eq!(back.title.as_deref(), Some("Fix login"));
+        assert_eq!(back.status, TabStatus::Idle);
+        let session = get("a").unwrap();
+        assert_eq!(tab_ids("a"), ["t2", "t1"]);
+        assert_eq!(session.active_tab.as_deref(), Some("t1"));
+        assert!(tab_state().unwrap().closed.is_empty());
+        assert!(reopen_tab("a", "t1").is_err(), "it can be reopened once");
+
+        // A tab with nothing to bring back is simply removed, and says so.
+        assert_eq!(close_tab("a", "t2", false).unwrap(), [("a".to_string(), "t2".to_string())]);
+        assert!(tab_state().unwrap().closed.is_empty());
+        // Closing a tab that is already gone is not an error.
+        assert!(close_tab("a", "t2", true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_session_keeps_its_last_closed_tabs_and_they_go_with_it() {
+        let _home = crate::store::temp_home();
+        let (mut a, mut b) = (entry("a"), entry("b"));
+        a.tabs = (0..CLOSED_TABS_KEPT + 2).map(|n| tab(&format!("a{n}"))).collect();
+        b.tabs = vec![tab("b0")];
+        save(&[a, b]).unwrap();
+        close_tab("b", "b0", true).unwrap();
+
+        let mut dropped = Vec::new();
+        for n in 0..CLOSED_TABS_KEPT + 2 {
+            dropped.extend(close_tab("a", &format!("a{n}"), true).unwrap());
+        }
+        // The two oldest of this session made room; another session's is not touched.
+        assert_eq!(dropped, [("a".to_string(), "a0".to_string()), ("a".to_string(), "a1".to_string())]);
+        let closed = tab_state().unwrap().closed;
+        assert_eq!(closed.iter().filter(|c| c.session_id == "a").count(), CLOSED_TABS_KEPT);
+        assert!(closed.iter().any(|c| c.session_id == "b"));
+
+        update(|sessions| {
+            sessions.retain(|s| s.id != "a");
+            Ok(())
+        })
+        .unwrap();
+        let closed = tab_state().unwrap().closed;
+        assert_eq!(closed.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>(), ["b"]);
     }
 
     #[test]

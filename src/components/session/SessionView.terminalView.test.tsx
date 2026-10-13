@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import type { AgentEvent, Payload } from "@/types/events";
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   guard: null as unknown as ReturnType<typeof import("@/test/guardedApi").guardedApi>,
   workspaceConnection: vi.fn(),
   catalog: { owner: "me", revision: "r", loaded: true, orgs: {} as Record<string, unknown>, createMemory: {}, notices: [] },
-  prefs: { panelOpen: false, panelWidth: 360, sidebarOpen: true, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true, shortcuts: {} as Record<string, string[]> },
+  prefs: { panelOpen: false, panelWidth: 360, sidebarOpen: true, tabStrip: false, lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", useWorktree: true, shortcuts: {} as Record<string, string[]> },
   createTerminal: (): unknown => undefined,
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (command: string, args?: Record<string, unknown>) => mocks.guard.invoke(command, args) }));
@@ -77,10 +77,10 @@ import { agentTerminalId, agentTerminalOf, cloudTerminalFactory, ensureAgentTerm
 import { getInstance } from "@/lib/terminal";
 import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
-import { selectSessionTab } from "@/lib/terminal";
+import { dropSessionTerminals, selectSessionTab } from "@/lib/terminal";
 import { TERMINAL_VIEW_OLD_RUNTIME, resetCloudWakes } from "@/lib/sessionBackend";
 import { resetTabViews } from "@/lib/tabViews";
-import { upsertSession } from "@/lib/sessions";
+import { upsertSession, useSessionStore } from "@/lib/sessions";
 import { cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FakeAgentRuntime, agentTab, fakeXterm, type FakeXterm } from "@/test/fakeAgentRuntime";
@@ -236,6 +236,142 @@ describe("the chat / terminal switch on a local agent tab", () => {
   });
 });
 
+describe("a local session's title bar with the tabs in it (#438)", () => {
+  const tab = (id: string, harness: string, title: string | null) => ({ id, harness, title, model: "", permissionMode: "bypassPermissions", status: "idle" as const, created: `2026-10-01T00:00:0${id.at(-1)}.000Z`, modified: "" });
+  const local = (patch: Partial<SessionEntry> = {}): SessionEntry => ({
+    id: "strip-1",
+    projectPath: "/Users/me/api",
+    cwd: "/Users/me/api/.raccoon/worktrees/fix",
+    worktreeName: "fix",
+    branch: "raccoon/fix",
+    title: "Fix the login loop",
+    created: "",
+    modified: "",
+    archived: false,
+    pinned: false,
+    worktreeRemoved: false,
+    issue: { provider: "github", id: "12", identifier: "#12", title: "Login loops", url: "https://example.test/12" },
+    automation: { id: "auto", name: "Nightly", runId: "run", runNumber: 3 },
+    worktreeBase: { commit: "123456789abcdef", fetched: true, warning: null },
+    tabs: [tab("st-1", "claude", "Investigate"), tab("st-2", "codex", "Write the fix")],
+    activeTab: "st-1",
+    ...patch,
+  });
+  /** The session as the store has it, so closing a tab is seen. */
+  function Local() {
+    const session = useSessionStore().sessions.find((candidate) => candidate.id === "strip-1");
+    return session ? <SessionView session={session} sidebarOpen onToggleSidebar={() => undefined} /> : null;
+  }
+  const show = (patch: Partial<SessionEntry> = {}) => {
+    upsertSession(local(patch));
+    selectSessionTab("strip-1", { kind: "agent", id: "st-1" });
+    const view = render(wrap(<Local />));
+    return view.container.querySelector("header")!;
+  };
+  const spawned = () => guard.calls.filter((call) => call.command === "pty_spawn");
+
+  beforeEach(() => {
+    guard.strict = false;
+    guard.local = () => null;
+    guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "raccoon/fix", ahead: 0, behind: 0 });
+    mocks.prefs.tabStrip = true;
+  });
+  afterEach(() => {
+    mocks.prefs.tabStrip = false;
+    // A shell one test opened is not there for the next.
+    dropSessionTerminals(["strip-1"]);
+  });
+
+  it("holds the session's tabs with the + after them, and the session's name and chips in a compact form", () => {
+    const header = show();
+    const strip = within(header).getByRole("tablist", { name: "Workspace tabs" });
+    expect(within(strip).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Investigate", "Write the fix"]);
+    const plus = within(header).getByRole("button", { name: "New tab" });
+    expect(strip.compareDocumentPosition(plus) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The + ends the row of tabs: it is not among the session's actions at the right any more.
+    const actions = header.lastElementChild!;
+    expect(actions.contains(plus)).toBe(false);
+    expect(within(actions as HTMLElement).getByRole("button", { name: "Toggle panel" })).toBeTruthy();
+
+    // One label for the session, with the project and the session on its hover, and where it runs.
+    expect(screen.queryByTestId("session-project")).toBeNull();
+    const title = screen.getByTestId("session-title");
+    expect(title.textContent).toBe("Fix the login loop");
+    expect(title.getAttribute("title")).toBe("project / Fix the login loop\n/Users/me/api/.raccoon/worktrees/fix\nBase 1234567 · fetched at creation");
+    // The issue and automation chips are still there, and so is the branch.
+    expect(within(header).getByRole("button", { name: "#12" })).toBeTruthy();
+    expect(screen.getByTestId("session-automation").textContent).toBe("Nightly #3");
+    expect(screen.getByTestId("session-branch").textContent).toBe("fix");
+    // An ordinary base is on the hover; it is not spelled out beside the tabs.
+    expect(screen.queryByText("Base 1234567 · fetched at creation")).toBeNull();
+    // What is left between the + and the actions is empty: the window is dragged from there, and from no tab.
+    expect(header.getAttribute("data-tauri-drag-region")).toBe("deep");
+    expect(screen.getByTestId("session-header-handle").children).toHaveLength(0);
+    for (const item of within(strip).getAllByRole("tab")) expect(item.closest("[data-tauri-drag-region]")!.getAttribute("data-tauri-drag-region")).toBe("false");
+  });
+
+  it("names each tab's panel by its tab in the strip", () => {
+    show();
+    const panels = [...document.querySelectorAll('[role="tabpanel"]')];
+    expect(panels).toHaveLength(2);
+    for (const panel of panels) {
+      const named = document.getElementById(panel.getAttribute("aria-labelledby")!)!;
+      expect(named.getAttribute("role")).toBe("tab");
+      expect(named.getAttribute("aria-controls")).toBe(panel.id);
+    }
+  });
+
+  it("still says so beside the tabs when the base may be out of date", () => {
+    show({ worktreeBase: { commit: "123456789abcdef", fetched: false, warning: "Fetch timed out. This worktree may be out of date." } });
+    expect(screen.getByRole("status").textContent).toBe("Base may be out of date");
+  });
+
+  it("goes back to the breadcrumb, with the tabs in the sidebar alone, when the strip is turned off", () => {
+    mocks.prefs.tabStrip = false;
+    const header = show();
+    expect(within(header).queryByRole("tablist")).toBeNull();
+    expect(screen.getByTestId("session-project").textContent).toBe("project");
+    expect(screen.getByText("Base 1234567 · fetched at creation")).toBeTruthy();
+    expect(header.lastElementChild!.contains(within(header).getByRole("button", { name: "New tab" }))).toBe(true);
+    expect(document.querySelector('[role="tabpanel"]')!.getAttribute("aria-labelledby")).toBe("session-agent-tab-st-1");
+  });
+
+  it("is not drawn for a cloud session", async () => {
+    await open();
+    expect(screen.queryByRole("tablist", { name: "Workspace tabs" })).toBeNull();
+    expect(screen.getByTestId("session-project")).toBeTruthy();
+  });
+
+  it("leaves the reader on the terminal they are in when the last agent tab is closed from the strip", async () => {
+    const header = show({ tabs: [tab("st-1", "claude", "Investigate")] });
+    fireEvent.click(within(header).getByRole("button", { name: "New tab" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    await waitFor(() => expect(spawned()).toHaveLength(1));
+    const tabs = () => within(header).getAllByRole("tab");
+    await waitFor(() => expect(tabs().map((item) => item.getAttribute("aria-selected"))).toEqual(["false", "true"]));
+
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(tabs()[0].getAttribute("aria-selected")).toBe("true"));
+    fireEvent.click(tabs()[1]);
+    await waitFor(() => expect(tabs()[1].getAttribute("aria-selected")).toBe("true"));
+    // Closing the agent tab, which is not the one on screen.
+    fireEvent.click(header.querySelector('[aria-label="Close Investigate"]') as HTMLElement);
+    await waitFor(() => expect(guard.calls.some((call) => call.command === "remove_tab")).toBe(true));
+    await settle();
+    // The terminal is still the tab on screen, and no shell was opened behind it.
+    expect(tabs().map((item) => [item.getAttribute("aria-label"), item.getAttribute("aria-selected")])).toEqual([["Terminal 1", "true"]]);
+    expect(spawned()).toHaveLength(1);
+  });
+
+  it("opens a shell, as before, when the last tab of any kind closes", async () => {
+    const header = show({ tabs: [tab("st-1", "claude", "Investigate")] });
+    expect(spawned()).toHaveLength(0);
+    fireEvent.click(header.querySelector('[aria-label="Close Investigate"]') as HTMLElement);
+    await waitFor(() => expect(spawned()).toHaveLength(1));
+    await waitFor(() => expect(within(header).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Terminal 1"]));
+  });
+});
+
 describe("a quick chat in the floating window's compact chrome", () => {
   const scratch = "/Users/me/.raccoon/quick/quick-1";
   const quick = (): SessionEntry => ({
@@ -296,11 +432,11 @@ describe("a quick chat in the floating window's compact chrome", () => {
     upsertSession(session);
     render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
     // One tab: nothing to switch between, so no strip.
-    expect(screen.queryByTestId("session-tab-strip")).toBeNull();
+    expect(screen.queryByTestId("workspace-tab-strip")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
-    const strip = await screen.findByTestId("session-tab-strip");
+    const strip = await screen.findByTestId("workspace-tab-strip");
     await waitFor(() => expect(spawned()).toHaveLength(1));
     // In the session's working directory: the scratch folder, not the home directory or a repository.
     expect(spawned()[0]).toMatchObject({ cwd: scratch, title: "Terminal 1" });
@@ -333,7 +469,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("session-branch")).toBeNull();
     // The main window's own chrome is untouched.
     expect(screen.getByRole("button", { name: "Toggle panel" })).toBeTruthy();
-    expect(screen.queryByTestId("session-tab-strip")).toBeNull();
+    expect(screen.queryByTestId("workspace-tab-strip")).toBeNull();
   });
 });
 

@@ -271,6 +271,8 @@ export interface TabRowProps extends TabRowPassThrough {
   onOpen: () => void;
   /** Absent when this reader may not close the tab (a cloud tab for anyone but a workspace manager): no close button is drawn. */
   onClose?: () => void;
+  /** Pinned in its workspace's row of tabs: listed first, and marked. */
+  pinned?: boolean;
   children: ReactNode;
 }
 
@@ -279,7 +281,7 @@ export interface TabRowProps extends TabRowPassThrough {
  * middle click or its hover close button. Remaining props (a context menu
  * trigger's handlers and ref, `aria-description`) land on the row element.
  */
-export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, children, ...rest }: TabRowProps) {
+export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLabel, onOpen, onClose, pinned, children, ...rest }: TabRowProps) {
   const style = TAB_ROW[tone];
   return (
     <div
@@ -303,6 +305,7 @@ export function TabRow({ tone, nodeId, panelId, label, title, selected, closeLab
       className={cn(style.row, selected ? "bg-(--surface-thumb) text-foreground shadow-button" : style.idle)}
     >
       {children}
+      {pinned ? <Pin className="size-3 shrink-0 text-faint" aria-label="Pinned tab" /> : null}
       {onClose && (
         <button
           type="button"

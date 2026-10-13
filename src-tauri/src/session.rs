@@ -463,14 +463,8 @@ pub fn idle_orphaned_tabs() {
                 if matches!(t.status, TabStatus::InProgress | TabStatus::Waiting) {
                     t.status = TabStatus::Idle;
                 }
-                // Nor does any pane: a tab that lived in a shell's has its
-                // own from here on, and an agent that was started by hand
-                // went with the terminal it was started in. Its conversation
-                // is the tab's, for the app to resume when the tab is opened.
-                t.follow.pane = None;
-                if t.follow.front == index::Front::ByHand {
-                    t.follow.front = index::Front::Agent;
-                }
+                // Nor does any pane.
+                t.lose_pane();
             }
         }
         Ok(())
