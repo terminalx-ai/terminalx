@@ -846,6 +846,35 @@ fn the_disk_has_the_last_word_after_a_publish() {
     }
 }
 
+// #451: with the workspace unchanged, a discard left the edits on disk while the mirror read "Files synced".
+#[test]
+fn a_discard_is_owed_until_a_sync_has_put_the_files_back() {
+    let mut f = Fixture::new();
+    f.remote_write("README.md", "v1\n");
+    f.remote_write("src/app.js", "v1\n");
+    f.sync().unwrap();
+    assert_eq!(f.mirror.pending_discards().unwrap(), 0);
+    f.write_local("README.md", "my local edit\n");
+    std::fs::remove_file(f.files().join("src/app.js")).unwrap();
+    assert_eq!(f.mirror.check().unwrap().1, 2);
+
+    // The workspace has not changed: the same manifest as the last sync.
+    assert_eq!(f.mirror.resolve(&f.manifest(), Resolution::Discard).unwrap().paths, 2);
+    // The answer is recorded, so the paths are no longer a divergence; nothing is on disk yet, and the check says so.
+    assert_eq!(f.mirror.check().unwrap(), (Vec::new(), 0));
+    assert_eq!(f.mirror.pending_discards().unwrap(), 2);
+    assert_eq!(f.local("README.md").as_deref(), Some("my local edit\n"));
+    let plan = f.mirror.plan(&f.manifest()).unwrap();
+    assert!(!plan.up_to_date);
+    assert_eq!(plan.fetch, ["README.md", "src/app.js"]);
+
+    f.sync().unwrap();
+    assert_eq!(f.local("README.md").as_deref(), Some("v1\n"));
+    assert_eq!(f.local("src/app.js").as_deref(), Some("v1\n"));
+    assert_eq!(f.mirror.pending_discards().unwrap(), 0);
+    assert!(f.mirror.plan(&f.manifest()).unwrap().up_to_date);
+}
+
 #[test]
 fn an_edit_made_after_discard_is_a_new_divergence() {
     let mut f = Fixture::new();

@@ -96,7 +96,7 @@ beforeEach(async () => {
   mocks.api.cloudMirrorPlan.mockResolvedValue(plan(["a.ts", "b.ts"]));
   mocks.api.cloudMirrorStage.mockResolvedValue(undefined);
   mocks.api.cloudMirrorPublish.mockResolvedValue({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0, takenBack: 0 });
-  mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0 });
+  mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0, discarded: 0 });
   mocks.api.cloudMirrorClaimOwner.mockResolvedValue(0);
   mirror.bootCloudMirrors();
   await mirror.claimCloudMirrorOwner("ada@example.com");
@@ -215,11 +215,46 @@ describe("the local mirror's sync loop", () => {
 
   it("notices a local edit of an unchanged workspace", async () => {
     mocks.api.cloudMirrorStatus.mockResolvedValue(status(true, "m1"));
-    mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [{ path: "b.ts", reason: "deleted" }], divergedTotal: 1 });
+    mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [{ path: "b.ts", reason: "deleted" }], divergedTotal: 1, discarded: 0 });
     connect();
     await settle();
     expect(mirror.cloudMirrorState(KEY).phase).toBe("diverged");
     expect(mocks.api.cloudMirrorPlan).not.toHaveBeenCalled();
+  });
+
+  // #451: the workspace had not changed, so the scan after a discard only checked for local changes,
+  // found none (the discarded paths are answered) and said "Files synced" with the edits still on disk.
+  it("after a discard on an unchanged workspace, fetches the files before it says synced", async () => {
+    mocks.api.cloudMirrorStatus.mockResolvedValue(status(true, "m1"));
+    const diverged = [{ path: "a.ts", reason: "modified" }, { path: "b.ts", reason: "deleted" }];
+    mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged, divergedTotal: 2, discarded: 0 });
+    connect();
+    await settle();
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("diverged");
+    expect(mocks.api.cloudMirrorPlan).not.toHaveBeenCalled();
+
+    // The answer is recorded: no divergence any more, and two paths still to put back.
+    mocks.api.cloudMirrorResolve.mockResolvedValue({ paths: 2, exportedTo: null });
+    mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0, discarded: 2 });
+    mocks.api.cloudMirrorPlan.mockResolvedValue(plan(["a.ts", "b.ts"]));
+    let finish: (value: unknown) => void = () => undefined;
+    mocks.api.cloudMirrorPublish.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    const resolving = mirror.resolveCloudMirror(target, "discard");
+    await settle();
+    // Not synced while the files are still being put back.
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("syncing");
+    expect(mocks.readRemoteFile.mock.calls.map(([, path]) => path)).toEqual(["a.ts", "b.ts"]);
+    expect(mocks.api.cloudMirrorStage.mock.calls.map(([, , path]) => path)).toEqual(["a.ts", "b.ts"]);
+
+    mocks.api.cloudMirrorCheck.mockResolvedValue({ diverged: [], divergedTotal: 0, discarded: 0 });
+    finish({ status: status(true, "m1"), diverged: [], divergedTotal: 0, written: 2, removed: 0, takenBack: 0 });
+    await resolving;
+    expect(mirror.cloudMirrorState(KEY).phase).toBe("synced");
+
+    // Nothing owed any more: the next scan of the unchanged workspace reads nothing.
+    await vi.advanceTimersByTimeAsync(mirror.MIRROR_SCAN_MS);
+    expect(mocks.api.cloudMirrorPlan).toHaveBeenCalledTimes(1);
+    expect(mocks.readRemoteFile).toHaveBeenCalledTimes(2);
   });
 
   it("reports a failure with its reason, keeps the last successful revision, and tries again", async () => {

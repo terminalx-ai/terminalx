@@ -3716,6 +3716,8 @@ fn cloud_mirror(organization_id: &str, workspace_id: &str) -> CmdResult<crate::c
 pub struct CloudMirrorCheck {
     diverged: Vec<crate::cloud_mirror::Divergence>,
     diverged_total: usize,
+    /// Discarded paths no sync has replaced yet: not in sync until a plan is carried out.
+    discarded: usize,
 }
 
 #[tauri::command]
@@ -3736,8 +3738,9 @@ pub async fn cloud_mirror_disable(organization_id: String, workspace_id: String,
 #[tauri::command]
 pub async fn cloud_mirror_check(organization_id: String, workspace_id: String) -> CmdResult<CloudMirrorCheck> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (diverged, diverged_total) = cloud_mirror(&organization_id, &workspace_id)?.check().map_err(err)?;
-        Ok(CloudMirrorCheck { diverged, diverged_total })
+        let mirror = cloud_mirror(&organization_id, &workspace_id)?;
+        let (diverged, diverged_total) = mirror.check().map_err(err)?;
+        Ok(CloudMirrorCheck { diverged, diverged_total, discarded: mirror.pending_discards().map_err(err)? })
     })
     .await
     .map_err(err)?

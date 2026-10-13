@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Cloud
+
+- Local mirror: "Discard my changes" (and "Keep a copy, then discard") now
+  puts the workspace's files back right away, and reads "Files synced" only
+  once they are back. With an unchanged workspace it used to say "Files
+  synced" at once and leave the discarded edits on disk until the workspace
+  next changed. (#451)
+
 ## 0.2.11
 
 Issue sessions that carry through a pull request, review and optional merge;

@@ -519,7 +519,7 @@ export const api = {
   cloudMirrorDisable: (organizationId: string, workspaceId: string, removeFiles: boolean) =>
     invoke<CloudMirrorStatus>("cloud_mirror_disable", { organizationId, workspaceId, removeFiles }),
   cloudMirrorCheck: (organizationId: string, workspaceId: string) =>
-    invoke<{ diverged: CloudMirrorDivergence[]; divergedTotal: number }>("cloud_mirror_check", { organizationId, workspaceId }),
+    invoke<{ diverged: CloudMirrorDivergence[]; divergedTotal: number; discarded: number }>("cloud_mirror_check", { organizationId, workspaceId }),
   cloudMirrorPlan: (organizationId: string, workspaceId: string, manifest: CloudMirrorManifestInput) =>
     invoke<CloudMirrorPlan>("cloud_mirror_plan", { organizationId, workspaceId, manifest }),
   cloudMirrorStage: (organizationId: string, workspaceId: string, relative: string, dataB64: string, size: number, etag: string) =>

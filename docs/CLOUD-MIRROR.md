@@ -282,7 +282,9 @@ left out.
 
 The native side is eight commands and holds no loop of its own:
 `cloud_mirror_status`, `_enable`, `_disable`, `_check` (local changes only,
-asks the workspace nothing), `_plan`, `_stage`, `_publish`, `_resolve`. None
+asks the workspace nothing; it also counts the discarded paths no sync has
+replaced yet, and while there are any the loop plans and fetches even for an
+unchanged manifest), `_plan`, `_stage`, `_publish`, `_resolve`. None
 takes a local path; the mirror's directory is derived from the two ids and
 only reported back for the UI. A file that was rewritten with the same
 content (an editor's save) is not a change: size and modification time are
@@ -301,6 +303,10 @@ nothing by itself.
   - **Discard local changes**: the listed paths are replaced by the
     workspace's versions. The choice covers what was there when it was
     made: a file edited again before the next sync is a new divergence.
+    The files are fetched right away, whether or not the workspace has
+    changed, and the mirror says "Files synced" only once they are back
+    (#451: with an unchanged workspace it used to say so at once and leave
+    the edits on disk until the workspace next changed).
   - **Export, then discard**: the local versions are first copied to
     `exports/<time>/` beside the mirror.
 - Local files the workspace has no file for, at paths it does not use, are
