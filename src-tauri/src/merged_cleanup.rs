@@ -90,7 +90,7 @@ pub struct PrRef {
 
 /// What became of a branch when its workspace was removed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "camelCase")]
+#[serde(tag = "outcome", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum BranchFate {
     Deleted,
     /// It was not there any more (GitHub deletes a merged branch itself when

@@ -234,12 +234,30 @@ describe("with the setting on for this computer", () => {
     expect(Object.values(lib.getMergedCleanup().unreadable)).toEqual(["gh: not logged in"]);
   });
 
+  it("looks at once when an issue's pipeline merges its pull request, and once only", async () => {
+    await lib.bootMergedCleanup();
+    await flush();
+    expect(calls("merged_cleanup_sweep")).toHaveLength(1);
+    const heard = (state: string) => mocks.listeners.get("issue_pipeline")!({ payload: { id: "p1", state } });
+    heard("readyToMerge");
+    await flush();
+    expect(calls("merged_cleanup_sweep")).toHaveLength(1);
+    heard("merged");
+    await flush();
+    expect(calls("merged_cleanup_sweep")).toHaveLength(2);
+    // Whatever else the pipeline says once merged is not a reason to ask GitHub again.
+    heard("merged");
+    await flush();
+    expect(calls("merged_cleanup_sweep")).toHaveLength(2);
+  });
+
   it("only the main window runs passes; the floating window mirrors the setting", async () => {
     setAppWindowForTest("floating");
     await lib.bootMergedCleanup();
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(lib.getMergedCleanup().settings.enabled).toBe(true);
     expect(calls("merged_cleanup_sweep")).toEqual([]);
+    expect(mocks.listeners.has("issue_pipeline")).toBe(false);
   });
 
   it("a notice waits for the reader to be at the app before it goes by itself", async () => {

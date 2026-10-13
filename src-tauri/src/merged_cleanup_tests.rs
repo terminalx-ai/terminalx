@@ -1,5 +1,5 @@
 use super::*;
-use crate::store::index::{TabEntry, TabStatus};
+use crate::store::index::{Front, TabEntry, TabStatus};
 use crate::store::projects::Project;
 use crate::worktree_cleanup::Live;
 use chrono::SubsecRound;
@@ -251,6 +251,15 @@ fn reason(status: &Status) -> (Phase, &str) {
     (status.phase, status.reason.as_deref().unwrap_or_default())
 }
 
+/// What a session's tab is now that it follows its terminal (#437).
+fn fronted(session: &SessionEntry, front: Front) {
+    index::update(|sessions| {
+        sessions.iter_mut().find(|entry| entry.id == session.id).unwrap().tabs[0].follow.front = front;
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[test]
 fn with_the_setting_off_nothing_is_looked_at_and_nothing_goes() {
     let f = Fixture::new();
@@ -477,6 +486,38 @@ fn an_agent_sitting_idle_is_stopped_and_does_not_keep_it_but_something_else_runn
     both.sort();
     assert_eq!(stopped, both);
     assert!(!index::get(&busy_session.id).unwrap().worktree_removed);
+}
+
+#[test]
+fn a_tab_that_is_a_shell_now_or_holds_an_agent_started_by_hand_keeps_it_like_any_terminal() {
+    let f = Fixture::new();
+    let names = ["shell-now", "by-hand", "shell-gone"];
+    let paths: Vec<PathBuf> = names.iter().map(|name| f.worktree(name)).collect();
+    for (number, name) in names.iter().enumerate() {
+        f.merge(name, 90 + number as u64);
+    }
+    // The agent was exited and its shell is still there; an agent the reader
+    // typed into that shell; and a tab that was left a shell, which has ended.
+    let sessions: Vec<SessionEntry> = paths.iter().map(|path| f.session(path, TabStatus::Idle)).collect();
+    fronted(&sessions[0], Front::Terminal);
+    fronted(&sessions[1], Front::ByHand);
+    fronted(&sessions[2], Front::Terminal);
+    {
+        let mut live = f.live.lock().unwrap();
+        for (session, path) in sessions.iter().zip(&paths).take(2) {
+            live.tabs.insert((session.id.clone(), session.tabs[0].id.clone()));
+            live.panes.push((format!("tab:{}", session.tabs[0].id), path.clone()));
+        }
+    }
+
+    f.sweep(1);
+    let due = f.sweep(12);
+    assert_eq!(reason(of(&due, &paths[0])), (Phase::Kept, "a terminal is open in \"in shell-now\""));
+    assert_eq!(reason(of(&due, &paths[1])), (Phase::Kept, "an agent started by hand is open in \"in by-hand\""));
+    assert_eq!(of(&due, &paths[2]).phase, Phase::Removed);
+    // Nothing the reader started was stopped to find that out.
+    assert_eq!(*f.stopped.lock().unwrap(), vec![sessions[2].id.clone()]);
+    assert!(paths[0].exists() && paths[1].exists() && !paths[2].exists());
 }
 
 #[test]

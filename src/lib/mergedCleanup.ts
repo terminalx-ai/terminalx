@@ -461,6 +461,8 @@ function drives(): boolean {
 }
 
 let booted: Promise<void> | null = null;
+/** The issue pipelines already seen merged: each asks for one pass, not one for every later word of it. */
+const mergedPipelines = new Set<string>();
 
 /** Mirror the setting, and in the main window run the passes. */
 export function bootMergedCleanup(): Promise<void> {
@@ -477,6 +479,12 @@ export function bootMergedCleanup(): Promise<void> {
       return; // outside a webview
     }
     if (!drives()) return;
+    // An issue's pipeline merges its own pull request (#433), or sees it merged elsewhere: its workspace is looked at now rather than at the next pass.
+    await listen<{ id: string; state: string }>("issue_pipeline", ({ payload }) => {
+      if (payload.state !== "merged" || mergedPipelines.has(payload.id)) return;
+      mergedPipelines.add(payload.id);
+      void requestMergedSweep();
+    }).catch(() => undefined);
     if (typeof window !== "undefined") {
       window.addEventListener("focus", onReturn);
       document.addEventListener("visibilitychange", onReturn);
@@ -499,6 +507,7 @@ export function resetMergedCleanupForTest() {
   again = false;
   lastPass = 0;
   wasOn = new Set();
+  mergedPipelines.clear();
   booted = null;
   state = { settings: OFF, ready: false, statuses: {}, unreadable: {}, notices: [] };
 }

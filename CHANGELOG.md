@@ -21,7 +21,8 @@
   remote branch that has moved since the merge is kept, and that is said; a
   remote that cannot be reached leaves its branch and does not hold up the
   rest. An agent that sits idle at its prompt does not keep a workspace: it
-  is stopped, as the dialog stops it. (#432)
+  is stopped, as the dialog stops it. One you started by hand in a terminal
+  does keep it, and so does a tab that is a terminal now. (#432)
 - It waits first: 10 minutes by default (5 minutes to 1 hour), counted from
   when the merge is first seen and from the last thing done in the
   workspace's sessions. A notice says the workspace will go and offers
@@ -29,7 +30,8 @@
   offers **Undo**, which puts back the worktree, its branch, the branch on
   the remote and the sessions that have not been used since. The grace
   period runs only while the app is running, so nothing goes the moment the
-  app is opened again. (#432)
+  app is opened again. A pull request merged in TerminalX, from the pull
+  request panel or by an issue's pipeline, is seen at once. (#432)
 - Every removal is recorded with its workspace, branch, commit and pull
   request, and listed in Settings → Storage with **Restore** for as long as
   its commit is still in the repository. (#432)

@@ -185,8 +185,11 @@ pub(crate) enum Activity {
     /// bulk clean-up stops nothing, so all of it counts.
     Anything,
     /// A turn that is running or waiting, or a terminal the reader opened.
-    /// An agent that sits idle at its prompt is not work in progress: the
-    /// removal that follows this check stops it, as the removal dialog does.
+    /// An agent the app started that sits idle at its prompt is not work in
+    /// progress: the removal that follows this check stops it, as the
+    /// removal dialog does. A tab that follows its terminal (#437) and is a
+    /// shell now, or holds an agent the reader started by hand, is theirs
+    /// like any terminal they opened.
     Engaged,
 }
 
@@ -290,9 +293,15 @@ impl Live {
         if session.tabs.iter().any(|tab| tab.status == TabStatus::InProgress || is(&self.turns, tab) || (idle_counts && is(&self.tabs, tab))) {
             return Some("an agent is running".into());
         }
+        // What a tab's terminal holds when the reader put it there, not the
+        // app. Where an idle agent counts, it is covered by the lines around.
+        let open = |tab: &crate::store::index::TabEntry| !idle_counts && self.panes.iter().any(|(pane, _)| *pane == tab.pane_id());
+        if session.tabs.iter().any(|tab| tab.by_hand() && open(tab)) {
+            return Some("an agent started by hand is open".into());
+        }
         let prefix = format!("{}:", session.id);
         let own = |pane: &str| pane.starts_with(&prefix) || (idle_counts && session.tabs.iter().any(|tab| pane.strip_prefix("tab:") == Some(tab.id.as_str())));
-        self.panes.iter().any(|(pane, _)| own(pane)).then(|| "a terminal is open".into())
+        (self.panes.iter().any(|(pane, _)| own(pane)) || session.tabs.iter().any(|tab| tab.is_terminal() && open(tab))).then(|| "a terminal is open".into())
     }
 }
 
@@ -629,7 +638,8 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         }
         // An agent's own terminal (`tab:<id>`) is its CLI, and its processes
         // run in the worktree: both are covered by the session check above
-        // when an idle agent counts, and are not in use when it does not.
+        // when an idle agent counts, and are not in use when it does not. One
+        // that holds what the reader started was covered there too.
         let idle_counts = activity == Activity::Anything;
         let terminals = live.panes.iter().filter(|(pane, dir)| dir.starts_with(&path) && (idle_counts || !pane.starts_with("tab:"))).count();
         if terminals > 0 {
