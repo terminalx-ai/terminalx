@@ -140,7 +140,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   // turn it was sent to is still the one running, the same button is the stop that ends the process. A runtime that
   // cannot take an interrupt (older, or not connected) only has that stop.
   const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
-  useEffect(() => { if (!working) setInterruptedAt(null); }, [working]);
+  if (!working && interruptedAt !== null) setInterruptedAt(null);
   const unanswered = working && interruptUnanswered(events ?? [], interruptedAt);
 
   const run = async (action: () => Promise<unknown>, done?: () => void) => {
