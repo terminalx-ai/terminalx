@@ -375,6 +375,49 @@ fn a_shell_becomes_the_tab_of_the_agent_started_in_it_and_a_terminal_again_when_
     assert!(!rig.said(&tab.id).iter().any(|line| line.starts_with("recovery")));
 }
 
+/// What the reader arranged for a shell in its workspace's row of tabs (its
+/// place, a pin, a title of their own) is the tab's when an agent is started
+/// in the shell (#438). A window hears of the tab before it hears where the
+/// tab goes, so it never sees it out of its place.
+#[test]
+fn a_shell_an_agent_is_started_in_keeps_its_place_in_the_row_of_tabs() {
+    let rig = Rig::new(json!([]));
+    let (pane, other) = (rig.shell(1), rig.shell(2));
+    let workspace = rig.dir.path().to_string_lossy().into_owned();
+    let (shell_key, other_key) = (format!("terminal:{pane}"), format!("terminal:{other}"));
+    let arranged: index::TabLayout =
+        serde_json::from_value(json!({ "order": [other_key.clone(), shell_key.clone()], "pinned": [shell_key.clone()], "titles": { shell_key.clone(): "dev server" } })).unwrap();
+    index::set_tab_layout(&workspace, arranged).unwrap();
+    let mut heard = rig.sink.subscribe();
+
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &rig.dir.path().join("claude.jsonl"))), Some(Activity::Idle));
+    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+
+    let tab_key = format!("agent:{}", rig.tab().id);
+    let now = index::tab_state().unwrap().workspaces.remove(&workspace).unwrap();
+    assert_eq!(now.order, [other_key.clone(), tab_key.clone()]);
+    assert_eq!(now.pinned, std::slice::from_ref(&tab_key));
+    assert_eq!(now.titles.get(&tab_key).map(String::as_str), Some("dev server"));
+    let mut events = Vec::new();
+    while let Ok(published) = heard.try_recv() {
+        events.push(published);
+    }
+    let told = events.iter().position(|published| &*published.event == "tab_state_changed").expect("every window is told of the layout");
+    assert!(events[told].payload.contains(&tab_key) && !events[told].payload.contains(&shell_key));
+    assert!(events[..told].iter().any(|published| &*published.event == "session_updated" && published.payload.contains(&tab_key["agent:".len()..])), "the tab is announced first");
+
+    // A shell nobody arranged is adopted without a word about layouts.
+    let mut heard = rig.sink.subscribe();
+    rig.told.set(CODEX_PID, Some(Located { provider_session_id: CODEX_ID.into(), transcript: None }), None);
+    rig.manager.pane_foreground(&rig.shell(3), Some(agent("codex", CODEX_PID)));
+    let mut again = Vec::new();
+    while let Ok(published) = heard.try_recv() {
+        again.push(published.event.to_string());
+    }
+    assert!(!again.iter().any(|event| event == "tab_state_changed"), "{again:?}");
+    assert_eq!(index::tab_state().unwrap().workspaces[&workspace].order, [other_key, tab_key]);
+}
+
 #[test]
 fn an_agent_tab_becomes_a_terminal_when_its_cli_exits_and_follows_what_is_started_there_next() {
     let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));

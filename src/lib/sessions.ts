@@ -6,6 +6,7 @@ import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
 import { buildPaletteIndex, type PaletteIndex } from "@/lib/commandPalette";
+import { bootTabLayouts } from "@/lib/tabLayouts";
 import { isFloatingWindow } from "@/lib/appWindow";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
@@ -125,6 +126,9 @@ export async function bootSessions() {
   booted = true;
   // Projects and sessions are two file reads; the harness probe may shell out
   // to a login shell and take seconds, so it lands on its own.
+  // How the tabs are arranged is read alongside the sessions and not waited for: a window must never
+  // fail to list its sessions over it. Until it lands, tabs are in the order they were opened.
+  void bootTabLayouts();
   const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
   set({ loaded: true, projects: projects.projects, lastProject: projects.lastSelected, sessions });
   void api.listHarnesses().then((harnesses) => set({ harnesses })).catch(() => {});
@@ -540,6 +544,15 @@ export async function removeTab(sessionId: string, tabId: string) {
   patchSession(sessionId, { tabs, activeTab: next });
   // The backend stopped the tab's CLI; its pane and xterm are this window's to drop.
   queueMicrotask(() => dropTabTerminals([tabId]));
+}
+
+/** Bring a closed tab back into its session, with its conversation, and show it. */
+export async function reopenTab(sessionId: string, tabId: string) {
+  const tab = await api.reopenTab(sessionId, tabId);
+  const s = state.sessions.find((x) => x.id === sessionId);
+  if (s) patchSession(sessionId, { tabs: [...s.tabs.filter((t) => t.id !== tab.id), tab], activeTab: tab.id });
+  setSelectedAgent(sessionId, tab.id);
+  return tab;
 }
 
 export async function setActiveTab(sessionId: string, tabId: string) {

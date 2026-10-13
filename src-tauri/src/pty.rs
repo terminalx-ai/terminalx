@@ -827,6 +827,25 @@ impl Terminals {
         Some(ShellPane { id: id.to_string(), session_id, title, renamed, cwd, exited, created })
     }
 
+    /// Whether the shell in `id` is running something: the terminal's
+    /// foreground process group is no longer the shell's own. `false` for a
+    /// pane that has exited, and wherever that cannot be told.
+    pub fn is_busy(&self, id: &str) -> bool {
+        let panes = self.panes.lock().unwrap();
+        let Some(pane) = panes.get(id) else { return false };
+        if !*pane.alive.lock().unwrap() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            matches!((pane.master.process_group_leader(), pane.pid), (Some(leader), Some(shell)) if leader > 0 && leader as u32 != shell)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// Every session's shell tabs, oldest first: what a window that was not
     /// there when they were opened needs in order to list them.
     pub fn shells(&self) -> Vec<ShellPane> {
@@ -1323,6 +1342,31 @@ mod tests {
         left.sort();
         assert_eq!(left, ["s10:a", "tab:s1"]);
         terminals.kill_all();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_is_busy_while_it_runs_a_command_and_not_at_its_prompt() {
+        let terminals = Terminals::new();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let dir = tempfile::tempdir().unwrap();
+        let until = |wanted: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while terminals.is_busy("session-a:1") != wanted && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            terminals.is_busy("session-a:1")
+        };
+        pane(&terminals, &sink, &dir, "session-a:1", "sh");
+        assert!(!terminals.is_busy("session-z:9"), "a pane that does not exist runs nothing");
+        assert!(!until(false), "a shell at its prompt is not busy");
+        terminals.write("session-a:1", b"sleep 600\n").unwrap();
+        assert!(until(true), "a shell running a command is busy");
+        // Ctrl+C ends the command; the shell is at its prompt again.
+        terminals.write("session-a:1", &[3]).unwrap();
+        assert!(!until(false), "the shell is not busy once the command has ended");
+        terminals.kill_all();
+        assert!(!terminals.is_busy("session-a:1"));
     }
 
     #[test]

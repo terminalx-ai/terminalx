@@ -45,6 +45,14 @@ tab's own `tab:<id>`) and the time the shell was opened (`created`), which is
 what keeps it in the shell's place. From then on it is a tab like any other.
 A window that had the shell selected has that tab selected.
 
+Where the reader arranged the workspace's row of tabs themselves (#438), the
+shell's place is in the workspace's saved layout, under `terminal:<pane id>`.
+What the layout says of the shell (its place, a pin, a mute, a title the
+reader gave it) it says of the tab from then on, under `agent:<tab id>`
+(`index::shell_became_tab`). A window is told of the tab before it is told
+of the layout, and reads a layout that still names the shell as naming the
+tab (`followedLayout`), so the tab is never drawn out of its place.
+
 No pane survives the app, so at the next launch a tab is in a pane of its own
 again, and an agent that was started by hand is the tab's agent for the app
 to resume when the tab is opened. A tab that was a terminal is still one.

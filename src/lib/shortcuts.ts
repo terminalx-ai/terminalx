@@ -58,6 +58,20 @@ const ACTIONS = [
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"] },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },
+  // The browser's keys: the main modifier and a digit for a position in the tab row, 9 for the last tab.
+  { id: "session.tab1", label: "Switch to tab 1", group: "Session", keys: ["mod+1"] },
+  { id: "session.tab2", label: "Switch to tab 2", group: "Session", keys: ["mod+2"] },
+  { id: "session.tab3", label: "Switch to tab 3", group: "Session", keys: ["mod+3"] },
+  { id: "session.tab4", label: "Switch to tab 4", group: "Session", keys: ["mod+4"] },
+  { id: "session.tab5", label: "Switch to tab 5", group: "Session", keys: ["mod+5"] },
+  { id: "session.tab6", label: "Switch to tab 6", group: "Session", keys: ["mod+6"] },
+  { id: "session.tab7", label: "Switch to tab 7", group: "Session", keys: ["mod+7"] },
+  { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
+  { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
+  { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
+  { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
+  // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
+  { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"], macKeys: ["mod+alt+t"] },
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"] },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"] },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).

@@ -366,6 +366,15 @@ impl SessionManager {
             session.tabs.push(tab);
             Ok(session.clone())
         })?;
+        // The place the reader gave the shell in its workspace's row, with
+        // its pin, mute and title, is the tab's (#438). The session first:
+        // a window is told of the tab before it is told where the tab goes.
+        if index::shell_became_tab(pane, &made.id).unwrap_or(false) {
+            self.sink.emit("session_updated", &entry);
+            if let Ok(tabs) = index::tab_state() {
+                self.sink.emit("tab_state_changed", &tabs);
+            }
+        }
         Ok(Some((entry, made)))
     }
 

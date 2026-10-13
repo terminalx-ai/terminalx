@@ -15,7 +15,7 @@ import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
-import { tabPanelId } from "@/lib/sessionTabs";
+import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
@@ -46,7 +46,7 @@ import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostic
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
 import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
-import { SessionTabStrip } from "./SessionTabStrip";
+import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { pipelineForSession, useIssuePipelines } from "@/lib/issuePipeline";
@@ -177,6 +177,50 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+
+/**
+ * A local session's header with the tab strip in it (the main window, unless
+ * the strip is turned off in Settings). The title bar then holds, from the
+ * left: the session's name and its chips, the workspace's tabs, the "+", and
+ * the session's actions at the right. What is left between the "+" and the
+ * actions is empty, and is where the window is dragged from.
+ *
+ * The name, the chips and the tabs are laid out as one row (the breadcrumb
+ * has no box of its own here), so each gives way in its turn and none runs
+ * under another. The actions at the right never shrink and are never
+ * covered. As the header narrows:
+ *
+ * 1. The tabs narrow evenly, to a width their titles still read at.
+ * 2. The pipeline, automation, folder and branch chips shrink to their
+ *    icons (the pipeline's to the dot that says where it stands), the way
+ *    a cloud header's do (`STRIP_CHIP_YIELDS`: a label with no room left
+ *    for even an ellipsis is out of sight, never a stray letter). Then the
+ *    session's name shrinks to about its first ten characters
+ *    (`STRIP_TITLE_YIELDS`); its full "project / session" is on its hover.
+ *    The issue chip keeps its place.
+ * 3. The tabs narrow further, down to an icon and a few characters each.
+ * 4. The row of tabs scrolls, with a menu at its end that lists every tab,
+ *    until two tabs are left in view.
+ *
+ * Past that nothing can shrink, so what is drawn depends on the header's
+ * width, least needed first:
+ *
+ * 5. Narrower than `STRIP_NARROW`: the branch, folder and base chips are
+ *    left out (the sidebar's workspace row shows them), and one tab stays in
+ *    view beside the menu.
+ * 6. Narrower than `STRIP_TIGHT`: the session's name is left out (the
+ *    sidebar and each tab's hover have it), and Share keeps only its icon.
+ * 7. Narrower than `STRIP_MENU`: the row of tabs is the menu alone, and the
+ *    issue chip keeps only its icon.
+ */
+const STRIP_CHIP_YIELDS = cn(HEADER_CHIP_YIELDS, "shrink-[10000] overflow-hidden");
+const STRIP_TITLE_YIELDS = "shrink-[200]";
+const STRIP_NARROW = "@max-[650px]/session-header:hidden";
+const STRIP_TIGHT = "@max-[540px]/session-header:hidden";
+const STRIP_MENU = "@max-[415px]/session-header:hidden";
+/** How many tabs the strip keeps in view at their narrowest, and its giving way to its menu in the narrowest header. */
+const STRIP_FLOOR =
+  "[--tab-floor:2] @max-[650px]/session-header:[--tab-floor:1] @max-[415px]/session-header:min-w-0! @max-[415px]/session-header:grow-0! @max-[415px]/session-header:basis-auto! @max-[415px]/session-header:[&>[role=tablist]]:hidden";
 
 /** What a presence tab id names in this session: an agent tab's title or a terminal. */
 function tabLabelOf(cloud: CloudSessionModel, tabId: string): string | null {
@@ -314,6 +358,12 @@ export function SessionView({
   const store = useSessionStore();
   const backend = cloud?.backend ?? localSessionBackend(session.id);
   const local = backend.caps.local;
+  // The workspace's tabs in the title bar: the main window's local sessions, unless the reader turned the strip off.
+  const strip = local && !cloud && !compact && prefs.tabStrip;
+  // A window with no room in its title bar (the floating one) draws the same tabs in a row under it.
+  const stripRow = !!chrome?.tabStrip && !cloud && !strip;
+  // A tab's panel is named by the tab that shows it: the strip's while there is one, else the sidebar's row.
+  const labelledBy = strip || stripRow ? stripTabId : tabNodeId;
   // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
   const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
@@ -368,6 +418,7 @@ export function SessionView({
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
+  const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = managedWorkspaceFor(session);
@@ -382,8 +433,19 @@ export function SessionView({
 
   // A local session with no agent opens a shell. A cloud one never opens
   // anything by itself: that could wake a stopped workspace.
+  //
+  // That is for a session opened with no agent, and for one whose last tab
+  // of any kind just closed. When its last agent tab closes while a shell or
+  // a page is on screen, the reader is somewhere: the view is not taken from
+  // them, and no shell they did not ask for is opened behind it.
+  const shownKind = useRef(selectedKind);
+  shownKind.current = selectedKind;
+  const openedOn = useRef<string | null>(null);
   useEffect(() => {
+    const opening = openedOn.current !== session.id;
+    openedOn.current = session.id;
     if (!local || session.tabs.length) return;
+    if (!opening && shownKind.current) return;
     // A compact window has no panel to open.
     if (!compact && !getPrefs().panelOpen) setPrefs({ panelOpen: true });
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
@@ -406,7 +468,7 @@ export function SessionView({
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region="deep"
-          className={cn("flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2", cloud && "@container/session-header")}
+          className={cn("flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2", (cloud || strip) && "@container/session-header")}
           style={{ paddingLeft: sidebarOpen ? 8 : TITLEBAR_INSET }}
         >
           {!sidebarOpen && !compact && (
@@ -420,9 +482,11 @@ export function SessionView({
             <div className="flex min-w-0 flex-1 items-center gap-1 text-sm" data-testid="session-compact-leading">{chrome?.leading}</div>
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
-          <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+          /* Beside the tabs its parts are items of the header's own row (it has no box), so each gives way in its turn and none runs under a tab. */
+          <div className={cn("text-sm", strip ? "contents" : "flex min-w-0 flex-1 items-center gap-1.5 px-1", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
-            {!(cloud && cloud.projectName === session.title) && (
+            {/* With the tabs in the title bar the project is on the title's hover, not beside it. */}
+            {!strip && !(cloud && cloud.projectName === session.title) && (
               <>
                 <span className={cn("max-w-[30%] truncate text-muted-foreground", cloud && HEADER_PROJECT_YIELDS, cloud && HEADER_TIGHT)} title={cloud ? cloud.projectName : quick ? "A quick chat: it has no project" : project?.name} data-testid="session-project">
                   {cloud ? cloud.projectName : quick ? sessionProjectName(session, project) : (project?.name ?? "project")}
@@ -430,7 +494,13 @@ export function SessionView({
                 <span className={cn("text-faint", cloud && HEADER_TIGHT)}>/</span>
               </>
             )}
-            <span className="truncate text-foreground" title={session.title} data-testid="session-title">
+            <span
+              className={cn("truncate text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
+              // Beside the tabs the name keeps about its first ten characters, or all of a shorter one.
+              style={strip ? { minWidth: `${Math.min(session.title.length, 10)}ch` } : undefined}
+              title={strip ? [`${quick ? sessionProjectName(session, project) : (project?.name ?? "project")} / ${session.title}`, workspaceTitle, baseNote].filter(Boolean).join("\n") : session.title}
+              data-testid="session-title"
+            >
               {session.title}
             </span>
             {session.issue && (
@@ -441,7 +511,7 @@ export function SessionView({
                   className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
                 >
                   <CircleDot className="size-3" />
-                  {session.issue.identifier}
+                  <span className={cn(strip && STRIP_MENU)}>{session.issue.identifier}</span>
                 </button>
               </WithTooltip>
             )}
@@ -451,11 +521,28 @@ export function SessionView({
                 <button
                   type="button"
                   onClick={() => (pipelineRole.pipeline.pr ? void openUrl(pipelineRole.pipeline.pr.url) : void openUrl(pipelineRole.pipeline.issue.url))}
-                  className="ml-1 flex shrink-0 items-center gap-1.5 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  className={cn(
+                    "ml-1 flex items-center rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground",
+                    // Beside the tabs it gives way like the other chips, down to the dot that says where the pipeline stands.
+                    strip ? cn("max-w-48", STRIP_CHIP_YIELDS, "gap-x-1.5") : "shrink-0 gap-1.5",
+                  )}
                   data-testid="session-pipeline"
                 >
-                  {pipelineRole.role === "reviewer" && <span>Reviewer ·</span>}
-                  <PipelineStatus pipeline={pipelineRole.pipeline} />
+                  {strip ? (
+                    // The status laid out as the chip's own icon and label: the dot leads and stays, and the words are one label that is cut, then gone.
+                    <PipelineStatus
+                      pipeline={pipelineRole.pipeline}
+                      className="contents"
+                      dotClassName="my-[7px]"
+                      labelClassName={cn("truncate", HEADER_CHIP_LABEL)}
+                      lead={pipelineRole.role === "reviewer" ? <span className="font-normal text-muted-foreground">Reviewer · </span> : null}
+                    />
+                  ) : (
+                    <>
+                      {pipelineRole.role === "reviewer" && <span>Reviewer ·</span>}
+                      <PipelineStatus pipeline={pipelineRole.pipeline} />
+                    </>
+                  )}
                 </button>
               </WithTooltip>
             )}
@@ -464,27 +551,32 @@ export function SessionView({
                 <button
                   type="button"
                   onClick={openAutomations}
-                  className="ml-1 flex shrink-0 items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                  className={cn("ml-1 flex items-center gap-1 rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground", strip ? cn("max-w-40", STRIP_CHIP_YIELDS) : "shrink-0")}
+                  data-testid="session-automation"
                 >
-                  <CalendarClock className="size-3" />
-                  {session.automation.name} #{session.automation.runNumber}
+                  <CalendarClock className={strip ? HEADER_CHIP_ICON : "size-3 shrink-0"} />
+                  <span className={cn(strip && cn("truncate", HEADER_CHIP_LABEL))}>{session.automation.name} #{session.automation.runNumber}</span>
                 </button>
               </WithTooltip>
             )}
             {quick && (
               // Where a quick chat runs: it has no project to say so.
-              <span className="ml-1 flex min-w-0 max-w-[35%] items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground" title={session.cwd} data-testid="session-quick-place">
-                <FolderOpen className="size-3 shrink-0" />
-                <span className="truncate">{quickChatPlace(session)}</span>
+              <span className={cn("ml-1 flex min-w-0 items-center gap-1 overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", strip ? cn("max-w-40", STRIP_CHIP_YIELDS, STRIP_NARROW) : "max-w-[35%]")} title={session.cwd} data-testid="session-quick-place">
+                <FolderOpen className={strip ? HEADER_CHIP_ICON : "size-3 shrink-0"} />
+                <span className={cn("truncate", strip && HEADER_CHIP_LABEL)}>{quickChatPlace(session)}</span>
               </span>
             )}
             {workspaceLabel && (
               <span
-                className={cn("ml-1 flex max-w-[35%] items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground", cloud ? cn(HEADER_CHIP_YIELDS, HEADER_TIGHT) : "min-w-0 gap-1")}
+                className={cn(
+                  "ml-1 flex items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground",
+                  strip ? "max-w-48" : "max-w-[35%]",
+                  cloud ? cn(HEADER_CHIP_YIELDS, HEADER_TIGHT) : strip ? cn(STRIP_CHIP_YIELDS, STRIP_NARROW) : "min-w-0 gap-1",
+                )}
                 title={workspaceTitle}
                 data-testid="session-branch"
               >
-                <GitBranch className={cloud ? HEADER_CHIP_ICON : "size-3 shrink-0"} />
+                <GitBranch className={cloud || strip ? HEADER_CHIP_ICON : "size-3 shrink-0"} />
                 {local && session.worktreeName && !session.worktreeRemoved ? (
                   <WorkspaceNameEditor
                     value={session.worktreeName}
@@ -493,18 +585,19 @@ export function SessionView({
                       return renamed.name;
                     }}
                     onError={setRenameError}
-                    className="max-w-52 text-muted-foreground hover:text-foreground"
+                    className={cn("text-muted-foreground hover:text-foreground", strip ? cn("truncate text-left", HEADER_CHIP_LABEL) : "max-w-52")}
                   />
                 ) : (
-                  <span className={cn("truncate", cloud && HEADER_CHIP_LABEL)}>{workspaceLabel}</span>
+                  <span className={cn("truncate", (cloud || strip) && HEADER_CHIP_LABEL)}>{workspaceLabel}</span>
                 )}
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
-            {session.worktreeBase && (
+            {/* Beside the tabs only a base that may be out of date is said aloud; an ordinary one is on the title's hover. */}
+            {session.worktreeBase && (!strip || session.worktreeBase.warning) && (
               <span
                 role={session.worktreeBase.warning ? "status" : undefined}
-                className="truncate text-[11px] text-muted-foreground"
+                className={cn("truncate text-[11px] text-muted-foreground", strip && cn("min-w-0 shrink-[10000]", STRIP_NARROW))}
                 title={session.worktreeBase.warning ?? `Base commit: ${session.worktreeBase.commit}`}
               >
                 {session.worktreeBase.warning
@@ -514,18 +607,27 @@ export function SessionView({
             )}
             {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} />}
             {renameError && (
-              <span role="alert" className="ml-1 max-w-64 truncate text-[11px] text-destructive" title={renameError}>
+              <span role="alert" className={cn("ml-1 max-w-64 truncate text-[11px] text-destructive", strip && "min-w-0 shrink-[10000]")} title={renameError}>
                 {renameError}
               </span>
             )}
           </div>
           )}
 
-          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && "max-w-[70%]")}>
+          {strip && (
+            <>
+              <WorkspaceTabStrip session={session} selected={selected} placement="titlebar" readOnlyReason={backend.readOnlyReason} className={STRIP_FLOOR} />
+              {/* The "+" ends the row of tabs, as in a browser. Keyed by session: a menu left open never carries over to another session. */}
+              <TabActions key={session.id} session={session} selected={selected} />
+              {/* Empty title bar: what is left here is where the window is dragged from. */}
+              <div aria-hidden className="min-w-6 flex-[0.001_1_0%] self-stretch @max-[415px]/session-header:min-w-2" data-testid="session-header-handle" />
+            </>
+          )}
+          <div className={cn("flex shrink-0 items-center gap-0.5", !strip && "ml-auto", !compact && !strip && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
-            {local && !compact && <LocalShareButton sessionId={session.id} />}
+            {local && !compact && <LocalShareButton sessionId={session.id} labelClassName={strip ? STRIP_TIGHT : undefined} />}
             {/* Keyed by session: a menu left open never carries over to another session. */}
-            {!cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
+            {!strip && !cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
             {activeTab && local && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>
@@ -580,7 +682,7 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
-        {chrome?.tabStrip && !cloud && <SessionTabStrip session={session} selected={selected} />}
+        {stripRow && <WorkspaceTabStrip session={session} selected={selected} placement="row" hideSingle className="border-b border-hairline px-1.5" />}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
@@ -596,7 +698,7 @@ export function SessionView({
                   key={t.id}
                   id={tabPanelId({ kind: "agent", id: t.id })}
                   role="tabpanel"
-                  aria-labelledby={`session-agent-tab-${encodeURIComponent(t.id)}`}
+                  aria-labelledby={labelledBy({ kind: "agent", id: t.id })}
                   aria-hidden={selected?.kind !== "agent" || t.id !== selected.id}
                   className={cn("flex min-h-0 flex-1 flex-col", (selected?.kind !== "agent" || t.id !== selected.id) && "hidden")}
                 >
@@ -616,7 +718,7 @@ export function SessionView({
                   key={pane.id}
                   id={tabPanelId({ kind: "terminal", id: pane.id })}
                   role="tabpanel"
-                  aria-labelledby={`session-terminal-tab-${encodeURIComponent(pane.id)}`}
+                  aria-labelledby={labelledBy({ kind: "terminal", id: pane.id })}
                   aria-hidden={selected?.kind !== "terminal" || pane.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "terminal" || pane.id !== selected.id) && "invisible")}
                 >
@@ -656,7 +758,7 @@ export function SessionView({
                   key={page.id}
                   id={tabPanelId({ kind: "browser", id: page.id })}
                   role="tabpanel"
-                  aria-labelledby={`session-browser-tab-${encodeURIComponent(page.id)}`}
+                  aria-labelledby={labelledBy({ kind: "browser", id: page.id })}
                   aria-hidden={selected?.kind !== "browser" || page.id !== selected.id}
                   className={cn("absolute inset-0", (selected?.kind !== "browser" || page.id !== selected.id) && "invisible")}
                 >
