@@ -117,6 +117,13 @@ struct FakeAgent {
     awaiting_approval: AtomicBool,
     /// Someone who may answer it is attached.
     approver: Arc<AtomicBool>,
+    /// A request is answered once it has waited this long, and the next is
+    /// asked at the following look; after this many answers the turn ends
+    /// well. Timed by the looks themselves, so a slow machine cannot
+    /// stretch one wait.
+    answered: Option<(Duration, usize)>,
+    asked: Mutex<Option<Instant>>,
+    answers: AtomicUsize,
 }
 
 impl FakeAgent {
@@ -137,6 +144,9 @@ impl FakeAgent {
             held_seen: Mutex::default(),
             awaiting_approval: AtomicBool::new(false),
             approver: Arc::default(),
+            answered: None,
+            asked: Mutex::default(),
+            answers: AtomicUsize::new(0),
         }
     }
 }
@@ -171,7 +181,20 @@ impl Agent for FakeAgent {
     }
 
     fn awaiting_approval(&self, _session_id: &str, _tab_id: &str) -> bool {
-        self.awaiting_approval.load(Ordering::SeqCst) && !self.ended.load(Ordering::SeqCst)
+        if !self.awaiting_approval.load(Ordering::SeqCst) || self.ended.load(Ordering::SeqCst) {
+            return false;
+        }
+        let Some((after, times)) = self.answered else { return true };
+        let mut asked = self.asked.lock().unwrap();
+        if asked.is_some_and(|since| since.elapsed() >= after) {
+            *asked = None;
+            if self.answers.fetch_add(1, Ordering::SeqCst) + 1 == times {
+                *self.script.lock().unwrap() = [Turn::Ended(TurnStatus::Ok)].into();
+            }
+            return false;
+        }
+        asked.get_or_insert_with(Instant::now);
+        true
     }
 
     fn interrupt(&self, _session_id: &str, _tab_id: &str) {
@@ -527,22 +550,19 @@ fn a_turn_waiting_for_an_approval_is_left_alone_while_someone_who_can_give_it_is
 
 #[test]
 fn an_approval_that_is_answered_starts_the_wait_afresh() {
-    // Asked, answered, asked again: neither wait reaches the grace, though
-    // together they pass it.
-    let timing = Timing { approval_grace: Duration::from_millis(60), minute: Duration::from_millis(200), ..fast() };
-    let agent = FakeAgent::new(&[Turn::Running]);
+    // Asked and answered 110 times, each after 10 ms: no wait comes near
+    // the grace, though together they pass it. Nothing here is timed
+    // against another thread or against the run's limit.
+    let timing = Timing { approval_grace: Duration::from_secs(1), ..fast() };
+    let mut agent = FakeAgent::new(&[Turn::Running]);
     agent.awaiting_approval.store(true, Ordering::SeqCst);
-    let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![run("run_1")]), agent, timing);
-    let agent = rig.agent.clone();
-    let answers = std::thread::spawn(move || {
-        for waiting in [false, true, false, true, false] {
-            std::thread::sleep(Duration::from_millis(35));
-            agent.awaiting_approval.store(waiting, Ordering::SeqCst);
-        }
-    });
+    agent.answered = Some((Duration::from_millis(10), 110));
+    let rig = rig_in(tempfile::tempdir().unwrap(), FakeApi::with(vec![run("run_1")]), agent, timing.clone());
+    let began = Instant::now();
     rig.runner.pass().unwrap();
-    answers.join().unwrap();
-    assert_eq!(rig.api.ends(), [end("failed", Some("timed-out"))]);
+    assert!(began.elapsed() > timing.approval_grace);
+    assert_eq!(rig.api.ends(), [end("completed", None)]);
+    assert_eq!(rig.agent.answers.load(Ordering::SeqCst), 110);
 }
 
 #[test]
