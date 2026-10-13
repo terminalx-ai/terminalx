@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { buildTranscript } from "@terminalx/portable/transcript";
-import type { AgentEvent } from "@terminalx/portable/events";
+import { interruptUnanswered, type AgentEvent } from "@terminalx/portable/events";
 import { Chat } from "@/components/chat/Chat";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
@@ -227,6 +227,19 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
   const lease = status?.state?.leases.find((l) => l.tabId === tabId);
   const anotherDrives = !!lease && lease.holder.userId !== status?.you?.person.userId;
   const canDrive = status?.you?.role === "driver" && !closed && !anotherDrives && !shell;
+  // Stop is Escape first (#427), as in the host's own composer: the turn is
+  // interrupted and the host's agent keeps running. While the turn it was
+  // sent to is still the one running, the same button asks for the stop that
+  // ends the agent's process.
+  const newest = useRef(0);
+  newest.current = events.length ? events[events.length - 1].seq : 0;
+  const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!busy) setInterruptedAt(null);
+  }, [busy]);
+  // An interrupt was for one tab's turn: another tab's Stop starts as an interrupt.
+  useEffect(() => setInterruptedAt(null), [tabId]);
+  const unanswered = busy && interruptUnanswered(events, interruptedAt);
   async function run(method: string, params: object = {}) {
     if (!client) return;
     setSending(true);
@@ -362,14 +375,25 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
                       Steer
                     </Button>
                   )}
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    disabled={!canDrive || sending}
-                    onClick={() => void run("session.stop")}
-                  >
-                    Stop
-                  </Button>
+                  {busy && (
+                    <Button
+                      type="button"
+                      variant={unanswered ? "destructive" : "outline"}
+                      disabled={!canDrive || sending}
+                      title={
+                        unanswered
+                          ? "Ends the host's agent process. The conversation resumes with the next message."
+                          : "Interrupts the running turn. The host's agent keeps running."
+                      }
+                      onClick={() => {
+                        if (unanswered) return void run("session.stop", { force: true });
+                        setInterruptedAt(newest.current);
+                        void run("session.stop");
+                      }}
+                    >
+                      {unanswered ? "Stop session" : "Stop"}
+                    </Button>
+                  )}
                   {lease?.holder.userId === status.you?.person.userId && (
                     <Button type="button" variant="ghost" onClick={() => void run("steerLease.release")}>
                       Release control

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Stop from a guest or the phone interrupts too
+
+- A guest's Stop in a shared session no longer ends the host's agent and puts
+  "Session closed" over the host's tab. It interrupts the running turn, as the
+  host's own Stop does; if the agent does not answer, the same button becomes
+  "Stop session" and ends the process. What guests queued behind the turn is
+  kept and goes out when the interrupted turn has ended. (#427)
+- A guest's Steer no longer stops the host's agent and starts it again. The
+  turn is interrupted and the steering prompt is the next message, to the
+  same process, ahead of anything already waiting.
+- A guest's queued follow-up is no longer dropped when its turn ends within a
+  quarter of a second of that guest's last action.
+- On the phone, Stop in a cloud workspace interrupts the running turn instead
+  of ending the agent's process; pressed again while that turn is still
+  running, it stops the session. A workspace on a runtime from before the
+  interrupt keeps the old Stop.
+
 ## 0.2.11
 
 Issue sessions that carry through a pull request, review and optional merge;

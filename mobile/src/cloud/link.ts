@@ -27,8 +27,8 @@ import { b64 } from "./crypto";
  */
 
 export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
-/** What a phone asks for: agent sessions, the content key, sharing. No terminals, files or Git. */
-export const PHONE_CAPABILITIES = ["session/1", "session/2", "keys/1", "collab/1", "agents/1"] as const;
+/** What a phone asks for: agent sessions (`session/3` is Stop as an interrupt, #427), the content key, sharing. No terminals, files or Git. */
+export const PHONE_CAPABILITIES = ["session/1", "session/2", "session/3", "keys/1", "collab/1", "agents/1"] as const;
 
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 const BACKOFF_FIRST_MS = 250;

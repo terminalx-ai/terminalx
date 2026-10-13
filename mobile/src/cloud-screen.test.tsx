@@ -55,7 +55,7 @@ const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace:
 
 const NAMES: Record<string, string> = { "u-alice": "Alice", "u-bob": "Bob" };
 
-function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown> } = {}) {
+function world(options: { state?: string | null; role?: string | null; canApprove?: boolean; hasKey?: boolean; events?: unknown[]; outbox?: unknown[]; connection?: string; noKey?: boolean; tabs?: number; access?: string; problem?: unknown; collab?: Record<string, unknown>; interrupts?: boolean } = {}) {
   const state = options.state === undefined ? "ready" : options.state;
   const snapshot = {
     connection: { state: options.connection ?? (state === "ready" ? "connected" : "suspended") },
@@ -64,6 +64,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     role: options.role === undefined ? "driver" : options.role,
     canApprove: options.canApprove ?? false,
     hasKey: options.hasKey ?? true,
+    interrupts: options.interrupts ?? false,
     tabs: Array.from({ length: options.tabs ?? 1 }, (_, index) => ({ tabId: index ? `t${index + 1}` : "t1", sessionId: "s1", title: index ? `Second ${index}` : "Fix login", status: "in_progress", source: "live", pendingPermissions: [], events: index ? [] : (options.events ?? [event(1, { type: "user_message", text: "run the tests", queued: false })]), truncated: false, noKey: options.noKey ?? false })),
     outbox: options.outbox ?? [],
     error: null,
@@ -74,6 +75,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     view: vi.fn(() => () => undefined),
     send: vi.fn(async () => ({})),
     stop: vi.fn(async () => ({})),
+    interrupt: vi.fn(async () => true),
     decide: vi.fn(async () => ({})),
     cancel: vi.fn(async () => undefined),
     typingIn: vi.fn(),
@@ -98,7 +100,7 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     people: { subscribe: () => () => undefined, getVersion: () => 1, name: (userId: string | null | undefined) => NAMES[userId ?? ""] ?? "Someone", roster: vi.fn(async () => [{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }, { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }]), remember: vi.fn() },
     api: { shares: vi.fn(), putShare: vi.fn(async () => ({})), revokeShare: vi.fn(async () => undefined) },
   };
-  return { session, release };
+  return { session, release, snapshot };
 }
 
 const text = () => container.textContent ?? "";
@@ -160,6 +162,35 @@ describe("the Cloud tab", () => {
 });
 
 describe("a cloud workspace screen", () => {
+  it("interrupts with Stop, and ends the agent's process only when that went unanswered", async () => {
+    const { session, snapshot } = world({ interrupts: true });
+    await show(<CloudWorkspaceScreen />);
+    await click("Stop the agent");
+    expect(session.interrupt).toHaveBeenCalledWith("t1");
+    expect(session.stop).not.toHaveBeenCalled();
+    // The turn it was sent to is still running: the same button now ends the process, and says so.
+    expect(() => button("Stop the agent")).toThrow();
+    await click("Stop the session");
+    expect(session.stop).toHaveBeenCalledWith("t1");
+    expect(session.interrupt).toHaveBeenCalledTimes(1);
+
+    // The agent answered and a later turn runs: Stop is an interrupt again.
+    snapshot.tabs[0].events = [...snapshot.tabs[0].events, event(2, { type: "turn_completed", status: "aborted" }), event(3, { type: "user_message", text: "again", queued: false })];
+    await show(<CloudWorkspaceScreen />);
+    expect(() => button("Stop the session")).toThrow();
+    await click("Stop the agent");
+    expect(session.interrupt).toHaveBeenCalledTimes(2);
+    expect(session.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Stop as the stop that ends the process on a runtime that cannot take an interrupt", async () => {
+    const { session } = world({ interrupts: false });
+    await show(<CloudWorkspaceScreen />);
+    await click("Stop the agent");
+    expect(session.stop).toHaveBeenCalledWith("t1");
+    expect(session.interrupt).not.toHaveBeenCalled();
+  });
+
   it("shows a running workspace live and sends without asking", async () => {
     const { session, release } = world();
     await show(<CloudWorkspaceScreen />);

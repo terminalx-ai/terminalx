@@ -45,6 +45,8 @@ export class Runtime {
   refuse: number | null = null;
   provision = true;
   you: Record<string, unknown> = { userId: "u-me", role: "driver", canApprove: false };
+  /** Capabilities this runtime does not grant, as one from before they existed. */
+  withheld: string[] = [];
   /** Answers for further methods: return undefined to refuse with `method_not_found`. */
   methods: Record<string, (params: Record<string, unknown>) => unknown> = { "session.tabs": () => ({ tabs: [{ tabId: "t1" }] }) };
   private schedule: ReturnType<typeof deriveKeySchedule> | null = null;
@@ -86,7 +88,7 @@ export class Runtime {
     this.requests.push(value);
     if (value.method === "pairing.provisionRelay") return this.encrypted(this.provision ? { id: value.id, ok: true, result: { reqId: value.params.reqId } } : { id: value.id, ok: false, error: { code: "unavailable", message: "no" } });
     if (value.method === "rpc.hello") {
-      return this.encrypted({ id: value.id, ok: true, result: { protocol: "terminalx-workspace-rpc/1", runtime: { version: "0.2.7", runtimeGeneration: this.generation, epoch: "e1" }, capabilities: value.params.want, authority: this.authority, limits: {}, you: this.you } });
+      return this.encrypted({ id: value.id, ok: true, result: { protocol: "terminalx-workspace-rpc/1", runtime: { version: "0.2.7", runtimeGeneration: this.generation, epoch: "e1" }, capabilities: (value.params.want as string[]).filter((capability) => !this.withheld.includes(capability)), authority: this.authority, limits: {}, you: this.you } });
     }
     const answer = this.methods[value.method]?.(value.params ?? {});
     if (answer !== undefined) return this.encrypted({ id: value.id, ok: true, result: answer });
