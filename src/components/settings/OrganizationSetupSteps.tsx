@@ -35,7 +35,8 @@ const UNSETTLED =
   "An earlier request for the setup workspace was never answered, and the workspace list could not be read to see whether it made one. Check again when the list loads; a new setup workspace is offered only once that is known.";
 
 function failureText(failure: unknown): string {
-  if (failure instanceof CreateRefused) return createErrorMessage(failure.code, failure.detail);
+  // The setup is an owner's or admin's, and the logins are on this same page.
+  if (failure instanceof CreateRefused) return createErrorMessage(failure.code, failure.detail, true);
   if (isClientError(failure)) return createErrorMessage(failure.code);
   return errorMessage(failure);
 }

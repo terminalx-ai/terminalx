@@ -859,6 +859,7 @@ impl ControlService {
             expected_sessions: None,
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
+            guard: None,
         };
         let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {

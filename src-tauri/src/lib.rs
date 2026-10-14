@@ -90,6 +90,7 @@ mod keychain;
 mod landed;
 mod local_sharing;
 mod memory_baseline;
+mod merged_cleanup;
 mod models;
 mod names;
 #[cfg(feature = "desktop")]
@@ -617,6 +618,14 @@ pub fn run() {
             commands::worktree_cleanup_cancel_sizes,
             commands::worktree_cleanup_remove,
             commands::worktree_cleanup_stop,
+            commands::merged_cleanup_settings,
+            commands::set_merged_cleanup_settings,
+            commands::merged_cleanup_sweep,
+            commands::merged_cleanup_hold,
+            commands::merged_cleanup_records,
+            commands::merged_cleanup_restore,
+            commands::github_head_branch_setting,
+            commands::github_enable_head_branch_deletion,
             quit::set_quit_warning,
             commands::issues_list,
             commands::issue_pipelines_list,

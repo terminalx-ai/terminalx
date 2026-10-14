@@ -194,3 +194,14 @@ export function mergeAgentEvents(existing: readonly AgentEvent[], incoming: read
   for (const event of incoming) bySequence.set(event.seq, event);
   return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
 }
+
+/**
+ * Whether an interrupt is still unanswered (#427). `interruptedAt` is the
+ * sequence number of the newest event when the interrupt was sent; until a
+ * turn has ended after it, the turn the interrupt was meant for is the one
+ * still running, and the same control may offer the stop that ends the
+ * agent's process.
+ */
+export function interruptUnanswered(events: readonly AgentEvent[], interruptedAt: number | null): boolean {
+  return interruptedAt !== null && !events.some((event) => event.seq > interruptedAt && event.payload.type === "turn_completed");
+}

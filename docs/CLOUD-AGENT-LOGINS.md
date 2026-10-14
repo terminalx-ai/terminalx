@@ -10,6 +10,11 @@ Settings → Account → **Agent logins**.
 
 - Lists each agent's status: connected (API key or subscription login, whose
   it is when the service knows, who may use it), revoked, or not connected.
+- Flags a login whose configurer has left (`configurerLeft` in the service's
+  list, terminalx-saas #186): the person who connected a subscription login
+  is no longer an owner or admin. The login is kept and keeps working on
+  their subscription; the row says so, and that logging in again takes it
+  over.
 - **Log in with Claude** (the first way offered for Claude Code). The
   account service runs the sign-in and keeps a login it renews. See below.
 - **Connect / replace with an API key.** A native secure dialog collects the
@@ -29,6 +34,25 @@ Owners and admins. The service refuses every credential route, the list
 included, to anyone else (`organization_admin_required`), so a member sees a
 sentence saying who connects logins and no controls. The desktop does not
 decide this itself and cannot widen it.
+
+A member does see, per agent, whether a workspace of theirs would get a
+login. That comes from the create check (`cloud-workspaces/preflight?agent=`,
+which any member may ask, PRO-73), not from the list: it answers pass or
+fail and carries no identity. A fail is the same answer for "no login is
+stored" and "the stored one is limited to managers' workspaces", so the
+member's row names both. A server that does not answer per agent gets "the
+service did not say".
+
+## Where other pages send people
+
+A first prompt refused for lack of a login
+(`cloud_workspace_agent_credential_required`), a launch that failed with
+`agent-sign-in-required`, and an agent tab that needs sign-in all name
+Settings → Account → Agent logins and carry an "Open Agent logins" button
+that opens it. The create refusal is one code for two causes (see above):
+an owner or admin is never held back by the managers-only limit, so they are
+told the login is missing or revoked; anyone else is told it is one of the
+two and that an owner or admin can see which.
 
 ## Who a stored login reaches (`sharedUse`)
 
@@ -164,9 +188,24 @@ token.
   for a first login, or the scope the replaced login has.
 - That anyone who can drive a workspace can read the short-lived token off
   its machine (it is in the agent's environment there).
-- How it ends: Disconnect, which the service refuses (409) while a workspace
-  of the organization still uses the login; revoke in the web console; or
-  its own expiry. The desktop has no revoke route today.
+- How it ends: Disconnect, or its own expiry. The desktop has no revoke
+  route today.
+
+## What Disconnect does
+
+The service deletes the stored login. It does **not** refuse because a
+workspace is running: desktop-created workspaces name no login of their own
+and sign in with whatever the organization has stored, so a disconnect
+reaches all of them, running ones included. Nothing is stopped; an agent
+keeps the access its machine was already handed until that runs out, then
+needs a sign-in.
+
+The one refusal (`cloud_workspace_credential_in_use`, 409) is for a
+workspace still in existence whose first-run setup pinned this very login's
+id (`remove` in `organizationCloudWorkspaceCredentialService.ts`). The page
+and the native lend confirmation say exactly this. Until #450 they said the
+service refuses "while a workspace of the organization still uses the
+login", which a disconnect with a running Claude Code workspace disproved.
 
 ## Not verified, and for the owner
 

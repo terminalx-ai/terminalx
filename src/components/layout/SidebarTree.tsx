@@ -18,6 +18,7 @@ import {
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
+import { MergedNote } from "@/components/layout/MergedNote";
 import { RowActions } from "@/components/layout/RowActions";
 import {
   AgentTabRow,
@@ -72,6 +73,7 @@ import {
   startSessionIn,
   useSessionStore,
 } from "@/lib/sessions";
+import { LOCAL_HOST, useMergedStatus } from "@/lib/mergedCleanup";
 import { useTabViews } from "@/lib/tabViews";
 import { tabViewIn } from "@/lib/tabFront";
 import { activatePeer, closePeer, isShellPeer, peerLabel, peerShell, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
@@ -235,6 +237,8 @@ function WorkspaceNode({
 }) {
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = group.workspace;
+  // Why it is still here after its pull request merged, or when it goes.
+  const merged = useMergedStatus(LOCAL_HOST, workspace && !workspace.isMain ? workspace.path : null);
   const removedSession = group.sessions.find((session) => session.removedWorkspace) ?? group.sessions[0];
   const name = group.removed && removedSession ? sessionWorkspaceName(removedSession) : (workspace?.name ?? group.path.split("/").pop() ?? group.path);
   const displayName = group.removed ? name : workspace?.managed ? name : (workspace?.branch ?? name);
@@ -305,6 +309,7 @@ function WorkspaceNode({
           {renameError}
         </div>
       ) : null}
+      <MergedNote status={merged} className="mx-6 mb-1" />
       <TreeGroup expanded={expanded} className="pl-2">
         {group.sessions.map((session) => (
           <SessionNode

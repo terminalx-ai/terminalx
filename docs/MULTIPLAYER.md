@@ -132,9 +132,27 @@ checked again when an idle tab receives it. CLI input that waits for readiness
 is checked a third time at the actual PTY writer, with a connection revision,
 tab cancellation generation, current public-tab resolution, and mode check.
 Demotion followed by promotion cannot revive an old waiting input. Host
-takeover, stop, or release cancels waiting input even after a lease expires.
-Steering interrupts the active turn, then resumes the agent with the steering
-prompt; it does not leave a guest prompt in an agent-owned queue.
+takeover, a forced stop, or release cancels waiting input even after a lease
+expires. Waiting input is delivered whatever its guest did since it was
+accepted: the limit on how fast a guest may write is for requests, not for
+delivery.
+
+`session.stop` is Escape first (#427), as the host's own Stop is
+([PTY-FIRST.md](./PTY-FIRST.md), "Escape interrupts; only Stop ends the
+process"). The running turn is interrupted, the host's agent process stays,
+and waiting input is kept and goes out when the interrupted turn has ended.
+The answer is `{ stopped: false, interrupted }`; `interrupted` is false when
+nothing was running, and then nothing was typed. `session.stop` with
+`force: true` is the stop that ends the agent's process and cancels waiting
+input (`{ stopped: true }`). The guest's view asks for it only while the turn
+it interrupted is still the one running. A host from before this takes every
+`session.stop` as the forced one and refuses the `force` parameter.
+
+Steering is an interrupt, then the steering prompt as the next message. The
+prompt goes to the front of the host's queue, is checked again like any
+waiting input, and is sent to the same agent process once the interrupted
+turn has ended. It is never typed into the running agent, so no guest prompt
+sits in an agent-owned queue.
 
 ## Presence, content, and bounds
 

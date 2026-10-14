@@ -1014,6 +1014,10 @@ impl WorkspaceRpc {
             "cleanup.remove" => self.cleanup_remove(peer, params),
             "workspace.disposition" => self.workspace_disposition(peer, params),
             "workspace.remove" => self.workspace_remove(peer, params),
+            "workspace.sweepMerged" => self.workspace_sweep_merged(params),
+            "workspace.holdMerged" => self.workspace_hold_merged(params),
+            "workspace.removedRecords" => self.workspace_removed_records(),
+            "workspace.restoreRemoved" => self.workspace_restore_removed(params),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -2156,17 +2160,17 @@ impl WorkspaceRpc {
             })
             .collect::<Result<_, _>>()?;
         let protected = [self.root.clone()];
-        let busy: HashSet<(String, String)> = self
-            .agents
-            .get()
-            .map(|agents| agents.tabs())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|tab| tab.process == "running" || !tab.pending_permissions.is_empty() || matches!(tab.status, index::TabStatus::InProgress | index::TabStatus::Waiting))
-            .map(|tab| (tab.session_id, tab.tab_id))
+        let tabs = self.agents.get().map(|agents| agents.tabs()).unwrap_or_default();
+        // In a turn, or waiting on an answer: what keeps a worktree even from
+        // a removal that stops the agents sitting idle in it.
+        let turns: HashSet<(String, String)> = tabs
+            .iter()
+            .filter(|tab| !tab.pending_permissions.is_empty() || matches!(tab.status, index::TabStatus::InProgress | index::TabStatus::Waiting))
+            .map(|tab| (tab.session_id.clone(), tab.tab_id.clone()))
             .collect();
+        let busy: HashSet<(String, String)> = tabs.iter().filter(|tab| tab.process == "running").map(|tab| (tab.session_id.clone(), tab.tab_id.clone())).chain(turns.iter().cloned()).collect();
         let running = |session: &str, tab: &str| busy.contains(&(session.to_string(), tab.to_string())) || self.sessions.as_ref().is_some_and(|manager| manager.is_running(session, tab));
-        let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live::observe(&self.terminals, sessions, &running);
+        let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live { turns: turns.clone(), ..crate::worktree_cleanup::Live::observe(&self.terminals, sessions, &running) };
         Ok(f(&crate::worktree_cleanup::Host { projects: &projects, protected: &protected, confine: Some(&self.root), live: &live, fetch: crate::landed::Fetch::Fresh }))
     }
 
@@ -2508,6 +2512,7 @@ impl WorkspaceRpc {
                     expected_sessions: Some(&expected),
                     direct: crate::git::DirectDelete::Never,
                     fetch: crate::landed::Fetch::Fresh,
+                    guard: None,
                 };
                 let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
                 kept_branch = removed.removal.kept_branch;
@@ -2600,11 +2605,80 @@ impl WorkspaceRpc {
             expected_sessions: Some(&p.expected_sessions),
             direct: crate::git::DirectDelete::Never,
             fetch: crate::landed::Fetch::Fresh,
+            guard: None,
         };
         let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
         let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(RpcError::internal)?;
         let deleted = self.forget_deleted_sessions(&removed.sessions);
         Ok(json!({ "deleted": deleted, "keptBranch": removed.removal.kept_branch, "rescuedBranch": removed.removal.rescued_branch }))
+    }
+
+    // ---- the removal that follows a merged pull request -------------------------
+
+    /// `workspace/2`: one pass over this workspace's repositories: which
+    /// worktrees' pull requests merged, which stay and why, and the removal
+    /// of those that are safe and due, with their branches. The caller says
+    /// only that it is on, whether conversations go too, and how long the
+    /// grace period is; when a merge was first seen is kept here. With
+    /// `enabled: false` nothing is looked at and what was seen is forgotten:
+    /// the caller's way of saying it has been turned off.
+    fn workspace_sweep_merged(&self, params: Value) -> Result<Value, RpcError> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            enabled: Option<bool>,
+            #[serde(default)]
+            delete_sessions: bool,
+            grace_seconds: u64,
+        }
+        let p: Params = parse(params)?;
+        let before = index::load().map_err(RpcError::internal)?;
+        let swept = self
+            .with_cleanup_host(|host| {
+                let scope = crate::merged_cleanup::Scope {
+                    projects: host.projects.iter().filter(|_| p.enabled != Some(false)).map(|project| project.path.clone()).collect(),
+                    delete_sessions: p.delete_sessions,
+                    grace_seconds: p.grace_seconds,
+                };
+                let stop = |doomed: &SessionEntry| self.stop_before_removal(doomed);
+                let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd, branches);
+                let run = crate::merged_cleanup::Sweep { host, sink: &*self.sink, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
+                crate::merged_cleanup::sweep(&run, &scope)
+            })?
+            .map_err(RpcError::internal)?;
+        // What the runtime still holds for sessions deleted with their
+        // worktree, as after `session.delete`.
+        let deleted: HashSet<&String> = swept.statuses.iter().filter_map(|status| status.record.as_ref()).flat_map(|record| &record.sessions_deleted).collect();
+        if !deleted.is_empty() {
+            let removed: Vec<SessionEntry> = before.into_iter().filter(|session| deleted.contains(&session.id)).collect();
+            self.forget_deleted_sessions(&removed);
+        }
+        Ok(json!({ "statuses": swept.statuses, "unreadable": swept.unreadable }))
+    }
+
+    /// `workspace/2`: keep a worktree that is waiting to be removed, or let
+    /// it go again. The path only names an entry of what this runtime has
+    /// itself seen merged.
+    fn workspace_hold_merged(&self, params: Value) -> Result<Value, RpcError> {
+        let held = params.get("held").and_then(Value::as_bool).ok_or_else(|| RpcError::invalid("held is required"))?;
+        crate::merged_cleanup::hold(required_str(&params, "path")?, held, chrono::Utc::now()).map_err(|error| RpcError::not_found(format!("{error:#}")))?;
+        Ok(json!({}))
+    }
+
+    /// `workspace/2`: what was removed here, newest first, with whether each
+    /// can still be brought back.
+    fn workspace_removed_records(&self) -> Result<Value, RpcError> {
+        let records = self.with_cleanup_host(crate::merged_cleanup::records)?.map_err(RpcError::internal)?;
+        Ok(json!({ "records": records }))
+    }
+
+    /// `workspace/2`: undo one recorded removal, where it was.
+    fn workspace_restore_removed(&self, params: Value) -> Result<Value, RpcError> {
+        let id = required_str(&params, "id")?;
+        let restored = self
+            .with_cleanup_host(|host| crate::merged_cleanup::restore(host, &*self.sink, id, chrono::Utc::now()))?
+            .map_err(|error| RpcError::invalid(format!("{error:#}")))?;
+        Ok(json!({ "record": restored.record, "notes": restored.notes }))
     }
 
     /// Close the terminals opened for sessions that are gone.

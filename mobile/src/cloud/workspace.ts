@@ -62,6 +62,8 @@ export interface CloudWorkspaceSnapshot {
   canApprove: boolean;
   /** Whether this phone can seal a command and open a transcript. */
   hasKey: boolean;
+  /** Whether Stop can interrupt (#427): a live connection to a runtime that granted `session/3`. Otherwise Stop is the mailbox `stop`. */
+  interrupts: boolean;
   tabs: CloudTab[];
   outbox: OutboxEntry[];
   /** The last thing that went wrong while reading, as a code. */
@@ -310,8 +312,23 @@ export class CloudWorkspaceSession {
     return this.command(tabId, "steer", { text }, {});
   }
 
+  /** The hard stop: the agent's process is ended and the tab's queued follow-ups are dropped. */
   stop(tabId: string): Promise<OutboxEntry> {
     return this.command(tabId, "stop", {}, {});
+  }
+
+  /**
+   * Stop as Escape (#427): the running turn is interrupted and the agent's
+   * process stays, with what is queued behind the turn. A live call, never
+   * the mailbox (a queued Escape would land in some later turn), so only
+   * while `snapshot.interrupts`. False when the tab had nothing running.
+   */
+  async interrupt(tabId: string): Promise<boolean> {
+    const { role } = this.snapshot;
+    if (role !== "manager" && role !== "driver") throw new CloudSendError(role === "viewer" ? "read-only" : "unavailable");
+    const sessionId = this.tabs.get(tabId)?.sessionId;
+    if (!sessionId || !this.client.hasCapability("session/3")) throw new CloudSendError("unavailable");
+    return (await this.client.interruptAgentTab({ sessionId, tabId })).interrupted;
   }
 
   /**
@@ -741,6 +758,8 @@ export class CloudWorkspaceSession {
       role: (you?.role as CloudRole | undefined) ?? null,
       canApprove: you?.canApprove === true,
       hasKey: !!this.keys?.current(),
+      // As shown: in the moment after a trip to the home screen an interrupt is refused, never turned into the stop that ends the process.
+      interrupts: connection.state === "connected" && connection.capabilities.includes("session/3"),
       tabs: [...(this.tabs?.values() ?? [])].map((tab) => ({ ...tab })),
       outbox: this.outbox?.entries() ?? [],
       error: this.error,

@@ -205,6 +205,20 @@ class FakeRuntime implements WorkspaceTransport {
         this.cache.set(key!, result);
         return ok(result);
       }
+      case "workspace.sweepMerged": {
+        const result = { statuses: [{ path: "/w/.raccoon/worktrees/a", phase: params.graceSeconds === 0 ? "removed" : "scheduled", sessions: ["s1"] }], unreadable: [{ projectPath: "/w/other", reason: "gh is not signed in" }] };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "workspace.holdMerged":
+        return ok({});
+      case "workspace.removedRecords":
+        return ok({ records: [{ id: "r1", path: "/w/.raccoon/worktrees/a", blocked: null }] });
+      case "workspace.restoreRemoved": {
+        const result = { record: { id: params.id, restoredAt: "2026-10-12T00:00:00Z" }, notes: [] };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
       default:
         return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
     }
@@ -612,6 +626,40 @@ describe("workspace RPC client", () => {
       await expect(before.workspaceDisposition("s1")).rejects.toMatchObject({ code: "capability_not_granted" });
       await expect(before.removeSessionWorkspace("s1", { deleteBranch: false, confirmedDigest: null, expectedSessions: ["s1"] })).rejects.toMatchObject({ code: "capability_not_granted" });
       expect(old.sent.some((frame) => frame.method.startsWith("workspace."))).toBe(false);
+      before.close();
+    });
+
+    it("workspace/2: the removal that follows a merge is the runtime's to run, every change is one idempotent request, and a workspace/1 runtime is never asked", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.sweepMergedWorkspaces({ deleteSessions: false, graceSeconds: 600 })).toEqual({
+        statuses: [expect.objectContaining({ phase: "scheduled", sessions: ["s1"] })],
+        unreadable: [{ projectPath: "/w/other", reason: "gh is not signed in" }],
+      });
+      await client.holdMergedWorkspace("/w/.raccoon/worktrees/a", true);
+      expect(await client.removedWorkspaceRecords()).toEqual([expect.objectContaining({ id: "r1", blocked: null })]);
+      expect(await client.restoreRemovedWorkspace("r1")).toMatchObject({ record: { id: "r1" }, notes: [] });
+      const sent = (method: string) => runtime.sent.find((frame) => frame.method === method)!.params as Record<string, unknown>;
+      expect(sent("workspace.sweepMerged")).toMatchObject({ deleteSessions: false, graceSeconds: 600 });
+      expect(sent("workspace.holdMerged")).toMatchObject({ path: "/w/.raccoon/worktrees/a", held: true });
+      for (const method of ["workspace.sweepMerged", "workspace.holdMerged", "workspace.restoreRemoved"]) {
+        expect(typeof sent(method).clientRequestId, method).toBe("string");
+        expect(MUTATING_METHODS.has(method), method).toBe(true);
+      }
+      client.close();
+
+      // A runtime from before it still serves the removal dialog, and is asked nothing more.
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "workspace/2"));
+      expect(before.hasCapability("workspace/1")).toBe(true);
+      expect(before.hasCapability("workspace/2")).toBe(false);
+      await expect(before.sweepMergedWorkspaces({ deleteSessions: false, graceSeconds: 600 })).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.holdMergedWorkspace("/w/a", true)).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.removedWorkspaceRecords()).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.restoreRemovedWorkspace("r1")).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(old.sent.some((frame) => ["workspace.sweepMerged", "workspace.holdMerged", "workspace.removedRecords", "workspace.restoreRemoved"].includes(frame.method))).toBe(false);
       before.close();
     });
 

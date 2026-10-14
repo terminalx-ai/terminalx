@@ -130,9 +130,16 @@ async function scan(target: CloudTarget, run: Running): Promise<void> {
     if (cloudMirrorState(key).revision?.manifestId === manifest.manifestId) {
       const local = await api.cloudMirrorCheck(orgId, workspaceId);
       if (signal.aborted) return;
-      if (local.divergedTotal > 0) publish(key, { phase: "diverged", progress: null, diverged: local.diverged, divergedTotal: local.divergedTotal, skipped, error: null });
-      else publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, skipped, error: null });
-      return;
+      if (local.divergedTotal > 0) {
+        publish(key, { phase: "diverged", progress: null, diverged: local.diverged, divergedTotal: local.divergedTotal, skipped, error: null });
+        return;
+      }
+      // Discarded paths are no divergence, and what is on disk is still what was discarded:
+      // the mirror is in sync only once the plan below has put the workspace's files back.
+      if (!local.discarded) {
+        publish(key, { phase: "synced", progress: null, diverged: [], divergedTotal: 0, skipped, error: null });
+        return;
+      }
     }
     const plan = await api.cloudMirrorPlan(orgId, workspaceId, input);
     if (signal.aborted) return;

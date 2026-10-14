@@ -708,6 +708,15 @@ impl Mirror {
         Ok((desired, refused, case))
     }
 
+    /// Paths a person discarded that no sync has replaced yet: what is
+    /// there is still what they discarded. `check` passes these over (they
+    /// are answered, not a divergence), so while there are any the mirror
+    /// is not in sync, whatever the workspace's manifest says.
+    pub fn pending_discards(&self) -> Result<usize> {
+        let record = self.working_record()?;
+        Ok(record.discard.keys().filter(|path| self.discarded(&record, path)).count())
+    }
+
     fn plan_with(&self, record: &Record, manifest: &Manifest) -> Result<(Plan, Vec<Divergence>, Vec<String>)> {
         let (desired, refused, case) = self.desired(manifest, &record.blocked)?;
         let forced = |path: &str| self.discarded(record, path);

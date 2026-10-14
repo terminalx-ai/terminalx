@@ -33,6 +33,9 @@ import {
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
 import { errorCode } from "@/lib/cloudTerminals";
+import { getAccount } from "@/lib/account";
+import { managesOrganization } from "@/lib/multiOrg";
+import { AgentLoginsLink } from "./AgentLoginsLink";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 
 const AGENTS = [
@@ -142,7 +145,7 @@ export function CloudCreateWorkspace({
       setTracked(snapshot);
       onChanged?.();
     } catch (e) {
-      if (e instanceof CreateRefused) setError({ code: e.code, message: createErrorMessage(e.code, e.detail), retry: false });
+      if (e instanceof CreateRefused) setError({ code: e.code, message: createErrorMessage(e.code, e.detail, managesOrganization(getAccount().status, organizationId)), retry: false });
       else {
         const code = errorCode(e);
         setError({ code, message: createErrorMessage(code), retry: isClientError(e) && e.retryWithSameIdempotencyKey });
@@ -363,6 +366,7 @@ export function CloudCreateWorkspace({
       {error && (
         <div className="flex items-center gap-2 text-xs" role="alert" data-testid="cloud-create-error">
           <span className="text-red-500">{error.message}</span>
+          <AgentLoginsLink message={error.message} />
           {error.retry && pending && (
             <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void submit(true)}>
               <RotateCcw className="size-3" /> Retry
@@ -503,7 +507,11 @@ export function CreationProgress({
           {RUNTIME_NOT_PICKED_UP}
         </p>
       )}
-      {phase === "failed" && <p className="text-xs text-red-500">{failureMessage(snapshot)}</p>}
+      {phase === "failed" && (
+        <p className="text-xs text-red-500">
+          {failureMessage(snapshot)} <AgentLoginsLink message={failureMessage(snapshot)} className="ml-1 align-baseline text-foreground" />
+        </p>
+      )}
       {phase === "canceled" && <p className="text-xs text-muted-foreground">Canceled. Its compute is released and the first prompt was not sent.</p>}
       {error && <p className="text-xs text-red-500">{error}</p>}
       <div className="flex items-center gap-2">

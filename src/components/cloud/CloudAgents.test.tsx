@@ -383,7 +383,7 @@ describe("cloud agent tabs", () => {
     const info = (signIn: AgentTabInfo["signIn"]) => ({ harness: "codex", signIn });
     expect(signInMessage(info(null), true)).toBeNull();
     expect(signInMessage(info({ provider: "codex", state: "not-connected" }), true)).toBe(
-      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Connect it in the web console under Compute setup → Agent logins, then send again.",
+      "Needs sign-in: Codex isn't connected for this organization, so it can't take prompts here. Connect it in Settings → Account → Agent logins, then send again.",
     );
     // A member cannot connect it, and is not sent somewhere they have no access to.
     expect(signInMessage(info({ provider: "codex", state: "not-connected" }), false)).toBe(

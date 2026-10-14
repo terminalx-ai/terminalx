@@ -106,6 +106,47 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     answers.floating_visible = true;
     answers.floating_take_pending = f.localSession ? { sessionId: "local-s1", tabId: "lt-chat" } : null;
   }
+  // `mergedCleanup`: the removal that follows a merged pull request (#432) is
+  // on. The first project has worktrees whose pull requests merged: one that
+  // is about to go, ones that are kept (with a short and a long reason, and by
+  // the reader), and one a pass has just removed. Settings lists removals.
+  if (f.mergedCleanup) {
+    const root = projects[0].path;
+    const long = "432-setting-delete-the-workspace-and-its-branches-automatically-once-the-pull-request-is-merged";
+    const tree = (name, patch = {}) => ({ path: `${root}/.raccoon/worktrees/${name}`, name, branch: `raccoon/${name}`, head: "abc", isMain: false, managed: true, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0, state: "merged", ...patch });
+    const pr = (number) => ({ number, title: "Fix the login redirect", url: `https://github.com/acme/app/pull/${number}`, head: "a".repeat(40) });
+    const status = (name, patch) => ({ projectPath: root, path: tree(name).path, name, branch: `raccoon/${name}`, pr: pr(62), phase: "kept", reason: null, detail: null, due: null, fresh: false, sessions: [], record: null, ...patch });
+    const record = (id, name, minutes, patch = {}) => ({ id, removedAt: new Date(now - minutes * 60_000).toISOString(), projectPath: root, path: tree(name).path, name, branch: `raccoon/${name}`, commit: "abcdef0123456789abcdef0123456789abcdef01", pr: pr(60), localBranch: { outcome: "deleted" }, remoteBranch: { outcome: "deleted" }, sessionsKept: [], sessionsDeleted: [], blocked: null, ...patch });
+    const state = window.__PW_MERGED__ = { settings: { enabled: true, projects: { [projects[1]?.path ?? "/none"]: false }, deleteConversations: false, graceMinutes: 10 }, held: [], restored: [], headBranch: 0 };
+    answers.list_workspaces = ({ projectPath }) =>
+      projectPath === root
+        ? [{ ...tree("main"), path: root, name: "main", branch: "main", isMain: true, managed: false, state: "clean" }, tree("quiet-amber-fox"), tree("wip-red-bee", { state: "uncommitted", uncommitted: 2, additions: 12, deletions: 3 }), tree(long), tree("kept-grey-cat")]
+        : [];
+    answers.merged_cleanup_settings = () => state.settings;
+    answers.set_merged_cleanup_settings = ({ patch }) => {
+      const { project, ...rest } = patch;
+      const own = { ...state.settings.projects };
+      if (project) project.enabled === null ? delete own[project.key] : (own[project.key] = project.enabled);
+      return (state.settings = { ...state.settings, ...rest, projects: own });
+    };
+    answers.merged_cleanup_sweep = () => ({ unreadable: projects[2] ? [{ projectPath: projects[2].path, reason: "GitHub CLI (gh) is not installed or not on PATH." }] : [], statuses: [
+      status("quiet-amber-fox", state.held.includes(tree("quiet-amber-fox").path) ? { phase: "held" } : { phase: "scheduled", fresh: true, due: new Date(Date.now() + 8 * 60_000).toISOString() }),
+      status("wip-red-bee", { reason: "2 uncommitted files", detail: "It has 1 modified file, 1 untracked file." }),
+      status(long, { reason: "an agent is running in \"Deploy the staging environment and verify that the rollout finished everywhere\"" }),
+      status("kept-grey-cat", { phase: "held" }),
+      ...(state.restored.length ? [] : [status("gone-blue-jay", { phase: "removed", record: record("removal-0", "gone-blue-jay", 0, { remoteBranch: { outcome: "moved", at: "b".repeat(40) } }) })]),
+    ] });
+    answers.merged_cleanup_hold = ({ path, held }) => { held ? state.held.push(path) : (state.held = state.held.filter((kept) => kept !== path)); return null; };
+    answers.merged_cleanup_records = () => [
+      record("removal-0", "gone-blue-jay", 0, { remoteBranch: { outcome: "moved", at: "b".repeat(40) }, restoredAt: state.restored.includes("removal-0") ? new Date().toISOString() : null }),
+      record("removal-1", long, 45, { remoteBranch: { outcome: "kept", reason: "it could not be deleted: fatal: unable to access 'https://github.com/a-rather-long-organization-name/a-project-with-a-very-long-descriptive-name.git/': The requested URL returned error: 403" } }),
+      record("removal-2", "old-green-eel", 60 * 26, { blocked: "The branch raccoon/old-green-eel exists again, at another commit." }),
+      record("removal-3", "back-pink-emu", 60 * 50, { restoredAt: new Date(now - 60 * 49 * 60_000).toISOString(), blocked: "It was brought back already." }),
+    ];
+    answers.merged_cleanup_restore = ({ id }) => { state.restored.push(id); return { record: record(id, "gone-blue-jay", 0), notes: ["The session \"Fix the login redirect\" has been used since and stays under the project."] }; };
+    answers.github_head_branch_setting = ({ projectPath }) => ({ repository: projectPath === root ? "a-rather-long-organization-name/a-project-with-a-very-long-descriptive-name" : "acme/site", enabled: projectPath !== root || state.headBranch > 0, admin: true });
+    answers.github_enable_head_branch_deletion = () => { state.headBranch++; return { repository: "a-rather-long-organization-name/a-project-with-a-very-long-descriptive-name", enabled: true, admin: true }; };
+  }
   // Fixture scripts loaded after this one add answers (a value, or a function
   // of the command's arguments) and emit native events through `__PW_STUB__`.
   let id = 1;

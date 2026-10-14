@@ -263,3 +263,105 @@ async fn a_removal_tells_its_caller_how_far_it_is_and_nobody_else() {
     assert_eq!(resent, done);
     assert!(tokio::time::timeout(std::time::Duration::from_millis(50), heard.recv()).await.is_err());
 }
+
+// ---- workspace/2: the removal that follows a merged pull request --------------
+
+/// What GitHub is made to say of a workspace's branches.
+type Merged = std::collections::HashMap<String, crate::github::BranchPr>;
+
+/// Commit in a session's worktree, push its branch, merge it into `main` on
+/// the remote, and have GitHub say its pull request merged.
+fn merge_session(f: &Fixture, merged: &mut Merged, session: &crate::store::index::SessionEntry, number: u64) -> String {
+    let worktree = Path::new(&session.cwd);
+    let branch = crate::git::current_branch(worktree).unwrap();
+    std::fs::write(worktree.join(format!("{number}.txt")), "work").unwrap();
+    git(worktree, &["add", "-A"]);
+    git(worktree, &["commit", "-qm", "work"]);
+    git(worktree, &["push", "-q", "origin", "HEAD"]);
+    git(&f.root, &["merge", "-q", "--no-ff", "-m", "merge", &branch]);
+    git(&f.root, &["push", "-q", "origin", "main"]);
+    let head = crate::git::head_commit(worktree).unwrap();
+    let pr = crate::github::BranchPr { number, title: "Done".into(), url: format!("https://github.com/o/r/pull/{number}"), state: "MERGED".into(), head, base: "main".into() };
+    merged.insert(branch.clone(), pr);
+    crate::github::stand_in::set(&f.root, Ok(merged.clone()));
+    branch
+}
+
+fn status<'a>(sweep: &'a Value, path: &str) -> &'a Value {
+    sweep["statuses"].as_array().unwrap().iter().find(|status| status["path"] == path).unwrap_or_else(|| panic!("no status for {path}: {sweep}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_manager_that_was_granted_it_may_run_the_removal_that_follows_a_merge() {
+    let f = fixture();
+    let viewer = peer(&f.rpc, Authority::Participate, &["workspace/2"]).await;
+    let older = peer(&f.rpc, Authority::Manage, &["workspace/1"]).await;
+    let done = session(&f, "done", Some("done-one"));
+    merge_session(&f, &mut Merged::new(), &done, 7);
+    for method in ["workspace.sweepMerged", "workspace.holdMerged", "workspace.removedRecords", "workspace.restoreRemoved"] {
+        let params = json!({ "clientRequestId": "request-0001", "graceSeconds": 0, "path": done.cwd, "held": true, "id": "x" });
+        assert_eq!(call(&f.rpc, &viewer, method, params.clone()).await.unwrap_err(), "forbidden", "{method}");
+        assert_eq!(call(&f.rpc, &older, method, params).await.unwrap_err(), "capability_not_granted", "{method}");
+    }
+    assert!(Path::new(&done.cwd).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_runtime_removes_a_merged_worktree_with_its_branches_keeps_an_unsafe_one_and_can_put_it_back() {
+    let f = fixture();
+    let mut merged = Merged::new();
+    let manager = peer(&f.rpc, Authority::Manage, &["workspace/2"]).await;
+    let main = session(&f, "in main", None);
+    let done = session(&f, "done", Some("done-one"));
+    let wip = session(&f, "wip", Some("wip-one"));
+    let branch = merge_session(&f, &mut merged, &done, 7);
+    merge_session(&f, &mut merged, &wip, 8);
+    std::fs::write(Path::new(&wip.cwd).join("wip.txt"), "wip").unwrap();
+    let remote_has = |branch: &str| crate::git::run(&f.root, &["ls-remote", "origin", &format!("refs/heads/{branch}")]).unwrap().contains(branch);
+
+    // A pass carries a clientRequestId, like every call that can change the workspace.
+    assert_eq!(call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "graceSeconds": 600 })).await.unwrap_err(), "invalid_params");
+    // Within the grace period: scheduled or kept, and nothing has gone.
+    let first = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0001", "graceSeconds": 600 })).await.unwrap();
+    assert_eq!((first["statuses"].as_array().unwrap().len(), &first["unreadable"]), (2, &json!([])), "{first}");
+    assert_eq!((&status(&first, &done.cwd)["phase"], &status(&first, &done.cwd)["sessions"]), (&json!("scheduled"), &json!([done.id])));
+    assert_eq!((&status(&first, &wip.cwd)["phase"], &status(&first, &wip.cwd)["reason"]), (&json!("kept"), &json!("1 uncommitted file")));
+    assert!(Path::new(&done.cwd).exists());
+
+    // The reader keeps it, then lets it go: it is the runtime's own entry that is named.
+    call(&f.rpc, &manager, "workspace.holdMerged", json!({ "clientRequestId": "request-0002", "path": done.cwd, "held": true })).await.unwrap();
+    let held = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0003", "graceSeconds": 0 })).await.unwrap();
+    assert_eq!(status(&held, &done.cwd)["phase"], "held");
+    assert!(Path::new(&done.cwd).exists());
+    assert_eq!(call(&f.rpc, &manager, "workspace.holdMerged", json!({ "clientRequestId": "request-0004", "path": f.root, "held": true })).await.unwrap_err(), "not_found");
+    call(&f.rpc, &manager, "workspace.holdMerged", json!({ "clientRequestId": "request-0005", "path": done.cwd, "held": false })).await.unwrap();
+
+    // Due: the clean one goes with its branches, the dirty one and the main directory stay.
+    let swept = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0006", "graceSeconds": 0 })).await.unwrap();
+    let removed = status(&swept, &done.cwd);
+    assert_eq!(removed["phase"], "removed", "{swept}");
+    assert_eq!((&removed["record"]["localBranch"]["outcome"], &removed["record"]["remoteBranch"]["outcome"], &removed["record"]["pr"]["number"]), (&json!("deleted"), &json!("deleted"), &json!(7)));
+    assert!(!Path::new(&done.cwd).exists() && !remote_has(&branch));
+    assert_eq!(status(&swept, &wip.cwd)["phase"], "kept");
+    assert!(Path::new(&wip.cwd).exists() && f.root.join("README.md").exists());
+    // Its conversation is kept, filed under the workspace; the main directory's session is untouched.
+    let kept = crate::store::index::get(&done.id).unwrap();
+    assert!(kept.worktree_removed && kept.cwd == f.root.to_string_lossy());
+    assert_eq!(crate::store::index::get(&main.id).unwrap(), main);
+    // Sent again after a dropped connection: the first answer, not a second pass.
+    let resent = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0006", "graceSeconds": 0 })).await.unwrap();
+    assert_eq!(resent, swept);
+
+    // It is recorded, and an undo puts it back where it was and keeps it there.
+    let records = call(&f.rpc, &manager, "workspace.removedRecords", json!({})).await.unwrap();
+    assert_eq!((records["records"].as_array().unwrap().len(), &records["records"][0]["blocked"]), (1, &Value::Null));
+    let id = records["records"][0]["id"].clone();
+    assert_eq!(call(&f.rpc, &manager, "workspace.restoreRemoved", json!({ "clientRequestId": "request-0007", "id": "no-such-removal" })).await.unwrap_err(), "invalid_params");
+    let restored = call(&f.rpc, &manager, "workspace.restoreRemoved", json!({ "clientRequestId": "request-0008", "id": id })).await.unwrap();
+    assert!(restored["record"]["restoredAt"].is_string() && restored["notes"].as_array().unwrap().is_empty(), "{restored}");
+    assert!(Path::new(&done.cwd).join("7.txt").exists() && remote_has(&branch));
+    assert!(!crate::store::index::get(&done.id).unwrap().worktree_removed);
+    let after = call(&f.rpc, &manager, "workspace.sweepMerged", json!({ "clientRequestId": "request-0009", "graceSeconds": 0 })).await.unwrap();
+    assert_eq!(status(&after, &done.cwd)["phase"], "held");
+    assert!(Path::new(&done.cwd).exists());
+}

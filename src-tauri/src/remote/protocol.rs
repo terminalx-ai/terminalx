@@ -47,9 +47,14 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// - `workspace/1`: one session's worktree, for the removal dialog a desktop
 ///   shows: `workspace.disposition` and `workspace.remove`. The worktree is
 ///   named by its session, never by a path.
-pub const CAPABILITIES: [&str; 19] = [
+/// - `workspace/2`: the removal that follows a merged pull request
+///   (`merged_cleanup.rs`): `workspace.sweepMerged`, `workspace.holdMerged`,
+///   `workspace.removedRecords` and `workspace.restoreRemoved`. The runtime
+///   reads, removes and records its own worktrees; a client only says that
+///   it is on, and how long the grace period is.
+pub const CAPABILITIES: [&str; 20] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2",
 ];
 
 /// The namespace that lets a connection address an agent tab's own terminal
@@ -190,6 +195,13 @@ pub const METHODS: &[Method] = &[
     // removal deletes them with it: both are the manager's.
     method("workspace.disposition", "workspace/1", Manage, false),
     method("workspace.remove", "workspace/1", Manage, true),
+    // The removal that follows a merged pull request. A pass removes
+    // worktrees and their branches, and an undo makes them again: all of it
+    // is the manager's, as `workspace.remove` is.
+    method("workspace.sweepMerged", "workspace/2", Manage, true),
+    method("workspace.holdMerged", "workspace/2", Manage, true),
+    method("workspace.removedRecords", "workspace/2", Manage, false),
+    method("workspace.restoreRemoved", "workspace/2", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
     method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
     // PRO-33: free memory and disk of the machine; read-only. A runtime
@@ -229,7 +241,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "lifecycle/1" => &["lifecycle."],
         "mirror/1" => &["mirror."],
         "cleanup/1" => &["cleanup."],
-        "workspace/1" => &["workspace."],
+        "workspace/1" | "workspace/2" => &["workspace."],
         // `composer/N` adds what an agent tab's composer asks of its session.
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],

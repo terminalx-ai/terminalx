@@ -22,6 +22,7 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
+import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { QuickChatSettings } from "./FloatingWindowSettings";
@@ -120,7 +121,13 @@ export function SettingsPage({
             {tab === "agents" && <AgentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
-            {tab === "storage" && <StorageTab />}
+            {tab === "storage" && (
+              <>
+                <MergedCleanupSettings />
+                <div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div>
+                <StorageTab />
+              </>
+            )}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>

@@ -36,6 +36,7 @@ import { WorkspaceNameEditor } from "./WorkspaceNameEditor";
 import { CloudCreateConfirm, cloudStartError, useCloudDraft, useCloudProjectChoices } from "./CloudNewSession";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { RunningLimitNotice } from "@/components/cloud/RunningLimitNotice";
+import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { RUNNING_LIMIT_CODE, runningLimitMessage, runningLimitReached } from "@/lib/runningLimit";
 import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest, type PreparedCreate } from "@/lib/cloudNewSession";
@@ -181,7 +182,7 @@ export function NewSessionView({
     const code = e && typeof e === "object" && "code" in e ? String((e as { code: unknown }).code) : null;
     const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
     setLimitOrg(atRunningLimit ? orgId : null);
-    setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e));
+    setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e, orgId));
     // Refused for lack of role: read the roles again, so the form and the menus stop offering it.
     if (isRoleRefusal(e)) void refreshAccountRoles(true);
   };
@@ -571,7 +572,11 @@ export function NewSessionView({
               {NEW_SESSION_ADMIN_REASON}
             </div>
           )}
-          {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+          {error && (
+            <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error} <AgentLoginsLink message={error} className="ml-1 align-baseline text-foreground" />
+            </div>
+          )}
           {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}
         </div>
       </div>

@@ -35,6 +35,7 @@ import { openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
+import { interruptUnanswered } from "@/types/events";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -256,7 +257,7 @@ export function TabView({
   }, [live]);
   const interrupts = backend.caps.interrupt;
   const unanswered = useMemo(
-    () => interrupts && live && interruptedAt !== null && !log.events.some((e) => e.seq > interruptedAt && e.payload.type === "turn_completed"),
+    () => interrupts && live && interruptUnanswered(log.events, interruptedAt),
     [interrupts, live, interruptedAt, log.events, log.version],
   );
 

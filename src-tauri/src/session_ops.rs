@@ -675,6 +675,12 @@ pub(crate) struct WorkspaceRemoval<'a> {
     pub expected_sessions: Option<&'a [String]>,
     pub direct: git::DirectDelete,
     pub fetch: crate::landed::Fetch,
+    /// A last look the caller wants taken once the sessions are stopped and
+    /// the workspace has been checked again, immediately before the
+    /// directory goes. An `Err` says why it stays, and nothing is removed.
+    /// For a caller with rules of its own on top of clean-and-merged (the
+    /// removal that follows a merged pull request).
+    pub guard: Option<&'a dyn Fn() -> Result<()>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -722,6 +728,7 @@ fn needs_confirmation(landed: &crate::landed::Landed, confirmation: &Confirmatio
 /// 3. `stop` ends what each session runs, and waits.
 /// 4. The workspace is read again. Something an agent wrote between the
 ///    check and its stopping must not be deleted under the earlier verdict.
+///    A caller's own `guard` is asked last.
 /// 5. The directory is removed. On the safe path git is not forced, so it
 ///    refuses by itself if the tree is not clean after all.
 ///
@@ -765,6 +772,9 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
     if ids(&now) != ids(&affected) {
         let titles: Vec<String> = now.iter().map(|session| format!("• {}", session.title)).collect();
         return Err(format!("{SESSIONS_CHANGED}, while it was being checked. Nothing was removed; the sessions that were in it are stopped. It now holds:\n{}", titles.join("\n")));
+    }
+    if let Some(guard) = request.guard {
+        guard()?;
     }
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
     let removal = if on_disk {
@@ -1354,6 +1364,7 @@ mod tests {
             expected_sessions: None,
             direct,
             fetch: crate::landed::Fetch::Skip,
+            guard: None,
         }
     }
 
