@@ -3140,6 +3140,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_share_requires_organization_access"
             | "cloud_workspace_share_limit"
             | "cloud_workspace_share_forbidden"
+            | "cloud_workspace_share_credential_restricted"
             | "cloud_workspace_collaboration_forbidden"
     )
 }
@@ -5406,6 +5407,7 @@ mod tests {
             ("409 Conflict", "cloud_workspace_share_requires_organization_access"),
             ("429 Too Many Requests", "cloud_workspace_share_limit"),
             ("403 Forbidden", "cloud_workspace_share_forbidden"),
+            ("409 Conflict", "cloud_workspace_share_credential_restricted"),
             ("404 Not Found", "organization_member_not_found"),
             ("404 Not Found", "cloud_workspace_share_not_found"),
         ] {
