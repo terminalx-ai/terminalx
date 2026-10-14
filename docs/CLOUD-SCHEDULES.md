@@ -90,7 +90,9 @@ A run that stops at a permission request with nobody attached who could
 answer it is ended by the runtime after a few minutes (`needs-approval`)
 instead of holding the workspace until the time limit, and the server
 pauses the task at once with that reason. The list says so, and which
-modes ask less.
+modes ask less. Such a task is not resumed (the server refuses it with
+`cloud_schedule_needs_approval`, since neither mode nor prompt can be
+changed): Resume is disabled and says to make the task again.
 
 Under the permission list the form says what the chosen mode means with
 nobody watching: "Ask every time" ends at the agent's first edit or

@@ -481,7 +481,7 @@ describe("sessions under the project", () => {
     mouseClick(within(projectRow(`cloud:${ORG}:github.com/acme/api`)!).getByRole("button", { name: "Project menu for acme/api" }));
     const menu = await screen.findByRole("menu");
     const labels = within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim());
-    expect(labels).toEqual(["New session", "Pin project", "Refresh", "Cloud diagnostics…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
+    expect(labels).toEqual(["New session", "Pin project", "Move to section", "Refresh", "Cloud diagnostics…", "Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…"]);
     expect(within(menu).getByText("Workspace · fix-login")).toBeTruthy();
   });
 

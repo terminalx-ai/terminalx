@@ -42,8 +42,19 @@ function NewTabTrigger({ trigger }: { trigger: ReturnType<typeof useRowMenu>["tr
  * reopen. They act on the workspace's row of tabs, which the title bar strip
  * and the sidebar both draw.
  */
-export function TabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud?: CloudSessionModel }) {
-  if (cloud) return <CloudTabActions session={session} selected={selected} cloud={cloud} />;
+export function TabActions({
+  session,
+  selected,
+  cloud,
+  onShowPorts,
+}: {
+  session: SessionEntry;
+  selected: SelectedSessionTab | null;
+  cloud?: CloudSessionModel;
+  /** A cloud session's "Ports and previews" (PRO-28); absent for anyone who may not use previews. */
+  onShowPorts?: () => void;
+}) {
+  if (cloud) return <CloudTabActions session={session} selected={selected} cloud={cloud} onShowPorts={onShowPorts} />;
   return <LocalTabActions session={session} selected={selected} />;
 }
 
@@ -147,7 +158,7 @@ export function NewTabHint({ children }: { children: ReactNode }) {
   return <DropdownMenuLabel className="max-w-64 whitespace-normal normal-case tracking-normal text-[11px] font-normal text-muted-foreground" role="note">{children}</DropdownMenuLabel>;
 }
 
-function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel }) {
+function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel; onShowPorts?: () => void }) {
   const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
   const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +226,15 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
           <DropdownMenuItem disabled={!!blocked} onSelect={() => run(() => cloud.openTerminal())}>
             <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[11px] text-faint">on the VM</span>
           </DropdownMenuItem>
+        )}
+        {onShowPorts && (
+          <>
+            <DropdownMenuSeparator />
+            {/* Never wakes the workspace: the panel only says it is stopped. */}
+            <DropdownMenuItem onSelect={onShowPorts}>
+              <Globe /><span>Ports and previews</span><span className="ml-auto pl-3 text-[11px] text-faint">side panel</span>
+            </DropdownMenuItem>
+          </>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

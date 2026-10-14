@@ -40,7 +40,10 @@ export interface PaletteWorkspaceItem extends PaletteEntityBase {
 
 export interface PaletteProjectItem extends PaletteEntityBase {
   group: "projects";
-  project: Project;
+  /** A local project; absent for a cloud one. */
+  project?: Project;
+  /** A cloud project's key (`cloud:<orgId>:<identity>`); opening it focuses it and never wakes anything. */
+  cloudKey?: string;
 }
 
 export type PaletteEntityItem = PaletteSessionItem | PaletteWorkspaceItem | PaletteProjectItem;
@@ -266,6 +269,55 @@ export function withCloudSessions(index: PaletteIndex, cloud: PaletteSessionItem
   return {
     ...index,
     sessions: [...index.sessions, ...cloud].sort((a, b) => b.recentAt - a.recentAt || a.primary.localeCompare(b.primary)),
+  };
+}
+
+/** What the palette needs of a cloud project: the sidebar's own placement, and its organization's section name. */
+export interface CloudPaletteProject {
+  key: string;
+  fullName: string;
+  /** `host/owner/name`, or `blank/<name>` for a project with no repository. */
+  identity: string;
+  blank: boolean;
+  orgName: string;
+  workspaces: { name: string; lastActivity: number }[];
+}
+
+/**
+ * Cloud projects as palette documents, each labelled with its organization so
+ * two projects of the same name in two organizations read apart. Found by
+ * name, repository, organization and workspace name.
+ */
+export function buildCloudPaletteProjects(projects: readonly CloudPaletteProject[]): PaletteProjectItem[] {
+  return projects.map((project): PaletteProjectItem => {
+    const where = project.blank ? "no repository" : project.identity;
+    const secondary = `${project.orgName} cloud · ${where}`;
+    return {
+      id: `cloud-project:${project.key}`,
+      group: "projects",
+      cloudKey: project.key,
+      primary: project.fullName,
+      secondary,
+      recentAt: Math.max(0, ...project.workspaces.map((workspace) => workspace.lastActivity)),
+      searchFields: searchFields(project.fullName, secondary, [project.orgName, ...project.workspaces.map((workspace) => workspace.name)]),
+    };
+  });
+}
+
+/**
+ * The index with cloud projects among the projects. Beside them, a local
+ * project says it is local, so the list never leaves "which one is this?"
+ * open. The same index when there are none (signed out, no cloud).
+ */
+export function withCloudProjects(index: PaletteIndex, cloud: PaletteProjectItem[]): PaletteIndex {
+  if (!cloud.length) return index;
+  const local = index.projects.map((item) => {
+    const secondary = `Local · ${item.secondary}`;
+    return { ...item, secondary, searchFields: searchFields(item.primary, secondary, ["this computer"]) };
+  });
+  return {
+    ...index,
+    projects: [...local, ...cloud].sort((a, b) => b.recentAt - a.recentAt || a.primary.localeCompare(b.primary)),
   };
 }
 

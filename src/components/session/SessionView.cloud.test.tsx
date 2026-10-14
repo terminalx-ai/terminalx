@@ -124,6 +124,7 @@ import { getSessionStore, selectCloudSession, upsertSession } from "@/lib/sessio
 import { api } from "@/lib/api";
 import { LocalPathLeakError, cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { resetPanelTabs } from "@/lib/panelTab";
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
@@ -419,6 +420,7 @@ afterEach(() => {
   resetCloudWakes();
   resetCloudConnections();
   resetCollab();
+  resetPanelTabs();
   client.close();
 });
 
@@ -813,7 +815,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…", "Ports and previews"]);
   });
 
   // PRO-38: the organization's diagnostics, from where the session runs.
@@ -836,7 +838,7 @@ describe("the session header's location and connection chips", () => {
     await openConnected();
     click(screen.getByTestId("session-location"));
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…", "Cloud diagnostics…"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Stop", "Archive… (stops compute, deleted after 30 days)", "Delete…", "Local mirror…", "Ports and previews", "Cloud diagnostics…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Cloud diagnostics/ }));
     const dialog = await screen.findByTestId("cloud-diagnostics-dialog");
     expect(within(dialog).getByText("Cloud diagnostics · Acme")).toBeTruthy();
@@ -1249,7 +1251,7 @@ describe("the session header's New tab menu", () => {
     mouseClick(plus());
     const menu = await screen.findByRole("menu");
     expect(within(menu).getByText("New agent tab with")).toBeTruthy();
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM", "Ports and previewsside panel"]);
     expect(plus().getAttribute("aria-expanded")).toBe("true");
     // The tooltip around it must not mark the open menu's trigger closed.
     expect(plus().getAttribute("data-state")).toBe("open");
@@ -1498,6 +1500,104 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     }
     const menu = await asleep("manager");
     expect(within(menu).getByRole("menuitem", { name: "Terminal on the VM: wakes the workspace" })).toBeTruthy();
+    expect(activate).not.toHaveBeenCalled();
+  });
+});
+
+// PRO-28 acceptance pass: the Ports panel had no entry in a session, and none at all for someone it was shared with.
+describe("Ports and previews in a cloud session (PRO-28)", () => {
+  const ME = { userId: "u-me", role: "driver", canApprove: false };
+  const sharedAs = (role: "manager" | "driver" | "viewer", canApprove: boolean, state: CloudWorkspaceListItem["workspace"]["state"] = "ready") => {
+    const item = workspaceItem(state, "participate");
+    item.workspace.accessMode = "organization";
+    item.workspace.you = { role, canApprove };
+    item.workspace.sharedWith = 2;
+    return item;
+  };
+  const panelTab = () => screen.queryByRole("button", { name: "Ports", hidden: true });
+  async function newTabMenu() {
+    mouseClick(screen.getByRole("button", { name: "New tab", hidden: true }));
+    return screen.findByRole("menu");
+  }
+  async function chipMenu() {
+    mouseClick(screen.getByTestId("session-location"));
+    return screen.findByRole("menu");
+  }
+
+  it("is a tab of the side panel and an entry of the New tab and workspace menus for a manager", async () => {
+    await openConnected();
+    expect(panelTab()).toBeTruthy();
+    expect(screen.queryByTestId("panel-ports")).toBeNull();
+    const menu = await newTabMenu();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Ports and previews/ }));
+    // The panel turns to Ports; this runtime has no ports/1, and the panel says so.
+    expect(await screen.findByTestId("panel-ports")).toBeTruthy();
+    expect(screen.getByTestId("cloud-ports-unsupported")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Files", hidden: true }));
+    await waitFor(() => expect(screen.queryByTestId("panel-ports")).toBeNull());
+    const workspace = await chipMenu();
+    fireEvent.click(within(workspace).getByRole("menuitem", { name: /Ports and previews/ }));
+    expect(await screen.findByTestId("panel-ports")).toBeTruthy();
+  });
+
+  it("is offered to a driver who may approve, the person a workspace is shared with", async () => {
+    setCatalog(sharedAs("driver", true));
+    runtime.collab = { you: { ...ME, canApprove: true }, participants: [], leases: [] };
+    runtime.tabs = [tabInfo()];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connectShared({ ...ME, canApprove: true }));
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(panelTab()).toBeTruthy());
+    const menu = await newTabMenu();
+    expect(within(menu).getByRole("menuitem", { name: /Ports and previews/ })).toBeTruthy();
+  });
+
+  it("is left out everywhere for a viewer and a driver who may not approve", async () => {
+    for (const role of ["viewer", "driver"] as const) {
+      resetCloudConnections();
+      resetCollab();
+      setCatalog(sharedAs(role, false));
+      runtime = new FakeRuntime();
+      client = new WorkspaceRpcClient(runtime);
+      runtime.collab = { you: { ...ME, role }, participants: [], leases: [] };
+      runtime.tabs = [tabInfo()];
+      render(wrap(<CloudHarness />));
+      await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+      await act(async () => runtime.connectShared({ ...ME, role }));
+      await screen.findByText("Fix login redirect");
+      await waitFor(() => expect(runtime.methods("collab.state").length).toBeGreaterThan(0));
+      expect(panelTab()).toBeNull();
+      const menu = await newTabMenu();
+      expect(within(menu).queryByRole("menuitem", { name: /Ports and previews/ })).toBeNull();
+      fireEvent.keyDown(menu, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+      const workspace = await chipMenu();
+      expect(within(workspace).queryByRole("menuitem", { name: /Ports and previews/ })).toBeNull();
+      cleanup();
+    }
+  });
+
+  // Found in the live run: after a stop and resume the panel came back on Changes, so the closed preview went unseen.
+  it("keeps the side panel on Ports when the connection drops and comes back", async () => {
+    await openConnected();
+    fireEvent.click(screen.getByRole("button", { name: "Ports", hidden: true }));
+    expect(await screen.findByTestId("panel-ports")).toBeTruthy();
+    await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "closed", retryInMs: 1000 }));
+    const offline = await screen.findByTestId("cloud-panel-offline-ports");
+    expect(within(offline).getByTestId("cloud-ports-restarting").textContent).toContain("Reconnecting");
+    await act(async () => runtime.connect());
+    expect(await screen.findByTestId("panel-ports")).toBeTruthy();
+  });
+
+  it("says where previews stand while the workspace is stopped, and wakes nothing", async () => {
+    setCatalog(workspaceItem("suspended"));
+    render(wrap(<CloudHarness />));
+    await act(async () => runtime.emit({ state: "suspended" }));
+    const ports = await screen.findByTestId("cloud-panel-offline-ports");
+    expect(within(ports).getByTestId("cloud-ports-stopped").textContent).toContain("Looking here never starts it");
+    const menu = await newTabMenu();
+    fireEvent.click(within(menu).getByRole("menuitem", { name: /Ports and previews/ }));
     expect(activate).not.toHaveBeenCalled();
   });
 });
@@ -1864,6 +1964,7 @@ describe("sharing states found in the live two-user test", () => {
       "Archive… (stops compute, deleted after 30 days)",
       "Delete…",
       "Local mirror…",
+      "Ports and previews",
     ]);
   });
 

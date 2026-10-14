@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Cloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
@@ -93,11 +93,20 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
  * quota first, then the provider, the machine and its price. Nothing is
  * created until Create is pressed.
  */
-export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCancel }: { prepared: PreparedCreate; orgName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
-  const { quote, quota } = prepared;
+/** A quote in words: the machine it is for, and what it costs running and stopped. */
+export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { machine: string; price: string } {
   const config = quote.configuration;
   const hourly = formatMicros(quote.activeHourlyMicros, quote.currency);
   const suspended = quote.estimatedSuspendedMonthlyMicros !== null ? formatMicros(quote.estimatedSuspendedMonthlyMicros, quote.currency) : null;
+  return {
+    machine: `${providerLabel} · ${config.machineClassLabel} (${config.vcpu} vCPU, ${Math.round(config.memoryMiB / 1024)} GB) · ${config.locationLabel}`,
+    price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. It stops itself after ${config.idleSuspendMinutes} idle minutes.`,
+  };
+}
+
+export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCancel }: { prepared: PreparedCreate; orgName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
+  const { quote, quota } = prepared;
+  const text = quoteText(quote, prepared.providerLabel);
   return (
     <div className="mb-3 rounded-xl border border-hairline bg-well p-3 text-xs" role="group" aria-label="Confirm a new cloud workspace" data-testid="cloud-create-confirm">
       <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-foreground">
@@ -106,12 +115,9 @@ export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCance
       <p className="text-muted-foreground" data-testid="cloud-create-quota">
         {quota ? `${orgName} has ${quota.used} of ${quota.limit} cloud workspaces in use; this adds one.` : `${orgName}'s workspace limit applies; this adds one workspace.`}
       </p>
-      <p className="mt-1 text-muted-foreground">
-        {prepared.providerLabel} · {config.machineClassLabel} ({config.vcpu} vCPU, {Math.round(config.memoryMiB / 1024)} GB) · {config.locationLabel}
-      </p>
+      <p className="mt-1 text-muted-foreground">{text.machine}</p>
       <p className="mt-1 text-foreground" data-testid="cloud-create-price">
-        {hourly} an hour while it runs{quote.pricing === "estimate" ? " (estimate)" : ""}
-        {suspended ? `, about ${suspended} a month while stopped` : ""}. It stops itself after {config.idleSuspendMinutes} idle minutes.
+        {text.price}
       </p>
       {prepared.project.blank && <p className="mt-1 text-muted-foreground">It starts as an empty folder with Git, so changes can be tracked.</p>}
       <div className="mt-2 flex justify-end gap-2">

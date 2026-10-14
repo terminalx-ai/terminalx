@@ -61,6 +61,11 @@ export interface Prefs {
   /** Cloud projects the reader collapsed, by project key (`cloud:<orgId>:<identity>`); expanded by default. */
   cloudCollapsed: Record<string, true>;
   /**
+   * Personal named sections of cloud projects (see `@/lib/cloudSidebarSections`),
+   * by account email, then organization id, in the reader's order.
+   */
+  cloudSections: Record<string, Record<string, CloudSidebarSection[]>>;
+  /**
    * Keyboard shortcuts the reader changed, by action id (see `@/lib/shortcuts`):
    * the bindings that replace the action's defaults, an empty list for none.
    * Kept per machine. An action not listed uses its defaults.
@@ -110,6 +115,7 @@ const DEFAULTS: Prefs = {
   cloudBlankProjects: {},
   cloudPinned: {},
   cloudCollapsed: {},
+  cloudSections: {},
   shortcuts: {},
   shortcutsVersion: SHORTCUTS_VERSION,
   sidebarFilters: {},
@@ -117,6 +123,30 @@ const DEFAULTS: Prefs = {
 };
 
 const KEY = "raccoon.prefs";
+
+/** One personal section of an organization's cloud projects. */
+export interface CloudSidebarSection {
+  id: string;
+  name: string;
+  /** Project identities (`host/owner/name` or `blank/<name>`), each in one section at most. */
+  projects: string[];
+}
+
+/** Saved sections as written, minus anything malformed (a hand-edited or older file never breaks the sidebar). */
+function cleanCloudSections(value: unknown): Prefs["cloudSections"] {
+  const isObject = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
+  if (!isObject(value)) return {};
+  const out: Prefs["cloudSections"] = {};
+  for (const [who, orgs] of Object.entries(value)) {
+    if (!isObject(orgs)) continue;
+    for (const [orgId, sections] of Object.entries(orgs)) {
+      if (!Array.isArray(sections)) continue;
+      const kept = sections.filter((section): section is CloudSidebarSection => isObject(section) && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.projects)).map((section) => ({ id: section.id, name: section.name, projects: section.projects.filter((id): id is string => typeof id === "string") }));
+      if (kept.length) (out[who] ??= {})[orgId] = kept;
+    }
+  }
+  return out;
+}
 
 function load(): Prefs {
   try {
@@ -127,6 +157,7 @@ function load(): Prefs {
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
+    prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

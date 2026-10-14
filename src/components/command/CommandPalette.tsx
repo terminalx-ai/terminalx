@@ -47,7 +47,9 @@ import {
   parseSmartInput,
   rankPaletteItems,
   searchPaletteIndex,
+  buildCloudPaletteProjects,
   buildCloudPaletteSessions,
+  withCloudProjects,
   withCloudSessions,
   type MatchRange,
   type PaletteEntityBase,
@@ -69,6 +71,7 @@ import {
   refreshWorkspaces,
   selectProjectInSidebar,
   selectSession,
+  startCloudSessionIn,
   startSessionIn,
   upsertSession,
   useSessionStore,
@@ -77,7 +80,8 @@ import { SHORTCUT_ACTIONS, keycaps, useKeymap, type ShortcutAction } from "@/lib
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
 import { useAccount } from "@/lib/account";
-import { defaultOrgId, liveCloudOrgIds } from "@/lib/cloudCatalog";
+import { defaultOrgId, lastActivity, liveCloudOrgIds } from "@/lib/cloudCatalog";
+import { useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { THEMES, setMode, setTheme, useTheme } from "@/lib/theme";
@@ -593,10 +597,17 @@ export function CommandPalette({
   // Cloud sessions of every live organization sit among the sessions (PRO-23 CS-19).
   const cloudSessions = useCloudDashboard();
   const { visibleIds } = useOrganizationVisibility();
-  const paletteIndex = useMemo(
-    () => withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
-    [store.paletteIndex, cloudSessions, store.harnesses, visibleIds, deferredQuery],
-  );
+  // And their projects among the projects, each named with its organization (a hidden organization's only when searched for, like its sessions).
+  const cloudProjects = useCloudProjectChoices();
+  const paletteIndex = useMemo(() => {
+    const projects = cloudProjects
+      .filter((org) => deferredQuery.trim() || visibleIds.has(org.orgId))
+      .flatMap((org) => org.projects.map((project) => ({ ...project, orgName: org.orgName, workspaces: project.workspaces.map((node) => ({ name: node.item.workspace.name, lastActivity: lastActivity(node.item.workspace) })) })));
+    return withCloudProjects(
+      withCloudSessions(store.paletteIndex, buildCloudPaletteSessions(visiblePaletteSessions(cloudSessions, visibleIds, deferredQuery), store.harnesses)),
+      buildCloudPaletteProjects(projects),
+    );
+  }, [store.paletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
 
   const groups = useMemo<PaletteGroup[]>(() => {
     const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
@@ -659,10 +670,15 @@ export function CommandPalette({
       { agentId: match.item.agentIds[0] },
     ));
     const workspaceRows = entityMatches.workspaces.map((match) => entityRow(match, "workspace", () => void openWorkspace(match.item.projectPath, match.item.workspace.path)));
-    const projectRows = entityMatches.projects.map((match) => entityRow(match, "project", () => {
-      selectProjectInSidebar(match.item.project.path);
-      startSessionIn(match.item.project.path, null);
-    }, { project: match.item.project }));
+    const projectRows = entityMatches.projects.map((match) => {
+      const { project, cloudKey } = match.item;
+      // A cloud project opens its new-session form like a local one (a member's only focuses it); nothing is woken.
+      if (cloudKey) return entityRow(match, "project", () => startCloudSessionIn(cloudKey), { icon: Cloud });
+      return entityRow(match, "project", () => {
+        selectProjectInSidebar(project!.path);
+        startSessionIn(project!.path, null);
+      }, { project });
+    });
     const fileRows = rankedFiles.map((match) => entityRow(match, "file", () => void openFileHit(match.item.hit)));
     const commandRows = commandMatches.map((match) => entityRow(match, "command", match.item.run, {
       ...(match.item.keepOpen ? { closeBefore: false } : {}),

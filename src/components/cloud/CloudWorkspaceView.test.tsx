@@ -445,6 +445,19 @@ describe("shared cloud workspaces (PRO-30)", () => {
     expect(screen.queryByRole("button", { name: "Take control" })).toBeNull();
   });
 
+  it("PRO-28: shows Ports to a driver who may approve, and leaves it out for anyone who may not use previews", async () => {
+    collabState = { ...collabState, you: { userId: "u-me", role: "driver", canApprove: true } };
+    await openReady();
+    act(() => emit(shared({ userId: "u-me", role: "driver", canApprove: true }, { authority: "participate" })));
+    fireEvent.click(await screen.findByRole("tab", { name: "Ports" }));
+    // The right to approve is taken away while the panel is open.
+    act(() => notify("collab.you", { you: { userId: "u-me", role: "driver", canApprove: false } }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Ports" })).toBeNull());
+    // The view it was on goes back to the terminals rather than a panel of refusals.
+    expect(screen.queryByTestId("cloud-ports-forbidden")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Agent" }).getAttribute("aria-selected")).toBe("false");
+  });
+
   it("opens the share dialog for the workspace", async () => {
     await openReady();
     fireEvent.click(await screen.findByRole("button", { name: /Share/ }));

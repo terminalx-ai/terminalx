@@ -194,8 +194,8 @@ stream ends.
    on `127.0.0.1`, on a random free port by default. A listener is bound to
    one workspace and is never reused for another.
 3. Desktop, interface: a Ports panel in the cloud session (listening ports,
-   open previews, states: starting, unavailable, stopped), and "Open
-   preview" in the built-in browser.
+   open previews, states: looking, restarting, unavailable, stopped,
+   expired). The preview opens in the system browser when the person asks.
 
 The API and the relay need no change for private previews.
 
@@ -240,17 +240,37 @@ One `PortForwarder` per workspace connection. Commands:
 
 ## The Ports panel (`src/components/cloud/CloudPorts.tsx`)
 
-A "Ports" tab in the cloud workspace view.
+Where it is, for anyone who may use previews (a manager, or a driver who
+may approve; the same rule as above):
+
+- a "Ports" tab in a cloud session's side panel, beside Changes, Repo, PR
+  and Files;
+- "Ports and previews" in the session's "New tab" menu and in the
+  workspace menu on its location chip, which open that tab;
+- a "Ports" tab in the cloud workspace view.
+
+For anyone else the tab and both menu entries are left out, not shown and
+refused. While the workspace is not connected the side panel keeps a
+small Ports section under its "appear once connected" text, which says
+where previews stand, and when the connection is back the panel reopens
+on the tab it showed before. None of these entries connects or wakes the
+workspace.
+
+What it does:
 
 - It lists what listens in the workspace (`ports.list`) and the forwards
-  that are open, and refreshes every 5 seconds while it is on screen and the
-  window is visible. It reads nothing while hidden. What the runtime lists
-  is checked before it is shown: whole numbers from 1 to 65535, at most 256.
-- "Open preview" forwards the port to a random free port on this Mac and
-  opens `http://127.0.0.1:<port>` in the system browser. The address is
-  `127.0.0.1`, not `localhost`: the listener is IPv4 only, and `localhost`
-  could reach another program listening on IPv6 loopback at that port. An
-  open forward shows its address and a Stop button.
+  that are open. Until the runtime's first answer it says it is looking
+  for ports, never that nothing listens. It reads again every 2 seconds
+  (one read of `/proc/net/tcp` on the runtime), so an application that has
+  just started shows within a couple of seconds. It reads only while it is
+  on screen and the window is visible. What the runtime lists is checked
+  before it is shown: whole numbers from 1 to 65535, at most 256.
+- "Start preview" forwards the port to a random free port on this Mac and
+  shows `http://127.0.0.1:<port>`. Nothing opens by itself: the address
+  and "Open in browser" open it in the system browser, and "Copy" copies
+  it. The address is `127.0.0.1`, not `localhost`: the listener is IPv4
+  only, and `localhost` could reach another program listening on IPv6
+  loopback at that port. An open forward also has a Stop button.
 - "Same port number as the workspace" asks for the workspace's own port
   number on this Mac, and refuses when any program has it.
 - A port can be opened by number when the runtime cannot list listeners or
@@ -258,11 +278,23 @@ A "Ports" tab in the cloud workspace view.
 - The panel says what a preview exposes: other programs on this Mac can
   connect while it is open, and it shares cookies with anything else used
   at `127.0.0.1`.
-- States: stopped or not connected ("Looking here never starts it", nothing
-  is asked of the workspace, and the forwards shown are cleared because
-  they are closed); a runtime without `ports/1`; someone who may not use a
-  terminal, with the reason, and no call to the runtime.
 
-Previews open in the system browser because the built-in browser is not
-available in cloud sessions today (its pages are grouped by a local working
-directory, which a cloud session does not have).
+States, in its words:
+
+| State | When |
+| --- | --- |
+| Looking for ports | Connected, before the runtime's first answer. |
+| Restarting | Connecting, reconnecting after a drop, or waiting for a runtime that is starting or restarting. |
+| Stopped | Suspended or not connected: "Looking here never starts it". Nothing is asked of the workspace. |
+| Update required | This desktop is too old to connect. |
+| Unavailable | A runtime without `ports/1`. |
+| Expired | A preview that was open here closed without a Stop here: the connection dropped, was replaced or lost access. Its old address is shown struck through, with "Start again"; a new preview gets a new address. While there is no connection the panel says the previews that were open closed with it. |
+
+The panel remembers, per workspace and in memory only, the forwards it
+last saw open, so a preview that closed while the panel was not on screen
+is still reported as expired when it is next shown.
+
+Previews open in the system browser, and only when asked, because the
+built-in browser is not available in cloud sessions today (its pages are
+grouped by a local working directory, which a cloud session does not
+have).

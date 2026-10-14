@@ -1,6 +1,6 @@
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
+import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, Globe, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -38,12 +38,14 @@ import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { presenceTab } from "@/lib/cloudCollab";
 import { resolveSessionTab, setVisibleSessionTab } from "@/lib/visibleTab";
 import { WorkspaceActionItems, WorkspaceLifecycleDialog, useLifecycleRun, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
 import { lastSavedText } from "@/lib/cloudLifecycle";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
 import { CloudMirrorChip, CloudMirrorDialog, CloudMirrorMenuItem } from "@/components/cloud/CloudMirrorDialog";
+import { CloudPortsView } from "@/components/cloud/CloudPorts";
+import { showPanelTab } from "@/lib/panelTab";
 import { useAccount } from "@/lib/account";
 import { isQuickChat, quickChatPlace, sessionProjectName, useSessionIsGit } from "@/lib/quickChats";
 import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
@@ -112,6 +114,12 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
 function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud: CloudSessionModel; tab?: TabEntry }) {
   const log = useTabLog(cloud.backend.logSessionId, tab?.id ?? "");
   const live = tab?.status === "in_progress" || tab?.status === "waiting";
+  // PRO-28: only for someone who may use previews; it never connects or wakes the workspace.
+  const ports = cloud.ports.offered
+    ? (active: boolean) => (
+        <CloudPortsView workspaceKey={cloud.workspaceKey} client={cloud.client} state={cloud.ports.state} connectionId={cloud.ports.connectionId} mayOpen active={active} />
+      )
+    : null;
   if (!cloud.fileSource) {
     return (
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
@@ -123,6 +131,15 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
               ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
               : "Changes, Files and Git appear once the workspace is connected."}
         </div>
+        {/* Where previews stand while there is no connection: restarting, stopped, or closed with it. */}
+        {ports && (
+          <section className="shrink-0 border-t border-hairline" aria-label="Ports" data-testid="cloud-panel-offline-ports">
+            <h2 className="flex items-center gap-1 px-3 pt-2 text-[11px] font-medium text-muted-foreground">
+              <Globe className="size-3" /> Ports
+            </h2>
+            {ports(false)}
+          </section>
+        )}
       </aside>
     );
   }
@@ -144,6 +161,7 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       fileSource={cloud.fileSource}
       repositories={cloud.repositories && cloud.repositories.length > 1 ? { list: cloud.repositories.map((repo) => repo.repo), selected: cloud.repository, onSelect: cloud.selectRepository } : undefined}
       readOnlyReason={cloud.manage ? null : (cloud.backend.readOnlyReason ?? "View only: commits, pushes and file edits need manage access to this workspace.")}
+      ports={ports ? () => ports(true) : undefined}
     />
   );
 }
@@ -242,7 +260,17 @@ function CloudLastSaved({ cloud }: { cloud: CloudSessionModel }) {
 }
 
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
-function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /** Left out of a tight header (see the order above). */ yields?: boolean }) {
+function CloudLocation({
+  cloud,
+  yields = false,
+  onShowPorts,
+}: {
+  cloud: CloudSessionModel;
+  /** Left out of a tight header (see the order above). */
+  yields?: boolean;
+  /** Opens the side panel's Ports tab; absent for anyone who may not use previews, and in a window with no panel. */
+  onShowPorts?: () => void;
+}) {
   const { location, connection } = cloud;
   const catalog = useCloudCatalog();
   const item = findCloudWorkspace(catalog, cloud.orgId, cloud.workspaceId);
@@ -263,7 +291,7 @@ function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /*
   const diagnosticsOffered = offersCloudDiagnostics(status, cloud.orgId);
   return (
     <>
-      {item || diagnosticsOffered ? (
+      {item || diagnosticsOffered || onShowPorts ? (
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
             <button
@@ -284,6 +312,14 @@ function CloudLocation({ cloud, yields = false }: { cloud: CloudSessionModel; /*
               <>
                 <DropdownMenuSeparator />
                 <CloudMirrorMenuItem onSelect={() => setMirror(true)} />
+              </>
+            )}
+            {onShowPorts && (
+              <>
+                {item && <DropdownMenuSeparator />}
+                <DropdownMenuItem onSelect={onShowPorts}>
+                  <Globe /> Ports and previews
+                </DropdownMenuItem>
               </>
             )}
             {diagnosticsOffered && (
@@ -351,6 +387,8 @@ export function SessionView({
   chrome?: SessionChrome;
 }) {
   const compact = !!chrome?.compact;
+  // PRO-28: the side panel's Ports tab, from the header's menus; a compact window has no panel.
+  const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
   const isGit = useSessionIsGit(session);
   const quick = isQuickChat(session);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
@@ -605,7 +643,7 @@ export function SessionView({
                   : `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}`}
               </span>
             )}
-            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} />}
+            {cloud && <CloudLocation cloud={cloud} yields={!!terminalOffer?.available} onShowPorts={showPorts} />}
             {renameError && (
               <span role="alert" className={cn("ml-1 max-w-64 truncate text-[11px] text-destructive", strip && "min-w-0 shrink-[10000]")} title={renameError}>
                 {renameError}
@@ -627,7 +665,7 @@ export function SessionView({
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} labelClassName={strip ? STRIP_TIGHT : undefined} />}
             {/* Keyed by session: a menu left open never carries over to another session. */}
-            {!strip && !cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} />}
+            {!strip && !cloud?.locked && <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />}
             {activeTab && local && (
               <WithTooltip label="Continue in New Session…">
                 <Button variant="ghost" size="icon-sm" aria-label="Continue in New Session…" onClick={() => setContinuationSource(activeTab)}>

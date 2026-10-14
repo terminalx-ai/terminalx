@@ -87,9 +87,17 @@ const mount = () =>
 const projectNames = () => screen.queryAllByRole("treeitem").flatMap((node) => (["Api", "Web", "Quiet"].includes(node.getAttribute("aria-label") ?? "") ? [node.getAttribute("aria-label")] : []));
 const shown = (title: string) => screen.queryAllByText(title).length > 0;
 
+/** A real mouse click: pointerdown, mousedown, pointerup, mouseup, click. */
+function mouseClick(element: HTMLElement) {
+  fireEvent.pointerDown(element, { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent.mouseDown(element, { button: 0 });
+  fireEvent.pointerUp(element, { button: 0, pointerType: "mouse" });
+  fireEvent.mouseUp(element, { button: 0 });
+  fireEvent.click(element, { button: 0 });
+}
+
 async function choose(label: string) {
-  const trigger = screen.getByTestId("sidebar-filter");
-  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+  mouseClick(screen.getByTestId("sidebar-filter"));
   fireEvent.click(await screen.findByRole("menuitemradio", { name: label }));
   await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 }
@@ -101,6 +109,25 @@ describe("the sidebar's session filter (local)", () => {
     const control = screen.getByTestId("sidebar-filter");
     expect(control.getAttribute("data-filter")).toBe("all");
     expect(control.getAttribute("aria-label")).toBe("Filter sessions");
+  });
+
+  it("opens its menu on an accessibility press (a click with no pointerdown), and a second press closes it", async () => {
+    mount();
+    const trigger = screen.getByTestId("sidebar-filter");
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("menuitemradio", { name: "Unread" })).toBeTruthy();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    // A real click opens it too, and so does the keyboard.
+    mouseClick(trigger);
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(await screen.findByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
   it("Needs you shows only the sessions waiting for a person, with their projects opened", async () => {

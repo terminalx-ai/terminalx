@@ -24,7 +24,7 @@ import {
   useCloudTerminals,
   type CloudTerminal,
 } from "@/lib/cloudTerminals";
-import { canTypeInTerminals, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
+import { canTypeInTerminals, mayUsePreviews, sharingKnown, effectiveYou, notShared, presenceTab, rememberYou, startCollab, useCollab } from "@/lib/cloudCollab";
 import { rememberPeople } from "@/lib/cloudPeople";
 import { getCloudAgents } from "@/lib/cloudAgents";
 import { useTheme } from "@/lib/theme";
@@ -154,6 +154,11 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const manage = connected && state.authority === "manage" && (!sharingKnown(shared) || shared.role === "manager");
   // Managers and approving drivers of a shared workspace may take a terminal over; viewers and plain drivers never.
   const mayControl = manage || canTypeInTerminals(shared);
+  // PRO-28: Ports is left out for someone the live runtime says may not use previews.
+  const portsOffered = !connected || mayUsePreviews(manage, shared);
+  useEffect(() => {
+    if (!portsOffered) setView((current) => (current.kind === "ports" ? { kind: "terminal" } : current));
+  }, [portsOffered]);
   const [sharing, setSharing] = useState(false);
   const cloudTarget = connection.target.kind === "cloud" ? connection.target : null;
 
@@ -337,15 +342,17 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
         >
           <GitBranch className="size-3.5" /> Git
         </Button>
-        <Button
-          size="sm"
-          role="tab"
-          aria-selected={view.kind === "ports"}
-          variant={view.kind === "ports" ? "secondary" : "ghost"}
-          onClick={() => setView({ kind: "ports" })}
-        >
-          <Globe className="size-3.5" /> Ports
-        </Button>
+        {portsOffered && (
+          <Button
+            size="sm"
+            role="tab"
+            aria-selected={view.kind === "ports"}
+            variant={view.kind === "ports" ? "secondary" : "ghost"}
+            onClick={() => setView({ kind: "ports" })}
+          >
+            <Globe className="size-3.5" /> Ports
+          </Button>
+        )}
       </div>
       {!connected && <div className="px-4 py-1 text-xs text-muted-foreground">{describe(state)}</div>}
       {error && <p className="px-4 py-1 text-xs text-red-500">Terminal: {error}</p>}
@@ -396,9 +403,9 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
         </div>
       )}
       {/* Only while shown: it reads the workspace's ports on a timer. */}
-      {view.kind === "ports" && (
+      {view.kind === "ports" && portsOffered && (
         <div className="flex min-h-0 flex-1 flex-col">
-          <CloudPortsView client={client} state={state} connectionId={connection.connectionId?.() ?? null} mayOpen={mayControl} active />
+          <CloudPortsView workspaceKey={key} client={client} state={state} connectionId={connection.connectionId?.() ?? null} mayOpen={mayControl} active />
         </div>
       )}
     </div>

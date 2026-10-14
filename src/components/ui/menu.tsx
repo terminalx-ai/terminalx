@@ -7,7 +7,6 @@ export const DropdownMenu = Prim.Root;
 export const DropdownMenuTrigger = Prim.Trigger;
 export const DropdownMenuGroup = Prim.Group;
 export const DropdownMenuSub = Prim.Sub;
-export const DropdownMenuSubTrigger = Prim.SubTrigger;
 export const DropdownMenuRadioGroup = Prim.RadioGroup;
 
 const contentClass =
@@ -35,6 +34,18 @@ DropdownMenuSubContent.displayName = "DropdownMenuSubContent";
 
 const itemClass =
   "relative flex cursor-default select-none items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-[13px] outline-none data-[highlighted]:bg-veil-strong data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground";
+
+/** A row that opens a submenu, styled as an item; the arrow at its end says so. */
+export const DropdownMenuSubTrigger = React.forwardRef<
+  React.ComponentRef<typeof Prim.SubTrigger>,
+  React.ComponentPropsWithoutRef<typeof Prim.SubTrigger>
+>(({ className, children, ...props }, ref) => (
+  <Prim.SubTrigger ref={ref} className={cn(itemClass, "data-[state=open]:bg-veil-strong", className)} {...props}>
+    {children}
+    <ChevronRight className="ml-auto size-3.5! text-faint!" />
+  </Prim.SubTrigger>
+));
+DropdownMenuSubTrigger.displayName = "DropdownMenuSubTrigger";
 
 export const DropdownMenuItem = React.forwardRef<
   React.ComponentRef<typeof Prim.Item>,

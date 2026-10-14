@@ -284,6 +284,24 @@ describe("merging and tombstones", () => {
     expect(getCloudCatalog().notices).toHaveLength(1);
   });
 
+  it("drops a blank project's pending name once its workspace is listed, so deleting the workspace removes the project", async () => {
+    const { getPrefs, setPrefs } = await import("@/lib/prefs");
+    signIn();
+    setPrefs({ cloudBlankProjects: { [ORG]: ["Idlecheck", "Not yet"], "org-b": ["Elsewhere"] } });
+    const options = () => ({ blank: getPrefs().cloudBlankProjects[ORG] });
+    // Not created yet: the name alone is the project.
+    await ingestCloudList({ workspaces: [] }, ORG, 1, 1);
+    expect(placeCloudProjects(getCloudCatalog().orgs[ORG], {}, options()).projects.map((p) => p.fullName)).toEqual(["Idlecheck", "Not yet"]);
+    // Its first session created the workspace; a workspace with a repository of the same name is another project.
+    await ingestCloudList({ workspaces: [item("w1", { name: "idlecheck", repositories: [] }), item("w2", { name: "Not yet", repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null, primary: true }] })] }, ORG, 2, 2);
+    expect(getPrefs().cloudBlankProjects).toEqual({ [ORG]: ["Not yet"], "org-b": ["Elsewhere"] });
+    expect(placeCloudProjects(getCloudCatalog().orgs[ORG], {}, options()).projects.find((p) => p.blank && p.identity === "blank/idlecheck")?.workspaces).toHaveLength(1);
+    // The workspace is deleted (here or on another device): no empty project stays behind.
+    await ingestCloudList({ workspaces: [item("w2", { name: "Not yet", repositories: [{ identity: "github.com/acme/api", fullName: "acme/api", cloneUrl: null, primary: true }] })], tombstones: [{ id: "w1", orgId: ORG } as never] }, ORG, 3, 3);
+    expect(placeCloudProjects(getCloudCatalog().orgs[ORG], {}, options()).projects.map((p) => [p.fullName, p.blank])).toEqual([["acme/api", false], ["Not yet", true]]);
+    setPrefs({ cloudBlankProjects: {} });
+  });
+
   it("forgets what it remembered of a workspace once the server lists its repositories (PRO-59)", async () => {
     signIn();
     bootCloudCatalog();

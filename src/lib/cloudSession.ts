@@ -41,6 +41,7 @@ import {
   forgetCollabAccess,
   knownYou,
   listedYou,
+  mayUsePreviews,
   notShared,
   sharingKnown,
   startCollab,
@@ -225,6 +226,12 @@ export interface CloudSessionModel {
    * for a session in the repository's main directory.
    */
   removableWorkspace: RemovableWorkspace | undefined;
+  /**
+   * PRO-28: the Ports panel's inputs. `offered` is false for anyone who may
+   * not use previews (not a manager, nor a driver who may approve) and for a
+   * locked session: the panel and every entry to it are then left out.
+   */
+  ports: { offered: boolean; state: WorkspaceConnectionState; connectionId: string | null };
   error: string | null;
 }
 
@@ -803,6 +810,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     gitSource: locked ? undefined : gitSource,
     fileSource: locked ? undefined : fileSource,
     removableWorkspace: locked ? undefined : removableWorkspace,
+    // While connected the runtime's word; while not, whoever would manage it once it runs, or an approving driver.
+    ports: { offered: !locked && mayUsePreviews(connected ? manage : wouldManage, you), state, connectionId: connection?.connectionId?.() ?? null },
     error,
   };
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -16,13 +16,15 @@ import type { GitSource } from "@/lib/gitSource";
 import type { FileSource } from "@/lib/workspaceFiles";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
+import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
 
-export type PanelTab = "changes" | "repo" | "pr" | "files";
-const TABS: { id: PanelTab; label: string; shortcut: ShortcutId }[] = [
+export type { PanelTab };
+const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
   { id: "changes", label: "Changes", shortcut: "panel.changes" },
   { id: "repo", label: "Repo", shortcut: "panel.repository" },
   { id: "pr", label: "PR", shortcut: "panel.pullRequests" },
   { id: "files", label: "Files", shortcut: "panel.files" },
+  { id: "ports", label: "Ports" },
 ];
 
 /**
@@ -51,6 +53,7 @@ export function RightPanel({
   fileSource,
   repositories,
   readOnlyReason,
+  ports,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -79,13 +82,29 @@ export function RightPanel({
   repositories?: { list: string[]; selected: string | null; onSelect: (repo: string | null) => void };
   /** Shown above the panels when this attachment may read but not change the workspace. */
   readOnlyReason?: string | null;
+  /** A cloud workspace's Ports tab (PRO-28), drawn only while it is the tab shown; absent for anyone who may not use previews. */
+  ports?: () => ReactNode;
 }) {
   const prefs = usePrefs();
-  const [selectedTab, setTab] = useState<PanelTab>("changes");
+  // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
+  const remembers = !!ports && !!sessionId;
+  const [selectedTab, setTab] = useState<PanelTab>(() => takePanelTab() ?? (remembers ? rememberedPanelTab(sessionId!) : null) ?? "changes");
+  useEffect(() => {
+    if (remembers) rememberPanelTab(sessionId!, selectedTab);
+  }, [remembers, sessionId, selectedTab]);
+  // A menu elsewhere asked for a tab (the session's "Ports and previews").
+  useEffect(
+    () =>
+      onPanelTab((asked) => {
+        takePanelTab();
+        setTab(asked);
+      }),
+    [],
+  );
   const [repoView, setRepoView] = useState<RepoView>("uncommitted");
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
-  const tab = isGit ? selectedTab : "files";
+  const tab: PanelTab = selectedTab === "ports" ? (ports ? "ports" : isGit ? "changes" : "files") : isGit ? selectedTab : "files";
   const dragging = useRef<{ x: number; w: number } | null>(null);
 
   useEffect(() => {
@@ -102,10 +121,10 @@ export function RightPanel({
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
 
-  useShortcut(TABS[0].shortcut, () => setTab("changes"));
-  useShortcut(TABS[1].shortcut, () => setTab("repo"));
-  useShortcut(TABS[2].shortcut, () => setTab("pr"));
-  useShortcut(TABS[3].shortcut, () => setTab("files"));
+  useShortcut("panel.changes", () => setTab("changes"));
+  useShortcut("panel.repository", () => setTab("repo"));
+  useShortcut("panel.pullRequests", () => setTab("pr"));
+  useShortcut("panel.files", () => setTab("files"));
 
   const onDown = useCallback(
     (e: React.PointerEvent) => {
@@ -142,7 +161,7 @@ export function RightPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
-        {TABS.filter((t) => isGit || t.id === "files").map((t) => (
+        {TABS.filter((t) => (t.id === "ports" ? !!ports : isGit || t.id === "files")).map((t) => (
           <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
             <button
               type="button"
@@ -241,6 +260,12 @@ export function RightPanel({
               />
             </div>
           </>
+        )}
+        {/* Only while shown: it reads the workspace's ports on a timer. */}
+        {ports && tab === "ports" && (
+          <div className="flex h-full flex-col" data-testid="panel-ports">
+            {ports()}
+          </div>
         )}
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree

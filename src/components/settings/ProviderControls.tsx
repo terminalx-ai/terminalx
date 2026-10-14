@@ -63,8 +63,12 @@ export function ProviderControls({
     setLoading(true);
     try {
       const result = await api.cloudProviders();
+      // Without a choice, open on the provider the organization connected, not
+      // the first one listed (which reads "setup incomplete" when another is in use).
       const next =
         result.providers.find((item) => item.id === preferred) ??
+        result.providers.find((item) => item.connection?.state === "connected") ??
+        result.providers.find((item) => item.connection) ??
         result.providers[0];
       const detail = next ? await api.cloudProvider(next.id) : null;
       if (request !== epoch.current) return;

@@ -182,7 +182,7 @@ describe("organization sections", () => {
     mouseClick(trigger);
     const menu = await screen.findByRole("menu");
     // An admin of the default organization also gets the full new-workspace form.
-    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New cloud workspace…", "Hide organization"]);
+    expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New section", "New cloud workspace…", "Hide organization"]);
     // Still open after the whole click sequence.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.getByRole("menu")).toBe(menu);
@@ -320,6 +320,227 @@ describe("organization sections", () => {
     render(<CloudWorkspaceMain workspaceKey={`cloud:${ORG}:starting`} sidebarOpen onToggleSidebar={() => undefined} />);
     expect(screen.getByTestId("cloud-workspace-main").textContent).toContain("Allocating");
     expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+});
+
+describe("an organization whose list has not answered", () => {
+  it("says it is loading, then why it failed, and Retry lists it again; collapsed or not", async () => {
+    catalog.resetCloudCatalog();
+    prefs.setPrefs({ cloudProjects: {}, cloudBlankProjects: {}, cloudPinned: {}, sidebarSections: { [`org:${ORG}`]: "collapsed" } });
+    let answer: (value: unknown) => void = () => undefined;
+    let fail: (reason: unknown) => void = () => undefined;
+    mocks.api.cloudWorkspaceRepositories.mockResolvedValue({ repositories: [] });
+    mocks.api.cloudWorkspaces.mockImplementationOnce(() => new Promise((_resolve, reject) => (fail = reject)));
+    mount();
+    const section = screen.getByRole("treeitem", { name: "Acme organization" });
+    // Nothing listed yet: the section says so, in words, although it is collapsed.
+    expect(within(section).getByTestId("cloud-org-loading").textContent).toBe("Loading cloud projects…");
+    const first = act(() => catalog.refreshCloudCatalog(ORG));
+    fail({ code: "cloud_workspace_unavailable" });
+    await first;
+    const failed = within(section).getByTestId("cloud-org-failed");
+    expect(failed.textContent).toContain("Couldn’t load cloud projects. The cloud service did not answer.");
+    expect(within(section).queryByTestId("cloud-org-loading")).toBeNull();
+    expect(failed.closest("[hidden]")).toBeNull();
+
+    mocks.api.cloudWorkspaces.mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    fireEvent.click(within(failed).getByRole("button", { name: "Retry loading Acme" }));
+    const retrying = within(section).getByRole("button", { name: "Retrying Acme" });
+    expect(retrying.textContent).toBe("Retrying…");
+    expect((retrying as HTMLButtonElement).disabled).toBe(true);
+    expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+    await act(async () => answer(list));
+    await waitFor(() => expect(within(section).queryByTestId("cloud-org-failed")).toBeNull());
+    fireEvent.click(within(section).getByRole("button", { name: "Expand Acme organization" }));
+    expect(within(section).getAllByTestId("cloud-project-row").length).toBeGreaterThan(0);
+    // Looking and retrying a list never connect or resume anything.
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    act(() => prefs.setPrefs({ sidebarSections: {} }));
+  });
+
+  it("an offline organization keeps its rows and offers Retry beside 'last known'", async () => {
+    mocks.api.cloudWorkspaceRepositories.mockResolvedValue({ repositories: [] });
+    mocks.api.cloudWorkspaces.mockRejectedValueOnce({ code: "cloud_workspace_unavailable" });
+    await act(() => catalog.refreshCloudCatalog(ORG));
+    mount();
+    const offline = screen.getByTestId("cloud-org-offline");
+    expect(offline.textContent).toMatch(/^Offline · last known .+Retry$/);
+    expect(offline.getAttribute("title")).toBe("The cloud service did not answer.");
+    expect(screen.getAllByTestId("cloud-project-row").length).toBeGreaterThan(0);
+    mocks.api.cloudWorkspaces.mockResolvedValueOnce(list);
+    fireEvent.click(within(offline).getByRole("button", { name: "Retry loading Acme" }));
+    await waitFor(() => expect(screen.queryByTestId("cloud-org-offline")).toBeNull());
+  });
+
+  it("words the codes a list fails with, and names an unknown one", () => {
+    expect(catalog.catalogErrorText("cloud_organization_unavailable")).toBe("Cloud workspaces are turned off for this organization.");
+    expect(catalog.catalogErrorText("cloud_mystery")).toBe("Something went wrong (cloud_mystery).");
+  });
+});
+
+describe("personal named sections (PRO-23)", () => {
+  const ME = "a@example.com";
+  const API = "github.com/acme/api";
+  const IMAGE = "blank/image-only";
+  const mine = () => prefs.getPrefs().cloudSections[ME]?.[ORG] ?? [];
+  const sectionRows = () => screen.queryAllByTestId("cloud-section-row");
+  const sectionNames = () => sectionRows().map((row) => within(row).queryByTestId("cloud-section-name")?.textContent ?? null);
+  const sectionTree = (name: string) => screen.getByRole("treeitem", { name: `${name} section` });
+  const projectIn = (tree: HTMLElement) => within(tree).queryAllByTestId("cloud-project-row").map((row) => row.getAttribute("data-project"));
+  const acmeMenu = async () => {
+    mouseClick(screen.getByRole("button", { name: "Menu for Acme" }));
+    return screen.findByRole("menu");
+  };
+  const projectMenu = async (name: string) => {
+    mouseClick(screen.getByRole("button", { name: `Project menu for ${name}` }));
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to section" }));
+    return (await screen.findAllByRole("menu")).at(-1)!;
+  };
+  async function typeName(name: string, key = "Enter") {
+    const input = await screen.findByTestId("cloud-section-name-input");
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    fireEvent.change(input, { target: { value: name } });
+    fireEvent.keyDown(input, { key });
+  }
+
+  const clean = () => prefs.setPrefs({ cloudSections: {}, sidebarSections: {}, cloudCollapsed: {}, cloudPinned: {}, cloudProjects: {}, cloudBlankProjects: {} });
+  beforeEach(clean);
+  afterEach(() => {
+    cleanup();
+    signIn();
+    clean();
+  });
+
+  it("creates a section from the organization's menu, named as it is typed, kept for this account and organization", async () => {
+    mount();
+    expect(sectionRows()).toHaveLength(0);
+    fireEvent.click(within(await acmeMenu()).getByRole("menuitem", { name: "New section" }));
+    await typeName("Active");
+    expect(sectionNames()).toEqual(["Active"]);
+    expect(mine()).toEqual([{ id: expect.any(String), name: "Active", projects: [] }]);
+    expect(within(sectionTree("Active")).getByTestId("cloud-section-empty").textContent).toContain("Move a project here");
+    // Looking at or arranging sections never connects or resumes anything.
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
+
+  it("moves projects between sections from the project's menu, and back to the organization's list", async () => {
+    mount();
+    // A new section straight from a project's menu takes the project with it.
+    fireEvent.click(within(await projectMenu("acme/api")).getByRole("menuitem", { name: "New section…" }));
+    await typeName("Active");
+    fireEvent.click(within(await acmeMenu()).getByRole("menuitem", { name: "New section" }));
+    await typeName("Parked");
+    expect(projectIn(sectionTree("Active"))).toEqual([`cloud:${ORG}:${API}`]);
+    fireEvent.click(within(await projectMenu("acme/api")).getByRole("menuitemradio", { name: "Parked" }));
+    await waitFor(() => expect(projectIn(sectionTree("Parked"))).toEqual([`cloud:${ORG}:${API}`]));
+    expect(projectIn(sectionTree("Active"))).toEqual([]);
+    fireEvent.click(within(await projectMenu("image-only")).getByRole("menuitemradio", { name: "Parked" }));
+    await waitFor(() => expect(projectIn(sectionTree("Parked"))).toEqual([`cloud:${ORG}:${API}`, `cloud:${ORG}:${IMAGE}`]));
+    expect(mine().map((section) => [section.name, section.projects])).toEqual([["Active", []], ["Parked", [API, IMAGE]]]);
+    const parked = await projectMenu("acme/api");
+    expect(within(parked).getByRole("menuitemradio", { name: "Parked" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(within(parked).getByRole("menuitem", { name: "Remove from Parked" }));
+    await waitFor(() => expect(projectIn(sectionTree("Parked"))).toEqual([`cloud:${ORG}:${IMAGE}`]));
+    // Back among the ungrouped projects, which come after the sections.
+    const order = screen.getAllByTestId(/^cloud-(section|project)-row$/).map((row) => row.getAttribute("data-section") ? "section" : row.getAttribute("data-project"));
+    expect(order).toEqual(["section", "section", `cloud:${ORG}:${IMAGE}`, `cloud:${ORG}:${API}`]);
+  });
+
+  it("renames from the menu, with F2 or a double-click; Escape keeps the old name", async () => {
+    mount();
+    fireEvent.click(within(await acmeMenu()).getByRole("menuitem", { name: "New section" }));
+    await typeName("Active");
+    mouseClick(screen.getByRole("button", { name: "Menu for section Active" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Rename section" }));
+    await typeName("Doing");
+    expect(sectionNames()).toEqual(["Doing"]);
+    fireEvent.keyDown(sectionRows()[0], { key: "F2" });
+    await typeName("Never mind", "Escape");
+    expect(sectionNames()).toEqual(["Doing"]);
+    fireEvent.doubleClick(screen.getByTestId("cloud-section-name"));
+    await typeName("   ");
+    // A blank name keeps the old one.
+    expect(sectionNames()).toEqual(["Doing"]);
+    expect(mine()[0].name).toBe("Doing");
+  });
+
+  it("reorders sections with Move up and Move down", async () => {
+    mount();
+    for (const name of ["One", "Two", "Three"]) {
+      fireEvent.click(within(await acmeMenu()).getByRole("menuitem", { name: "New section" }));
+      await typeName(name);
+    }
+    expect(sectionNames()).toEqual(["One", "Two", "Three"]);
+    mouseClick(screen.getByRole("button", { name: "Menu for section One" }));
+    let menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Move up" }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move down" }));
+    await waitFor(() => expect(sectionNames()).toEqual(["Two", "One", "Three"]));
+    mouseClick(screen.getByRole("button", { name: "Menu for section Three" }));
+    menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "Move down" }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Move up" }));
+    await waitFor(() => expect(sectionNames()).toEqual(["Two", "Three", "One"]));
+    expect(mine().map((section) => section.name)).toEqual(["Two", "Three", "One"]);
+  });
+
+  it("deleting a section puts its projects back and touches no workspace", async () => {
+    mount();
+    fireEvent.click(within(await projectMenu("acme/api")).getByRole("menuitem", { name: "New section…" }));
+    await typeName("Active");
+    mouseClick(screen.getByRole("button", { name: "Menu for section Active" }));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Delete section" }));
+    await waitFor(() => expect(sectionRows()).toHaveLength(0));
+    expect(screen.getAllByTestId("cloud-project-row").map((row) => row.getAttribute("data-project"))).toEqual([`cloud:${ORG}:${API}`, `cloud:${ORG}:${IMAGE}`]);
+    expect(mine()).toEqual([]);
+    expect(prefs.getPrefs().cloudSections).toEqual({});
+    expect(mocks.api.cloudWorkspaceDelete).not.toHaveBeenCalled();
+  });
+
+  it("keeps sections, their order, collapse and pins after a relaunch, and shows none to another account", async () => {
+    prefs.setPrefs({
+      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [IMAGE] }, { id: "s2", name: "Active", projects: [API, "github.com/acme/gone"] }] } },
+      sidebarSections: { "cloud-section:s1": "collapsed" },
+      cloudPinned: { [ORG]: [API] },
+    });
+    mount();
+    expect(sectionNames()).toEqual(["Parked", "Active"]);
+    expect(sectionTree("Parked").getAttribute("aria-expanded")).toBe("false");
+    expect(sectionTree("Active").getAttribute("aria-expanded")).toBe("true");
+    // A project a section names that is not shown now is simply not listed.
+    expect(projectIn(sectionTree("Active"))).toEqual([`cloud:${ORG}:${API}`]);
+    // The pin still marks the project inside its section.
+    expect(within(sectionTree("Active")).getByTestId("cloud-project-row").querySelector("svg.lucide-pin")).toBeTruthy();
+    fireEvent.click(within(sectionTree("Parked")).getByRole("button", { name: "Expand Parked section" }));
+    expect(prefs.getPrefs().sidebarSections["cloud-section:s1"]).toBe("expanded");
+    cleanup();
+
+    // Another account on this Mac, same organization: none of these.
+    mocks.status = { ...mocks.status, identity: { ...mocks.status.identity!, email: "b@example.com" } };
+    mount();
+    expect(sectionRows()).toHaveLength(0);
+    expect(screen.getAllByTestId("cloud-project-row")).toHaveLength(2);
+  });
+
+  it("with a filter on, shows a section only with what matched in it, opened", async () => {
+    const { setSidebarFilter } = await import("@/lib/sidebarFilter");
+    prefs.setPrefs({
+      cloudSections: { [ME]: { [ORG]: [{ id: "s1", name: "Parked", projects: [IMAGE] }, { id: "s2", name: "Active", projects: [API] }] } },
+      sidebarSections: { "cloud-section:s2": "collapsed" },
+    });
+    // The server's list says fix-login waits for a person.
+    await catalog.ingestCloudList({ workspaces: [item("fix-login", { repositories, launch: launch("terminalx/fix-login-3f2a9c01d4e7"), lastActivityAt: 50, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 1 } }), list.workspaces[2]] }, ORG);
+    act(() => setSidebarFilter("needs"));
+    try {
+      mount();
+      expect(sectionNames()).toEqual(["Active"]);
+      expect(sectionTree("Active").getAttribute("aria-expanded")).toBe("true");
+    } finally {
+      act(() => setSidebarFilter("all"));
+    }
   });
 });
 
@@ -867,7 +1088,10 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     fireEvent.click(newProject);
     expect(screen.queryByTestId("cloud-new-blank-project")).toBeNull();
     await closeMenu();
-    let [refresh, newWorkspace] = await entries("Menu for Acme");
+    // "New section" (the reader's own layout) is for everyone.
+    let [refresh, newSection, newWorkspace] = await entries("Menu for Acme");
+    expect(newSection.textContent).toContain("New section");
+    expect(newSection.getAttribute("aria-disabled")).toBeNull();
     expect(refresh.textContent).toContain("Refresh cloud workspaces");
     expect(refresh.getAttribute("aria-disabled")).toBeNull();
     expect(newWorkspace.textContent).toContain("New cloud workspace…");
@@ -884,7 +1108,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
     asRole(undefined);
     mountWithPage();
     expect(screen.queryByRole("button", { name: "Add project to Acme" })).toBeNull();
-    expect((await entries("Menu for Acme")).map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "Hide organization"]);
+    expect((await entries("Menu for Acme")).map((entry) => entry.textContent?.trim())).toEqual(["Refresh cloud workspaces", "New section", "Hide organization"]);
     cleanup();
 
     // An owner or admin keeps all of it.
@@ -896,7 +1120,7 @@ describe("shared workspaces in the sidebar (PRO-30)", () => {
       expect(newProject.getAttribute("aria-disabled")).toBeNull();
       expect(newProject.textContent).not.toContain("admins only");
       await closeMenu();
-      [refresh, newWorkspace] = await entries("Menu for Acme");
+      [refresh, newSection, newWorkspace] = await entries("Menu for Acme");
       expect(newWorkspace.getAttribute("aria-disabled")).toBeNull();
       expect(newWorkspace.getAttribute("title")).toBeNull();
       cleanup();

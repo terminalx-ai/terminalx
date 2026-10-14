@@ -176,6 +176,7 @@ describe("a workspace's scheduled tasks", () => {
       ["provider-disconnected", "Connect the organization's compute provider"],
       ["workspace-unavailable", "archived or deleted"],
       ["prompt-forbidden", "different prompt"],
+      ["needs-approval", "same permission request again"],
     ]) {
       listed = [schedule({ state: "paused", pausedReason })];
       open();

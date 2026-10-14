@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
 import { useShortcutKeys } from "@/lib/hotkeys";
 import type { ShortcutId } from "@/lib/shortcuts";
@@ -88,6 +89,8 @@ export function ProjectRail({
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
 
   const filter = useSidebarFilter();
+  // Opens on a click, an accessibility press and the keyboard alike (Radix alone opens only on pointerdown).
+  const filterMenu = useRowMenu();
   const projects = [...store.projects]
     .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
     // Unread or Needs you: only the projects with such a session.
@@ -145,9 +148,9 @@ export function ProjectRail({
   const filterLabel = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
   const headerActions = (
     <div className="flex items-center">
-      <DropdownMenu>
+      <DropdownMenu {...filterMenu.root}>
         <WithTooltip label={filter.active ? `Showing: ${filterLabel}` : "Filter sessions"}>
-          <DropdownMenuTrigger asChild>
+          <DropdownMenuTrigger asChild {...filterMenu.trigger}>
             <Button
               variant="ghost"
               size="icon-xs"

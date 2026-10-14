@@ -83,6 +83,7 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(resumeBlocked({ state: "paused", pausedReason: "workspace-unavailable" })).toContain("archived or deleted");
     expect(resumeBlocked({ state: "paused", pausedReason: "provider-disconnected" })).toContain("Connect the organization's compute provider");
     expect(resumeBlocked({ state: "paused", pausedReason: "prompt-forbidden" })).toContain("different prompt");
+    expect(resumeBlocked({ state: "paused", pausedReason: "needs-approval" }, true)).toContain("same permission request again");
     // A runtime that cannot take a run refuses every resume.
     expect(resumeBlocked({ state: "paused", pausedReason: "by-user" }, false)).toContain("Resume the workspace once");
   });
@@ -95,8 +96,8 @@ describe("scheduled tasks: what the dialog says", () => {
       "Failed: the agent asked for an approval and nobody was there to give it; a mode that asks less (Accept edits or Auto) may let it finish",
     );
     expect(pausedText({ state: "paused", pausedReason: "needs-approval" })).toContain("a mode that asks less");
-    // It may be resumed: someone may mean to be attached for the next run.
-    expect(resumeBlocked({ state: "paused", pausedReason: "needs-approval" })).toBeNull();
+    // Not resumed: the server refuses it, since mode and prompt cannot be changed.
+    expect(resumeBlocked({ state: "paused", pausedReason: "needs-approval" })).toContain("Delete the task and make it again");
     expect(scheduleErrorMessage("cloud_schedule_estimate_not_supported")).toContain("cannot say yet what a scheduled task costs");
   });
 
@@ -116,6 +117,7 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(runText({ state: "skipped", category: "daily-cap" })).toBe("Skipped: 24 runs had already started in 24 hours");
     expect(runText({ state: "failed", category: "something-new" })).toBe("Failed: something-new");
     expect(scheduleErrorMessage("cloud_schedule_cleanup_pending")).toContain("Pause the task");
+    expect(scheduleErrorMessage("cloud_schedule_needs_approval")).toContain("Delete the task and make it again");
     expect(scheduleErrorMessage("something_new")).toBe("That did not work (something_new).");
   });
 });

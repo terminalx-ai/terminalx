@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCloudPaletteProjects,
   buildPaletteIndex,
   movePaletteSelection,
   parseSmartInput,
   searchPaletteIndex,
+  withCloudProjects,
 } from "./commandPalette";
 import type { HarnessInfo, Project, SessionEntry, Workspace } from "@/types/session";
 
@@ -135,5 +137,32 @@ describe("palette keyboard navigation", () => {
     expect(movePaletteSelection(1, 3, "Home")).toBe(0);
     expect(movePaletteSelection(1, 3, "End")).toBe(2);
     expect(movePaletteSelection(0, 0, "ArrowDown")).toBe(-1);
+  });
+});
+
+describe("cloud projects in the palette (PRO-23)", () => {
+  const cloud = buildCloudPaletteProjects([
+    { key: "cloud:org-a:github.com/acme/api", fullName: "acme/api", identity: "github.com/acme/api", blank: false, orgName: "Acme", workspaces: [{ name: "fix-login", lastActivity: 50 }] },
+    { key: "cloud:org-b:blank/notes", fullName: "notes", identity: "blank/notes", blank: true, orgName: "Beta", workspaces: [] },
+  ]);
+
+  it("says which organization each one is in, and finds it by repository, organization or workspace", () => {
+    expect(cloud.map((item) => [item.primary, item.secondary, item.cloudKey])).toEqual([
+      ["acme/api", "Acme cloud · github.com/acme/api", "cloud:org-a:github.com/acme/api"],
+      ["notes", "Beta cloud · no repository", "cloud:org-b:blank/notes"],
+    ]);
+    const index = withCloudProjects({ sessions: [], workspaces: [], projects: [] }, cloud);
+    const found = (query: string) => searchPaletteIndex(index, query).projects.map((match) => match.item.cloudKey);
+    expect(found("beta")).toEqual(["cloud:org-b:blank/notes"]);
+    expect(found("github.com/acme")).toEqual(["cloud:org-a:github.com/acme/api"]);
+    expect(found("fix-login")).toEqual(["cloud:org-a:github.com/acme/api"]);
+  });
+
+  it("marks local projects Local beside cloud ones, and leaves a local-only index as it was", () => {
+    const local = buildPaletteIndex([], projects, {}, []);
+    expect(withCloudProjects(local, [])).toBe(local);
+    const mixed = withCloudProjects(local, cloud);
+    expect(mixed.projects.filter((item) => item.project).map((item) => item.secondary)).toEqual(local.projects.map((item) => `Local · ${item.secondary}`));
+    expect(searchPaletteIndex(mixed, "local").projects.every((match) => !!match.item.project)).toBe(true);
   });
 });

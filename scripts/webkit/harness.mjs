@@ -29,10 +29,14 @@ export async function serve() {
 
 export const launch = () => webkit.launch();
 
-/** A page of the app with `fixture` behind its Tauri bridge. */
-export async function open(browser, url, fixture, viewport) {
-  const page = await browser.newPage({ viewport });
-  await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}`);
+/**
+ * A page of the app with `fixture` behind its Tauri bridge. `extra` is a
+ * script run after the stub (to add answers or saved prefs), and
+ * `colorScheme` the system appearance the page sees.
+ */
+export async function open(browser, url, fixture, viewport, { extra = "", colorScheme } = {}) {
+  const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}) });
+  await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}\n${extra}`);
   await page.goto(url);
   return page;
 }

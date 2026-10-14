@@ -300,6 +300,8 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     create.savePending("org-b", pending);
     expect(localStorage.getItem("terminalx.cloudCreate.pending.a%40example%2Ecom.org-b")).toContain("secret plan");
     prefs.setPrefs({ cloudPinned: { "org-a": ["x"], "org-b": ["y"] }, cloudProjects: { "org-b": ["z"] }, cloudBlankProjects: { "org-a": ["p"], "org-b": ["q"] } });
+    const section = (name: string) => [{ id: name, name, projects: ["x"] }];
+    prefs.setPrefs({ cloudSections: { "a@example.com": { "org-a": section("A"), "org-b": section("B") } } });
 
     announce(who("a@example.com", ["org-a"]));
     expect(create.loadPending("org-b")).toBeNull();
@@ -308,6 +310,8 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     expect(prefs.getPrefs().cloudPinned).toEqual({ "org-a": ["x"] });
     expect(prefs.getPrefs().cloudProjects).toEqual({});
     expect(prefs.getPrefs().cloudBlankProjects).toEqual({ "org-a": ["p"] });
+    // The personal sections of the organization left go too; the others stay.
+    expect(prefs.getPrefs().cloudSections).toEqual({ "a@example.com": { "org-a": section("A") } });
   });
 
   it("another user signing in removes the previous user's pending creates and other organizations' prefs; the same user again keeps them", async () => {
@@ -319,18 +323,23 @@ describe("leftovers of an organization left or another user (PRO-71 follow-ups)"
     // An unscoped one from before this change is removed on the next user change too.
     localStorage.setItem("terminalx.cloudCreate.pending.org-a", "{}");
     prefs.setPrefs({ cloudPinned: { "org-a": ["x"], "org-c": ["y"] }, cloudProjects: {}, cloudBlankProjects: {} });
+    const mine = [{ id: "s", name: "Mine", projects: ["x"] }];
+    prefs.setPrefs({ cloudSections: { "a@example.com": { "org-a": mine } } });
 
     // Sign-out and the same user again: nothing goes.
     announce({ state: "signed-out", identity: null, expiresAt: null, lastError: null });
     expect(create.loadPending("org-a")).toBeNull(); // nobody signed in: nothing is read
     announce(who("a@example.com", ["org-a"]));
     expect(create.loadPending("org-a")).not.toBeNull();
+    expect(prefs.getPrefs().cloudSections).toEqual({ "a@example.com": { "org-a": mine } });
 
     announce(who("b@example.com", ["org-c"]));
     expect(create.loadPending("org-a")).toBeNull();
     expect(localStorage.getItem("terminalx.cloudCreate.pending.a%40example%2Ecom.org-a")).toBeNull();
     expect(localStorage.getItem("terminalx.cloudCreate.pending.org-a")).toBeNull();
     expect(prefs.getPrefs().cloudPinned).toEqual({ "org-c": ["y"] });
+    // Sections are one person's own layout: the next person on this Mac does not inherit them.
+    expect(prefs.getPrefs().cloudSections).toEqual({});
     expect(account.getAccount().status.identity?.email).toBe("b@example.com");
   });
 

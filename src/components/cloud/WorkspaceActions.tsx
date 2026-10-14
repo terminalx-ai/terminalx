@@ -110,8 +110,9 @@ export function WorkspaceActionItems({
           <Pause /> Stop
         </DropdownMenuItem>
       )}
+      {/* The long label wraps rather than being cut off at the menu's edge. */}
       {lifecycle && actions.includes("archive") && (
-        <DropdownMenuItem disabled={busy} onSelect={() => onLifecycle({ item, action: "archive" })}>
+        <DropdownMenuItem disabled={busy} className="whitespace-normal" onSelect={() => onLifecycle({ item, action: "archive" })}>
           <Archive /> {archived ? "Retry archive" : "Archive… (stops compute, deleted after 30 days)"}
         </DropdownMenuItem>
       )}

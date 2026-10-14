@@ -1,13 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   Archive,
+  ArrowDown,
   ArrowLeftRight,
+  ArrowUp,
   BookOpen,
+  Check,
   Cloud,
   Ellipsis,
   EyeOff,
   Folder,
   FolderGit2,
+  FolderInput,
+  FolderPlus,
+  Loader2,
   Pencil,
   Pin,
   PinOff,
@@ -40,6 +46,7 @@ import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialo
 import { api, errorMessage, type CloudWorkspaceListItem, type OrganizationSummary } from "@/lib/api";
 import { refreshAccount, useAccount } from "@/lib/account";
 import {
+  catalogErrorText,
   dismissCloudNotice,
   placeCloudProjects,
   refreshCloudWorkspaces,
@@ -53,6 +60,20 @@ import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFa
 import { useMergedStatusOfSession } from "@/lib/mergedCleanup";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
+import {
+  createCloudSection,
+  deleteCloudSection,
+  groupIntoSections,
+  holdMenuFocus,
+  keepFocusForNameField,
+  moveCloudSection,
+  moveProjectToSection,
+  renameCloudSection,
+  sectionOfProject,
+  takeRenameRequest,
+  useCloudSidebarSections,
+} from "@/lib/cloudSidebarSections";
+import type { CloudSidebarSection } from "@/lib/prefs";
 import { cloudAgentLabel, deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import { workspaceUsage } from "@/lib/runningLimit";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
@@ -232,6 +253,8 @@ function OrgSection({
   const pickerMenu = useRowMenu();
   const name = sectionName(org);
   const offline = live && !!cached?.error && cached.fetchedAt !== null;
+  // Never listed yet: loading, or failed with nothing to show. Said under the header, collapsed or not.
+  const unloaded = live && (!cached || (cached.fetchedAt === null && !cached.workspaces.length && !placed.projects.length));
   // Creating a workspace is the API's owner-or-admin action, the same rule as
   // a project's "+": true for them, false for a member, null while this
   // account's role here is not known yet (nothing is offered until it is).
@@ -350,11 +373,21 @@ function OrgSection({
                 <Ellipsis />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" onCloseAutoFocus={keepFocusForNameField}>
               {live ? (
                 <>
                   <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(org.id)}>
                     <RefreshCw /> Refresh cloud workspaces
+                  </DropdownMenuItem>
+                  {/* The reader's own grouping of this organization's projects; it changes nothing for anyone else. */}
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      createCloudSection(org.id);
+                      if (collapsed) toggle();
+                    }}
+                    data-testid="cloud-new-section"
+                  >
+                    <FolderPlus /> New section
                   </DropdownMenuItem>
                   {/* The full form (several repositories, the provider) works in the default organization. */}
                   {isDefault && mayCreate !== null && (
@@ -381,11 +414,13 @@ function OrgSection({
       </div>
       {switchError && <div className="pl-5 text-[10px] text-destructive">{switchError}</div>}
       {offline && (
-        <div className="pl-5 text-[10px] text-faint" data-testid="cloud-org-offline" title={cached!.error ?? undefined}>
-          Offline · last known {timeText(cached!.fetchedAt!)}
+        <div className="flex min-w-0 items-center gap-1 pl-5 text-[10px] text-faint" data-testid="cloud-org-offline" title={catalogErrorText(cached!.error!)}>
+          <span className="min-w-0 truncate">Offline · last known {timeText(cached!.fetchedAt!)}</span>
+          <RetryButton orgId={org.id} name={name} />
         </div>
       )}
-      {live && (
+      {unloaded && <OrgLoadState orgId={org.id} name={name} error={cached?.error ?? null} />}
+      {live && !unloaded && (
         <TreeGroup expanded={!collapsed} className={cn("min-w-0", offline && "opacity-70")}>
           <OrgTree org={cached} orgId={org.id} mayCreate={mayCreate} onLifecycle={onLifecycle} />
         </TreeGroup>
@@ -416,14 +451,10 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
   );
   const [archivedOpen, setArchivedOpen] = useState(false);
   const filter = useSidebarFilter();
+  const sections = useCloudSidebarSections(orgId);
 
-  if (!org || (org.fetchedAt === null && !org.workspaces.length && !placed.projects.length)) {
-    return (
-      <div className="pl-5 text-[11px] text-faint" data-testid="cloud-org-loading">
-        {org?.error ? `Cloud workspaces are unavailable (${org.error}).` : "Loading cloud workspaces…"}
-      </div>
-    );
-  }
+  // The section says it is loading, or why it could not (OrgLoadState).
+  if (!org) return null;
   // Unread or Needs you: only the projects with such a session, and no archive (nothing archived runs or answers).
   if (filter.active) {
     const projects = placed.projects.filter((project) => filter.showsProject(project.key));
@@ -434,15 +465,21 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
         </div>
       );
     }
+    // The reader's sections stay, opened, with what matched in them; a section with nothing that matched has no row.
+    const grouped = groupIntoSections(projects, sections);
     return (
       <>
-        {projects.map((project) => (
+        {grouped.sections.map(({ section, projects: inSection }, index) =>
+          inSection.length ? <CloudSectionNode key={section.id} orgId={orgId} section={section} projects={inSection} index={index} count={sections.length} filtered onLifecycle={onLifecycle} /> : null,
+        )}
+        {grouped.ungrouped.map((project) => (
           <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />
         ))}
       </>
     );
   }
   const empty = !placed.projects.length && !placed.archived.length;
+  const grouped = groupIntoSections(placed.projects, sections);
   return (
     <>
       {empty && (
@@ -450,7 +487,10 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
           {emptyOrgText(mayCreate)}
         </div>
       )}
-      {placed.projects.map((project) => (
+      {grouped.sections.map(({ section, projects }, index) => (
+        <CloudSectionNode key={section.id} orgId={orgId} section={section} projects={projects} index={index} count={sections.length} filtered={false} onLifecycle={onLifecycle} />
+      ))}
+      {grouped.ungrouped.map((project) => (
         <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />
       ))}
       {placed.archived.length > 0 && (
@@ -472,6 +512,249 @@ function OrgTree({ org, orgId, mayCreate, onLifecycle }: { org: OrgCatalog | und
         </TreeNode>
       )}
     </>
+  );
+}
+
+// ---- personal sections -----------------------------------------------------
+
+/**
+ * One of the reader's own named sections in an organization (PRO-23): a
+ * collapsible group of projects with Rename, Move up, Move down and Delete.
+ * Deleting it puts its projects back among the organization's ungrouped ones.
+ */
+function CloudSectionNode({
+  orgId,
+  section,
+  projects,
+  index,
+  count,
+  filtered,
+  onLifecycle,
+}: {
+  orgId: string;
+  section: CloudSidebarSection;
+  projects: CloudProject[];
+  index: number;
+  count: number;
+  /** A filter is on: the section shows what matched, opened. */
+  filtered: boolean;
+  onLifecycle: (dialog: Dialog) => void;
+}) {
+  const [collapsedPref, toggle] = useSectionCollapsed(`cloud-section:${section.id}`);
+  const collapsed = !filtered && collapsedPref;
+  const menu = useRowMenu();
+  const [renaming, setRenaming] = useState(() => takeRenameRequest(section.id));
+  const label = `${section.name} section`;
+  return (
+    <TreeNode label={label} expanded={!collapsed}>
+      <div
+        data-tree-row
+        onContextMenu={(event) => {
+          event.preventDefault();
+          menu.setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (renaming) return;
+          if (event.key === "F2") {
+            event.preventDefault();
+            setRenaming(true);
+          } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            event.preventDefault();
+            event.stopPropagation();
+            menu.setOpen(true);
+          }
+        }}
+        className={cn(actionRow, "relative mt-1 flex h-7 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-selected/40")}
+        data-testid="cloud-section-row"
+        data-section={section.id}
+      >
+        <TreeToggle expanded={!collapsed} label={label} onToggle={toggle} />
+        {renaming ? (
+          <SectionNameInput
+            name={section.name}
+            onDone={(name) => {
+              if (name !== null) renameCloudSection(orgId, section.id, name);
+              setRenaming(false);
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={toggle}
+            onDoubleClick={() => setRenaming(true)}
+            className="min-w-0 flex-1 truncate rounded-sm text-left text-[12px] font-medium text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            title={`${section.name}: your own section. Double-click or F2 to rename.`}
+            data-testid="cloud-section-name"
+          >
+            {section.name}
+          </button>
+        )}
+        {!renaming && (
+          <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)} aria-label={`${projects.length} project${projects.length === 1 ? "" : "s"}`}>
+            {projects.length}
+          </span>
+        )}
+        {!renaming && (
+          <RowActions persistent className={menu.open ? "not-sr-only" : undefined}>
+            <DropdownMenu {...menu.root}>
+              <DropdownMenuTrigger asChild {...menu.trigger}>
+                <Button variant="ghost" size="icon-xs" aria-label={`Menu for section ${section.name}`}>
+                  <Ellipsis />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" onCloseAutoFocus={keepFocusForNameField}>
+                <DropdownMenuItem
+                  onSelect={() => {
+                    holdMenuFocus();
+                    setRenaming(true);
+                  }}
+                >
+                  <Pencil /> Rename section
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={index === 0} onSelect={() => moveCloudSection(orgId, section.id, -1)}>
+                  <ArrowUp /> Move up
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={index === count - 1} onSelect={() => moveCloudSection(orgId, section.id, 1)}>
+                  <ArrowDown /> Move down
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem destructive onSelect={() => deleteCloudSection(orgId, section.id)} title="Its projects go back to the organization's list; no workspace is touched">
+                  <Trash2 /> Delete section
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </RowActions>
+        )}
+      </div>
+      <TreeGroup expanded={!collapsed} className="min-w-0 pl-2">
+        {projects.length === 0 ? (
+          <div className="px-5 py-1 text-[11px] text-faint" data-testid="cloud-section-empty">
+            Empty. Move a project here from its ⋯ menu.
+          </div>
+        ) : (
+          projects.map((project) => <CloudProjectNode key={project.key} project={project} onLifecycle={onLifecycle} />)
+        )}
+      </TreeGroup>
+    </TreeNode>
+  );
+}
+
+/** Type a section's name: Return keeps it, Escape leaves the old one, leaving the field keeps what was typed. */
+function SectionNameInput({ name, onDone }: { name: string; onDone: (name: string | null) => void }) {
+  const [value, setValue] = useState(name);
+  const ref = useRef<HTMLInputElement>(null);
+  const done = useRef(false);
+  const finish = (next: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(next);
+  };
+  // After a menu that opened it has put the focus back where it was.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      ref.current?.focus();
+      ref.current?.select();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <input
+      ref={ref}
+      value={value}
+      maxLength={60}
+      aria-label="Section name"
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={() => finish(value)}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish(value);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+        }
+      }}
+      className="h-6 min-w-0 flex-1 rounded-sm bg-well px-1.5 text-[12px] outline-none focus:ring-2 focus:ring-ring/40"
+      data-testid="cloud-section-name-input"
+    />
+  );
+}
+
+/** "Move to section" in a project's menu: the reader's sections, a new one, or none. */
+function MoveToSectionItems({ project }: { project: CloudProject }) {
+  const sections = useCloudSidebarSections(project.orgId);
+  const current = sectionOfProject(sections, project.identity);
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <FolderInput /> Move to section
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-[14rem]">
+        {sections.map((section) => (
+          <DropdownMenuItem
+            key={section.id}
+            role="menuitemradio"
+            aria-checked={current?.id === section.id}
+            disabled={current?.id === section.id}
+            onSelect={() => moveProjectToSection(project.orgId, project.identity, section.id)}
+          >
+            {current?.id === section.id ? <Check /> : <span aria-hidden className="size-4 shrink-0" />}
+            <span className="truncate">{section.name}</span>
+          </DropdownMenuItem>
+        ))}
+        {sections.length > 0 && <DropdownMenuSeparator />}
+        <DropdownMenuItem onSelect={() => createCloudSection(project.orgId, project.identity)}>
+          <FolderPlus /> New section…
+        </DropdownMenuItem>
+        {current && (
+          <DropdownMenuItem onSelect={() => moveProjectToSection(project.orgId, project.identity, null)}>
+            <X /> <span className="min-w-0 truncate">Remove from {current.name}</span>
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
+/** An organization whose list has never answered: loading, or why it failed and a way to ask again. */
+function OrgLoadState({ orgId, name, error }: { orgId: string; name: string; error: string | null }) {
+  if (!error) {
+    return (
+      <div role="status" className="flex items-center gap-1.5 pl-5 text-[11px] text-faint" data-testid="cloud-org-loading">
+        <Loader2 className="size-3 animate-spin" aria-hidden />
+        Loading cloud projects…
+      </div>
+    );
+  }
+  return (
+    <div role="status" className="pl-5 pr-1 text-[11px] text-faint" data-testid="cloud-org-failed">
+      <p>
+        Couldn’t load cloud projects. <span data-testid="cloud-org-failed-reason">{catalogErrorText(error)}</span>
+      </p>
+      <RetryButton orgId={orgId} name={name} />
+    </div>
+  );
+}
+
+/** Lists the organization again now; says so while it does. */
+function RetryButton({ orgId, name }: { orgId: string; name: string }) {
+  const [retrying, setRetrying] = useState(false);
+  const retry = () => {
+    setRetrying(true);
+    void refreshCloudWorkspaces(orgId).finally(() => setRetrying(false));
+  };
+  return (
+    <button
+      type="button"
+      onClick={retry}
+      disabled={retrying}
+      aria-label={retrying ? `Retrying ${name}` : `Retry loading ${name}`}
+      className="shrink-0 rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:no-underline"
+      data-testid="cloud-org-retry"
+    >
+      {retrying ? "Retrying…" : "Retry"}
+    </button>
   );
 }
 
@@ -594,7 +877,7 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
                 <Ellipsis />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-[17rem]">
+            <DropdownMenuContent align="end" className="w-[17rem]" onCloseAutoFocus={keepFocusForNameField}>
               <DropdownMenuItem onSelect={() => startNewCloudSession(project.key)} disabled={startBlocked} title={mayStart === false ? NEW_SESSION_ADMIN_REASON : undefined}>
                 <Plus /> New session
                 {mayStart === false && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
@@ -604,6 +887,7 @@ function CloudProjectNode({ project, onLifecycle }: { project: CloudProject; onL
               >
                 {project.pinned ? <PinOff /> : <Pin />} {project.pinned ? "Unpin project" : "Pin project"}
               </DropdownMenuItem>
+              <MoveToSectionItems project={project} />
               <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(project.orgId)}>
                 <RefreshCw /> Refresh
               </DropdownMenuItem>

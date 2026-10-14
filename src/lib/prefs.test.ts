@@ -204,3 +204,24 @@ describe("shortcuts saved before Escape was split into interrupt and stop", () =
     }
   });
 });
+
+describe("personal sections of cloud projects (PRO-23)", () => {
+  it("survive a restart, per account and organization, in their order", async () => {
+    const { getPrefs, setPrefs } = await import("./prefs");
+    expect(getPrefs().cloudSections).toEqual({});
+    const sections = { "a@example.com": { "org-a": [{ id: "s2", name: "Parked", projects: ["blank/notes"] }, { id: "s1", name: "Active", projects: ["github.com/acme/api"] }] } };
+    setPrefs({ cloudSections: sections });
+    vi.resetModules();
+    const reloaded = await import("./prefs");
+    expect(reloaded.getPrefs().cloudSections).toEqual(sections);
+  });
+
+  it("drop whatever saved part is malformed, and keep the rest", async () => {
+    localStorage.setItem(
+      "raccoon.prefs",
+      JSON.stringify({ cloudSections: { "a@example.com": { "org-a": [{ id: "s1", name: "Active", projects: ["x", 3] }, { id: 2, name: "Bad", projects: [] }, "junk"], "org-b": "junk" }, "b@example.com": [] } }),
+    );
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs().cloudSections).toEqual({ "a@example.com": { "org-a": [{ id: "s1", name: "Active", projects: ["x"] }] } });
+  });
+});

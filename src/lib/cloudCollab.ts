@@ -417,6 +417,16 @@ export function canTypeInTerminals(you: WorkspaceYou | null): boolean {
   return you?.role === "manager" || (canDrive(you) && !!you?.canApprove);
 }
 
+/**
+ * May use a workspace's ports and previews (PRO-28): the terminal's rule, a
+ * manager or a driver who may approve, since a preview reaches whatever
+ * listens on the workspace's loopback. The Ports panel and every entry to it
+ * are left out for anyone else.
+ */
+export function mayUsePreviews(manage: boolean, you: WorkspaceYou | null): boolean {
+  return manage || canTypeInTerminals(you);
+}
+
 /** Why a driver without the approval right only watches terminals. */
 export const TERMINAL_APPROVER_REASON = "typing in a terminal needs the right to approve permissions; ask an admin.";
 

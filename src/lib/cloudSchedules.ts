@@ -149,6 +149,8 @@ export function resumeBlocked(schedule: Pick<CloudSchedule, "state" | "pausedRea
       return "Connect the organization's compute provider first.";
     case "prompt-forbidden":
       return "Its prompt would be refused again. Delete the task and make it with a different prompt.";
+    case "needs-approval":
+      return ERRORS.cloud_schedule_needs_approval;
     default:
       return runtimeSupported === false ? ERRORS.cloud_schedule_runtime_unsupported : null;
   }
@@ -215,6 +217,8 @@ const ERRORS: Record<string, string> = {
   cloud_schedule_prompt_shell_command: "The prompt starts with “!”, which the agent's CLI would run as a shell command with nobody watching. Write it as a request instead.",
   cloud_schedule_prompt_slash_command: "The prompt starts with a slash command, which changes what the agent may do. Write it as a request instead.",
   cloud_schedule_prompt_file_mention: "The prompt mentions a file outside the project with “@”. Mention only files inside the project.",
+  cloud_schedule_needs_approval:
+    "Its runs would stop at the same permission request again, and its mode and prompt cannot be changed. Delete the task and make it again with a mode that asks less (Accept edits or Auto), or a prompt that needs no approval.",
   cloud_workspace_quota_exceeded: "There are already as many scheduled tasks as allowed (10 per workspace, 50 per organization).",
   cloud_workspace_request_invalid: "The server did not accept those settings.",
   cloud_workspace_prompt_too_long: "The prompt is empty or longer than 32 KB.",

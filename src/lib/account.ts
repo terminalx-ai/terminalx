@@ -127,11 +127,27 @@ function pruneCloudPrefs(keep: (orgId: string) => boolean) {
   if (Object.keys(patch).length) setPrefs(patch);
 }
 
+/**
+ * Drop personal sidebar sections (`cloudSections`): of organizations `keep`
+ * does not name, and, when `user` is given, every other account's.
+ */
+function pruneCloudSections(keep: (orgId: string) => boolean, user?: string) {
+  const all = getPrefs().cloudSections ?? {};
+  const next: typeof all = {};
+  for (const [who, orgs] of Object.entries(all)) {
+    if (user !== undefined && who !== user) continue;
+    const kept = Object.fromEntries(Object.entries(orgs).filter(([orgId]) => keep(orgId)));
+    if (Object.keys(kept).length) next[who] = kept;
+  }
+  if (JSON.stringify(next) !== JSON.stringify(all)) setPrefs({ cloudSections: next });
+}
+
 /** What is left of an organization the user left: its pending creates (with their prompts) and its sidebar prefs. */
 function forgetCloudOrg(orgId: string, user: string | null) {
   forgetPendingCreates((_user, organizationId) => organizationId === orgId);
   if (user) forgetSetups(user, (organizationId) => organizationId === orgId);
   pruneCloudPrefs((id) => id !== orgId);
+  pruneCloudSections((id) => id !== orgId);
 }
 
 /** Organizations the same signed-in account was a member of and no longer is. Unknown lists count as unchanged. */
@@ -169,6 +185,8 @@ function followUser(status: AccountStatus) {
   if (last !== null && status.organizations) {
     const members = new Set(status.organizations.map((org) => org.id));
     pruneCloudPrefs((orgId) => members.has(orgId));
+    // Another person's own layout is theirs: it does not stay for the next one on this Mac.
+    pruneCloudSections((orgId) => members.has(orgId), user);
   }
   try {
     localStorage.setItem(LAST_USER_KEY, user);

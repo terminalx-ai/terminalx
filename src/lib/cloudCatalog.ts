@@ -22,6 +22,7 @@ import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice }
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
 /**
@@ -362,6 +363,7 @@ export async function ingestCloudList(
       createMemory,
     });
     tellConnections(workspaces, requestedAt);
+    forgetCreatedBlankProjects(org, list.workspaces, createMemory);
     // A local mirror (PRO-25) of a workspace this person can no longer open,
     // or that is gone, is removed with the session lists above. Only this
     // organization's mirrors are judged by this organization's list.
@@ -370,6 +372,26 @@ export async function ingestCloudList(
   const notices = await purgeTombstones(tombstones, names);
   if (notices.length) set({ ...state, notices: [...state.notices, ...notices] }, false);
   return { workspaces, notices };
+}
+
+/**
+ * A blank project added with "New project…" is a name this desktop keeps
+ * until its workspace exists. Once the server lists that workspace (archived
+ * or not) the project is known by it, so the name is dropped: deleting the
+ * workspace then removes the project, here and on every other device, rather
+ * than leaving an empty "No sessions yet" project behind.
+ */
+function forgetCreatedBlankProjects(orgId: string, listed: readonly CloudWorkspaceListItem[], memory: Record<string, CreateMemoryEntry>) {
+  const prefs = getPrefs();
+  const pending = prefs.cloudBlankProjects?.[orgId];
+  if (!pending?.length) return;
+  const created = new Set(listed.filter((item) => !repositoryOf(item, memory)).map((item) => blankIdentity(item.workspace.name)));
+  const left = pending.filter((name) => !created.has(blankIdentity(name)));
+  if (left.length === pending.length) return;
+  const next = { ...prefs.cloudBlankProjects };
+  if (left.length) next[orgId] = left;
+  else delete next[orgId];
+  setPrefs({ cloudBlankProjects: next });
 }
 
 /**
@@ -465,6 +487,21 @@ function patchOrg(orgId: string, patch: Partial<OrgCatalog>) {
 function errorText(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof (error as { code: unknown }).code === "string") return (error as { code: string }).code;
   return error instanceof Error ? error.message : String(error);
+}
+
+const LIST_ERRORS: Record<string, string> = {
+  cloud_workspace_unavailable: "The cloud service did not answer.",
+  cloud_catalog_feed_unavailable: "The cloud service did not answer.",
+  cloud_organization_unavailable: "Cloud workspaces are turned off for this organization.",
+  cloud_workspace_invalid_response: "The cloud service sent an answer this app could not read.",
+  cloud_workspace_not_found: "You may no longer be a member of this organization.",
+  account_signed_out: "You are signed out.",
+  account_context_changed: "Your account changed while loading.",
+};
+
+/** Why an organization's list could not be read, in words; `error` is the code a failed refresh kept. */
+export function catalogErrorText(error: string): string {
+  return LIST_ERRORS[error] ?? `Something went wrong (${error}).`;
 }
 
 /**

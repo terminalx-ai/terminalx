@@ -3110,6 +3110,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_schedule_prompt_shell_command"
             | "cloud_schedule_prompt_slash_command"
             | "cloud_schedule_prompt_file_mention"
+            | "cloud_schedule_needs_approval"
             | "cloud_workspace_concurrency_exceeded"
             | "idempotency_key_reused"
             | "cloud_workspace_quote_expired"
@@ -5733,5 +5734,11 @@ mod tests {
             request.join().unwrap();
             assert_eq!(error.code, code);
         }
+        // A resume of a task paused for an approval nobody could give.
+        let (base, _, request) = serve_once(response("409 Conflict", &json!({ "error": "cloud_schedule_needs_approval" }).to_string(), ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.schedule_set_active(None, SCHEDULE, true).unwrap_err();
+        request.join().unwrap();
+        assert_eq!(error.code, "cloud_schedule_needs_approval");
     }
 }
