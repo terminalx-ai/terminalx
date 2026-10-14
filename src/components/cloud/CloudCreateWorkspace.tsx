@@ -8,6 +8,7 @@ import {
   type CloudSelectedRepository,
   type CloudWorkspaceListItem,
   type CloudWorkspaceProviderId,
+  type CloudWorkspaceQuote,
   type CloudWorkspaceSnapshot,
 } from "@/lib/api";
 import {
@@ -20,6 +21,7 @@ import {
   launchLatencyText,
   loadPending,
   phaseOf,
+  quoteCreate,
   runtimeNotPickedUp,
   RUNTIME_NOT_PICKED_UP,
   savePending,
@@ -36,6 +38,7 @@ import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
 import { AgentLoginsLink } from "./AgentLoginsLink";
+import { quoteText } from "@/components/session/CloudNewSession";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
 
 const AGENTS = [
@@ -89,6 +92,8 @@ export function CloudCreateWorkspace({
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
   const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
+  // The price of this form, shown before anything is created; a change to the form asks for it again.
+  const [quoted, setQuoted] = useState<{ pending: PendingCreate; quote: CloudWorkspaceQuote } | null>(null);
   const [tracked, setTrackedState] = useState<CloudWorkspaceSnapshot | null>(null);
   const progress = useRef(onProgress);
   progress.current = onProgress;
@@ -130,14 +135,38 @@ export function CloudCreateWorkspace({
   );
 
   const update = <K extends keyof CreateForm>(key: K, value: CreateForm[K]) => setForm((current) => ({ ...current, [key]: value }));
+  // The price shown was for the form as it was: any change asks for it again.
+  useEffect(() => setQuoted(null), [form]);
   const errors = useMemo(() => validateForm(form), [form]);
   const busy = step !== null;
 
-  const submit = async (retry: boolean) => {
+  const fail = (e: unknown) => {
+    if (e instanceof CreateRefused) setError({ code: e.code, message: createErrorMessage(e.code, e.detail, managesOrganization(getAccount().status, organizationId)), retry: false });
+    else {
+      const code = errorCode(e);
+      setError({ code, message: createErrorMessage(code), retry: isClientError(e) && e.retryWithSameIdempotencyKey });
+    }
+  };
+
+  /** The first press: check and quote, and show the price. Nothing is created. */
+  const showPrice = async () => {
     setError(null);
     try {
+      setQuoted(await quoteCreate(api, form, { onStep: setStep }));
+    } catch (e) {
+      fail(e);
+    } finally {
+      setStep(null);
+    }
+  };
+
+  const submit = async (retry: boolean) => {
+    setError(null);
+    const confirmed = retry ? pending : quoted?.pending ?? null;
+    setQuoted(null);
+    try {
       const snapshot = await createWorkspace(api, form, {
-        pending: retry ? pending : null,
+        pending: confirmed,
         onStep: setStep,
         onPending: keep,
         onCreated: (created, request) => rememberCreatedWorkspace(created, request.repositories),
@@ -145,11 +174,7 @@ export function CloudCreateWorkspace({
       setTracked(snapshot);
       onChanged?.();
     } catch (e) {
-      if (e instanceof CreateRefused) setError({ code: e.code, message: createErrorMessage(e.code, e.detail, managesOrganization(getAccount().status, organizationId)), retry: false });
-      else {
-        const code = errorCode(e);
-        setError({ code, message: createErrorMessage(code), retry: isClientError(e) && e.retryWithSameIdempotencyKey });
-      }
+      fail(e);
     } finally {
       setStep(null);
     }
@@ -185,7 +210,8 @@ export function CloudCreateWorkspace({
       data-testid="cloud-create-form"
       onSubmit={(event) => {
         event.preventDefault();
-        void submit(false);
+        // Return asks for the price; only the button under it creates (and spends).
+        if (!quoted && !busy) void showPrice();
       }}
     >
       {loadError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}).</p>}
@@ -385,13 +411,36 @@ export function CloudCreateWorkspace({
           </Button>
         </div>
       )}
+      {quoted ? (
+        <QuotedCreate quote={quoted.quote} providerLabel={providers?.find((item) => item.id === form.provider)?.displayName ?? form.provider ?? ""} busy={busy} onConfirm={() => void submit(false)} onBack={() => setQuoted(null)} />
+      ) : (
+        <div className="flex items-center gap-2">
+          <Button type="submit" size="sm" disabled={busy || Object.keys(errors).length > 0 || Boolean(pending)}>
+            {busy && <Loader2 className="size-3.5 animate-spin" />} Show price
+          </Button>
+          {step && <span className="text-xs text-muted-foreground">{STEP_TEXT[step]}</span>}
+        </div>
+      )}
+    </form>
+  );
+}
+
+/** The price of the workspace the form describes, and the one button that creates it. */
+function QuotedCreate({ quote, providerLabel, busy, onConfirm, onBack }: { quote: CloudWorkspaceQuote; providerLabel: string; busy: boolean; onConfirm: () => void; onBack: () => void }) {
+  const text = quoteText(quote, providerLabel);
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-hairline bg-well p-3 text-xs" role="group" aria-label="Price of the new workspace" data-testid="cloud-create-quote">
+      <p className="text-muted-foreground">{text.machine}</p>
+      <p className="text-foreground" data-testid="cloud-create-quote-price">{text.price}</p>
       <div className="flex items-center gap-2">
-        <Button type="submit" size="sm" disabled={busy || Object.keys(errors).length > 0 || Boolean(pending)}>
+        <Button type="button" size="sm" variant="accent" disabled={busy} onClick={onConfirm}>
           {busy && <Loader2 className="size-3.5 animate-spin" />} Create workspace
         </Button>
-        {step && <span className="text-xs text-muted-foreground">{STEP_TEXT[step]}</span>}
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onBack}>
+          Back
+        </Button>
       </div>
-    </form>
+    </div>
   );
 }
 

@@ -145,6 +145,45 @@ export class CreateRefused extends Error {
 }
 
 /**
+ * Check and quote: the create request a confirmed price would send, and that
+ * price. Nothing is created; the form shows the price before it is confirmed.
+ */
+export async function quoteCreate(
+  api: CreateApi,
+  form: CreateForm,
+  options: { onStep?: (step: CreateStep) => void; newKey?: () => string; now?: () => number; orgId?: string | null } = {},
+): Promise<{ pending: PendingCreate; quote: CloudWorkspaceQuote }> {
+  const errors = validateForm(form);
+  const first = Object.values(errors)[0];
+  if (first) throw new CreateRefused("cloud_workspace_form_invalid", first);
+  const repositories = repositoriesInput(form);
+  if (repositories.length || form.prompt.trim()) {
+    options.onStep?.("checking");
+    await preflightCreate(api, form, options.orgId ?? null);
+  }
+  options.onStep?.("quoting");
+  const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
+  const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults }, options.orgId ?? null);
+  const idempotencyKey = options.newKey?.() ?? crypto.randomUUID();
+  return {
+    quote,
+    pending: {
+      idempotencyKey,
+      createdAt: options.now?.() ?? Date.now(),
+      request: {
+        name: form.name.trim(),
+        quoteId: quote.id,
+        accessMode: form.accessMode,
+        confirmProviderSpend: true,
+        idempotencyKey,
+        repositories,
+        launch: launchInput(form),
+      },
+    },
+  };
+}
+
+/**
  * Check, quote and create; or, with `pending`, resend that exact create.
  * `onPending` is told the request before it is sent so it can be kept.
  */
@@ -164,34 +203,7 @@ export async function createWorkspace(
   } = {},
 ): Promise<CloudWorkspaceSnapshot> {
   const { onStep, onPending } = options;
-  let pending = options.pending ?? null;
-  if (!pending) {
-    const errors = validateForm(form);
-    const first = Object.values(errors)[0];
-    if (first) throw new CreateRefused("cloud_workspace_form_invalid", first);
-    const repositories = repositoriesInput(form);
-    if (repositories.length || form.prompt.trim()) {
-      onStep?.("checking");
-      await preflightCreate(api, form, options.orgId ?? null);
-    }
-    onStep?.("quoting");
-    const setup = await api.cloudWorkspaceSetup(form.provider!, options.orgId ?? null);
-    const quote = await api.cloudWorkspaceQuote({ provider: form.provider!, ...setup.defaults }, options.orgId ?? null);
-    pending = {
-      idempotencyKey: options.newKey?.() ?? crypto.randomUUID(),
-      createdAt: options.now?.() ?? Date.now(),
-      request: {
-        name: form.name.trim(),
-        quoteId: quote.id,
-        accessMode: form.accessMode,
-        confirmProviderSpend: true,
-        idempotencyKey: "",
-        repositories,
-        launch: launchInput(form),
-      },
-    };
-    pending.request.idempotencyKey = pending.idempotencyKey;
-  }
+  const pending = options.pending ?? (await quoteCreate(api, form, options)).pending;
   onPending?.(pending);
   onStep?.("creating");
   try {

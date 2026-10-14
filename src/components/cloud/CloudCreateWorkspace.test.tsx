@@ -31,6 +31,17 @@ vi.mock("@/lib/models", async (original) => ({
 
 const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
+const QUOTE = {
+  id: "quote-1", currency: "USD", pricing: "estimate", activeHourlyMicros: 120_000, estimatedSuspendedMonthlyMicros: 3_000_000, expiresAt: 0,
+  configuration: { machineClassLabel: "Standard", vcpu: 4, memoryMiB: 8192, locationLabel: "Frankfurt", idleSuspendMinutes: 10 },
+};
+
+/** Show the price, then create: the form creates nothing before its price is on screen. */
+async function create() {
+  fireEvent.click(screen.getByRole("button", { name: /Show price/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Create workspace/ }));
+}
+
 const timings = { requestedAt: 1000, bootingAt: null, authenticatingAt: null, syncingAt: null, startingAgentAt: null, runningAt: null, failedAt: null };
 const snapshot = (phase: string, patch: { workspace?: object; operation?: object; launch?: object } = {}) => ({
   workspace: {
@@ -62,7 +73,7 @@ beforeEach(() => {
   });
   mocked.cloudWorkspacePreflight.mockResolvedValue({ ready: true, checks: [] });
   mocked.cloudWorkspaceSetup.mockResolvedValue({ defaults: { sourceId: "s", locationId: "l", machineClassId: "m", idleSuspendMinutes: 10, retentionDays: 30, networkPolicy: "provider-public-network" } });
-  mocked.cloudWorkspaceQuote.mockResolvedValue({ id: "quote-1" });
+  mocked.cloudWorkspaceQuote.mockResolvedValue(QUOTE);
 });
 
 afterEach(() => {
@@ -89,7 +100,7 @@ describe("CloudCreateWorkspace", () => {
     expect(screen.getByRole("option", { name: /acme\/gone/ })).toHaveProperty("disabled", true);
     expect((screen.getByLabelText("Workspace name") as HTMLInputElement).value).toBe("app");
     expect((screen.getByLabelText("Base branch of acme/lib") as HTMLInputElement).placeholder).toBe("trunk");
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
 
     await screen.findByTestId("cloud-create-progress");
     expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith([
@@ -112,18 +123,36 @@ describe("CloudCreateWorkspace", () => {
     expect(screen.getByText("terminalx/app-3f9a2c1b7d4e")).toBeTruthy();
   });
 
+  it("shows the price before anything is created, and asks for it again after a change", async () => {
+    mocked.cloudWorkspaceCreate.mockResolvedValue(snapshot("allocating"));
+    await fill();
+    expect(screen.queryByRole("button", { name: /Create workspace/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Show price/ }));
+    const price = await screen.findByTestId("cloud-create-quote-price");
+    expect(price.textContent).toBe("$0.12 an hour while it runs (estimate), about $3.00 a month while stopped. It stops itself after 10 idle minutes.");
+    expect(screen.getByTestId("cloud-create-quote").textContent).toContain("Boat · Standard (4 vCPU, 8 GB) · Frankfurt");
+    expect(mocked.cloudWorkspaceCreate).not.toHaveBeenCalled();
+    // A change to the form: the price shown is no longer this form's.
+    fireEvent.change(screen.getByLabelText("Initial prompt"), { target: { value: "Fix the logout" } });
+    expect(screen.queryByTestId("cloud-create-quote")).toBeNull();
+    await create();
+    await screen.findByTestId("cloud-create-progress");
+    expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
+    expect(mocked.cloudWorkspaceCreate.mock.calls[0][0].launch.prompt).toBe("Fix the logout");
+  });
+
   it("refuses an invalid base branch before anything is quoted", async () => {
     await fill();
     fireEvent.change(screen.getByLabelText("Base branch of acme/app"), { target: { value: "bad..branch" } });
     expect(screen.getByText("Not a valid branch name.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Create workspace/ })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: /Show price/ })).toHaveProperty("disabled", true);
     expect(mocked.cloudWorkspaceQuote).not.toHaveBeenCalled();
   });
 
   it("shows quota and policy refusals in words, without a retry", async () => {
     mocked.cloudWorkspaceCreate.mockRejectedValue({ code: "cloud_workspace_quota_exceeded", retryWithSameIdempotencyKey: false });
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     const alert = await screen.findByTestId("cloud-create-error");
     expect(alert.textContent).toMatch(/workspace limit/);
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
@@ -134,7 +163,7 @@ describe("CloudCreateWorkspace", () => {
       .mockRejectedValueOnce({ code: "cloud_workspace_create_outcome_unknown", retryWithSameIdempotencyKey: true })
       .mockResolvedValueOnce(snapshot("booting"));
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     fireEvent.click(await screen.findByRole("button", { name: /Retry/ }));
     await screen.findByTestId("cloud-create-progress");
     expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(2);
@@ -154,7 +183,7 @@ describe("CloudCreateWorkspace", () => {
     render(<CloudCreateWorkspace organizationId="org-1" onOpen={onOpen} />);
     await screen.findByRole("option", { name: "acme/app" });
     fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/acme/app.git" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     const progress = await screen.findByTestId("cloud-create-progress");
     expect(progress.dataset.phase).toBe("allocating");
     await act(async () => void (await vi.advanceTimersByTimeAsync(2100)));
@@ -177,7 +206,7 @@ describe("CloudCreateWorkspace", () => {
       snapshot("canceled", { operation: { state: "canceled", stage: "cleanup", cancelable: false }, launch: { state: "canceled" } }),
     );
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.getByTestId("cloud-create-progress").dataset.phase).toBe("canceled"));
     expect(mocked.cloudWorkspaceOperationCancel).toHaveBeenCalledWith("op-1", null);
@@ -195,7 +224,7 @@ describe("CloudCreateWorkspace", () => {
     );
     mocked.cloudWorkspaceResume.mockResolvedValue(snapshot("allocating", { operation: { id: "op-2", stage: "queued", state: "queued", cancelable: false } }));
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     await screen.findByRole("button", { name: "Cancel" });
     await act(async () => void (await vi.advanceTimersByTimeAsync(2100)));
     expect(mocked.cloudWorkspaceOperation).toHaveBeenCalledWith("op-1", "org-1");
@@ -212,7 +241,7 @@ describe("CloudCreateWorkspace", () => {
     );
     mocked.cloudWorkspaceResume.mockResolvedValue(snapshot("allocating", { operation: { id: "op-2", stage: "queued", state: "queued", cancelable: false } }));
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     expect((await screen.findByText(/Provisioning failed/)).textContent).toMatch(/provider_retry_exhausted/);
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
     await waitFor(() => expect(screen.getByTestId("cloud-create-progress").dataset.phase).toBe("allocating"));
@@ -234,7 +263,7 @@ describe("CloudCreateWorkspace", () => {
     render(<CloudCreateWorkspace organizationId="org-1" onOpen={onOpen} onProgress={onProgress} />);
     await screen.findByRole("option", { name: "acme/app" });
     fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/acme/app.git" } });
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     const progress = await screen.findByTestId("cloud-create-progress");
     expect(progress.dataset.phase).toBe("authenticating-runtime");
     expect(onProgress).toHaveBeenCalledWith(stuck);
@@ -254,7 +283,7 @@ describe("CloudCreateWorkspace", () => {
       snapshot("failed", { workspace: { state: "ready" }, operation: { state: "succeeded", stage: "ready", cancelable: false }, launch: { state: "failed", category: "runtime-unsupported" } }),
     );
     await fill();
-    fireEvent.click(screen.getByRole("button", { name: /Create workspace/ }));
+    await create();
     expect(await screen.findByText(/runtime cannot start agents from a first prompt/)).toBeTruthy();
     expect(screen.queryByText(/runtime-unsupported/)).toBeNull();
   });
