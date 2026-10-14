@@ -1048,6 +1048,88 @@ fn a_slash_command_is_shown_as_typed_and_the_app_s_own_is_not_shown() {
     assert_eq!(rig.told().len(), 3, "{:?}", rig.told());
 }
 
+impl Rig {
+    /// Put the open turn's start `by` further back, as if that long had passed.
+    fn turn_began_earlier(&self, by: Duration) {
+        let mut rt = self.rt.lock().unwrap();
+        rt.turn_started_at = Some(rt.turn_started_at.expect("a turn is open") - by);
+    }
+
+    /// How long the last turn to end was said to have taken.
+    fn last_turn_took(&self) -> Duration {
+        let ms = self.events().iter().rev().find_map(|e| match &e.payload {
+            Payload::TurnCompleted { duration_ms, .. } => Some(duration_ms.expect("a turn with a start has a duration")),
+            _ => None,
+        });
+        Duration::from_millis(ms.expect("a turn ended"))
+    }
+}
+
+/// Found in a cloud acceptance pass: a driver sent `/help` from the composer,
+/// which the CLI answers on its own screen with no prompt record and no
+/// `Stop`, so the turn it opened stayed open. A one-second prompt typed into
+/// the terminal minutes later then said "Worked for 5m 27s": its hook and its
+/// record found a turn open and kept that turn's start.
+#[test]
+fn a_prompt_after_a_command_that_never_ends_counts_its_own_time() {
+    const LONG_AGO: Duration = Duration::from_secs(5 * 60);
+    for kind in BOTH {
+        for record_first in [false, true] {
+            let case = format!("{kind:?}, {}", if record_first { "the record and then the hook" } else { "the hook and then the record" });
+            let rig = Rig::of(kind, "");
+            assert!(!rig.compose("/help", 0), "{case}");
+            assert!(rig.turn_open(), "{case}");
+            rig.turn_began_earlier(LONG_AGO);
+
+            if record_first {
+                rig.append(&rig.cli().prompt("typed in the terminal"));
+                rig.hook("UserPromptSubmit", json!({ "prompt": "typed in the terminal" }));
+            } else {
+                rig.cli_takes("typed in the terminal");
+            }
+            rig.cli_replies("done");
+            assert!(rig.last_turn_took() < LONG_AGO, "{case}: {:?}", rig.last_turn_took());
+
+            // From the composer, it is a prompt of its own, not one queued
+            // behind a turn that is not running.
+            rig.compose("/help", 0);
+            rig.turn_began_earlier(LONG_AGO);
+            assert!(!rig.compose("from the composer", 0), "{case}");
+            rig.cli_takes("from the composer");
+            rig.cli_replies("done again");
+            assert!(rig.last_turn_took() < LONG_AGO, "{case}: {:?}", rig.last_turn_took());
+        }
+    }
+}
+
+/// What the fix must leave alone: a turn that is working keeps its start
+/// through its own hooks and through a prompt typed into it mid-turn.
+#[test]
+fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
+    const LONG_AGO: Duration = Duration::from_secs(5 * 60);
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        rig.cli_takes("start");
+        rig.turn_began_earlier(LONG_AGO);
+        // Codex asks the reader about every tool at `PreToolUse`.
+        let tool_hook = if kind == CliKind::Claude { "PreToolUse" } else { "PostToolUse" };
+        rig.hook(tool_hook, json!({ "tool_name": "Bash", "tool_input": { "command": "ls" }, "tool_use_id": "t1" }));
+        rig.hook("PostToolUse", json!({ "tool_name": "Bash", "tool_input": { "command": "ls" }, "tool_use_id": "t1" }));
+        rig.append(&rig.cli().steer("and one more thing"));
+        rig.cli_replies("both");
+        assert!(rig.last_turn_took() >= LONG_AGO, "{kind:?}: {:?}", rig.last_turn_took());
+
+        // A command that does work of its own is a turn like any other.
+        assert!(!rig.compose("/review the last commit", 0));
+        rig.turn_began_earlier(LONG_AGO);
+        rig.hook("UserPromptSubmit", json!({ "prompt": "/review the last commit" }));
+        rig.hook(tool_hook, json!({ "tool_name": "Bash", "tool_input": { "command": "git show" }, "tool_use_id": "t2" }));
+        rig.append(&rig.cli().steer("look at the tests too"));
+        rig.cli_replies("reviewed");
+        assert!(rig.last_turn_took() >= LONG_AGO, "{kind:?}: {:?}", rig.last_turn_took());
+    }
+}
+
 /// Escape, from the chat and from the agent's own terminal (#427): the same
 /// rig and the same two CLIs, and a headless tab beside them.
 #[path = "session_interrupt_tests.rs"]

@@ -196,6 +196,7 @@ impl Rig {
             queued: Vec::new(),
             turn_open: false,
             turn_started_at: None,
+            turn_by_command: false,
             last_activity: now,
             recovery: None,
             stalled_at: None,

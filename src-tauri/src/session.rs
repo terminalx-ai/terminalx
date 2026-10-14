@@ -407,6 +407,10 @@ pub struct TabRuntime {
     pub queued: Vec<QueuedMessage>,
     pub turn_open: bool,
     pub turn_started_at: Option<Instant>,
+    /// The open turn is a slash command's, with no work seen yet. The CLI
+    /// runs `/help` or `/model` by itself and no `Stop` closes it, so the
+    /// next prompt is where that prompt's time starts (`prompt_taken`).
+    turn_by_command: bool,
     pub last_activity: Instant,
     pub recovery: Option<RecoveryKind>,
     /// When the session watcher raised a silence/delivery warning, if it did.
@@ -437,10 +441,25 @@ impl TabRuntime {
     /// A turn opens, starting a fresh activity clock. Whatever the transcript
     /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
+        if !self.turn_open {
+            self.turn_by_command = false;
+        }
         self.turn_open = true;
         self.last_activity = Instant::now();
         if let Engine::Cli(p) = &mut self.engine {
             p.transcript_turn = None;
+        }
+    }
+
+    /// The CLI has a prompt (`command`: a slash command), and a turn is
+    /// open. Its clock starts here unless a turn with work in it was already
+    /// running: a prompt then is one typed into that turn.
+    fn prompt_taken(&mut self, command: bool) {
+        let fresh = !self.turn_open || (self.turn_by_command && !command);
+        self.open_turn();
+        if fresh {
+            self.turn_started_at = Some(Instant::now());
+            self.turn_by_command = command;
         }
     }
 
@@ -820,6 +839,7 @@ impl SessionManager {
                 queued: Vec::new(),
                 turn_open: false,
                 turn_started_at: None,
+                turn_by_command: false,
                 last_activity: Instant::now(),
                 recovery: None,
                 stalled_at: None,
@@ -2578,8 +2598,7 @@ impl SessionManager {
                 let held = echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed()));
                 if held {
                     if !rt.turn_open {
-                        rt.open_turn();
-                        rt.turn_started_at = Some(Instant::now());
+                        rt.prompt_taken(false);
                     }
                     if let Engine::Cli(p) = &mut rt.engine {
                         p.turn_tail.opened();
@@ -2596,15 +2615,17 @@ impl SessionManager {
                     continue; // the app already said this for a Stop hook
                 }
             }
+            // A reply is work: the turn is not a bare command's.
+            if matches!(payload, Payload::AssistantText { .. }) {
+                rt.turn_by_command = false;
+            }
             if matches!(payload, Payload::UserMessage { .. }) {
                 self.delivery_confirmed(&mut rt);
                 // A prompt typed into the terminal with no hook ahead of it
                 // (a CLI started by hand, #437) is where its turn's time is
                 // counted from.
-                if !rt.turn_open {
-                    rt.turn_started_at = Some(Instant::now());
-                }
-                rt.open_turn();
+                let command = matches!(&payload, Payload::UserMessage { text, .. } if tui::is_slash_command(text));
+                rt.prompt_taken(command);
                 if let Engine::Cli(p) = &mut rt.engine {
                     p.turn_tail.opened();
                 }
@@ -2756,7 +2777,8 @@ impl SessionManager {
     /// come, so that record is not drawn as a second message. Everything
     /// except the keystrokes.
     fn record_composer_prompt(&self, rt: &mut TabRuntime, prompt: &PromptText, images: Vec<ImageRef>, cwd: &str, receipt: Option<DeliveryReceipt>) -> (AgentEvent, bool) {
-        let queued = rt.turn_open;
+        // Nothing is running behind a command that never ended.
+        let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(cwd)).ok() };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
         let ev = self.publish(rt, message, None);
@@ -2773,8 +2795,7 @@ impl SessionManager {
             }
         }
         if !queued {
-            rt.open_turn();
-            rt.turn_started_at = Some(Instant::now());
+            rt.prompt_taken(tui::is_slash_command(&prompt.agent));
             self.set_status(rt, TabStatus::InProgress);
         }
         (ev, queued)
@@ -3178,9 +3199,15 @@ impl SessionManager {
                     }
                 }
                 rt.last_activity = Instant::now();
-                if !rt.turn_open {
-                    rt.open_turn();
-                    rt.turn_started_at = Some(Instant::now());
+                if frame.event == "UserPromptSubmit" {
+                    rt.prompt_taken(frame.payload["prompt"].as_str().is_some_and(tui::is_slash_command));
+                } else {
+                    if !rt.turn_open {
+                        rt.open_turn();
+                        rt.turn_started_at = Some(Instant::now());
+                    }
+                    // A tool running is work: the turn is not a bare command's.
+                    rt.turn_by_command = false;
                 }
                 if rt.pending.is_empty() {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
