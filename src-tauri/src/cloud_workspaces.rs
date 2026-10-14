@@ -344,6 +344,10 @@ pub struct AgentLogin {
     pub state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_use: Option<String>,
+    /// In the list only: the person who connected this subscription login
+    /// no longer owns or administers the organization. The login is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configurer_left: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3965,7 +3969,7 @@ mod tests {
     #[test]
     fn agent_logins_list_agents_only_and_never_carry_a_login() {
         let body = r#"{"credentials":[
-            {"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","displayIdentity":"ada@example.com","version":2,"updatedAt":5,"state":"connected","sharedUse":"organization","secret":"must-not-cross","ciphertext":"must-not-cross"},
+            {"id":"c1","provider":"claude","authKind":"oauth-credentials-json","fingerprint":"sha256:ab","displayIdentity":"ada@example.com","version":2,"updatedAt":5,"state":"connected","sharedUse":"organization","configurerLeft":true,"secret":"must-not-cross","ciphertext":"must-not-cross"},
             {"id":"c2","provider":"github","authKind":"personal-access-token","fingerprint":"sha256:cd","version":1,"updatedAt":4},
             {"id":"c3","provider":"codex","authKind":"api-key","fingerprint":"sha256:ef","version":1,"updatedAt":3,"state":"revoked"}
         ]}"#;
@@ -3978,6 +3982,9 @@ mod tests {
         let sent = serde_json::to_value(&listed).unwrap();
         assert_eq!(sent["credentials"][0]["displayIdentity"], "ada@example.com");
         assert_eq!(sent["credentials"][1]["state"], "revoked");
+        // #450: the service's word that the person who connected a login has left reaches the page, and only when it was said.
+        assert_eq!(sent["credentials"][0]["configurerLeft"], true);
+        assert!(sent["credentials"][1].get("configurerLeft").is_none());
         assert!(!sent.to_string().contains("must-not-cross"));
     }
 

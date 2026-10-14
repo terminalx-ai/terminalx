@@ -3,11 +3,11 @@ import { Cloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
-import { useAccount } from "@/lib/account";
+import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
 import type { PreparedCreate } from "@/lib/cloudNewSession";
-import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
 import { useSessionStore } from "@/lib/sessions";
@@ -73,12 +73,12 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
   }, [key, catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
-export function cloudStartError(error: unknown): string {
+export function cloudStartError(error: unknown, orgId: string | null = null): string {
   // Refused for lack of role (the server's code, or the runtime's `forbidden`
   // for a session this connection may not start): the form was offered on a
   // role that has changed since.
   if (isRoleRefusal(error)) return roleRefusedMessage("start a new cloud session");
-  if (error instanceof CreateRefused) return createErrorMessage(error.code, error.detail);
+  if (error instanceof CreateRefused) return createErrorMessage(error.code, error.detail, managesOrganization(getAccount().status, orgId));
   if (isClientError(error)) return createErrorMessage(error.code);
   const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : error instanceof Error ? error.message : null;
   if (code === "cloud_workspace_unreachable") return "The cloud workspace did not come up in time. Try again.";

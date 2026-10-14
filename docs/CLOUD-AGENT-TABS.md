@@ -153,6 +153,12 @@ nothing was typed.
   connection that granted `session/3`. Without it (an older runtime, or one
   that is not connected) the key is left alone and the composer's Stop stays
   the mailbox `stop`.
+- **The phone.** Its Stop is the same call on the same terms: an interrupt on
+  a connection that granted `session/3`, the mailbox `stop` when pressed
+  again while the turn it was sent to is still the one running, and only the
+  mailbox `stop` without the grant. In the moment after the app returns to
+  the foreground, before it is connected again, an interrupt is refused and
+  never becomes a `stop`.
 
 In a cloud tab's terminal view Escape is typed into the agent's screen with
 `pty.write`, as before; `session.interrupt` is only what the chat sends.

@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
-import { agentLoginReach, agentLoginStatus, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
+import { openAgentLogins } from "@/lib/settingsLinks";
+import { agentLoginConfigurerLeft, agentLoginReach, agentLoginStatus, connectedNotice, lentUntil, OrganizationAgentLogins, signInOutcome } from "./OrganizationAgentLogins";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -12,6 +13,7 @@ vi.mock("@/lib/api", () => ({
     cloudAgentClaudeLoginOpen: vi.fn(),
     cloudAgentClaudeLoginComplete: vi.fn(),
     cloudAgentClaudeLoginCancel: vi.fn(),
+    cloudWorkspacePreflight: vi.fn(),
   },
 }));
 
@@ -70,8 +72,9 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(panel.textContent).toContain("a confirmation from the app names the organization, the account and the expiry");
     expect(panel.textContent).toContain("every member's cloud workspaces of Acme Robotics");
     expect(panel.textContent).toContain("anyone who can drive a workspace can read it");
-    // The revoke promise is the true one: the service can refuse.
-    expect(panel.textContent).toContain("The service refuses while a workspace of the organization still uses the login");
+    // What Disconnect does is what the service does (#450): it reaches running workspaces too.
+    expect(panel.textContent).toContain("That reaches every workspace of the organization, running ones included");
+    expect(panel.textContent).not.toContain("refuses while a workspace of the organization still uses the login");
     expect(panel.textContent).not.toMatch(/stop receiving it at once|does not change the login/);
     const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
     expect(go.hasAttribute("disabled")).toBe(true);
@@ -127,20 +130,76 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
     expect(api.cloudAgentLoginRemove).not.toHaveBeenCalled();
     const confirm = within(row("claude")).getByTestId("agent-login-disconnect");
-    expect(confirm.textContent).toContain("The service refuses while a workspace of the organization still uses the login");
+    // #450: a running workspace does not stop a disconnect, and the text no longer says it does.
+    expect(confirm.textContent).toContain("This reaches every workspace of the organization, running ones included");
+    expect(confirm.textContent).toContain("The service refuses only while a workspace that was created with this very login chosen for it still exists");
+    expect(confirm.textContent).not.toContain("refuses while a workspace of the organization still uses the login");
     fireEvent.click(within(confirm).getByRole("button", { name: "Disconnect Claude Code" }));
     await waitFor(() => expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected"));
     expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision");
   });
 
-  it("says why a disconnect was refused while a workspace still uses the login, and keeps it listed", async () => {
+  it("says why a disconnect was refused for a workspace created with this login chosen for it, and keeps it listed", async () => {
     stored = [login({ displayIdentity: "ada@example.com" })];
     vi.mocked(api.cloudAgentLoginRemove).mockRejectedValue({ code: "cloud_workspace_credential_in_use" });
     await show();
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect" }));
     fireEvent.click(within(row("claude")).getByRole("button", { name: "Disconnect Claude Code" }));
-    expect((await screen.findByRole("alert")).textContent).toMatch(/still uses it\. Delete or archive those workspaces first, or revoke the login in the web console/);
+    expect((await screen.findByRole("alert")).textContent).toMatch(/a workspace that was created with this very login chosen for it still exists\. Delete or archive that workspace first\. Nothing was changed\./);
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
+  });
+
+  // #450: the server marks a subscription login whose configurer no longer manages the organization; the row said nothing.
+  it("flags a login whose configurer has left, with what it means and what to do", async () => {
+    stored = [login({ displayIdentity: "ada@example.com", configurerLeft: true }), login({ provider: "codex", authKind: "api-key" })];
+    await show();
+    const flag = within(row("claude")).getByTestId("agent-login-configurer-left");
+    expect(flag.textContent).toBe(
+      "The person who connected this login is no longer an owner or admin of Acme Robotics. It keeps working, on their subscription. To take it over, log in with Claude again: that replaces it with a login of your own.",
+    );
+    expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected · subscription login · ada@example\.com/);
+    expect(within(row("codex")).queryByTestId("agent-login-configurer-left")).toBeNull();
+    expect(agentLoginConfigurerLeft(login({ configurerLeft: true }))).toBe(true);
+    // Only a working login is flagged, and only on the service's word.
+    expect(agentLoginConfigurerLeft(login({ configurerLeft: true, state: "revoked" }))).toBe(false);
+    expect(agentLoginConfigurerLeft(login({}))).toBe(false);
+    expect(agentLoginConfigurerLeft(undefined)).toBe(false);
+  });
+
+  // #450: a member saw the explanation and nothing about any agent.
+  it("shows a member whether each agent has a login their workspaces can use, without identities or controls", async () => {
+    vi.mocked(api.cloudAgentLogins).mockRejectedValue({ code: "organization_admin_required" });
+    vi.mocked(api.cloudWorkspacePreflight).mockImplementation(async (_repositories, _org, agent) => ({
+      ready: agent === "claude",
+      checks:
+        agent === "cursor-agent"
+          ? []
+          : [{ kind: "agent-credential", cloneUrl: null, agent, status: agent === "claude" ? "verified" : "failed", errorCode: agent === "claude" ? null : "cloud_workspace_agent_credential_required", retryable: false }],
+    }));
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationName="Acme Robotics" />);
+    await screen.findByTestId("agent-logins-member");
+    await waitFor(() => expect(screen.getAllByTestId("agent-login-member-status")).toHaveLength(3));
+    const status = (agent: string) => screen.getAllByTestId("agent-login-member-status").find((item) => item.dataset.agent === agent)!.textContent;
+    expect(status("claude")).toBe("Claude Code: a login your workspaces can use is connected.");
+    expect(status("codex")).toBe("Codex: no login your workspaces can use. Either none is connected, or the one stored is limited to workspaces only owners and admins can drive.");
+    // A server that does not answer per agent says nothing, and neither does the row.
+    expect(status("cursor")).toBe("Cursor: the service did not say.");
+    expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([], null, "cursor-agent");
+    expect(screen.queryAllByTestId("agent-login")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: /Disconnect|Connect|Log in/ })).toBeNull();
+  });
+
+  it("comes into view when a message elsewhere sent the person here", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    stored = [login({})];
+    await show();
+    expect(scrolled).not.toHaveBeenCalled();
+    cleanup();
+    openAgentLogins();
+    await show();
+    expect(scrolled).toHaveBeenCalled();
+    expect(scrolled.mock.contexts.at(-1)).toBe(screen.getByTestId("agent-logins"));
   });
 
   // Review of #293: lending a sign-in silently replaced a working API key.

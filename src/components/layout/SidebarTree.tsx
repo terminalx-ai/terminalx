@@ -11,7 +11,6 @@ import {
   PictureInPicture2,
   Pin,
   Plus,
-  Sparkles,
   Terminal,
   Trash2,
   X,
@@ -19,6 +18,7 @@ import {
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";
+import { MergedNote } from "@/components/layout/MergedNote";
 import { RowActions } from "@/components/layout/RowActions";
 import {
   AgentTabRow,
@@ -40,8 +40,6 @@ import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
   ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
   ContextMenuTrigger,
   DropdownMenu,
   DropdownMenuContent,
@@ -66,7 +64,6 @@ import {
   archiveSession,
   forkSession,
   openAutomations,
-  openSkills,
   pinSession,
   refreshWorkspaces,
   renameWorkspace,
@@ -76,12 +73,14 @@ import {
   startSessionIn,
   useSessionStore,
 } from "@/lib/sessions";
+import { LOCAL_HOST, useMergedStatus } from "@/lib/mergedCleanup";
 import { useTabViews } from "@/lib/tabViews";
-import { isTerminalTab, tabLabel, tabPaneId, tabViewIn } from "@/lib/tabFront";
-import { activatePeer, browserPageLabel, closePeer, peerOrder, selectedPeer, tabNodeId, tabPanelId, type PeerTab } from "@/lib/sessionTabs";
-import { openBrowserTab, pagesFor, useBrowser } from "@/lib/browser";
+import { tabViewIn } from "@/lib/tabFront";
+import { activatePeer, closePeer, isShellPeer, peerLabel, peerShell, selectedPeer, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { openBrowserTab } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
-import { sessionStatus, type Project, type SessionEntry, type TabEntry, type Workspace } from "@/types/session";
+import { TabMenuItems } from "@/components/session/TabMenu";
+import { sessionStatus, type Project, type SessionEntry, type Workspace } from "@/types/session";
 
 interface WorkspaceGroup {
   workspace: Workspace | null;
@@ -238,6 +237,8 @@ function WorkspaceNode({
 }) {
   const [renameError, setRenameError] = useState<string | null>(null);
   const workspace = group.workspace;
+  // Why it is still here after its pull request merged, or when it goes.
+  const merged = useMergedStatus(LOCAL_HOST, workspace && !workspace.isMain ? workspace.path : null);
   const removedSession = group.sessions.find((session) => session.removedWorkspace) ?? group.sessions[0];
   const name = group.removed && removedSession ? sessionWorkspaceName(removedSession) : (workspace?.name ?? group.path.split("/").pop() ?? group.path);
   const displayName = group.removed ? name : workspace?.managed ? name : (workspace?.branch ?? name);
@@ -308,6 +309,7 @@ function WorkspaceNode({
           {renameError}
         </div>
       ) : null}
+      <MergedNote status={merged} className="mx-6 mb-1" />
       <TreeGroup expanded={expanded} className="pl-2">
         {group.sessions.map((session) => (
           <SessionNode
@@ -346,14 +348,16 @@ export function SessionNode({
   harnessNames: Map<string, string>;
 }) {
   const terminals = useTerminals();
-  const browser = useBrowser();
-  const peers = peerOrder(session, terminals.panes, pagesFor(browser.pages, session.cwd));
+  // The workspace's one row of tabs, in its saved order; this session lists its own part of it, and the
+  // workspace's browser pages. So the sidebar and the title bar strip are two views of one list.
+  const row = useTabRow(session);
+  const peers = row.tabs.filter((peer) => peer.sessionId === session.id || peer.sessionId === null);
   const activePeer = selectedPeer(session, peers, terminals.selected[session.id]);
   const branchBadge = session.issue && !session.worktreeName && !session.worktreeRemoved ? session.branch : null;
   const isActive = (peer: PeerTab) => selected && activePeer?.kind === peer.kind && peer.id === activePeer.id;
-  const agentName = (harness: string) => harnessNames.get(harness) || harness;
   const close = (peer: PeerTab) => () => void closePeer(session.id, peer, peers, activePeer);
   const open = (peer: PeerTab) => () => { selectSession(session.id); activatePeer(session.id, peer); };
+  const labelOf = (peer: PeerTab) => peerLabel(peer, row.layout, (id) => harnessNames.get(id));
 
   return (
     <DropdownMenu>
@@ -383,112 +387,65 @@ export function SessionNode({
           </button>
         ) : null}
         <TreeGroup expanded={expanded} className="pl-5">
-          {peers.map((peer) => peer.kind === "agent" ? (
-            <TabNode
-              key={peer.id}
-              session={session}
-              tab={peer.tab}
-              active={isActive(peer)}
-              label={tabLabel(peer.tab, agentName, terminals.agents[tabPaneId(peer.tab)])}
-              terminal={tabViewIn(tabViews, peer.tab) === "terminal"}
-              mobileDriven={mobileDriven.has(peer.id)}
-              // What its terminal holds while it is one: a shell that may have exited, or an agent the app has no chat for.
-              shellExited={!!terminals.panes.find((pane) => pane.id === tabPaneId(peer.tab))?.exited}
-              paneAgent={terminals.agents[tabPaneId(peer.tab)] ?? null}
-              onClose={close(peer)}
-            />
-          ) : peer.kind === "browser" ? (
-            <BrowserTabRow
-              key={peer.id}
-              nodeId={tabNodeId(peer)}
-              panelId={tabPanelId(peer)}
-              label={browserPageLabel(peer.page)}
-              url={peer.page.url}
-              agentTarget={peer.page.active}
-              selected={isActive(peer)}
-              onOpen={open(peer)}
-              onClose={close(peer)}
-            />
-          ) : (
-            <ShellTabRow
-              key={peer.id}
-              nodeId={tabNodeId(peer)}
-              panelId={tabPanelId(peer)}
-              title={peer.pane.title}
-              exited={peer.pane.exited}
-              agent={terminals.agents[peer.id] ?? null}
-              selected={isActive(peer)}
-              onOpen={open(peer)}
-              onClose={close(peer)}
-            />
+          {peers.map((peer) => (
+            // The same menu as on the title bar strip, on the tab that was clicked.
+            <ContextMenu key={peer.key}>
+              <ContextMenuTrigger asChild>
+                {peer.kind === "agent" && !isShellPeer(peer) ? (
+                  <AgentTabRow
+                    nodeId={tabNodeId(peer)}
+                    panelId={tabPanelId(peer)}
+                    harness={peer.tab.harness}
+                    label={labelOf(peer)}
+                    status={peer.tab.status}
+                    mobileDriven={mobileDriven.has(peer.id)}
+                    terminalView={tabViewIn(tabViews, peer.tab) === "terminal"}
+                    pinned={peer.pinned}
+                    selected={isActive(peer)}
+                    onOpen={() => {
+                      selectSession(session.id);
+                      void setActiveTab(session.id, peer.id);
+                    }}
+                    onClose={close(peer)}
+                  />
+                ) : peer.kind === "browser" ? (
+                  <BrowserTabRow
+                    nodeId={tabNodeId(peer)}
+                    panelId={tabPanelId(peer)}
+                    label={labelOf(peer)}
+                    url={peer.page.url}
+                    agentTarget={peer.page.active}
+                    pinned={peer.pinned}
+                    selected={isActive(peer)}
+                    onOpen={open(peer)}
+                    onClose={close(peer)}
+                  />
+                ) : (
+                  // A tab is drawn as what its terminal holds now (#437): a session's tab with no agent in it is a
+                  // terminal's row, with the mark of an agent the app has no chat for when one runs there.
+                  <ShellTabRow
+                    nodeId={tabNodeId(peer)}
+                    panelId={tabPanelId(peer)}
+                    title={labelOf(peer)}
+                    exited={!!peerShell(peer)?.exited}
+                    agent={peer.paneAgent}
+                    pinned={peer.pinned}
+                    selected={isActive(peer)}
+                    onOpen={open(peer)}
+                    onClose={close(peer)}
+                  />
+                )}
+              </ContextMenuTrigger>
+              <ContextMenuContent className="max-h-(--radix-context-menu-content-available-height) overflow-y-auto">
+                <TabMenuItems row={row} tab={peer} selected={selected && activePeer ? { kind: activePeer.kind, id: activePeer.id } : null} />
+              </ContextMenuContent>
+            </ContextMenu>
           ))}
           {peers.length === 0 ? <div className="px-3 py-1 text-[11px] text-faint">No tabs.</div> : null}
         </TreeGroup>
       </TreeNode>
       <SessionMenu session={session} />
     </DropdownMenu>
-  );
-}
-
-function TabNode({
-  session,
-  tab,
-  active,
-  label,
-  terminal,
-  mobileDriven,
-  shellExited,
-  paneAgent,
-  onClose,
-}: {
-  session: SessionEntry;
-  tab: TabEntry;
-  active: boolean;
-  label: string;
-  terminal: boolean;
-  mobileDriven: boolean;
-  shellExited: boolean;
-  paneAgent: string | null;
-  onClose: () => void;
-}) {
-  const open = () => {
-    selectSession(session.id);
-    void setActiveTab(session.id, tab.id);
-  };
-  const ids = { nodeId: tabNodeId({ kind: "agent", id: tab.id }), panelId: tabPanelId({ kind: "agent", id: tab.id }) };
-  // A tab is drawn as what its terminal holds now (#437): its agent, or a terminal.
-  const asTerminal = isTerminalTab(tab);
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>
-        {asTerminal ? (
-          <ShellTabRow {...ids} title={label} exited={shellExited} agent={paneAgent} selected={active} onOpen={open} onClose={onClose} />
-        ) : (
-          <AgentTabRow
-            {...ids}
-            harness={tab.harness}
-            label={label}
-            status={tab.status}
-            mobileDriven={mobileDriven}
-            terminalView={terminal}
-            selected={active}
-            onOpen={open}
-            onClose={onClose}
-          />
-        )}
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        {asTerminal ? null : (
-          <ContextMenuItem onSelect={() => openSkills({ agent: tab.harness, projectPath: session.cwd })}>
-            <Sparkles /> Skills for this tab
-          </ContextMenuItem>
-        )}
-        {asTerminal ? null : <ContextMenuSeparator />}
-        <ContextMenuItem destructive onSelect={onClose}>
-          <X /> Close tab
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
   );
 }
 

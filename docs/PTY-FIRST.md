@@ -223,7 +223,7 @@ is on a key by default.
 | The agent's process | Stays; the next message goes to it | Ends; the next message resumes the conversation in a new one |
 | Queued follow-ups | Kept (see below) | Dropped |
 | What the tab shows | The turn as "Stopped", once the agent says so | The same, plus "Session closed … Resume safely" |
-| Where it is | Escape in the chat, the composer's Stop | "Stop session" in the terminal view and on the recovery banner, the composer's Stop after an interrupt went unanswered, and a shortcut the reader may set |
+| Where it is | Escape in the chat, the composer's Stop, a guest's Stop and Steer in a shared session (`MULTIPLAYER.md`), the phone's Stop in a cloud workspace | "Stop session" in the terminal view and on the recovery banner, any of those Stops pressed again after an interrupt went unanswered, and a shortcut the reader may set |
 
 **Which view the key is pressed in decides who reads it.**
 

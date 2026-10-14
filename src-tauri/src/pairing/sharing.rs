@@ -35,7 +35,7 @@ use super::{
     PairingManager,
 };
 
-pub(super) fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     Utc::now().timestamp_millis()
 }
 
@@ -551,7 +551,7 @@ impl PairingManager {
         )
     }
 
-    fn share_rpc(
+    pub(crate) fn share_rpc(
         &self,
         session: &str,
         connection: &str,
@@ -690,25 +690,33 @@ impl PairingManager {
                     sessions.status_of(session, tab_id),
                     TabStatus::InProgress | TabStatus::Waiting
                 );
-                if busy && method == "session.steer" {
-                    // Interrupt before resuming with the steering prompt. Never
-                    // hand a guest's deferred input to an opaque agent queue.
-                    share.cancel_tab_inputs(tab_id);
-                    sessions.stop(session, tab_id)?;
-                }
-                if busy && method != "session.steer" {
+                if busy {
+                    let steer = method == "session.steer";
                     if share.queue.len() >= 64 {
                         bail!("The follow-up queue is full.");
                     }
-                    if crate::cloud_agents::slash::is_command(&text) {
+                    if !steer && crate::cloud_agents::slash::is_command(&text) {
                         bail!("Send slash commands after the turn finishes.");
                     }
-                    share.queue.push_back(QueuedInput {
+                    let input = QueuedInput {
                         connection_id: connection.into(),
                         tab_id: tab_id.into(),
                         text,
-                    });
-                    share.record(&person.user_id, "queued", json!({ "tabId": tab_id }), now());
+                    };
+                    if steer {
+                        // Escape, then this prompt as the next one (#427): the
+                        // turn is interrupted, the agent's process stays, and
+                        // the prompt goes to the front of the share's own
+                        // queue, checked again when the interrupted turn has
+                        // ended. Never typed into the running agent, whose
+                        // queue nobody here could take it back from.
+                        sessions.interrupt(session, tab_id)?;
+                        share.queue.push_front(input);
+                        share.record(&person.user_id, "steer", json!({ "tabId": tab_id }), now());
+                    } else {
+                        share.queue.push_back(input);
+                        share.record(&person.user_id, "queued", json!({ "tabId": tab_id }), now());
+                    }
                     Ok(json!({ "queued": true, "events": [] }))
                 } else {
                     let outcome = sessions.send_shared(
@@ -722,11 +730,23 @@ impl PairingManager {
                     Ok(json!(outcome))
                 }
             }
+            // Stop is Escape first (#427), as in the host's own composer: the
+            // turn is interrupted, the agent's process stays, and what guests
+            // queued behind the turn goes out when it has ended. `force` is
+            // the stop that ends the process and drops that queue, for an
+            // agent that did not answer the interrupt.
+            "session.stop" if params["force"] != true => {
+                let interrupted = sessions.interrupt(session, tab_id)?;
+                if interrupted {
+                    share.record(&person.user_id, "interrupt", json!({ "tabId": tab_id }), now());
+                }
+                Ok(json!({ "stopped": false, "interrupted": interrupted }))
+            }
             "session.stop" => {
                 share.cancel_tab_inputs(tab_id);
                 sessions.stop(session, tab_id)?;
                 share.record(&person.user_id, "stop", json!({ "tabId": tab_id }), now());
-                Ok(json!({ "stopped": true }))
+                Ok(json!({ "stopped": true, "interrupted": false }))
             }
             "permission.respond" => {
                 sessions.respond_permission(
@@ -758,7 +778,7 @@ impl PairingManager {
         }
     }
 
-    fn drain_share_queue(&self, session: &str) -> Result<()> {
+    pub(crate) fn drain_share_queue(&self, session: &str) -> Result<()> {
         let sessions = manager(self)?;
         let mut sharing = sessions.sharing.lock().unwrap();
         let Some(share) = sharing.sessions.get_mut(session) else {
@@ -780,22 +800,15 @@ impl PairingManager {
                 if !allowed_while_shared(&tab.permission_mode) {
                     bail!("Tab is in Bypass.");
                 }
-                let person = share.admit(
-                    &input.connection_id,
-                    Some(&input.tab_id),
-                    true,
-                    false,
-                    now(),
-                )?;
+                // Everything a write is checked for, except how long ago the
+                // guest last wrote: this input was accepted then, and what
+                // they did since (a steer, a stop, another follow-up) is no
+                // reason to drop it.
+                let permit = share.write_permit(&input.connection_id, &input.tab_id)?;
+                let person = share.admit_at_writer(&permit, &input.tab_id, now())?;
                 crate::cloud_agents::slash::check(&input.text, &tab.harness, None)
                     .map_err(|e| anyhow!(e.message()))?;
-                sessions.send_shared(
-                    session,
-                    &input.tab_id,
-                    input.text,
-                    person.clone(),
-                    share.write_permit(&input.connection_id, &input.tab_id)?,
-                )?;
+                sessions.send_shared(session, &input.tab_id, input.text, person.clone(), permit)?;
                 share.record(
                     &person.user_id,
                     "prompt",
@@ -851,9 +864,13 @@ fn validate_params(method: &str, params: &Value, session: &str) -> Result<()> {
         "session.send" | "session.queue" | "session.steer" => &["sessionId", "tabId", "text"],
         "chat.post" => &["sessionId", "text"],
         "permission.respond" => &["sessionId", "tabId", "requestId", "optionId"],
-        "session.stop" | "terminal.read" | "steerLease.release" => &["sessionId", "tabId"],
+        "session.stop" => &["sessionId", "tabId", "force"],
+        "terminal.read" | "steerLease.release" => &["sessionId", "tabId"],
         _ => &["sessionId"],
     };
+    if params.get("force").is_some_and(|force| !force.is_boolean()) {
+        bail!("The request is outside this session's scope.");
+    }
     if params["sessionId"].as_str() != Some(session)
         || !params
             .as_object()
@@ -1095,5 +1112,12 @@ mod tests {
             "one"
         )
         .is_ok());
+        // `force` is a stop's alone, and a yes or a no.
+        for force in [json!(true), json!(false)] {
+            assert!(validate_params("session.stop", &json!({"sessionId":"one", "tabId":"tab", "force": force}), "one").is_ok());
+        }
+        assert!(validate_params("session.stop", &json!({"sessionId":"one", "tabId":"tab"}), "one").is_ok());
+        assert!(validate_params("session.stop", &json!({"sessionId":"one", "tabId":"tab", "force": "yes"}), "one").is_err());
+        assert!(validate_params("session.steer", &json!({"sessionId":"one", "tabId":"tab", "text": "now", "force": true}), "one").is_err());
     }
 }

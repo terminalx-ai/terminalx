@@ -107,6 +107,10 @@ pub struct Candidate {
     pub verdict: Verdict,
     /// Why it is not eligible. `None` when it is.
     pub reason: Option<String>,
+    /// The same in a few words, for a row that has no room for a sentence
+    /// ("2 uncommitted files"). `None` when it is eligible, protected or
+    /// could not be checked.
+    pub brief: Option<String>,
     /// The newest of its last commit and its sessions' last change.
     pub last_activity: Option<String>,
     pub sessions: Vec<SessionImpact>,
@@ -171,6 +175,22 @@ pub struct ItemResult {
     pub kept_branch: Option<String>,
     pub sessions_kept: Vec<String>,
     pub sessions_deleted: Vec<String>,
+}
+
+/// How much of what is alive keeps a worktree where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Activity {
+    /// Anything: a turn, an agent's process even when it sits idle at its
+    /// prompt, a terminal, any process whose working directory is there. The
+    /// bulk clean-up stops nothing, so all of it counts.
+    Anything,
+    /// A turn that is running or waiting, or a terminal the reader opened.
+    /// An agent the app started that sits idle at its prompt is not work in
+    /// progress: the removal that follows this check stops it, as the
+    /// removal dialog does. A tab that follows its terminal (#437) and is a
+    /// shell now, or holds an agent the reader started by hand, is theirs
+    /// like any terminal they opened.
+    Engaged,
 }
 
 /// The desktop's event for [`Progress`], with the id of the removal it belongs
@@ -244,6 +264,9 @@ pub struct Live {
     pub panes: Vec<(String, PathBuf)>,
     /// Agent tabs with a live process: `(session id, tab id)`.
     pub tabs: HashSet<(String, String)>,
+    /// Agent tabs in a turn or waiting on an answer, where the host knows
+    /// more than the session index says (a permission a runtime holds open).
+    pub turns: HashSet<(String, String)>,
     /// The working directory of every process that could be read.
     pub process_dirs: Vec<PathBuf>,
 }
@@ -258,19 +281,27 @@ impl Live {
             .flat_map(|session| session.tabs.iter().map(move |tab| (session.id.clone(), tab.id.clone())))
             .filter(|(session, tab)| running(session, tab))
             .collect();
-        Self { panes, tabs, process_dirs: process_dirs() }
+        Self { panes, tabs, turns: HashSet::new(), process_dirs: process_dirs() }
     }
 
-    fn session(&self, session: &SessionEntry) -> Option<String> {
+    fn session(&self, session: &SessionEntry, activity: Activity) -> Option<String> {
         if session.tabs.iter().any(|tab| tab.status == TabStatus::Waiting) {
             return Some("waiting for an answer".into());
         }
-        if session.tabs.iter().any(|tab| tab.status == TabStatus::InProgress || self.tabs.contains(&(session.id.clone(), tab.id.clone()))) {
+        let idle_counts = activity == Activity::Anything;
+        let is = |set: &HashSet<(String, String)>, tab: &crate::store::index::TabEntry| set.contains(&(session.id.clone(), tab.id.clone()));
+        if session.tabs.iter().any(|tab| tab.status == TabStatus::InProgress || is(&self.turns, tab) || (idle_counts && is(&self.tabs, tab))) {
             return Some("an agent is running".into());
         }
+        // What a tab's terminal holds when the reader put it there, not the
+        // app. Where an idle agent counts, it is covered by the lines around.
+        let open = |tab: &crate::store::index::TabEntry| !idle_counts && self.panes.iter().any(|(pane, _)| *pane == tab.pane_id());
+        if session.tabs.iter().any(|tab| tab.by_hand() && open(tab)) {
+            return Some("an agent started by hand is open".into());
+        }
         let prefix = format!("{}:", session.id);
-        let own = |pane: &str| pane.starts_with(&prefix) || session.tabs.iter().any(|tab| pane.strip_prefix("tab:") == Some(tab.id.as_str()));
-        self.panes.iter().any(|(pane, _)| own(pane)).then(|| "a terminal is open".into())
+        let own = |pane: &str| pane.starts_with(&prefix) || (idle_counts && session.tabs.iter().any(|tab| pane.strip_prefix("tab:") == Some(tab.id.as_str())));
+        (self.panes.iter().any(|(pane, _)| own(pane)) || session.tabs.iter().any(|tab| tab.is_terminal() && open(tab))).then(|| "a terminal is open".into())
     }
 }
 
@@ -286,12 +317,12 @@ pub struct Host<'a> {
     pub fetch: Fetch,
 }
 
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether two paths are one directory, however each is spelled.
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -361,15 +392,15 @@ fn process_dirs() -> Vec<PathBuf> {
 
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Default, Clone)]
-struct Listed {
-    path: String,
-    branch: Option<String>,
+pub(crate) struct Listed {
+    pub(crate) path: String,
+    pub(crate) branch: Option<String>,
     bare: bool,
     locked: bool,
-    prunable: bool,
+    pub(crate) prunable: bool,
 }
 
-fn list_worktrees(project: &Path) -> anyhow::Result<Vec<Listed>> {
+pub(crate) fn list_worktrees(project: &Path) -> anyhow::Result<Vec<Listed>> {
     let out = git::run(project, &["worktree", "list", "--porcelain"])?;
     let mut entries: Vec<Listed> = Vec::new();
     for line in out.lines() {
@@ -392,12 +423,12 @@ fn list_worktrees(project: &Path) -> anyhow::Result<Vec<Listed>> {
 }
 
 /// One open project, as a scan or a removal sees it.
-struct Repository<'a> {
-    project: &'a Project,
-    root: PathBuf,
+pub(crate) struct Repository<'a> {
+    pub(crate) project: &'a Project,
+    pub(crate) root: PathBuf,
     /// Git's primary worktree of the repository this project belongs to.
-    primary: PathBuf,
-    listed: Vec<Listed>,
+    pub(crate) primary: PathBuf,
+    pub(crate) listed: Vec<Listed>,
     fetch: Fetch,
     /// What unpushed commits are compared with, read (and fetched) only
     /// when some worktree has any.
@@ -405,7 +436,7 @@ struct Repository<'a> {
 }
 
 impl<'a> Repository<'a> {
-    fn open(project: &'a Project, fetch: Fetch) -> Result<Self, String> {
+    pub(crate) fn open(project: &'a Project, fetch: Fetch) -> Result<Self, String> {
         let root = std::fs::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
         if !root.is_dir() || !git::is_repo(&root) {
             return Err("Not a Git repository, so it has no worktrees.".into());
@@ -424,13 +455,13 @@ impl<'a> Repository<'a> {
     }
 }
 
-struct Roots {
+pub(crate) struct Roots {
     /// `(root, what it is)` for every directory that must survive.
     protected: Vec<(PathBuf, String)>,
 }
 
 impl Roots {
-    fn of(host: &Host<'_>, sessions: &[SessionEntry]) -> Self {
+    pub(crate) fn of(host: &Host<'_>, sessions: &[SessionEntry]) -> Self {
         let mut protected: Vec<(PathBuf, String)> = host
             .projects
             .iter()
@@ -461,7 +492,7 @@ impl Roots {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
@@ -548,8 +579,9 @@ fn last_activity(path: &Path, sessions: &[SessionEntry]) -> Option<String> {
     Some(newest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-/// Read one listed worktree and decide what it is.
-fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &Listed, all_sessions: &[SessionEntry], live: &Live) -> Candidate {
+/// Read one listed worktree and decide what it is. `activity` says how much
+/// of what is alive counts as the worktree being in use.
+pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &Listed, all_sessions: &[SessionEntry], live: &Live, activity: Activity) -> Candidate {
     let path = canonical(Path::new(&entry.path));
     let sessions = session_ops::sessions_within(all_sessions.to_vec(), &path);
     let managed_root = canonical(&git::worktree_root(&repository.root));
@@ -562,8 +594,9 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
         managed: path.parent() == Some(managed_root.as_path()),
         verdict: Verdict::Unverifiable,
         reason: None,
+        brief: None,
         last_activity: None,
-        sessions: sessions.iter().map(|session| SessionImpact { id: session.id.clone(), title: session.title.clone(), modified: session.modified.clone(), live: live.session(session) }).collect(),
+        sessions: sessions.iter().map(|session| SessionImpact { id: session.id.clone(), title: session.title.clone(), modified: session.modified.clone(), live: live.session(session, activity) }).collect(),
         disposable: Vec::new(),
         ignored_data: Vec::new(),
         token: String::new(),
@@ -599,20 +632,34 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
         candidate.last_activity = last_activity(&path, &sessions);
 
         if let Some(session) = candidate.sessions.iter().find(|session| session.live.is_some()) {
-            return (Verdict::Active, Some(format!("The session \"{}\" is live: {}. Nothing is stopped to clean up.", session.title, session.live.as_deref().unwrap_or_default())));
+            let doing = session.live.as_deref().unwrap_or_default();
+            candidate.brief = Some(format!("{doing} in \"{}\"", session.title));
+            return (Verdict::Active, Some(format!("The session \"{}\" is live: {doing}. Nothing is stopped to clean up.", session.title)));
         }
-        let terminals = live.panes.iter().filter(|(_, dir)| dir.starts_with(&path)).count();
+        // An agent's own terminal (`tab:<id>`) is its CLI, and its processes
+        // run in the worktree: both are covered by the session check above
+        // when an idle agent counts, and are not in use when it does not. One
+        // that holds what the reader started was covered there too.
+        let idle_counts = activity == Activity::Anything;
+        let terminals = live.panes.iter().filter(|(pane, dir)| dir.starts_with(&path) && (idle_counts || !pane.starts_with("tab:"))).count();
         if terminals > 0 {
-            return (Verdict::Active, Some(format!("{} open in it.", plural(terminals, "terminal is", "terminals are"))));
+            let open = format!("{} open in it", plural(terminals, "terminal is", "terminals are"));
+            candidate.brief = Some(open.clone());
+            return (Verdict::Active, Some(format!("{open}.")));
         }
-        let processes = live.process_dirs.iter().filter(|dir| dir.starts_with(&path)).count();
+        let processes = if idle_counts { live.process_dirs.iter().filter(|dir| dir.starts_with(&path)).count() } else { 0 };
         if processes > 0 {
-            return (Verdict::Active, Some(format!("{} running in it.", plural(processes, "process is", "processes are"))));
+            let running = format!("{} running in it", plural(processes, "process is", "processes are"));
+            candidate.brief = Some(running.clone());
+            return (Verdict::Active, Some(format!("{running}.")));
         }
 
         match operation_in_progress(&path) {
             Ok(None) => {}
-            Ok(Some(what)) => return (Verdict::InProgress, Some(format!("A {what} is in progress."))),
+            Ok(Some(what)) => {
+                candidate.brief = Some(format!("a {what} is in progress"));
+                return (Verdict::InProgress, Some(format!("A {what} is in progress.")));
+            }
             Err(()) => return unverifiable("Git could not read the checkout's state."),
         }
         match git::run(&path, &["status", "--porcelain", "--untracked-files=all", "--"]) {
@@ -620,6 +667,7 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
             Err(_) => return unverifiable("Git could not read the working tree's status."),
         }
         if !listing.trim().is_empty() {
+            candidate.brief = Some(plural(listing.lines().count(), "uncommitted file", "uncommitted files"));
             return (Verdict::Dirty, Some(describe_changes(&listing)));
         }
         if candidate.head.is_none() {
@@ -653,6 +701,7 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
                         Some(base) if *verified => format!("and not merged into {base}"),
                         _ => "and whether they were merged could not be verified".to_string(),
                     };
+                    candidate.brief = Some(plural(count, "unpushed commit", "unpushed commits"));
                     return (Verdict::Unpushed, Some(format!("{} only on this machine: not on any remote, {against}.", plural(count, "commit is", "commits are"))));
                 }
             }
@@ -671,6 +720,7 @@ fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_>, entry: &
             return unverifiable(&format!("The ignored folder {name} holds another Git checkout, and work in it cannot be checked from here."));
         }
         if !candidate.ignored_data.is_empty() {
+            candidate.brief = Some(format!("ignored local files: {}", named(&candidate.ignored_data)));
             return (
                 Verdict::IgnoredData,
                 Some(format!("{} may be local data: {}.", plural(candidate.ignored_data.len(), "ignored file or folder", "ignored files or folders"), named(&candidate.ignored_data))),
@@ -730,7 +780,7 @@ pub fn scan(host: &Host<'_>, scope: Option<&[String]>) -> anyhow::Result<Vec<Pro
                     if std::fs::symlink_metadata(&path).is_err() || !seen.insert(path) {
                         continue;
                     }
-                    found.candidates.push(inspect(host, &roots, repository, entry, &sessions, &live));
+                    found.candidates.push(inspect(host, &roots, repository, entry, &sessions, &live, Activity::Anything));
                 }
                 if found.candidates.is_empty() {
                     found.note = Some("Its worktrees are listed under the project that holds its repository.".into());
@@ -842,7 +892,7 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
     };
     let roots = Roots::of(host, &sessions);
     let live = (host.live)(&sessions);
-    let now = inspect(host, &roots, repository, entry, &sessions, &live);
+    let now = inspect(host, &roots, repository, entry, &sessions, &live, Activity::Anything);
     let allowed = match now.verdict {
         Verdict::Eligible => true,
         Verdict::IgnoredData => item.accept_ignored,

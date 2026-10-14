@@ -142,6 +142,13 @@
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+  /* Scrolls with no bar: the tab row, which a wheel, a drag or its own menu moves. */
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
   .glass {
     backdrop-filter: blur(24px) saturate(140%);
     -webkit-backdrop-filter: blur(24px) saturate(140%);

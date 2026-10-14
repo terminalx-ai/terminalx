@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { onOpenAgentLogins, takeAgentLoginsRequest } from "@/lib/settingsLinks";
 import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome } from "@/lib/api";
 
 /**
@@ -14,13 +15,24 @@ import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, 
  * native secure dialog, and "use this Mac's login" is read by the app, both
  * after the consent below. Once stored it is never shown again.
  */
-const AGENTS: { id: AgentLoginProvider; name: string; local: string | null; signIn?: string }[] = [
+const AGENTS: { id: AgentLoginProvider; name: string; local: string | null; signIn?: string; launch: string }[] = [
   // Claude has the account service's own sign-in ("Log in with Claude"): the lasting way, and so the first one offered.
-  { id: "claude", name: "Claude Code", local: "Claude Code", signIn: "Claude" },
+  { id: "claude", name: "Claude Code", local: "Claude Code", signIn: "Claude", launch: "claude" },
   // Codex's own login cannot be used without its refresh token, which must not leave this Mac: no local option.
-  { id: "codex", name: "Codex", local: null },
-  { id: "cursor", name: "Cursor", local: null },
+  { id: "codex", name: "Codex", local: null, launch: "codex" },
+  // `launch` is the agent as a workspace starts it, which is how the create check names it.
+  { id: "cursor", name: "Cursor", local: null, launch: "cursor-agent" },
 ];
+
+/** What a member is told about an agent: whether a workspace of theirs would get a login. Null: the service did not say. */
+type MemberStatus = Partial<Record<AgentLoginProvider, boolean | null>>;
+
+export function memberLoginStatus(agent: string, usable: boolean | null | undefined): string {
+  if (usable === true) return `${agent}: a login your workspaces can use is connected.`;
+  // The service answers the same way for no login and for one limited to managers, and tells a member no more.
+  if (usable === false) return `${agent}: no login your workspaces can use. Either none is connected, or the one stored is limited to workspaces only owners and admins can drive.`;
+  return `${agent}: the service did not say.`;
+}
 
 type Pending = { agent: AgentLoginProvider; source: AgentLoginSource | "sign-in" } | { agent: AgentLoginProvider; source: "disconnect" };
 
@@ -105,7 +117,8 @@ export function agentLoginMessage(error: unknown): string {
     case "cloud_workspace_credential_verification_unavailable":
       return "The login could not be checked with the provider just now. Nothing was changed; try again in a moment.";
     case "cloud_workspace_credential_in_use":
-      return "The service did not remove this login: a workspace of this organization still uses it. Delete or archive those workspaces first, or revoke the login in the web console. Nothing was changed.";
+      // Refused only for a workspace whose setup names this login (the service's `remove`); a running workspace alone does not refuse.
+      return "The service did not remove this login: a workspace that was created with this very login chosen for it still exists. Delete or archive that workspace first. Nothing was changed.";
     case "cloud_workspace_request_invalid":
       return "That is not a login this agent can use. Nothing was changed.";
     case "cloud_agent_local_login_not_found":
@@ -175,10 +188,20 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
   return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
 
+/**
+ * The service says the person who connected this login no longer owns or
+ * administers the organization. The login is kept (the owner's decision),
+ * so the row says so and how to take it over.
+ */
+export function agentLoginConfigurerLeft(login: AgentLogin | undefined): boolean {
+  return login?.configurerLeft === true && login.state === "connected";
+}
+
 export function OrganizationAgentLogins({ contextRevision, organizationName }: { contextRevision: string; organizationName?: string | null }) {
   const organization = organizationName?.trim() || "this organization";
   const [logins, setLogins] = useState<AgentLogin[] | null>(null);
   const [adminOnly, setAdminOnly] = useState(false);
+  const [memberStatus, setMemberStatus] = useState<MemberStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -195,6 +218,19 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
     return () => clearInterval(timer);
   }, []);
   const epoch = useRef(0);
+  // A message elsewhere sent the person here: the section comes into view, again once its rows have loaded.
+  const section = useRef<HTMLDivElement>(null);
+  const revealing = useRef(false);
+  useEffect(() => {
+    const reveal = () => {
+      if (takeAgentLoginsRequest()) revealing.current = true;
+      if (!revealing.current) return;
+      section.current?.scrollIntoView?.({ block: "start" });
+      if (!loading) revealing.current = false;
+    };
+    reveal();
+    return onOpenAgentLogins(reveal);
+  }, [loading]);
 
   const load = useCallback(async () => {
     const request = ++epoch.current;
@@ -211,6 +247,23 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
       const refused = !!failure && typeof failure === "object" && "code" in failure && failure.code === "organization_admin_required";
       setAdminOnly(refused);
       setError(refused ? null : agentLoginMessage(failure));
+      if (refused) {
+        // The list is refused to a member. The create check is not: it answers, per agent and with no
+        // identity, whether a workspace this person creates would get a login.
+        const answers = await Promise.all(
+          AGENTS.map(async (agent) => {
+            try {
+              const preflight = await api.cloudWorkspacePreflight([], null, agent.launch);
+              // Only a check that names this agent counts: an older service answers about the setup, not the organization's logins.
+              const check = preflight.checks.find((candidate) => candidate.kind === "agent-credential" && candidate.agent === agent.launch);
+              return [agent.id, check ? check.status === "verified" : null] as const;
+            } catch {
+              return [agent.id, null] as const;
+            }
+          }),
+        );
+        if (request === epoch.current) setMemberStatus(Object.fromEntries(answers));
+      }
     } finally {
       if (request === epoch.current) setLoading(false);
     }
@@ -315,7 +368,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
   };
 
   return (
-    <div className="rounded-lg border border-hairline p-3" data-testid="agent-logins">
+    <div ref={section} className="rounded-lg border border-hairline p-3" data-testid="agent-logins">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">Agent logins</div>
         <Button variant="ghost" size="icon-xs" aria-label="Refresh agent logins" disabled={loading || busy}
@@ -338,10 +391,21 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
           <Loader2 className="size-3.5 animate-spin" /> Loading agent logins…
         </p>
       ) : adminOnly ? (
-        <p className="mt-2 text-xs text-muted-foreground" data-testid="agent-logins-member">
-          Organization owners and administrators connect agent logins. If an agent in a cloud workspace says it needs to sign in, an admin can connect
-          it here.
-        </p>
+        <div className="mt-2 text-xs text-muted-foreground" data-testid="agent-logins-member">
+          <p>
+            Organization owners and administrators connect agent logins. If an agent in a cloud workspace says it needs to sign in, an admin can
+            connect it here.
+          </p>
+          {memberStatus && (
+            <ul className="mt-2 flex flex-col gap-1">
+              {AGENTS.map((agent) => (
+                <li key={agent.id} className={memberStatus[agent.id] === false ? "text-warning" : undefined} data-testid="agent-login-member-status" data-agent={agent.id}>
+                  {memberLoginStatus(agent.name, memberStatus[agent.id])}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       ) : (
         logins && (
           <ul className="mt-2 flex flex-col gap-2 text-xs">
@@ -362,6 +426,13 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                       <div className={status.warn ? "text-warning" : "text-muted-foreground"} data-testid="agent-login-status">
                         {status.text}
                       </div>
+                      {agentLoginConfigurerLeft(login) && (
+                        <div className="mt-1 text-warning" data-testid="agent-login-configurer-left">
+                          The person who connected this login is no longer an owner or admin of {organization}. It keeps working, on their subscription.
+                          To take it over, {agent.signIn ? `log in with ${agent.signIn} again` : "connect a login again"}: that replaces it with a login of
+                          your own.
+                        </div>
+                      )}
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {agent.signIn && (
@@ -456,9 +527,9 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                         </span>
                       </label>
                       <p className="text-muted-foreground">
-                        To end it, press Disconnect here. The service refuses while a workspace of the organization still uses the login; delete or archive
-                        those first, or revoke it in the web console. Access already handed to a machine lasts until its own expiry. Disconnecting does not
-                        sign you out at the provider.
+                        To end it, press Disconnect here. That reaches every workspace of the organization, running ones included: their agents need a
+                        sign-in again once the access already handed to a machine runs out, which lasts until its own expiry. Disconnecting does not sign
+                        you out at the provider.
                       </p>
                       <div className="flex gap-1.5">
                         <Button
@@ -492,9 +563,10 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                   {open?.source === "disconnect" && (
                     <div className="mt-2 space-y-2 rounded-md border border-destructive/25 bg-background p-2" data-testid="agent-login-disconnect">
                       <p>
-                        Disconnect {agent.name}? The stored login is removed and {agent.name} agents will need a sign-in before they can work again. The
-                        service refuses while a workspace of the organization still uses the login. Access already handed to a machine lasts until its own
-                        expiry. Disconnecting does not sign the account out at the provider.
+                        Disconnect {agent.name}? The stored login is removed and {agent.name} agents will need a sign-in before they can work again. This
+                        reaches every workspace of the organization, running ones included: nothing is stopped, and access already handed to a machine
+                        lasts until its own expiry. The service refuses only while a workspace that was created with this very login chosen for it still
+                        exists. Disconnecting does not sign the account out at the provider.
                       </p>
                       <div className="flex gap-1.5">
                         <Button

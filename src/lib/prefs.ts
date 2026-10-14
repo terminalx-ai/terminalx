@@ -14,6 +14,8 @@ export interface Prefs {
   sidebarOpen: boolean;
   sidebarWidth: number;
   panelOpen: boolean;
+  /** A session's tabs as a row in the title bar. Off leaves them to the sidebar alone. */
+  tabStrip: boolean;
   panelWidth: number;
   editorPaneWidth: number;
   updateChannel: "stable" | "beta";
@@ -83,6 +85,7 @@ const DEFAULTS: Prefs = {
   sidebarOpen: true,
   sidebarWidth: 268,
   panelOpen: false,
+  tabStrip: true,
   panelWidth: 400,
   editorPaneWidth: 520,
   updateChannel: "stable",

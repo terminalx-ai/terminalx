@@ -564,3 +564,167 @@ fn live_acp_escape_stops_the_turn_and_the_queued_message_goes_on() {
         Err(_) => eprintln!("TERMINALX_LIVE_ACP_PROJECT is not set; skipping"),
     }
 }
+
+// ---- A guest in a shared session (`docs/MULTIPLAYER.md`) --------------------
+
+/// The rig's session shared, with one admitted driver: what a guest's
+/// requests go through, over the same tab and the same pane.
+#[cfg(unix)]
+fn shared_with_a_driver(rig: &Rig) -> crate::pairing::PairingManager {
+    use crate::local_sharing::{tests as fixtures, Role};
+    let harness = match rig.cli().0 {
+        CliKind::Claude => "claude",
+        CliKind::Codex => "codex",
+    };
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "shared", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": harness, "permissionMode": "default", "pane": rig.pane, "created": index::now() }]
+    }))
+    .unwrap();
+    index::save(&[entry]).unwrap();
+    let now = crate::pairing::sharing::now();
+    let mut share = fixtures::fixture();
+    let link = share.links.get_mut("link").unwrap();
+    link.settings.expires_at = now + 60_000;
+    link.settings.role = Role::Driver;
+    let mut guest = fixtures::guest("connection", "alice");
+    guest.verified_until = now + 60_000;
+    share.join(guest, now).unwrap();
+    rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(), share);
+    let pairing = crate::pairing::PairingManager::new(Arc::new(crate::account::AccountManager::default()));
+    pairing.attach_sessions(rig.manager.clone());
+    pairing
+}
+
+/// One request from the guest, as the share's router takes it.
+#[cfg(unix)]
+fn guest_asks(pairing: &crate::pairing::PairingManager, rig: &Rig, method: &str, extra: serde_json::Value) -> Result<serde_json::Value> {
+    // The share lets a guest write four times a second; the test is not about that.
+    if let Some(guest) = rig.manager.sharing.lock().unwrap().sessions.get_mut(SESSION).and_then(|share| share.guests.get_mut("connection")) {
+        guest.last_write = 0;
+    }
+    let mut params = json!({ "sessionId": SESSION, "tabId": TAB });
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        params[key.as_str()] = value.clone();
+    }
+    pairing.share_rpc(SESSION, "connection", method, params)
+}
+
+/// What guests have waiting behind the turn, in the order it will be sent.
+#[cfg(unix)]
+fn waiting_from_guests(rig: &Rig) -> Vec<String> {
+    rig.manager.sharing.lock().unwrap().sessions.get(SESSION).map(|share| share.queue.iter().map(|input| input.text.clone()).collect()).unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn share_activity(rig: &Rig) -> Vec<String> {
+    let sharing = rig.manager.sharing.lock().unwrap();
+    let Some(share) = sharing.sessions.get(SESSION) else { return Vec::new() };
+    // A dropped input carries the reason, which is what a failure here needs to say.
+    share
+        .activity
+        .iter()
+        .filter_map(|entry| match entry["action"].as_str()? {
+            "joined" => None,
+            "queue-dropped" => Some(format!("queue-dropped: {}", entry["detail"]["reason"])),
+            action => Some(action.to_string()),
+        })
+        .collect()
+}
+
+/// A guest's Stop used to be the host's hard stop: it killed the host's CLI
+/// and put "Session closed" over the host's tab. It is Escape, as the host's
+/// own Stop is, and what guests queued behind the turn is kept. The stop that
+/// ends the process is the one that says `force`.
+#[cfg(unix)]
+#[test]
+fn a_guest_s_stop_is_an_escape_and_only_a_forced_one_ends_the_process() {
+    for kind in BOTH {
+        let rig = with_a_cli_that_names_its_first_byte(kind);
+        let pairing = shared_with_a_driver(&rig);
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert_eq!(guest_asks(&pairing, &rig, "session.send", json!({ "text": "then the docs" })).unwrap()["queued"], true, "{kind:?}");
+
+        let answer = guest_asks(&pairing, &rig, "session.stop", json!({})).unwrap();
+        assert_eq!((&answer["stopped"], &answer["interrupted"]), (&json!(false), &json!(true)), "{kind:?}");
+        wait_until("the program reads the key", || screen(&rig).contains("TYPED-"));
+        assert!(screen(&rig).contains("TYPED-1b."), "{kind:?}: {:?}", screen(&rig));
+        assert!(rig.pane_is_running(), "{kind:?}: a guest's Stop must not end the host's agent");
+        assert!(rig.turn_open(), "{kind:?}");
+        assert!(!rig.said_session_closed(), "{kind:?}");
+        assert_eq!((rig.recovery(), rig.banner()), (None, None), "{kind:?}");
+        assert_eq!(waiting_from_guests(&rig), ["then the docs"], "{kind:?}");
+
+        // The agent did not answer: the guest asks for the stop that ends it.
+        let answer = guest_asks(&pairing, &rig, "session.stop", json!({ "force": true })).unwrap();
+        assert_eq!(answer["stopped"], true, "{kind:?}");
+        assert!(!rig.pane_is_running(), "{kind:?}");
+        assert!(rig.said_session_closed(), "{kind:?}");
+        assert!(waiting_from_guests(&rig).is_empty(), "{kind:?}");
+        assert_eq!(share_activity(&rig), ["queued", "interrupt", "stop"], "{kind:?}");
+    }
+}
+
+/// With nothing running a guest's Stop types nothing and ends nothing.
+#[cfg(unix)]
+#[test]
+fn a_guest_s_stop_with_nothing_running_does_nothing() {
+    let rig = with_a_cli_that_names_its_first_byte(CliKind::Claude);
+    let pairing = shared_with_a_driver(&rig);
+    let answer = guest_asks(&pairing, &rig, "session.stop", json!({})).unwrap();
+    assert_eq!((&answer["stopped"], &answer["interrupted"]), (&json!(false), &json!(false)));
+    assert!(rig.pane_is_running());
+    assert!(!rig.said_session_closed());
+    assert!(share_activity(&rig).is_empty());
+    // The first byte the program ever reads is the one typed now, not an Escape.
+    rig.manager.terminals.write(&rig.pane, b"x").unwrap();
+    wait_until("the program reads a key", || screen(&rig).contains("TYPED-"));
+    assert!(screen(&rig).contains("TYPED-78."), "{:?}", screen(&rig));
+}
+
+/// A guest's Steer used to stop the host's CLI and start it again with the
+/// steering prompt. It is Escape and then that prompt as the next message:
+/// kept on the host, ahead of what was already waiting, and sent to the same
+/// process once the interrupted turn has ended.
+#[cfg(unix)]
+#[test]
+fn a_guest_s_steer_interrupts_and_goes_next_to_the_same_process() {
+    for kind in BOTH {
+        let rig = with_a_cli_that_names_its_first_byte(kind);
+        let pairing = shared_with_a_driver(&rig);
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        let generation = match &rig.rt.lock().unwrap().engine {
+            Engine::Cli(p) => p.generation,
+            _ => unreachable!(),
+        };
+        guest_asks(&pairing, &rig, "session.send", json!({ "text": "then the docs" })).unwrap();
+
+        assert_eq!(guest_asks(&pairing, &rig, "session.steer", json!({ "text": "use the other branch" })).unwrap()["queued"], true, "{kind:?}");
+        wait_until("the program reads the key", || screen(&rig).contains("TYPED-"));
+        assert!(screen(&rig).contains("TYPED-1b."), "{kind:?}: {:?}", screen(&rig));
+        assert!(rig.pane_is_running(), "{kind:?}: a guest's Steer must not end the host's agent");
+        assert!(!rig.said_session_closed(), "{kind:?}");
+        assert_eq!(waiting_from_guests(&rig), ["use the other branch", "then the docs"], "{kind:?}");
+
+        // While the interrupted turn is still the agent's, nothing of a guest's is typed into it.
+        pairing.drain_share_queue(SESSION).unwrap();
+        assert_eq!(waiting_from_guests(&rig), ["use the other branch", "then the docs"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start"], "{kind:?}");
+
+        // The CLI says it stopped: the steering prompt is the next message, to the same process.
+        // It is sent although the guest wrote a moment ago; the share's limit on how fast a
+        // guest may write is for what they send, not for what is already waiting.
+        rig.interrupt();
+        assert_eq!(rig.status(), TabStatus::Idle, "{kind:?}");
+        pairing.drain_share_queue(SESSION).unwrap();
+        assert_eq!(waiting_from_guests(&rig), ["then the docs"], "{kind:?}");
+        assert_eq!(share_activity(&rig), ["queued", "steer", "prompt"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "end", "user: use the other branch"], "{kind:?}");
+        assert!(rig.pane_is_running(), "{kind:?}");
+        assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.generation == generation), "{kind:?}: the CLI was replaced");
+        assert!(!rig.said_session_closed(), "{kind:?}");
+    }
+}

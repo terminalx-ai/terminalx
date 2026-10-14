@@ -10,7 +10,8 @@ import { runningLimitReached } from "@/lib/runningLimit";
 import { useAccount } from "@/lib/account";
 import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
-import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { AgentLoginsLink } from "./AgentLoginsLink";
+import { managesOrganization } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { buildTranscript } from "@/lib/transcript";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -83,7 +84,8 @@ export function CloudAgentsView({
 }) {
   const snapshot = useCloudAgents(scope);
   const { status: account } = useAccount();
-  const mayManage = mayStartCloudSessions(account, scope.organizationId);
+  // Who connects a login is an owner or admin, which is not who may start a session (any member, PRO-73).
+  const mayManage = managesOrganization(account, scope.organizationId);
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -191,7 +193,7 @@ export function CloudAgentsView({
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
       {active?.info.signIn && (
         <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
-          {signInMessage(active.info, mayManage)}
+          {signInMessage(active.info, mayManage)} <AgentLoginsLink message={signInMessage(active.info, mayManage)} className="ml-1 align-baseline" />
         </p>
       )}
       {active ? (
@@ -340,7 +342,7 @@ export function signInMessage(info: Pick<AgentTabInfo, "harness" | "signIn">, ma
   const fix =
     signIn.reason === "shared-use-policy"
       ? mayManage
-        ? `Allow it for the whole organization in ${AGENT_LOGIN_PLACE}.`
+        ? "Allow it for the whole organization in the web console under Compute setup → Agent logins."
         : "An owner or admin can allow it for the whole organization."
       : mayManage
         ? `Connect it in ${AGENT_LOGIN_PLACE}, then send again.`

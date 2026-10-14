@@ -8,11 +8,12 @@ import { cn } from "@/lib/cn";
 import { closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
 import { moveQuickChatToProject, renameSession, useSessionStore } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
+import { TabDialogs } from "./TabDialogs";
 
 /**
- * Dialogs about one session that any window can open: rename, and moving a
- * quick chat into a project. Mounted once per window, beside the other
- * app-level dialogs.
+ * Dialogs about one session that any window can open: rename, moving a
+ * quick chat into a project, and the ones about its workspace's tabs.
+ * Mounted once per window, beside the other app-level dialogs.
  */
 export function SessionDialogs() {
   const dialogs = useDialogs();
@@ -23,6 +24,7 @@ export function SessionDialogs() {
     <>
       {renaming && <RenameSessionDialog key={renaming.id} session={renaming} onClose={closeRenameSession} />}
       {moving && <MoveToProjectDialog key={moving.id} session={moving} onClose={closeMoveToProject} />}
+      <TabDialogs />
     </>
   );
 }

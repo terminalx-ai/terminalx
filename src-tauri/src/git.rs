@@ -133,6 +133,74 @@ pub fn run_within_reporting(
     }
 }
 
+/// Run `command` to its end or to the deadline, whichever comes first, and
+/// return what it printed. At the deadline its whole process group is killed.
+/// For a call that goes to a remote and whose answer is needed.
+pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    use std::io::Read;
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    // Read as it comes, so a full pipe never blocks the child.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            ended => {
+                #[cfg(unix)]
+                // SAFETY: signals the process group this function just created.
+                unsafe {
+                    libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match ended {
+                    Err(error) => RunError::Spawn(error),
+                    _ => RunError::TimedOut,
+                });
+            }
+        }
+    };
+    let (out, err) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    if status.success() {
+        Ok(out)
+    } else {
+        Err(RunError::Failed(if err.trim().is_empty() { format!("exit {status}") } else { err.trim().to_string() }))
+    }
+}
+
+/// `run` with a deadline.
+pub fn run_bounded(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
+    let mut command = git();
+    command.current_dir(cwd).args(args);
+    output_within(command, timeout)
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => write!(f, "no answer in time"),
+            Self::Stopped => write!(f, "it was stopped"),
+            Self::Failed(text) => write!(f, "{}", text.lines().next().unwrap_or(text)),
+            Self::Spawn(error) => write!(f, "it could not be started: {error}"),
+        }
+    }
+}
+
 /// Run `git <first>` with its output fed to `git <second>`, and return what
 /// the second prints. For the plumbing pairs git expects to be piped
 /// (`log -p | patch-id`).

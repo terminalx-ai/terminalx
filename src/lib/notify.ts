@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getPrefs } from "@/lib/prefs";
 import { getSessions, selectSession, subscribeSessions } from "@/lib/sessions";
+import { isTabMuted } from "@/lib/tabLayouts";
 import { isUnread, sessionColumn } from "@/lib/dashboard";
 import { createCloudAttentionTracker, getCloudDashboard, openCloudSession, subscribeCloudDashboard, type CloudAttention } from "@/lib/cloudDashboard";
 import { isCloudKey } from "@/types/target";
@@ -211,6 +212,8 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   if (next === "waiting" && prev !== "waiting") kind = "waiting";
   else if (next === "completed" && prev === "in_progress") kind = "done";
   if (!kind) return;
+  // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
+  if (isTabMuted(session, tab.id)) return;
   const { title, body } = summarise(session, tab, kind);
   const onScreen = looking() && getSessions().selectedSessionId === session.id;
   if (!looking()) {

@@ -424,15 +424,24 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_launch_invalid: "Choose a valid agent, model and effort.",
 };
 
-/** Where an organization's agent logins are connected. Only an owner or admin can. */
-export const AGENT_LOGIN_PLACE = "the web console under Compute setup → Agent logins";
+/** Where an organization's agent logins are listed. Only an owner or admin can change them. */
+export const AGENT_LOGIN_PLACE = "Settings → Account → Agent logins";
 
-export function createErrorMessage(code: string, detail: string | null = null): string {
+/** A message that sends its reader to the agent logins, so the page can offer the way there. */
+export function mentionsAgentLogins(message: string | null | undefined): boolean {
+  return !!message && message.includes(AGENT_LOGIN_PLACE);
+}
+
+/** `manages`: whether the reader is an owner or admin of the organization; null when not known. */
+export function createErrorMessage(code: string, detail: string | null = null, manages: boolean | null = null): string {
   if (code === "cloud_workspace_form_invalid") return detail ?? "Check the form.";
-  // Only an owner or admin creates workspaces, so the fix is theirs to make.
+  // The service refuses the same way when no login is stored and when the stored one is limited to
+  // owners' and admins' workspaces. That limit never holds back an owner or admin, so for them it is the first.
   if (code === "cloud_workspace_agent_credential_required") {
     const agent = detail ? cloudAgentLabel(detail) : "The agent";
-    return `${agent} isn't connected for this organization, so it can't run a first prompt. Connect it in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`;
+    return manages
+      ? `${agent} has no working login for this organization (none is connected, or it was revoked), so it can't run a first prompt. Connect one in ${AGENT_LOGIN_PLACE}, or create the workspace without a prompt.`
+      : `${agent} has no login your workspaces can use, so it can't run a first prompt: either none is connected for this organization, or the one stored is limited to workspaces only owners and admins can drive. An owner or admin can see which in ${AGENT_LOGIN_PLACE}. Or create the workspace without a prompt.`;
   }
   const message = MESSAGES[code] ?? `The workspace could not be created (${code}).`;
   return detail && code.startsWith("cloud_workspace_repository") ? `${message} (${detail.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "")})` : message;
@@ -451,7 +460,7 @@ const FAILURES: Record<string, string> = {
   "branch-create-failed": "The work branch could not be created.",
   "agent-start-failed": "The agent could not be started.",
   "agent-model-unavailable": "The chosen Claude model is not available in this workspace. Choose a model listed by the workspace's Claude CLI.",
-  "agent-sign-in-required": `The agent isn't connected for this organization, so the first prompt was not sent. An owner or admin can connect it in ${AGENT_LOGIN_PLACE}.`,
+  "agent-sign-in-required": `The agent has no working login in this workspace, so the first prompt was not sent. The organization's login for it may be missing, expired, revoked, or limited to workspaces only owners and admins can drive. An owner or admin can see which in ${AGENT_LOGIN_PLACE}.`,
   "runtime-interrupted": "The workspace restarted while starting the agent. The prompt may not have been sent.",
   "runtime-storage-replaced": "The workspace lost its state while starting the agent. The prompt may not have been sent.",
   "payload-invalid": "The launch settings were not accepted by the workspace.",

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Send, Square } from "lucide-react-native";
+import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
@@ -135,6 +136,12 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
   // Also what the server holds for a workspace that stopped before it was delivered: nothing starts it until the person says so.
   const held = stopped ? outbox.filter((entry) => entry.state === "unsent" || entry.asleep) : [];
   const working = tab?.status === "in_progress";
+  // Stop is Escape first (#427), as on the desktop: the turn is interrupted and the agent's process stays. While the
+  // turn it was sent to is still the one running, the same button is the stop that ends the process. A runtime that
+  // cannot take an interrupt (older, or not connected) only has that stop.
+  const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
+  if (!working && interruptedAt !== null) setInterruptedAt(null);
+  const unanswered = working && interruptUnanswered(events ?? [], interruptedAt);
 
   const run = async (action: () => Promise<unknown>, done?: () => void) => {
     setSending(true);
@@ -183,6 +190,14 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
 
   const sendHeld = () => confirmStart(held.length === 1 ? "Sending the message that is waiting" : `Sending the ${held.length} messages that are waiting`, () => session.deliverHeld({ allowWake: true }));
 
+  const stopAgent = () => {
+    if (!snapshot.interrupts || unanswered) return void run(() => session.stop(tabId));
+    // Read now, not at the last render: the turn this is for may have ended since.
+    const seen = session.getSnapshot().tabs.find((entry) => entry.tabId === tabId)?.events ?? [];
+    setInterruptedAt(seen.length ? seen[seen.length - 1].seq : 0);
+    void run(() => session.interrupt(tabId));
+  };
+
   const decide = (ask: PendingAsk, optionId: string) => void run(() => session.decide(tabId, { requestId: ask.requestId, optionId }));
 
   const addNote = () => {
@@ -229,7 +244,7 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
         {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(lease?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
         <View style={styles.composeLine}>
           <TextInput accessibilityLabel={stopped ? "Message for the agent. Sending starts the workspace." : "Message for the agent"} value={draft} onChangeText={(value) => { setDraft(value); if (value) session.typingIn(tabId); }} multiline editable={snapshot.hasKey && !wheel.heldByOther} placeholder={stopped ? "Message (starts the workspace)" : "Message the agent"} placeholderTextColor={palette.faint} style={[styles.input, { color: palette.ink }]} />
-          {working && !stopped && (!wheel.heldByOther || snapshot.role === "manager") ? <Pressable accessibilityRole="button" accessibilityLabel="Stop the agent" disabled={sending} onPress={() => void run(() => session.stop(tabId))} style={[styles.round, { backgroundColor: palette.raised }]}><Square size={16} color={palette.ink} /></Pressable> : null}
+          {working && !stopped && (!wheel.heldByOther || snapshot.role === "manager") ? <Pressable accessibilityRole="button" accessibilityLabel={unanswered ? "Stop the session" : "Stop the agent"} accessibilityHint={unanswered ? "Ends the agent's process. The conversation resumes with the next message." : undefined} disabled={sending} onPress={stopAgent} style={[styles.round, { backgroundColor: unanswered ? palette.danger : palette.raised }]}><Square size={16} color={unanswered ? palette.accentInk : palette.ink} /></Pressable> : null}
           <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther} onPress={() => void send()} style={[styles.round, { backgroundColor: palette.accent }, (!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther) && styles.disabled]}><Send size={17} color={palette.accentInk} /></Pressable>
         </View>
       </View>

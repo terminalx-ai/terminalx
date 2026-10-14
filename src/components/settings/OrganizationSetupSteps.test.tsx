@@ -194,7 +194,7 @@ it("runs the create preflight before quoting, and a missing agent login stops it
   await waitFor(() => expect(record.step).toBe("workspace"));
   shown.rerender(view());
   fireEvent.click(screen.getByRole("button", { name: "Prepare setup workspace" }));
-  await screen.findByText(/Claude Code isn't connected for this organization/);
+  await screen.findByText(/Claude Code has no working login for this organization/);
   expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([{ cloneUrl: "https://github.com/acme/app.git", ref: null }], null, "claude");
   expect(api.cloudWorkspaceQuote).not.toHaveBeenCalled();
   expect(screen.queryByTestId("organization-setup-confirm")).toBeNull();

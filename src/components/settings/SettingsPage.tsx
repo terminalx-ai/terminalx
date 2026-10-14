@@ -22,6 +22,7 @@ import { TranscriptionTab } from "./TranscriptionTab";
 import { setStatusSettings, useStatus } from "@/lib/status";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
+import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
 import { QuickChatSettings } from "./FloatingWindowSettings";
@@ -120,7 +121,13 @@ export function SettingsPage({
             {tab === "agents" && <AgentsTab />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
-            {tab === "storage" && <StorageTab />}
+            {tab === "storage" && (
+              <>
+                <MergedCleanupSettings />
+                <div className="mb-2 mt-6 text-xs font-medium uppercase tracking-wide text-faint">Leftovers</div>
+                <StorageTab />
+              </>
+            )}
             {tab === "shortcuts" && <ShortcutsTab />}
             {tab === "about" && <AboutTab />}
           </div>
@@ -208,6 +215,11 @@ function GeneralTab() {
         label="Pixel raccoon"
         description="The raccoon forages in an empty session and runs along the composer while an agent is working. Off follows your system's reduced-motion setting automatically."
         control={<Switch checked={prefs.animations} onCheckedChange={(v) => setPrefs({ animations: v })} />}
+      />
+      <SettingRow
+        label="Tabs in the title bar"
+        description="A session's agents, terminals and browser pages as a row of tabs in the title bar, in the same order as the sidebar. Off leaves them in the sidebar only."
+        control={<Switch aria-label="Tabs in the title bar" checked={prefs.tabStrip} onCheckedChange={(v) => setPrefs({ tabStrip: v })} />}
       />
       <SettingRow
         label="Fold tool calls"

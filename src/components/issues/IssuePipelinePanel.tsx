@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Check, ChevronRight, CircleAlert, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -27,12 +27,33 @@ const TONE_TEXT: Record<PipelineTone, string> = {
 };
 
 /** Where the pipeline stands, small enough for a header or a list row. */
-export function PipelineStatus({ pipeline, className }: { pipeline: IssuePipeline; className?: string }) {
+/**
+ * Where a pipeline stands: a dot in the state's colour and two or three
+ * words. `lead` is said before the words, as part of them; the class names
+ * let a chip that gives way in a crowded header lay the dot and the words out
+ * as its own icon and label.
+ */
+export function PipelineStatus({
+  pipeline,
+  className,
+  dotClassName,
+  labelClassName,
+  lead,
+}: {
+  pipeline: IssuePipeline;
+  className?: string;
+  dotClassName?: string;
+  labelClassName?: string;
+  lead?: ReactNode;
+}) {
   const headline = pipelineHeadline(pipeline);
   return (
     <span className={cn("flex items-center gap-1.5 text-[11px] font-medium", TONE_TEXT[headline.tone], className)}>
-      <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[headline.tone])} />
-      {headline.label}
+      <span className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[headline.tone], dotClassName)} />
+      <span className={labelClassName}>
+        {lead}
+        {headline.label}
+      </span>
     </span>
   );
 }

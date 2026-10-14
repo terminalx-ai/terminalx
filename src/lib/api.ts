@@ -7,6 +7,9 @@ import {
   type CleanupProject,
   type CleanupRemoveItem,
   type CleanupResult,
+  type MergedRemovalView,
+  type MergedRestored,
+  type MergedSwept,
   type WorkspaceConnectionState,
   type WorkspaceTransport,
 } from "@terminalx/portable/workspace";
@@ -224,6 +227,35 @@ export interface ShellPane {
 export interface PaneAgent {
   paneId: string;
   harness: string | null;
+}
+
+/**
+ * How one workspace's tabs are arranged: one row for the checkout, whatever
+ * session a tab belongs to. A tab is named `agent:<tab id>`,
+ * `terminal:<pane id>` or `browser:<page id>` (`tabKey` in `@/lib/tabLayouts`).
+ */
+export interface TabLayout {
+  /** The tabs in the order the reader put them in; a tab not listed comes after these, oldest first. */
+  order: string[];
+  /** Kept at the left, drawn as an icon, and left open by the bulk closes. */
+  pinned: string[];
+  /** Tabs that raise no banner, notice or tone. */
+  muted: string[];
+  /** The reader's own title for a tab. */
+  titles: Record<string, string>;
+}
+
+/** An agent tab the reader closed, kept with its conversation so it can be reopened. */
+export interface ClosedTab {
+  sessionId: string;
+  tab: TabEntry;
+  closedAt: string;
+}
+
+/** What every window knows about tabs beyond the sessions: each workspace's layout, and the closed tabs. */
+export interface TabState {
+  workspaces: Record<string, TabLayout>;
+  closed: ClosedTab[];
 }
 
 /** How a workspace is removed. */
@@ -473,8 +505,15 @@ export const api = {
   /** What a session's scratch directory holds, for the delete confirmation. */
   quickChatScratch: (sessionId: string) => invoke<QuickChatScratch>("quick_chat_scratch", { sessionId }),
   addTab: (sessionId: string, tab: NewTab) => invoke<TabEntry>("add_tab", { sessionId, tab }),
+  /** Close an agent tab. One that holds a conversation stays reopenable (`reopenTab`); nothing of it is deleted. */
   removeTab: (sessionId: string, tabId: string) => invoke<void>("remove_tab", { sessionId, tabId }),
-  /** Name a tab. The name stays whatever runs in the tab; an empty one gives the naming back (#437). */
+  /** Bring a closed tab back into its session, with its conversation. */
+  reopenTab: (sessionId: string, tabId: string) => invoke<TabEntry>("reopen_tab", { sessionId, tabId }),
+  /** Give an agent tab the reader's own title. It stays the tab's name whatever runs in the tab (#437); `null` gives the naming back. */
+  renameTab: (sessionId: string, tabId: string, title: string | null) => invoke<void>("rename_tab", { sessionId, tabId, title }),
+  tabState: () => invoke<TabState>("tab_state"),
+  /** Save one workspace's tab order, pins, mutes and titles for every window and device. */
+  setTabLayout: (workspace: string, layout: TabLayout) => invoke<void>("set_tab_layout", { workspace, layout }),
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
   setSessionArchived: (sessionId: string, archived: boolean) =>
     invoke<void>("set_session_archived", { sessionId, archived }),
@@ -712,6 +751,8 @@ export interface AgentLogin {
   updatedAt: number;
   state?: "connected" | "revoked" | "disconnected" | (string & {});
   sharedUse?: "organization" | "managers" | (string & {});
+  /** In the list only: the person who connected this subscription login no longer owns or administers the organization. */
+  configurerLeft?: boolean;
 }
 
 export interface ClaudeLoginStarted {
@@ -1702,6 +1743,48 @@ export const browser = {
 };
 
 // ---- the floating chat window
+/** Whether a workspace is removed by itself once its pull request has merged (`store/settings.rs`). */
+export interface MergedCleanupSettings {
+  /** The default for every project. */
+  enabled: boolean;
+  /** One project's own answer, by a local project's path or a cloud workspace's key. */
+  projects: Record<string, boolean>;
+  /** Delete the conversations of the sessions in the workspace too. */
+  deleteConversations: boolean;
+  /** Minutes between the merge being seen and the removal. */
+  graceMinutes: number;
+}
+
+/** What Settings offers for `graceMinutes`; the backend accepts no others. */
+export const MERGED_GRACE_MINUTES = [5, 10, 30, 60] as const;
+
+/** GitHub's own "Automatically delete head branches" for a repository. */
+export interface HeadBranchSetting {
+  /** `owner/name`. */
+  repository: string;
+  /** Null when GitHub does not tell this reader. */
+  enabled: boolean | null;
+  /** The reader may change it. */
+  admin: boolean;
+}
+
+export const mergedCleanup = {
+  settings: () => invoke<MergedCleanupSettings>("merged_cleanup_settings"),
+  /** `project.enabled: null` makes that project follow the default again. */
+  setSettings: (patch: { enabled?: boolean; deleteConversations?: boolean; graceMinutes?: number; project?: { key: string; enabled: boolean | null } }) =>
+    invoke<MergedCleanupSettings>("set_merged_cleanup_settings", { patch }),
+  /**
+   * One pass on this computer. Which projects it covers is read by the
+   * backend from the settings, so with the setting off this removes nothing.
+   */
+  sweep: () => invoke<MergedSwept>("merged_cleanup_sweep"),
+  hold: (path: string, held: boolean) => invoke<void>("merged_cleanup_hold", { path, held }),
+  records: () => invoke<MergedRemovalView[]>("merged_cleanup_records"),
+  restore: (id: string) => invoke<MergedRestored>("merged_cleanup_restore", { id }),
+  headBranchSetting: (projectPath: string) => invoke<HeadBranchSetting>("github_head_branch_setting", { projectPath }),
+  enableHeadBranchDeletion: (projectPath: string) => invoke<HeadBranchSetting>("github_enable_head_branch_deletion", { projectPath }),
+};
+
 export const floatingWindow = {
   status: () => invoke<FloatingStatus>("floating_status"),
   /** `shortcut: ""` turns the system-wide shortcut off. A binding the system cannot register is refused. */
@@ -1728,6 +1811,8 @@ export const pty = {
   /** The agents in front of terminals right now (#437), for a window that loads after they were started. */
   agents: () => invoke<PaneAgent[]>("pane_agents"),
   rename: (id: string, title: string) => invoke<void>("pty_rename", { id, title }),
+  /** Which of these shell tabs are running a command now. */
+  busy: (ids: string[]) => invoke<string[]>("pty_busy", { ids }),
   write: (id: string, data: string) => invoke<void>("pty_write", { id, data }),
   /**
    * Receive pane `id`'s output as raw bytes, starting with what it has

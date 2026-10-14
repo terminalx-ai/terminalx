@@ -9,6 +9,124 @@
   once they are back. With an unchanged workspace it used to say "Files
   synced" at once and leave the discarded edits on disk until the workspace
   next changed. (#451)
+- Settings → Account → Agent logins now flags a login whose configurer is no
+  longer an owner or admin of the organization, and says that logging in
+  again takes it over. A member sees, per agent, whether a login their
+  workspaces can use is connected. The text about Disconnect matches what
+  the service does: it reaches running workspaces too. A first prompt
+  refused for lack of a login says which cases it can be and opens the
+  desktop's Agent logins instead of pointing at the web console. (#450)
+  
+### Workspaces that go once their pull request is merged
+
+- A new setting, off unless you turn it on: **Delete the workspace when its
+  pull request is merged** (Settings → Storage). It has a default for every
+  project, and each Git project and cloud workspace can answer for itself.
+  When it is on and a workspace's pull request shows as merged, the worktree
+  is removed with its local branch, and with its branch on the remote while
+  that still points at the commit that was merged. Its conversations are
+  kept, filed under the project as from a removed workspace; deleting them
+  too is a separate switch, also off. (#432)
+- Nothing is forced, and no work is lost. The workspace goes through the same
+  checks and the same removal as the Delete workspace dialog and the worktree
+  clean-up: one with uncommitted work, commits that are not merged, ignored
+  local files other than build output, a Git operation in progress, a turn
+  running or a terminal open stays, and its row in the sidebar says why
+  ("kept: 2 uncommitted files"). Squash and rebase merges are recognised. A
+  remote branch that has moved since the merge is kept, and that is said; a
+  remote that cannot be reached leaves its branch and does not hold up the
+  rest. An agent that sits idle at its prompt does not keep a workspace: it
+  is stopped, as the dialog stops it. One you started by hand in a terminal
+  does keep it, and so does a tab that is a terminal now. (#432)
+- It waits first: 10 minutes by default (5 minutes to 1 hour), counted from
+  when the merge is first seen and from the last thing done in the
+  workspace's sessions. A notice says the workspace will go and offers
+  **Keep workspace**; the row offers Keep too. After a removal a notice
+  offers **Undo**, which puts back the worktree, its branch, the branch on
+  the remote and the sessions that have not been used since. The grace
+  period runs only while the app is running, so nothing goes the moment the
+  app is opened again. A pull request merged in TerminalX, from the pull
+  request panel or by an issue's pipeline, is seen at once. (#432)
+- Every removal is recorded with its workspace, branch, commit and pull
+  request, and listed in Settings → Storage with **Restore** for as long as
+  its commit is still in the repository. (#432)
+- It never applies to a project's main directory, a worktree TerminalX did
+  not create, or a pull request that was closed without merging. For a cloud
+  workspace it runs on the workspace's own runtime, only for a manager and
+  only while the workspace is connected; a runtime from before this needs a
+  restart to offer it (`workspace/2`). (#432)
+- For a project the setting is on for, Settings also offers to turn on
+  GitHub's own "Automatically delete head branches" when you administer the
+  repository, which covers pull requests merged while TerminalX is closed.
+  (#432)
+
+### Tabs
+
+- A session's tabs are a row in the title bar, as in a browser: one tab per
+  agent, terminal and browser page, each with its icon, a shortened title
+  and its state (working, waiting, an unread reply, exited). Click to
+  switch, middle-click or the close button to close, and the "+" at the end
+  of the row opens a new tab. Hover a tab, or move the keyboard focus to it,
+  for its full title, its agent and its state. Settings → General has "Tabs
+  in the title bar" to turn the row off and keep tabs in the sidebar only.
+  (#438)
+- The row is the workspace's: when several sessions share a worktree, all
+  their tabs are in it, in one flat row, and opening a tab opens its session
+  too. A tab of another workspace is never in it. (#438)
+- A tab in the row is what runs in its terminal, as its sidebar row is: an
+  agent's mark, name and state while one runs there, a terminal when none
+  does, with the menu items that apply to what it is now. A terminal an
+  agent is started in stays where you put it, with its pin, its mute and the
+  name you gave it, and a name you give a tab is kept whatever comes to run
+  in it. (#438)
+- Tabs share the width and shrink evenly; when they no longer fit, the row
+  scrolls and a menu at its end lists every tab by its full title. The
+  session's name and its chips give way to the tabs in a narrow window, and
+  the header's own buttons are never covered. Empty title bar still drags
+  the window; a tab does not. (#438)
+- Drag a tab to move it. The order is one order for the workspace, saved
+  with the sessions: the sidebar, next and previous tab and the numbered
+  shortcuts follow it, it survives a restart, and the CLI and a paired
+  phone list a session's tabs in it. "Move tab left" and "Move tab right"
+  do the same from the keyboard. (#438)
+- New shortcuts, all remappable in Settings → Shortcuts: the main modifier
+  and 1 to 8 switch to that tab, 9 to the last one, from the composer and
+  from a terminal as well; move tab left and right; and reopen closed tab.
+  (#438)
+- Right-click a tab, in the row or in the sidebar, for everything that can
+  be done to it: rename it, switch it between chat and terminal view,
+  duplicate it, fork its conversation, open it in the floating window,
+  reload or restart it, copy its title, folder, conversation id or address,
+  pin it (pinned tabs stay at the left as an icon), mute its notifications,
+  move it, act on its session, and open a new tab right after it. (#438)
+- Close other tabs, tabs to the right, tabs to the left, idle tabs or all
+  tabs from the same menu. Each says how many tabs it will close first, and
+  names any with an agent working or waiting, a terminal in the middle of a
+  command or a draft not sent, with the choice to close only the idle ones.
+  Pinned tabs are left open unless you include them. (#438)
+- A closed agent tab keeps its conversation, and "Reopen closed tab" brings
+  the last closed tab back where it was: an agent with its conversation, a
+  browser page at its address. (#438)
+- Closing the last agent tab of a session no longer takes you off the
+  terminal or page you were on, or opens a shell you did not ask for.
+  (#438)
+
+### Stop from a guest or the phone interrupts too
+
+- A guest's Stop in a shared session no longer ends the host's agent and puts
+  "Session closed" over the host's tab. It interrupts the running turn, as the
+  host's own Stop does; if the agent does not answer, the same button becomes
+  "Stop session" and ends the process. What guests queued behind the turn is
+  kept and goes out when the interrupted turn has ended. (#427)
+- A guest's Steer no longer stops the host's agent and starts it again. The
+  turn is interrupted and the steering prompt is the next message, to the
+  same process, ahead of anything already waiting.
+- A guest's queued follow-up is no longer dropped when its turn ends within a
+  quarter of a second of that guest's last action.
+- On the phone, Stop in a cloud workspace interrupts the running turn instead
+  of ending the agent's process; pressed again while that turn is still
+  running, it stops the session. A workspace on a runtime from before the
+  interrupt keeps the old Stop.
 
 ## 0.2.11
 

@@ -41,6 +41,13 @@ export function mayStartCloudSessions(status: AccountStatus, orgId: string | nul
   return role === "owner" || role === "admin" || status.memberWorkspaces === true;
 }
 
+/** Whether this person is an owner or admin of the organization: who connects its agent logins. Null while not known. */
+export function managesOrganization(status: AccountStatus, orgId: string | null | undefined): boolean | null {
+  if (!orgId || status.state !== "signed-in") return null;
+  const role = status.organizations?.find((org) => org.id === orgId)?.role;
+  return role ? role === "owner" || role === "admin" : null;
+}
+
 /** The organization of a cloud project, workspace or session key (`cloud:<orgId>:…`); null for anything else. */
 export function cloudKeyOrgId(key: string | null | undefined): string | null {
   if (!key?.startsWith("cloud:")) return null;

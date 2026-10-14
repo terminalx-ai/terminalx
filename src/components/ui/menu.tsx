@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
-import { Check } from "lucide-react";
+import { Check, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 export const DropdownMenu = Prim.Root;
@@ -118,3 +118,30 @@ ContextMenuItem.displayName = "ContextMenuItem";
 export function ContextMenuSeparator({ className }: { className?: string }) {
   return <Ctx.Separator className={cn("my-1 h-px bg-hairline", className)} />;
 }
+
+export const ContextMenuSub = Ctx.Sub;
+
+/** A row that opens a submenu; the arrow at its end says so. */
+export const ContextMenuSubTrigger = React.forwardRef<
+  React.ComponentRef<typeof Ctx.SubTrigger>,
+  React.ComponentPropsWithoutRef<typeof Ctx.SubTrigger>
+>(({ className, children, ...props }, ref) => (
+  <Ctx.SubTrigger ref={ref} className={cn(itemClass, "data-[state=open]:bg-veil-strong", className)} {...props}>
+    {children}
+    <ChevronRight className="ml-auto size-3.5! text-faint!" />
+  </Ctx.SubTrigger>
+));
+ContextMenuSubTrigger.displayName = "ContextMenuSubTrigger";
+
+export const ContextMenuSubContent = React.forwardRef<
+  React.ComponentRef<typeof Ctx.SubContent>,
+  React.ComponentPropsWithoutRef<typeof Ctx.SubContent>
+>(({ className, ...props }, ref) => (
+  <Ctx.Portal>
+    <Ctx.SubContent ref={ref} className={cn(contentClass, className)} {...props} />
+  </Ctx.Portal>
+));
+ContextMenuSubContent.displayName = "ContextMenuSubContent";
+
+/** A heading over a group of items, as in a dropdown. */
+export const ContextMenuLabel = DropdownMenuLabel;
