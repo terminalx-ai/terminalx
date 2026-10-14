@@ -21,6 +21,7 @@ const { bootBrowser, refreshBrowserPages } = await import("@/lib/browser");
 const { dropSessionTerminals, openTerminal, setSelectedAgent } = await import("@/lib/terminal");
 const { resetTabLayouts } = await import("@/lib/tabLayouts");
 const { setPrefs } = await import("@/lib/prefs");
+const { newTabBlockedReason, NewTabHint } = await import("@/components/session/TabStrip");
 const { SHORTCUT_ACTIONS, SHORTCUT_GROUPS, bindingProblem, defaultBindings, saveShortcut } = await import("@/lib/shortcuts");
 
 const LONG = "Refactor the authentication middleware to use the new token service";
@@ -180,5 +181,34 @@ describe("the tab shortcuts", () => {
     expect(names().indexOf("Review")).toBe(2);
     expect(shown()).toBe("Review");
     void shell;
+  });
+});
+
+describe("the cloud new-tab menu's disabled hint", () => {
+  const model = (fields: Partial<Parameters<typeof newTabBlockedReason>[0]> = {}) => ({
+    backend: { readOnlyReason: null },
+    connected: true,
+    asleep: false,
+    canWakeForTerminal: false,
+    manage: false,
+    ...fields,
+  }) as Parameters<typeof newTabBlockedReason>[0];
+
+  it("tells a driver, who is not view-only, that tabs need an admin", () => {
+    const reason = newTabBlockedReason(model());
+    expect(reason).toBe("New tabs and terminals need a workspace admin.");
+    expect(reason).not.toMatch(/view only|attachment/i);
+  });
+
+  it("is absent for a manager and keeps a viewer's own reason", () => {
+    expect(newTabBlockedReason(model({ manage: true }))).toBeNull();
+    expect(newTabBlockedReason(model({ backend: { readOnlyReason: "View only: shared to watch." } as never }))).toBe("View only: shared to watch.");
+  });
+
+  it("reads as a sentence, not the uppercase section header", () => {
+    render(<NewTabHint>New tabs and terminals need a workspace admin.</NewTabHint>);
+    const hint = screen.getByRole("note");
+    expect(hint.className).toContain("normal-case");
+    expect(hint.className).not.toMatch(/(^| )uppercase( |$)/);
   });
 });

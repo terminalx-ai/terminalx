@@ -774,13 +774,15 @@ export function CloudOutbox({
   );
   if (!shown.length && !followUps.length) return null;
   return (
-    <ul className="flex shrink-0 flex-col gap-1 border-b border-hairline px-3 py-1.5 text-xs" data-testid="cloud-agent-outbox">
+    // A bar of its own above the transcript: its own background, a bounded height
+    // that scrolls, and rows whose reasons wrap rather than run off the pane.
+    <ul className="flex max-h-40 shrink-0 flex-col gap-1 overflow-y-auto border-b border-hairline bg-veil-raised px-3 py-1.5 text-xs" data-testid="cloud-agent-outbox">
       {followUps.map((f) => (
         <li key={`f-${f.clientCommandId}`} className="flex items-center gap-2" data-testid="cloud-agent-followup">
-          <span className="text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
+          <span className="shrink-0 text-muted-foreground">Queued follow-up{f.actorId ? ` from ${nameOf(f.actorId)}` : ""}:</span>
           {/* A queued message of images alone has no text to show. */}
           {f.text ? <span className="min-w-0 truncate">{f.text}</span> : <span className="min-w-0 truncate text-muted-foreground">(images)</span>}
-          <span className="ml-auto text-faint">sends when the agent finishes its turn</span>
+          <span className="ml-auto shrink-0 text-faint">sends when the agent finishes its turn</span>
         </li>
       ))}
       {shown
@@ -788,20 +790,20 @@ export function CloudOutbox({
         .map((entry) => (
           <li
             key={entry.clientCommandId}
-            className={cn("flex items-center gap-2", entry.state === "outcome-unknown" && "text-warning")}
+            className={cn("flex items-baseline gap-2", entry.state === "outcome-unknown" && "text-warning")}
             data-testid="cloud-agent-command"
             data-state={entry.state}
           >
-            <span className="text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
-            {entry.text ? <span className="min-w-0 truncate"><LinkedText text={entry.text} /></span> : null}
+            <span className="shrink-0 text-muted-foreground">{KIND_TEXT[entry.kind] ?? entry.kind}:</span>
+            {entry.text ? <span className="min-w-0 max-w-[40%] shrink-0 truncate"><LinkedText text={entry.text} /></span> : null}
             {entry.kind === "send" && (entry.images || !entry.text) ? (
               <span className="shrink-0 text-muted-foreground" data-testid="cloud-agent-command-images">
                 {entry.images ? `(${entry.images} ${entry.images === 1 ? "image" : "images"})` : "(images)"}
               </span>
             ) : null}
-            <span className="ml-auto shrink-0">{outboxStateText(entry, nameOf)}</span>
+            <span className="min-w-0 flex-1 break-words">{outboxStateText(entry, nameOf)}</span>
             {entry.state === "outcome-unknown" && entry.kind !== "permission-decision" && (
-              <Button size="xs" variant="outline" onClick={() => onSendAgain(entry)}>
+              <Button size="xs" variant="outline" className="shrink-0 self-center" onClick={() => onSendAgain(entry)}>
                 Send again
               </Button>
             )}

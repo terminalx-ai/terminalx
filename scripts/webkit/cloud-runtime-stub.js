@@ -42,6 +42,7 @@
   turn("echo:hello from Alice", ["hello from Alice"]);
   turn(`slow:${lines}:1500`, Array.from({ length: lines }, (_, i) => `chunk ${i + 1} of ${lines}`));
 
+  const outbox = (f.outbox ?? []).map((entry, i) => ({ clientCommandId: `c${i + 1}`, tabId: TAB, kind: "send", state: "rejected", createdAt: now - 1000 + i, updatedAt: now - 1000 + i, ...entry }));
   let status = "idle";
   // `model` and `permissionMode`: what the composer's pickers read (their labels decide how wide its toolbar wants to be).
   const tabInfo = () => ({ sessionId: SESSION, tabId: TAB, title: tab.title, harness: "claude", model: f.model ?? "", effort: null, permissionMode: f.permissionMode ?? "default", status, process: "running", pendingPermissions: [], followUps: [], lastSeq: seq, created: at, modified: at });
@@ -138,7 +139,9 @@
     cloud_workspaces: { workspaces: [workspace], quota: { used: 1, limit: 3 } },
     cloud_workspace_shares: { shares: [], you: { role, canApprove: you.canApprove } },
     cloud_agent_cache_save: null,
-    cloud_agent_outbox_sync: [],
+    // `f.outbox`: commands the runtime settled, such as the refusals a plain driver gets (PRO-88).
+    cloud_agent_outbox_sync: () => outbox,
+    cloud_agent_outbox: () => outbox,
     cloud_agent_checkpoint: null,
     git_identity: { name: "You", email: "you@example.com" },
     cloud_remote_attach: () => {
@@ -149,7 +152,9 @@
       return CONNECTION;
     },
     cloud_remote_send: ({ frame }) => {
-      deliver(answer(frame));
+      // `f.replayDelayMs`: the replay of a session is slow to come (a second person opening it).
+      if (frame.method === "session.subscribe" && f.replayDelayMs) setTimeout(() => deliver(answer(frame)), f.replayDelayMs);
+      else deliver(answer(frame));
       return true;
     },
     cloud_remote_activate: null,

@@ -395,6 +395,7 @@ export function TabView({
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
       live={live}
+      loading={!readOnly && !!tab.loadingHistory}
       progressing={live && tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
       answering={answering || deciding}
       onAnswerPermission={answerPermission}

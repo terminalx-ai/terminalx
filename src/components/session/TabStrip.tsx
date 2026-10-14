@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Globe, Plus, TerminalSquare } from "lucide-react";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
@@ -129,6 +129,24 @@ function LocalTabActions({ session, selected }: { session: SessionEntry; selecte
  * the VM. Adding either needs a live connection and manage access; the
  * menu says why when it is not there.
  */
+/** Why the cloud "New tab" menu's items are disabled, or null when they are not. */
+export function newTabBlockedReason(cloud: Pick<CloudSessionModel, "backend" | "connected" | "asleep" | "canWakeForTerminal" | "manage">): string | null {
+  if (cloud.backend.readOnlyReason) return cloud.backend.readOnlyReason;
+  if (!cloud.connected) {
+    if (!cloud.asleep) return "Connecting to the workspace…";
+    return cloud.canWakeForTerminal
+      ? "Stopped: sending a message or choosing Terminal wakes the workspace. Agent tabs are added once it runs."
+      : "Stopped: sending a message wakes the workspace. Terminals and new tabs need a workspace admin.";
+  }
+  // A driver gets here too, so not "View only": tabs and terminals are a manager's.
+  return cloud.manage ? null : "New tabs and terminals need a workspace admin.";
+}
+
+/** The disabled menu's reason: a plain sentence, not the uppercase section header. */
+export function NewTabHint({ children }: { children: ReactNode }) {
+  return <DropdownMenuLabel className="max-w-64 whitespace-normal normal-case tracking-normal text-[11px] font-normal text-muted-foreground" role="note">{children}</DropdownMenuLabel>;
+}
+
 function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; selected: SelectedSessionTab | null; cloud: CloudSessionModel }) {
   const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
   const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
@@ -162,17 +180,7 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
   useShortcut("session.nextTab", () => step(1));
   useShortcut("session.previousTab", () => step(-1));
   useShortcut("session.lastTab", openLast);
-  const blocked =
-    cloud.backend.readOnlyReason ??
-    (!cloud.connected
-      ? cloud.asleep
-        ? cloud.canWakeForTerminal
-          ? "Stopped: sending a message or choosing Terminal wakes the workspace. Agent tabs are added once it runs."
-          : "Stopped: sending a message wakes the workspace. Terminals and new tabs need a workspace admin."
-        : "Connecting to the workspace…"
-      : !cloud.manage
-        ? "View only: this attachment cannot add tabs."
-        : null);
+  const blocked = newTabBlockedReason(cloud);
   // A stopped workspace this attachment may manage: Terminal is the one item that wakes it, and only when chosen.
   // Not for a viewer or a driver (PRO-30): terminals are a manager's, so their wake would end in a refusal.
   const wakesForTerminal = cloud.canWakeForTerminal;
@@ -186,7 +194,7 @@ function CloudTabActions({ session, selected, cloud }: { session: SessionEntry; 
       {positions.map(({ action, open }) => <TabPositionShortcut key={action} action={action} open={open} />)}
       <NewTabTrigger trigger={picker.trigger} />
       <DropdownMenuContent align="end">
-        {(blocked || error) && <DropdownMenuLabel className="max-w-64 whitespace-normal text-[11px] font-normal text-muted-foreground">{error ?? blocked}</DropdownMenuLabel>}
+        {(blocked || error) && <NewTabHint>{error ?? blocked}</NewTabHint>}
         <DropdownMenuLabel>New agent tab with</DropdownMenuLabel>
         {cloud.agents.map((agent) => (
           <DropdownMenuItem

@@ -205,6 +205,51 @@ describe("cloud agent tabs store", () => {
     expect(backend.count("cloud_agent_checkpoint")).toBe(reads);
   });
 
+  it("knows when a second person's tab has not been read yet, and takes the checkpoint while the live replay is slow", async () => {
+    // Someone else's tab, new to this desktop: the runtime lists it with 4 events, nothing cached here.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 4 })]);
+    expect(getCloudAgents(scope).tabs[0]!.historyRead).toBe(false);
+    backend.checkpoints["t-1"] = {
+      epoch: 1,
+      version: 1,
+      projection: { v: 1, sessionId: "s-1", tabId: "t-1", title: null, harness: "claude", model: "", effort: null, permissionMode: "manual", status: "idle", process: "running", events: [ev(1, { type: "user_message", text: "hi", queued: false }), ev(2, { type: "assistant_text", text: "hello" })], truncated: false, followUps: [], updatedAt: 1 },
+    };
+    // The checkpoint read starts as the tab opens; the live attach lands before it answers, and its replay never comes.
+    let replay: () => void = () => undefined;
+    const client = fakeClient();
+    client.subscribeSession.mockImplementation(() => new Promise((resolve) => { replay = () => resolve(() => undefined); }));
+    const read = refreshFromCheckpoint(scope, "t-1");
+    void attachCloudAgentTab(scope, "t-1", client);
+    expect(await read).toBe(true);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2]);
+    expect(getCloudAgents(scope).tabs[0]!.historyRead).toBe(true);
+    replay();
+  });
+
+  it("is read once the live replay is merged, and a tab with no events has nothing to wait for", async () => {
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 3 }), tabInfo({ tabId: "t-2", sessionId: "s-2", lastSeq: 0 })]);
+    const [busy, empty] = getCloudAgents(scope).tabs;
+    expect([busy!.historyRead, empty!.historyRead]).toEqual([false, true]);
+    await attachCloudAgentTab(scope, "t-1", fakeClient());
+    expect(getCloudAgents(scope).tabs[0]!.historyRead).toBe(true);
+  });
+
+  it("attaches a tab opened before its session was known as soon as it is", async () => {
+    const client = fakeClient();
+    const stop = await attachCloudAgentTab(scope, "t-1", client);
+    expect(client.subscribeSession).not.toHaveBeenCalled();
+    applyLiveTabs(scope, [tabInfo()]);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledWith("s-1", "t-1", expect.any(Function), expect.anything()));
+    stop();
+    // Stopped before it was known: no attach follows.
+    resetCloudAgents();
+    const later = fakeClient();
+    (await attachCloudAgentTab(scope, "t-1", later))();
+    applyLiveTabs(scope, [tabInfo()]);
+    await Promise.resolve();
+    expect(later.subscribeSession).not.toHaveBeenCalled();
+  });
+
   it("never shows an agent that cannot sign in as working (PRO-78)", async () => {
     const signIn = { provider: "claude", state: "not-connected" };
     applyLiveTabs(scope, [tabInfo({ status: "in_progress", signIn })]);

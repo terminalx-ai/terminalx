@@ -43,6 +43,12 @@ export interface CloudAgentTab {
   completed: boolean;
   /** A live `session.subscribe` is feeding this tab. */
   live: boolean;
+  /**
+   * Its conversation has been read from somewhere (this desktop's cache, a
+   * checkpoint, the live replay), or it has none to read. Until then an empty
+   * transcript means "not here yet", not "nothing was said".
+   */
+  historyRead: boolean;
   /** Model, effort or mode chosen while offline, carried in the next send. */
   pendingConfig: { model?: string; effort?: string | null; mode?: string } | null;
   /**
@@ -239,6 +245,8 @@ function newTab(info: AgentTabInfo, source: CloudAgentTab["source"], placeholder
     unread: info.status === "completed",
     completed: info.status === "completed",
     live: false,
+    // A tab with no events has nothing to read.
+    historyRead: !info.lastSeq,
     pendingConfig: null,
   };
 }
@@ -339,6 +347,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         tab.unread = entry.unread;
         tab.completed = entry.completed;
         tab.pendingConfig = entry.pendingConfig ?? null;
+        if (entry.events?.length) tab.historyRead = true;
         s.tabs.set(tabId, tab);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
       }
@@ -377,7 +386,16 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
   if (!tab || tab.live) return false;
   const checkpoint = await cloudAgentApi.checkpoint(scope, tabId, tab.checkpoint);
   const current = s.tabs.get(tabId);
-  if (!checkpoint || !current || current.live || !newer(checkpoint, current.checkpoint)) return false;
+  if (!current) return false;
+  if (!checkpoint && !current.historyRead) {
+    // No checkpoint newer than the one already merged, or none at all for a tab that said nothing.
+    current.historyRead = !current.info.lastSeq || !!current.checkpoint;
+    if (current.historyRead) publish(s);
+  }
+  // Once live, the replay is stronger, but a live tab that has shown nothing yet (the replay
+  // is slow, or not answered) still takes the checkpoint's events: they merge by seq.
+  const replayed = current.live && (current.historyRead || (!!current.info.sessionId && lastSeq(current.info.sessionId, tabId) > 0));
+  if (!checkpoint || replayed || !newer(checkpoint, current.checkpoint)) return false;
   const p = checkpoint.projection;
   if (p.tabId !== tabId) return false;
   current.checkpoint = { epoch: checkpoint.epoch, version: checkpoint.version };
@@ -410,6 +428,7 @@ export async function refreshFromCheckpoint(scope: CloudAgentScope, tabId: strin
     current.placeholder = false;
   }
   mergeTabEvents(p.sessionId, tabId, p.events);
+  current.historyRead = true;
   publish(s);
   scheduleSave(s, tabId);
   return true;
@@ -442,6 +461,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
       existing.info = withPending(info, existing.pendingConfig);
       existing.source = "live";
       existing.placeholder = false;
+      if (!info.lastSeq) existing.historyRead = true;
     }
     scheduleSave(s, info.tabId);
   }
@@ -517,7 +537,9 @@ export function watchLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient
 export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient): Promise<() => void> {
   const s = store(scope);
   const tab = s.tabs.get(tabId);
-  if (!tab || !tab.info.sessionId) return () => undefined;
+  // Not known here yet (the runtime's tab list or a checkpoint has not named its session):
+  // attach as soon as it is, rather than when the connection next changes.
+  if (!tab || !tab.info.sessionId) return attachWhenKnown(scope, tabId, client);
   const sessionId = tab.info.sessionId;
   tab.live = true;
   publish(s);
@@ -566,11 +588,38 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     publish(s);
     throw error;
   }
+  // The replay has been merged: the conversation is what is shown now.
+  const replayed = s.tabs.get(tabId);
+  if (replayed && !replayed.historyRead) {
+    replayed.historyRead = true;
+    publish(s);
+  }
   return () => {
     stop?.();
     const current = s.tabs.get(tabId);
     if (current) current.live = false;
     publish(s);
+  };
+}
+
+/** `attachCloudAgentTab` once the tab and its session are known; the returned stop also ends the wait. */
+function attachWhenKnown(scope: CloudAgentScope, tabId: string, client: WorkspaceRpcClient): () => void {
+  const s = store(scope);
+  let stopped = false;
+  let stop: (() => void) | null = null;
+  const check = () => {
+    if (stopped || !s.tabs.get(tabId)?.info.sessionId) return;
+    s.listeners.delete(check);
+    void attachCloudAgentTab(scope, tabId, client).then(
+      (unsubscribe) => (stopped ? unsubscribe() : (stop = unsubscribe)),
+      () => undefined,
+    );
+  };
+  s.listeners.add(check);
+  return () => {
+    stopped = true;
+    s.listeners.delete(check);
+    stop?.();
   };
 }
 

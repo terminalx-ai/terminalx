@@ -27,6 +27,8 @@ export interface TabEntry {
   modified: string;
   contextUsed?: number | null;
   contextMax?: number | null;
+  /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
+  loadingHistory?: boolean;
   /**
    * What is in the tab's terminal (#437). Absent, or `agent`, is the tab's
    * agent run by the app. `by_hand` is that agent started by hand in the

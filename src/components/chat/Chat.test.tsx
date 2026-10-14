@@ -352,3 +352,30 @@ describe("a prompt the composer never saw", () => {
     expect(text.match(/typed in the terminal/g)).toHaveLength(1);
   });
 });
+
+// A shared cloud tab opened here for the first time: its conversation is on its way.
+describe("an empty chat", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduced-motion"), addEventListener() {}, removeEventListener() {} }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const empty = (loading?: boolean) =>
+    render(<Chat sessionId="s" transcript={buildTranscript([], false)} stream={[]} live={false} loading={loading} answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} />);
+
+  it("says it is loading while the conversation has not been read, not that nothing was said", () => {
+    empty(true);
+    expect(screen.getByRole("status").textContent).toContain("Loading the conversation…");
+    expect(screen.queryByText(/Nothing here yet/)).toBeNull();
+  });
+
+  it("invites a first message once there is nothing to read", () => {
+    empty();
+    expect(screen.getByText("Nothing here yet. Ask for something below.")).toBeTruthy();
+  });
+});

@@ -63,6 +63,7 @@ function agentTab(sessionId: string, status: AgentTabInfo["status"], requests: s
     unread: status === "completed",
     completed: status === "completed",
     live,
+    historyRead: true,
     pendingConfig: null,
   };
 }
