@@ -79,6 +79,7 @@ beforeEach(() => {
       { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" },
       { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" },
       { userId: "u-admin", email: "carol@example.com", displayName: "Carol", role: "admin" },
+      { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "member" },
     ],
     pendingInvites: [],
     viewerRole: "owner",
@@ -145,6 +146,14 @@ describe("share dialog", () => {
     expect(shareErrorMessage({ code: "cloud_workspace_share_forbidden" })).toBe(
       "Only organization admins and the workspace's creator can change who it is shared with.",
     );
+  });
+
+  it("does not offer the workspace's creator, and says why a driver share is refused for a managers-only login", async () => {
+    render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" createdBy="u-bob" onClose={() => undefined} />);
+    await screen.findByTestId("cloud-share-row");
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
+    expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeNull();
+    expect(shareErrorMessage({ code: "cloud_workspace_share_credential_restricted" })).toMatch(/agent login that only owners and admins may use/);
   });
 
   it("tells the organization's owner they are the Owner, and an admin that they are an Admin", async () => {
@@ -346,8 +355,8 @@ describe("sharing a private workspace", () => {
     listed = { shares: [share()], you: { role: "manager", canApprove: true, canManageShares: true } };
     render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="organization" createdBy="u-bob" canManage onClose={() => undefined} />);
     await screen.findByTestId("cloud-share-row");
-    // The roster says who this person is (by email).
-    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    // The roster says who this person is (by email); Bob created it, so he is not offered.
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Make private again/ }));
     const confirm = await screen.findByTestId("cloud-private-confirm");
     expect(confirm.textContent).toContain("The 1 person it is shared with loses access now");
@@ -359,7 +368,7 @@ describe("sharing a private workspace", () => {
     const onClose = vi.fn();
     render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" accessMode="organization" createdBy="u-bob" canManage onClose={onClose} />);
     await screen.findByTestId("cloud-share-row");
-    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /Make private again/ }));
     fireEvent.click(within(await screen.findByTestId("cloud-private-confirm")).getByRole("button", { name: "Revoke all and make private" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());

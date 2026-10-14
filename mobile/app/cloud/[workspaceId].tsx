@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Send, Square } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
@@ -11,6 +11,7 @@ import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLi
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { PermissionCard, TurnCard } from "@mobile/ui/transcript";
 import { linkedText } from "@mobile/ui/LinkedText";
@@ -222,11 +223,12 @@ function Conversation({ catalog, session, scope, tabId, live, listedState }: { c
         <Button label="Add note" kind="secondary" disabled={!note.trim() || sending} onPress={addNote} />
       </View>
     </View> : null}
-    <FlatList data={transcript.turns} keyExtractor={(turn) => turn.key} automaticallyAdjustContentInsets contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.transcript} keyboardDismissMode="interactive"
-      ListHeaderComponent={tab?.truncated ? <Text style={[styles.notice, { color: palette.muted }]}>Earlier messages are not in the saved conversation.</Text> : null}
+    {/* Opens at the newest turn, as the desktop and the session screen do; the asks and messages waiting sit at that edge. */}
+    <TranscriptList key={tabId ?? "none"} data={transcript.turns} keyExtractor={(turn) => turn.key}
+      earlier={tab?.truncated ? <Text style={[styles.notice, { color: palette.muted }]}>Earlier messages are not in the saved conversation.</Text> : null}
       ListEmptyComponent={tab?.noKey ? <EmptyState title="Not readable on this phone yet" detail={codeText("no-key")!} /> : <EmptyState title="No conversation yet" detail={live ? "This tab has not published any turns." : "Nothing has been saved for this tab."} />}
       renderItem={({ item }) => <TurnCard turn={item} />}
-      ListFooterComponent={<>
+      latest={<>
         {transcript.pendingAsks.map((ask) => snapshot.canApprove
           ? <PermissionCard key={ask.requestId} ask={ask} connected={!stopped} answering={sending || session.outbox.isDeciding(ask.requestId)} onRespond={(optionId) => decide(ask, optionId)} />
           : <Text key={ask.requestId} style={[styles.notice, { color: palette.warning }]}>The agent is waiting for a permission ({ask.title ?? ask.toolName ?? "request"}). Waiting for someone who can approve.</Text>)}
@@ -274,7 +276,6 @@ const styles = StyleSheet.create({
   tabsContent: { paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
   tab: { minHeight: 36, maxWidth: 220, paddingHorizontal: 13, borderRadius: 10, justifyContent: "center" },
   tabText: { fontSize: 14, fontWeight: "600" },
-  transcript: { padding: 16, paddingBottom: 24, gap: 16 },
   pending: { alignItems: "flex-end", gap: 4, marginTop: 12 },
   pendingText: { maxWidth: "88%", borderRadius: 17, borderBottomRightRadius: 5, paddingHorizontal: 14, paddingVertical: 11, fontSize: 15, lineHeight: 22, overflow: "hidden", opacity: 0.7 },
   pendingState: { fontSize: 12, lineHeight: 17 },

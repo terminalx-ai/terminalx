@@ -107,7 +107,9 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
 
   const manage = state.you.canManageShares;
   const sharedIds = new Set(state.shares.map((share) => share.userId));
-  const candidates = (members ?? []).filter((member) => !sharedIds.has(member.userId) && member.userId !== selfId);
+  // Owners, admins and the creator see the workspace without a share; the server refuses one for them.
+  const createdBy = catalog.workspace(orgId, workspaceId)?.createdBy ?? null;
+  const candidates = (members ?? []).filter((member) => !sharedIds.has(member.userId) && member.userId !== selfId && member.role !== "owner" && member.role !== "admin" && member.userId !== createdBy);
 
   return <Screen>
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
   app: {} as any,
   catalog: null as any,
+  listProps: {} as any,
   push: vi.fn(),
   alert: vi.fn(),
   focus: [] as (() => void)[],
@@ -35,7 +36,7 @@ vi.mock("react-native", () => {
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
     Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
-    FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent }: any) => <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
+    FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, ...rest }: any) => (mocks.listProps = { data, ...rest }) && <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent }: any) => <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key}>{renderSectionHeader({ section })}{section.data.map((item: any) => <div key={item.workspace.id}>{renderItem({ item })}</div>)}{renderSectionFooter({ section })}</div>) : ListEmptyComponent}</div>,
   };
 });
@@ -537,6 +538,22 @@ describe("a shared cloud workspace on the phone", () => {
   });
 });
 
+describe("the workspace conversation", () => {
+  it("opens at the newest turn, not the oldest", async () => {
+    world({ events: [event(1, { type: "user_message", text: "first ask", queued: false }), event(2, { type: "turn_completed", status: "completed" }), event(3, { type: "user_message", text: "newest ask", queued: false })] });
+    await show(<CloudWorkspaceScreen />);
+    // The native list is inverted: offset zero, where it opens, is its first item.
+    expect(mocks.listProps.inverted).toBe(true);
+    expect(JSON.stringify(mocks.listProps.data[0])).toContain("newest ask");
+    expect(JSON.stringify(mocks.listProps.data.at(-1))).toContain("first ask");
+  });
+
+  it("goes back to the Cloud tab by name, not the route group", async () => {
+    const layout = (await import("../app/_layout.tsx?raw")).default;
+    expect(layout).toMatch(/name="cloud\/\[workspaceId\]" options=\{\{[^}]*headerBackTitle: "Cloud"/);
+  });
+});
+
 describe("the sharing screen", () => {
   const share = (userId: string, fields: Record<string, unknown> = {}) => ({ userId, email: `${userId.slice(2)}@example.com`, name: NAMES[userId], role: "driver", canApprove: false, createdBy: "u-me", createdAt: 1, updatedAt: 1, ...fields });
 
@@ -618,6 +635,32 @@ describe("the sharing screen", () => {
     refuse("something_new_entirely");
     await click("Bob: Can send");
     expect(alert()).toBe("That did not work. Try again in a moment.");
+  });
+
+  it("does not offer owners, admins or the creator, who already have access", async () => {
+    world();
+    mocks.catalog.workspace = () => item("ws-1", { createdBy: "u-carol" }).workspace;
+    mocks.catalog.people.roster.mockResolvedValue([
+      { userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" },
+      { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "admin" },
+      { userId: "u-olga", email: "olga@example.com", displayName: "Olga", role: "owner" },
+      { userId: "u-carol", email: "carol@example.com", displayName: "Carol", role: "member" },
+    ]);
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    expect(text()).toContain("bob@example.com");
+    for (const email of ["erin@example.com", "olga@example.com", "carol@example.com"]) expect(text()).not.toContain(email);
+  });
+
+  it("says why a driver share is refused while a managers-only agent login exists", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-bob", { role: "viewer" })], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    mocks.catalog.api.putShare.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "cloud_workspace_share_credential_restricted" }));
+    await click("Bob: Can send");
+    const alert = container.querySelector('[role="alert"]')!.textContent;
+    expect(alert).toMatch(/agent login that only owners and admins may use/);
+    expect(alert).not.toMatch(/Try again in a moment/);
   });
 
   it("says when the list cannot be read and offers to try again", async () => {

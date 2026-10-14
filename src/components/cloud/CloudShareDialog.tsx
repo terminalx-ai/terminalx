@@ -41,6 +41,11 @@ export function yourAccessText(
   }
 }
 
+/** Owners, admins and the workspace's creator see it without a share; the server refuses one for them. */
+export function alwaysHasAccess(member: { userId: string; role: string }, createdBy: string | null): boolean {
+  return member.role === "owner" || member.role === "admin" || (!!createdBy && member.userId === createdBy);
+}
+
 function codeOf(error: unknown): string {
   if (error && typeof error === "object" && "code" in error) return String((error as { code: unknown }).code);
   return error instanceof Error ? error.message : String(error);
@@ -52,6 +57,8 @@ export function shareErrorMessage(error: unknown, who?: string): string {
   switch (code) {
     case "cloud_workspace_share_redundant":
       return `${who ?? "This person"} already has access as owner/admin/creator.`;
+    case "cloud_workspace_share_credential_restricted":
+      return "Can send is not available here while the organization has an agent login that only owners and admins may use. Share as view only, or share that login with the whole organization first (Settings → Account → Agent logins).";
     case "cloud_workspace_share_requires_organization_access":
       return "Make the workspace visible to the organization first.";
     case "cloud_workspace_share_limit":
@@ -164,8 +171,8 @@ export function CloudShareDialog({
   const mayChangeVisibility = listed?.you.role === "manager";
   const isPrivate = access === "private";
   const shared = useMemo(() => new Set(listed?.shares.map((share) => share.userId) ?? []), [listed]);
-  // Owners and admins always have access; offering them would only be refused.
-  const candidates = members.filter((member) => !shared.has(member.userId) && member.role !== "owner" && member.role !== "admin");
+  // Owners, admins and the creator always have access; offering them would only be refused.
+  const candidates = members.filter((member) => !shared.has(member.userId) && !alwaysHasAccess(member, createdBy));
   const nameOf = (userId: string) => {
     const member = members.find((m) => m.userId === userId);
     return member?.displayName || member?.email || listed?.shares.find((s) => s.userId === userId)?.name || "This person";
