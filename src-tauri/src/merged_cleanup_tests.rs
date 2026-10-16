@@ -452,6 +452,42 @@ fn a_workspace_that_fails_any_check_stays_and_says_why() {
 }
 
 #[test]
+fn a_built_workspace_goes_when_its_build_output_is_known_or_declared_and_stays_for_local_data() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    // This repository's own build output, declared on main (#476).
+    std::fs::write(alpha.join(".gitignore"), "node_modules/\n.env\ntarget/\n.build/\nsrc-tauri/gen/\n/src-tauri/binaries/agent-browser-*\n").unwrap();
+    std::fs::create_dir_all(alpha.join(".terminalx")).unwrap();
+    std::fs::write(alpha.join(cleanup::DECLARED_FILE), "src-tauri/gen/\nsrc-tauri/binaries/agent-browser-*\n").unwrap();
+    sh(&alpha, &["add", "."]);
+    sh(&alpha, &["commit", "-q", "-m", "declare build output"]);
+    sh(&alpha, &["push", "-q", "origin", "main"]);
+    let built = f.worktree("built-only");
+    let with_env = f.worktree("built-with-env");
+    for wt in [&built, &with_env] {
+        for file in ["node_modules/pkg/index.js", "src-tauri/target/debug/app", "native/helper/.build/debug/helper", "src-tauri/gen/schemas/desktop-schema.json", "src-tauri/binaries/agent-browser-aarch64-apple-darwin"] {
+            std::fs::create_dir_all(wt.join(file).parent().unwrap()).unwrap();
+            std::fs::write(wt.join(file), "x").unwrap();
+        }
+    }
+    std::fs::write(with_env.join(".env"), "SECRET=1").unwrap();
+    f.merge("built-only", 90);
+    f.merge("built-with-env", 91);
+
+    let first = f.sweep(1);
+    assert_eq!(of(&first, &built).phase, Phase::Scheduled, "{first:#?}");
+    let kept = of(&first, &with_env);
+    assert_eq!(reason(kept), (Phase::Kept, "ignored local files: .env"));
+    assert!(kept.detail.as_deref().is_some_and(|detail| detail.contains(cleanup::DECLARED_FILE)), "{kept:#?}");
+
+    let done = f.sweep(12);
+    assert_eq!(of(&done, &built).phase, Phase::Removed, "{done:#?}");
+    assert!(!built.exists());
+    assert_eq!(reason(of(&done, &with_env)), (Phase::Kept, "ignored local files: .env"));
+    assert!(with_env.join(".env").exists());
+}
+
+#[test]
 fn an_agent_sitting_idle_is_stopped_and_does_not_keep_it_but_something_else_running_there_does() {
     let f = Fixture::new();
     let idle = f.worktree("idle-agent");
