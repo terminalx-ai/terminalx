@@ -282,7 +282,7 @@ describe("a local session's title bar with the tabs in it (#438)", () => {
     dropSessionTerminals(["strip-1"]);
   });
 
-  it("holds the session's tabs with the + after them, and the session's name and chips in a compact form", () => {
+  it("holds the session's tabs with the + after them and the actions at the right, and leaves the session's name and branch to the sidebar", () => {
     const header = show();
     const strip = within(header).getByRole("tablist", { name: "Workspace tabs" });
     expect(within(strip).getAllByRole("tab").map((item) => item.getAttribute("aria-label"))).toEqual(["Investigate", "Write the fix"]);
@@ -293,19 +293,18 @@ describe("a local session's title bar with the tabs in it (#438)", () => {
     expect(actions.contains(plus)).toBe(false);
     expect(within(actions as HTMLElement).getByRole("button", { name: "Toggle panel" })).toBeTruthy();
 
-    // A local session is placed by its branch, not named: the project is not spelled out, and the
-    // session's name, where it runs and its base are on the branch's hover.
+    // Nothing before the tabs names the session or its branch (#477): the sidebar's rows show both.
     expect(screen.queryByTestId("session-project")).toBeNull();
     expect(screen.queryByTestId("session-title")).toBeNull();
-    const branch = screen.getByTestId("session-branch");
-    expect(branch.getAttribute("title")).toBe("Fix the login loop\n/Users/me/api/.raccoon/worktrees/fix\nBase 1234567 · fetched at creation");
-    // Pressed by the tabs, the branch keeps its icon and its first characters rather than folding to nothing.
-    expect(branch.style.minWidth).toBe("calc(3ch + 1.125rem)");
-    // The issue and automation chips are still there, and so is the branch.
+    expect(screen.queryByTestId("session-branch")).toBeNull();
+    expect(within(header).queryByText("Fix the login loop")).toBeNull();
+    expect(within(header).queryByText("fix")).toBeNull();
+    // The actions are pushed to the right edge, whatever room the tabs leave.
+    expect(actions.className).toContain("ml-auto");
+    // The issue and automation chips are still there.
     expect(within(header).getByRole("button", { name: "#12" })).toBeTruthy();
     expect(screen.getByTestId("session-automation").textContent).toBe("Nightly #3");
-    expect(screen.getByTestId("session-branch").textContent).toBe("fix");
-    // An ordinary base is on the hover; it is not spelled out beside the tabs.
+    // An ordinary base is not spelled out beside the tabs.
     expect(screen.queryByText("Base 1234567 · fetched at creation")).toBeNull();
     // What is left between the + and the actions is empty: the window is dragged from there, and from no tab.
     expect(header.getAttribute("data-tauri-drag-region")).toBe("deep");

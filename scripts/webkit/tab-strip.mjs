@@ -10,21 +10,19 @@
 // - the strip never covers the window controls' inset or the header's
 //   actions, with the sidebar open and hidden, down to a narrow window with
 //   the side panel open; the issue and automation chips stay reachable;
+// - the session's name and branch are not in the title bar, and Share and the
+//   other actions sit at its right edge at every width, with the empty room
+//   between the + and them (#477);
 // - the empty part of the title bar still drags the window and a tab does not;
 // - a tab dragged to a new place lands there, shows where it will land on
 //   the way, and Escape puts it back;
 // - the tab shortcuts and the arrow keys work, and a right-click opens the menu.
 //
-// Since the chat-first sidebar (#484) a local session's header places it by
-// its branch (`session-branch`, with the session's name on its hover) where
-// its name (`session-title`) was, so the crumb's checks measure that.
-//
 // Not checked since the chat-first sidebar (#484): that the sidebar lists the
 // session's tabs in the strip's order (the sidebar has no tab rows; the strip
 // is the one list of a workspace's tabs), the branch chip beside the crumb
-// giving way below 650 px (a local session has no branch chip: its branch is
-// the crumb), and the project on the crumb's hover (the crumb's hover is the
-// session's name and its workspace).
+// giving way below 650 px, and the project on the crumb's hover: since #477
+// the title bar has neither a crumb nor a branch chip.
 //
 //   pnpm build && npx playwright install webkit && node scripts/webkit/tab-strip.mjs
 //   Set TAB_STRIP_SHOTS to a directory to also save screenshots.
@@ -164,8 +162,6 @@ const measure = (page) =>
     };
     const handle = document.querySelector('[data-testid="session-header-handle"]');
     const handleBox = handle.getBoundingClientRect();
-    // The crumb: where the session is placed (its branch), with the session's name on its hover.
-    const crumb = header.querySelector('[data-testid="session-branch"]');
     return {
       window: innerWidth,
       header: rect(header),
@@ -188,7 +184,9 @@ const measure = (page) =>
       handle: rect(handle),
       handleDrags: handleBox.width > 0 ? drags(document.elementFromPoint(handleBox.left + handleBox.width / 2, handleBox.top + handleBox.height / 2)) : null,
       tabDrags: tabs.length ? drags(tabs[0].querySelector('[role="tab"]')) : null,
-      crumb: { visible: visible(crumb), text: crumb?.textContent.trim() ?? "", hover: crumb?.getAttribute("title") ?? "", ...(rect(crumb) ?? {}) },
+      // #477: nothing in the title bar names the session or its branch.
+      named: ['[data-testid="session-branch"]', '[data-testid="session-title"]', '[data-testid="session-project"]'].some((selector) => visible(header.querySelector(selector))),
+      paddingRight: Math.round(parseFloat(getComputedStyle(header).paddingRight)),
       issue: visible([...header.querySelectorAll("button")].find((button) => button.textContent.trim() === "#438")),
       automation: visible(header.querySelector('[data-testid="session-automation"]')),
       pipeline: (() => {
@@ -218,6 +216,8 @@ function fits(layout, { sidebarHidden = false } = {}) {
     "the pipeline chip is still there, with the dot that says where it stands": !!layout.pipeline && layout.pipeline.dot,
     "it is that dot alone, or the dot and its words up to the chip's edge": !!layout.pipeline && (layout.pipeline.label ? layout.pipeline.slack <= 7 : layout.pipeline.width <= 38),
     "a tab does not drag the window": layout.tabDrags === false,
+    "neither the session's name nor its branch is in the title bar": !layout.named,
+    "Share and the other actions are at the right edge": layout.actions.right >= layout.header.right - layout.paddingRight - SLACK && layout.actionButtons[0]?.name === "Share session…",
   };
 }
 
@@ -225,7 +225,6 @@ function fits(layout, { sidebarHidden = false } = {}) {
 function tier(layout) {
   const width = layout.content;
   return {
-    [`at ${width}px the branch crumb is ${width < 540 ? "left out" : "shown"}`]: layout.crumb.visible === width >= 540,
     [`at ${width}px Share ${width < 540 ? "keeps only its icon" : "has its label"}`]: !!layout.share === width >= 540,
     [`at ${width}px the row of tabs is ${width < 415 ? "its menu alone" : "drawn"}`]: layout.list.hidden === width < 415,
   };
@@ -249,8 +248,7 @@ function tier(layout) {
       "a long title is cut and a short one is not": layout.tabs[0].cut && !layout.tabs[3].cut,
       "the open tab is marked": layout.tabs.filter((tab) => tab.selected).length === 1 && layout.tabs[0].selected,
       "the empty title bar after the + drags the window": layout.handle.width >= 24 && layout.handleDrags === true,
-      // A session in a worktree is placed by the worktree's name (editable there); one in the project's own checkout by its branch.
-      "the branch crumb is there, with the session's name and its workspace on its hover": layout.crumb.visible && layout.crumb.text === "tab-strip" && layout.crumb.hover.split("\n")[0] === "Tab strip in the title bar" && layout.crumb.hover.includes("/repos/p0/.raccoon/worktrees/tab-strip"),
+      "the room the tabs leave is between the + and the actions": layout.actions.left - layout.plus.right >= 24 && layout.actions.right >= layout.header.right - layout.paddingRight - SLACK,
       "the row does not scroll": layout.list.scrollWidth <= layout.list.clientWidth + SLACK && !layout.allTabs,
     },
     layout,
@@ -294,8 +292,8 @@ function tier(layout) {
   await page.keyboard.press(`${mod}+9`);
   await page.waitForTimeout(250);
   const last = await measure(page);
-  // The last tab belongs to the workspace's other session: opening it opens that session (named first on the crumb's hover).
-  const crumb = (await page.locator('[data-testid="session-branch"]').getAttribute("title")).split("\n")[0];
+  // The last tab belongs to the workspace's other session: opening it opens that session, whose tab's panel is then on screen.
+  const opened = await page.locator("#session-agent-panel-b1").count();
   await page.keyboard.press(`${mod}+7`);
   await page.waitForTimeout(150);
   const none = (await measure(page)).tabs.findIndex((item) => item.selected);
@@ -305,10 +303,10 @@ function tier(layout) {
       "the right arrow moves the focus to the next tab": afterArrow === "Fix flaky checkout test",
       "the main modifier and 3 opens the third tab": third === 2,
       "the main modifier and 9 opens the last tab": last.tabs.findIndex((item) => item.selected) === last.tabs.length - 1,
-      "opening another session's tab opens that session": crumb === "Second session, same worktree",
+      "opening another session's tab opens that session": opened === 1,
       "a position with no tab does nothing": none === last.tabs.length - 1,
     },
-    { afterArrow, third, crumb, none },
+    { afterArrow, third, opened, none },
   );
 
   // A right-click opens the tab's menu.
@@ -391,8 +389,7 @@ function tier(layout) {
     "the row scrolls": layout.list.scrollWidth > layout.list.clientWidth + SLACK,
     "a menu at the end of the row lists the tabs, and says how many": !!layout.allTabs && layout.allTabs.left >= layout.list.right - SLACK && layout.allTabs.right <= layout.plus.left + SLACK && layout.allTabsText === "23",
     "the session's name and chips are not under the tabs": layout.breadcrumbParts.every((part) => part.right <= layout.strip.left + SLACK),
-    "the branch crumb keeps its first characters": layout.crumb.width >= 60,
-    "the chips beside it are down to their icons": layout.breadcrumbParts.slice(2).every((part) => part.width <= 26),
+    "the chips before the tabs are down to their icons": layout.breadcrumbParts.slice(1).every((part) => part.width <= 26),
   };
   // The last tab, opened from the menu, is scrolled into view.
   await page.locator('[data-testid="all-tabs"]').click();

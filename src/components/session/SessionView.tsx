@@ -209,23 +209,25 @@ function GithubMark({ className }: { className?: string }) {
 /**
  * A local session's header with the tab strip in it (the main window, unless
  * the strip is turned off in Settings). The title bar then holds, from the
- * left: the session's name and its chips, the workspace's tabs, the "+", and
- * the session's actions at the right. What is left between the "+" and the
+ * left: the session's chips, the workspace's tabs, the "+", and the session's
+ * actions pinned to the right edge. What is left between the "+" and the
  * actions is empty, and is where the window is dragged from.
  *
- * The name, the chips and the tabs are laid out as one row (the breadcrumb
- * has no box of its own here), so each gives way in its turn and none runs
- * under another. The actions at the right never shrink and are never
- * covered. As the header narrows:
+ * The session's name and its branch are not in the title bar (#477): the
+ * sidebar's rows show both (and rename a worktree), and a tab's hover names
+ * its session when the workspace has several.
+ *
+ * The chips and the tabs are laid out as one row (the breadcrumb has no box
+ * of its own here), so each gives way in its turn and none runs under
+ * another. The actions at the right never shrink and are never covered. As
+ * the header narrows:
  *
  * 1. The tabs narrow evenly, to a width their titles still read at.
- * 2. The pipeline, automation, folder and branch chips shrink to their
- *    icons (the pipeline's to the dot that says where it stands), the way
- *    a cloud header's do (`STRIP_CHIP_YIELDS`: a label with no room left
- *    for even an ellipsis is out of sight, never a stray letter). Then the
- *    session's name shrinks to about its first ten characters
- *    (`STRIP_TITLE_YIELDS`); its full "project / session" is on its hover.
- *    The issue chip keeps its place.
+ * 2. The pipeline, automation and folder chips shrink to their icons (the
+ *    pipeline's to the dot that says where it stands), the way a cloud
+ *    header's do (`STRIP_CHIP_YIELDS`: a label with no room left for even
+ *    an ellipsis is out of sight, never a stray letter). The issue chip
+ *    keeps its place.
  * 3. The tabs narrow further, down to an icon and a few characters each.
  * 4. The row of tabs scrolls, with a menu at its end that lists every tab,
  *    until two tabs are left in view.
@@ -233,16 +235,14 @@ function GithubMark({ className }: { className?: string }) {
  * Past that nothing can shrink, so what is drawn depends on the header's
  * width, least needed first:
  *
- * 5. Narrower than `STRIP_NARROW`: the branch, folder and base chips are
- *    left out (the sidebar's workspace row shows them), and one tab stays in
- *    view beside the menu.
- * 6. Narrower than `STRIP_TIGHT`: the session's name is left out (the
- *    sidebar and each tab's hover have it), and Share keeps only its icon.
+ * 5. Narrower than `STRIP_NARROW`: the folder and base chips are left out
+ *    (the sidebar's workspace row shows them), and one tab stays in view
+ *    beside the menu.
+ * 6. Narrower than `STRIP_TIGHT`: Share keeps only its icon.
  * 7. Narrower than `STRIP_MENU`: the row of tabs is the menu alone, and the
  *    issue chip keeps only its icon.
  */
 const STRIP_CHIP_YIELDS = cn(HEADER_CHIP_YIELDS, "shrink-[10000] overflow-hidden");
-const STRIP_TITLE_YIELDS = "shrink-[200]";
 const STRIP_NARROW = "@max-[650px]/session-header:hidden";
 const STRIP_TIGHT = "@max-[540px]/session-header:hidden";
 const STRIP_MENU = "@max-[415px]/session-header:hidden";
@@ -468,8 +468,6 @@ export function SessionView({
   const switching = !!activeTab && !!tabViews.switching[activeTab.id];
   const workspaceLabel = session.worktreeRemoved ? workspaceName(session) : session.branch;
   const workspaceTitle = session.removedWorkspace?.path ?? session.cwd;
-  // What the branch crumb shows: a worktree by its name, any other checkout by its branch.
-  const workspaceShown = session.worktreeName && !session.worktreeRemoved ? session.worktreeName : workspaceLabel;
   const baseNote = session.worktreeBase && !session.worktreeBase.warning ? `Base ${session.worktreeBase.commit.slice(0, 7)}${session.worktreeBase.fetched ? " · fetched at creation" : ""}` : null;
   const [continuationSource, setContinuationSource] = useState<TabEntry | null>(null);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -560,12 +558,11 @@ export function SessionView({
                 <span className={cn("text-faint", cloud && HEADER_TIGHT)}>/</span>
               </>
             )}
-            {local && workspaceLabel ? (
+            {/* Beside the tabs neither the name nor the branch is drawn (#477): the sidebar's rows show both. */}
+            {strip ? null : local && workspaceLabel ? (
               /* A local chat is placed by its branch, not named by its title (the sidebar names it): "terminalx / main". */
               <span
-                className={cn("flex min-w-0 items-center gap-1 text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
-                // Beside the tabs the branch keeps its icon and about its first ten characters, as the title does, instead of folding to nothing.
-                style={strip ? { minWidth: `calc(${Math.min(workspaceShown?.length ?? 0, 10)}ch + 1.125rem)` } : undefined}
+                className="flex min-w-0 items-center gap-1 text-foreground"
                 title={[session.title, workspaceTitle, baseNote].filter(Boolean).join("\n")}
                 data-testid="session-branch"
               >
@@ -586,13 +583,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
               </span>
             ) : (
-              <span
-                className={cn("truncate text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
-                // Beside the tabs the name keeps about its first ten characters, or all of a shorter one.
-                style={strip ? { minWidth: `${Math.min(session.title.length, 10)}ch` } : undefined}
-                title={strip ? [`${quick ? sessionProjectName(session, project) : (project?.name ?? "project")} / ${session.title}`, workspaceTitle, baseNote].filter(Boolean).join("\n") : session.title}
-                data-testid="session-title"
-              >
+              <span className="truncate text-foreground" title={session.title} data-testid="session-title">
                 {session.title}
               </span>
             )}
@@ -687,7 +678,7 @@ export function SessionView({
                 {session.worktreeRemoved && <span className="text-faint">· workspace removed</span>}
               </span>
             )}
-            {/* Beside the tabs only a base that may be out of date is said aloud; an ordinary one is on the title's hover. */}
+            {/* Beside the tabs only a base that may be out of date is said aloud. */}
             {session.worktreeBase && (!strip || session.worktreeBase.warning) && (
               <span
                 role={session.worktreeBase.warning ? "status" : undefined}
@@ -717,7 +708,8 @@ export function SessionView({
               <div aria-hidden className="min-w-6 flex-[0.001_1_0%] self-stretch @max-[415px]/session-header:min-w-2" data-testid="session-header-handle" />
             </>
           )}
-          <div className={cn("flex shrink-0 items-center gap-0.5", !strip && "ml-auto", !compact && !strip && "max-w-[70%]")}>
+          {/* At the right edge whatever the width: room the tabs leave unused goes before these, not after them (#477). */}
+          <div className={cn("ml-auto flex shrink-0 items-center gap-0.5", !compact && !strip && "max-w-[70%]")}>
             {/* The compact (floating) window has no share dialog to open. */}
             {local && !compact && <LocalShareButton sessionId={session.id} labelClassName={strip ? STRIP_TIGHT : undefined} />}
             {/* Keyed by session: a menu left open never carries over to another session. */}
