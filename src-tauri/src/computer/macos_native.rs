@@ -7,9 +7,15 @@
 //!    keeps TCC looking at the helper's identity, not the app that launched it).
 //!    The per-launch token is handed over on an inherited pipe, never a file,
 //!    so no other process of this user can read it;
-//! 3. connect with retries until the helper binds. The helper serves only the
-//!    process that started it (and, in a release, only if that process is the
-//!    signed TerminalX app): see `PeerTrust` in the Swift package;
+//!    The helper is started suspended and runs only once the system has
+//!    confirmed that the code in that process is the helper shipped with this
+//!    app (its cdhash; see [`super::code_identity`]). The bundle it runs from
+//!    is resolved again before every start, a restart included;
+//! 3. connect with retries until the helper binds, then check the socket's
+//!    peer the same way, by its audit token: it must be the child just
+//!    started and still run the expected code. The helper in turn serves only
+//!    the process that started it (and, in a release, only if that process is
+//!    the signed TerminalX app): see `PeerTrust` in the Swift package;
 //! 4. `handshake` must answer protocol version 1 and the capability matrix;
 //! 5. every later request carries the token, is answered on one line, and
 //!    times out after 60 s, which tears the connection down;
@@ -26,7 +32,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::code_identity::Peer;
 use super::{ActionMethod, ComputerError, ComputerProvider, REQUIRED_PROTOCOL_VERSION};
+
+/// Decides whether a helper process runs the expected code; `Err` says why
+/// not. See [`super::code_identity::check`].
+pub type CodeCheck = std::sync::Arc<dyn Fn(Peer) -> Result<(), String> + Send + Sync>;
+
+/// What to start: the helper's executable and how to recognise it.
+#[derive(Clone)]
+pub struct HelperLaunch {
+    pub executable: PathBuf,
+    pub check: CodeCheck,
+}
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -313,22 +331,48 @@ fn token_pipe(token: &str) -> std::io::Result<std::os::fd::OwnedFd> {
 
 /// Spawn `executable --agent <socket> --token-fd 3` with stdio on /dev/null,
 /// the token pipe as the only other inherited descriptor, and (on macOS) its
-/// own TCC identity.
+/// own TCC identity. It runs only if `check` accepts it.
 #[cfg(unix)]
-fn spawn_helper(executable: &Path, socket: &Path, token: &str) -> std::io::Result<HelperProcess> {
-    use std::ffi::CString;
+fn spawn_helper(executable: &Path, socket: &Path, token: &str, check: &CodeCheck) -> std::io::Result<HelperProcess> {
     use std::os::fd::AsRawFd;
+    let token_read = token_pipe(token)?;
+    let args = [
+        std::ffi::OsString::from("--agent"),
+        socket.as_os_str().to_owned(),
+        "--token-fd".into(),
+        TOKEN_FD.to_string().into(),
+    ];
+    spawn_checked(executable, &args, None, Some(token_read.as_raw_fd()), check)
+}
+
+/// `POSIX_SPAWN_START_SUSPENDED` (`<sys/spawn.h>`).
+#[cfg(target_os = "macos")]
+const POSIX_SPAWN_START_SUSPENDED: libc::c_short = 0x0080;
+
+/// Spawn a helper process with its own TCC identity (the responsibility
+/// disclaim), stdin and stderr on /dev/null, stdout on `stdout` or
+/// /dev/null, and `token_fd` (if any) as descriptor 3; nothing else is
+/// inherited. On macOS it starts suspended and is resumed only once `check`
+/// has accepted the code running in it; otherwise it is killed before it ran
+/// at all, so code that is not the helper never sees the token or the
+/// environment.
+#[cfg(unix)]
+pub fn spawn_checked(
+    executable: &Path,
+    args: &[std::ffi::OsString],
+    stdout: Option<libc::c_int>,
+    token_fd: Option<libc::c_int>,
+    check: &CodeCheck,
+) -> std::io::Result<HelperProcess> {
+    use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let token_read = token_pipe(token)?;
     let program = CString::new(executable.as_os_str().as_bytes())?;
-    let args = [
-        program.clone(),
-        CString::new("--agent")?,
-        CString::new(socket.as_os_str().as_bytes())?,
-        CString::new("--token-fd")?,
-        CString::new(TOKEN_FD.to_string())?,
-    ];
+    let mut args_c = vec![program.clone()];
+    for arg in args {
+        args_c.push(CString::new(arg.as_bytes())?);
+    }
+    let args = args_c;
     let mut argv: Vec<*mut libc::c_char> = args.iter().map(|a| a.as_ptr() as *mut _).collect();
     argv.push(std::ptr::null_mut());
     let dev_null = CString::new("/dev/null")?;
@@ -358,13 +402,18 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &str) -> std::io::Resul
         }
         #[cfg(target_os = "macos")]
         {
-            libc::posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+            libc::posix_spawnattr_setflags(&mut attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_START_SUSPENDED);
             responsibility_spawnattrs_setdisclaim(&mut attr, 1);
         }
         libc::posix_spawn_file_actions_addopen(&mut actions, 0, dev_null.as_ptr(), libc::O_RDONLY, 0);
-        libc::posix_spawn_file_actions_addopen(&mut actions, 1, dev_null.as_ptr(), libc::O_WRONLY, 0);
+        match stdout {
+            Some(fd) => libc::posix_spawn_file_actions_adddup2(&mut actions, fd, 1),
+            None => libc::posix_spawn_file_actions_addopen(&mut actions, 1, dev_null.as_ptr(), libc::O_WRONLY, 0),
+        };
         libc::posix_spawn_file_actions_addopen(&mut actions, 2, dev_null.as_ptr(), libc::O_WRONLY, 0);
-        libc::posix_spawn_file_actions_adddup2(&mut actions, token_read.as_raw_fd(), TOKEN_FD);
+        if let Some(fd) = token_fd {
+            libc::posix_spawn_file_actions_adddup2(&mut actions, fd, TOKEN_FD);
+        }
         let mut pid: libc::pid_t = 0;
         let result = libc::posix_spawn(&mut pid, program.as_ptr(), &actions, &attr, argv.as_ptr(), envp.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut actions);
@@ -372,7 +421,15 @@ fn spawn_helper(executable: &Path, socket: &Path, token: &str) -> std::io::Resul
         if result != 0 {
             return Err(std::io::Error::from_raw_os_error(result));
         }
-        Ok(HelperProcess { pid, status: None })
+        let mut child = HelperProcess { pid, status: None };
+        if let Err(reason) = check(Peer::Pid(pid)) {
+            libc::kill(pid, libc::SIGKILL);
+            child.wait();
+            return Err(std::io::Error::other(format!("{} was refused: {reason}", executable.display())));
+        }
+        #[cfg(target_os = "macos")]
+        libc::kill(pid, libc::SIGCONT);
+        Ok(child)
     }
 }
 
@@ -405,7 +462,10 @@ impl Session {
 }
 
 pub struct MacosNativeProvider {
-    executable: PathBuf,
+    /// Where the helper is and what it must be, asked again before every
+    /// start: the copy it runs from may have changed since the last one.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    resolve: Box<dyn Fn() -> Result<HelperLaunch, ComputerError> + Send>,
     /// Run before every helper start, the first and each restart.
     #[cfg_attr(not(unix), allow(dead_code))]
     before_start: Option<Box<dyn Fn() + Send>>,
@@ -414,9 +474,9 @@ pub struct MacosNativeProvider {
 }
 
 impl MacosNativeProvider {
-    pub fn new(executable: PathBuf) -> Self {
+    pub fn new(resolve: impl Fn() -> Result<HelperLaunch, ComputerError> + Send + 'static) -> Self {
         Self {
-            executable,
+            resolve: Box::new(resolve),
             before_start: None,
             #[cfg(unix)]
             session: None,
@@ -443,7 +503,8 @@ impl MacosNativeProvider {
         if let Some(hook) = &self.before_start {
             hook();
         }
-        let mut started = start_session(&self.executable)?;
+        let launch = (self.resolve)()?;
+        let mut started = start_session(&launch.executable, &launch.check)?;
         match evaluate_handshake(started.handshake()?) {
             Handshake::Compatible(capabilities) => Ok(Session {
                 transport: started.transport,
@@ -642,8 +703,8 @@ pub fn sweep_stale_socket_dirs_in(base: &Path) -> usize {
 
 /// Spawn the helper and connect to its socket.
 #[cfg(unix)]
-pub fn start_session(executable: &Path) -> Result<StartedSession, ComputerError> {
-    start_session_in(executable, &socket_base_dir(std::env::temp_dir()))
+pub fn start_session(executable: &Path, check: &CodeCheck) -> Result<StartedSession, ComputerError> {
+    start_session_in(executable, &socket_base_dir(std::env::temp_dir()), check)
 }
 
 #[cfg(unix)]
@@ -659,7 +720,7 @@ fn socket_base_dir(preferred: PathBuf) -> PathBuf {
 /// Spawn the helper with its socket directory under `base`. Public so tests
 /// can drive a fake helper and assert that nothing is left behind.
 #[cfg(unix)]
-pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession, ComputerError> {
+pub fn start_session_in(executable: &Path, base: &Path, check: &CodeCheck) -> Result<StartedSession, ComputerError> {
     use std::os::unix::fs::DirBuilderExt;
 
     let suffix = uuid::Uuid::new_v4().simple().to_string();
@@ -671,7 +732,7 @@ pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession
     let socket_path = socket_dir.join("provider.sock");
     let token = uuid::Uuid::new_v4().to_string();
 
-    let mut child = match spawn_helper(executable, &socket_path, &token) {
+    let mut child = match spawn_helper(executable, &socket_path, &token, check) {
         Ok(child) => child,
         Err(error) => {
             let _ = std::fs::remove_dir_all(&socket_dir);
@@ -681,7 +742,10 @@ pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession
         }
     };
 
-    match connect_with_retry(&socket_path, &mut child, CONNECT_TIMEOUT) {
+    match connect_with_retry(&socket_path, &mut child, CONNECT_TIMEOUT).and_then(|stream| {
+        check_socket_peer(&stream, child.id(), check)?;
+        Ok(stream)
+    }) {
         Ok(stream) => {
             match LineTransport::new(stream, token, REQUEST_TIMEOUT) {
                 Ok(transport) => Ok(StartedSession {
@@ -704,6 +768,30 @@ pub fn start_session_in(executable: &Path, base: &Path) -> Result<StartedSession
             Err(error)
         }
     }
+}
+
+/// The process listening on the helper's socket must be the child just
+/// started, still running the expected code: nothing else could have bound
+/// the socket in the app's private directory, but this does not rely on it.
+#[cfg(unix)]
+fn check_socket_peer(stream: &std::os::unix::net::UnixStream, child: u32, check: &CodeCheck) -> Result<(), ComputerError> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let refused = |reason: String| {
+            ComputerError::new("provider_incompatible", format!("the computer-use helper was refused: {reason}"))
+        };
+        let token = super::code_identity::peer_audit_token(stream.as_raw_fd())
+            .map_err(|e| refused(format!("its socket peer could not be identified: {e}")))?;
+        let peer = super::code_identity::audit_token_pid(&token);
+        if u32::try_from(peer).ok() != Some(child) {
+            return Err(refused(format!("the socket is held by pid {peer}, not by the helper just started (pid {child})")));
+        }
+        check(Peer::AuditToken(token)).map_err(refused)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (stream, child, check);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -848,7 +936,7 @@ mod tests {
     #[test]
     fn starting_a_missing_helper_cleans_up_its_socket_directory() {
         let base = tempfile::tempdir().unwrap();
-        let error = start_session_in(Path::new("/definitely/not/a/helper"), base.path()).err().unwrap();
+        let error = start_session_in(Path::new("/definitely/not/a/helper"), base.path(), &accept_all()).err().unwrap();
         assert_eq!(error.code, "accessibility_error");
         assert!(error.message.contains("failed to start"));
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
@@ -857,7 +945,7 @@ mod tests {
     #[test]
     fn a_helper_that_exits_without_listening_is_reported_and_reaped() {
         let base = tempfile::tempdir().unwrap();
-        let error = start_session_in(Path::new("/usr/bin/true"), base.path()).err().unwrap();
+        let error = start_session_in(Path::new("/usr/bin/true"), base.path(), &accept_all()).err().unwrap();
         assert_eq!(error.code, "accessibility_error");
         assert!(error.message.contains("exited before connecting"), "{}", error.message);
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
@@ -867,10 +955,13 @@ mod tests {
     /// Needs a built helper (`pnpm build:computer-macos --dev`) and macOS 14+.
     #[test]
     #[ignore]
+    #[cfg(target_os = "macos")]
     fn real_helper_round_trip() {
         let app = super::super::helper_app_path(None).expect("build the helper first");
         let executable = super::super::helper_executable_in(&app).unwrap();
-        let mut provider = MacosNativeProvider::new(executable);
+        let expected = super::super::code_identity::expected_for(&app, None).expect("a signed helper");
+        let check: CodeCheck = std::sync::Arc::new(move |peer| super::super::code_identity::check(peer, &expected));
+        let mut provider = MacosNativeProvider::new(move || Ok(HelperLaunch { executable: executable.clone(), check: check.clone() }));
         let capabilities = provider.capabilities().unwrap();
         println!("capabilities: {capabilities}");
         assert_eq!(capabilities["protocolVersion"], 1);
@@ -944,10 +1035,72 @@ mod tests {
         // python server, answers handshake with protocol 1, and exits on
         // terminate exactly like the Swift helper.
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-helper.sh");
+        let script = fake_helper(dir.path());
+
+        let mut provider = unchecked(script);
+        let capabilities = provider.capabilities().unwrap();
+        assert_eq!(capabilities["provider"], "fake");
+        let windows = provider.list_windows(json!({"app": "Finder"})).unwrap();
+        assert_eq!(windows["echo"], "listWindows");
+        assert_eq!(windows["params"]["app"], "Finder");
+        let unsupported = provider.action(ActionMethod::Drag, json!({})).unwrap_err();
+        assert_eq!(unsupported.code, "unsupported_capability");
+        let clicked = provider.action(ActionMethod::Click, json!({"app": "Finder", "elementIndex": 1})).unwrap();
+        assert_eq!(clicked["echo"], "click");
+
+        let socket_dir = provider.session.as_ref().unwrap().socket_dir.clone();
+        assert!(socket_dir.exists());
+        let left: Vec<_> = std::fs::read_dir(&socket_dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["provider.sock"], "the token is handed over a pipe and never written to disk");
+        let pid = provider.session.as_ref().unwrap().child.id();
+        provider.shutdown();
+        assert!(!socket_dir.exists(), "socket directory must be removed on shutdown");
+        assert!(!process_alive(pid), "helper must exit on terminate");
+    }
+
+    #[test]
+    fn the_hook_runs_before_every_helper_start_including_a_restart() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        // A helper that exits at once: every call is a fresh start attempt.
+        let mut provider = unchecked(PathBuf::from("/usr/bin/true")).before_each_start(move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(provider.capabilities().is_err());
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(provider.list_apps().is_err());
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_test_escape_hatch_travels_only_in_the_handshake_and_only_when_asked() {
+        assert_eq!(handshake_params(false), json!({}));
+        assert_eq!(handshake_params(true), json!({"allowOwnWindowsForTests": true}));
+    }
+
+    #[test]
+    fn the_token_pipe_holds_the_whole_token_and_then_ends() {
+        use std::io::Read;
+        let read = token_pipe("per-launch-secret").unwrap();
+        use std::os::fd::AsRawFd;
+        assert_ne!(read.as_raw_fd(), TOKEN_FD);
+        let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0, "no other child may inherit the token");
+        let mut text = String::new();
+        std::fs::File::from(read).read_to_string(&mut text).unwrap();
+        assert_eq!(text, "per-launch-secret");
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn fake_helper(dir: &Path) -> PathBuf {
+        let script = dir.join("fake-helper.sh");
         std::fs::write(
             &script,
             r#"#!/bin/sh
+echo ran >> "@RAN@"
 exec /usr/bin/python3 - "$2" "$4" <<'PY'
 import json, os, socket, sys
 sock_path, token_fd = sys.argv[1], int(sys.argv[2])
@@ -984,68 +1137,118 @@ while True:
             reply = {"id": req["id"], "ok": True, "result": {"echo": req["method"], "params": req["params"]}}
         conn.sendall((json.dumps(reply) + "\n").encode())
 PY
-"#,
+"#
+            .replace("@RAN@", &dir.join("ran").to_string_lossy()),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let mut provider = MacosNativeProvider::new(script);
-        let capabilities = provider.capabilities().unwrap();
-        assert_eq!(capabilities["provider"], "fake");
-        let windows = provider.list_windows(json!({"app": "Finder"})).unwrap();
-        assert_eq!(windows["echo"], "listWindows");
-        assert_eq!(windows["params"]["app"], "Finder");
-        let unsupported = provider.action(ActionMethod::Drag, json!({})).unwrap_err();
-        assert_eq!(unsupported.code, "unsupported_capability");
-        let clicked = provider.action(ActionMethod::Click, json!({"app": "Finder", "elementIndex": 1})).unwrap();
-        assert_eq!(clicked["echo"], "click");
-
-        let socket_dir = provider.session.as_ref().unwrap().socket_dir.clone();
-        assert!(socket_dir.exists());
-        let left: Vec<_> = std::fs::read_dir(&socket_dir).unwrap().flatten().map(|e| e.file_name()).collect();
-        assert_eq!(left, ["provider.sock"], "the token is handed over a pipe and never written to disk");
-        let pid = provider.session.as_ref().unwrap().child.id();
-        provider.shutdown();
-        assert!(!socket_dir.exists(), "socket directory must be removed on shutdown");
-        assert!(!process_alive(pid), "helper must exit on terminate");
+        script
     }
 
+    fn accept_all() -> CodeCheck {
+        std::sync::Arc::new(|_| Ok(()))
+    }
+
+    /// A provider that always starts `executable` and accepts any code.
+    fn unchecked(executable: PathBuf) -> MacosNativeProvider {
+        MacosNativeProvider::new(move || Ok(HelperLaunch { executable: executable.clone(), check: accept_all() }))
+    }
+
+    // A suspended start and a socket audit token exist only on macOS.
     #[test]
-    fn the_hook_runs_before_every_helper_start_including_a_restart() {
-        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let seen = count.clone();
-        // A helper that exits at once: every call is a fresh start attempt.
-        let mut provider = MacosNativeProvider::new(PathBuf::from("/usr/bin/true")).before_each_start(move || {
-            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(target_os = "macos")]
+    fn a_helper_whose_code_is_refused_never_runs_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let script = fake_helper(dir.path());
+        let ran = dir.path().join("ran");
+        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = checked.clone();
+        let marker = ran.clone();
+        let refuse: CodeCheck = std::sync::Arc::new(move |peer| {
+            seen.lock().unwrap().push(peer);
+            // Give an unsuspended process every chance to run its first line
+            // (a new script can wait on a malware scan) before deciding.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err("not the bundled helper".into())
         });
-        assert!(provider.capabilities().is_err());
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(provider.list_apps().is_err());
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let error = start_session_in(&script, base.path(), &refuse).err().unwrap();
+        assert!(error.message.contains("was refused: not the bundled helper"), "{}", error.message);
+        assert!(matches!(checked.lock().unwrap().as_slice(), [Peer::Pid(_)]), "checked once, by pid, before it ran");
+        assert!(!ran.exists(), "a refused helper must not run a single line");
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
+    }
+
+    // A suspended start and a socket audit token exist only on macOS.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn an_accepted_helper_is_checked_by_pid_and_again_on_its_socket() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let script = fake_helper(dir.path());
+        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = checked.clone();
+        let check: CodeCheck = std::sync::Arc::new(move |peer| {
+            seen.lock().unwrap().push(peer);
+            Ok(())
+        });
+        let started = start_session_in(&script, base.path(), &check).unwrap();
+        let pid = started.child.id() as i32;
+        let checked = checked.lock().unwrap().clone();
+        assert_eq!(checked.len(), 2);
+        assert_eq!(checked[0], Peer::Pid(pid));
+        let Peer::AuditToken(token) = checked[1] else { panic!("the socket peer is checked by audit token") };
+        assert_eq!(super::super::code_identity::audit_token_pid(&token), pid);
+        started.close();
+    }
+
+    // A suspended start and a socket audit token exist only on macOS.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_socket_held_by_another_process_than_the_helper_is_refused() {
+        // The "helper" hands the socket to a process of its own and waits.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let script = dir.path().join("forwarding-helper.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n/usr/bin/python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(5)' \"$2\" &\nsleep 5\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let error = start_session_in(&script, base.path(), &accept_all()).err().unwrap();
+        assert_eq!(error.code, "provider_incompatible");
+        assert!(error.message.contains("not by the helper just started"), "{}", error.message);
+        assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
     }
 
     #[test]
-    fn the_test_escape_hatch_travels_only_in_the_handshake_and_only_when_asked() {
-        assert_eq!(handshake_params(false), json!({}));
-        assert_eq!(handshake_params(true), json!({"allowOwnWindowsForTests": true}));
-    }
-
-    #[test]
-    fn the_token_pipe_holds_the_whole_token_and_then_ends() {
-        use std::io::Read;
-        let read = token_pipe("per-launch-secret").unwrap();
-        use std::os::fd::AsRawFd;
-        assert_ne!(read.as_raw_fd(), TOKEN_FD);
-        let flags = unsafe { libc::fcntl(read.as_raw_fd(), libc::F_GETFD) };
-        assert_ne!(flags & libc::FD_CLOEXEC, 0, "no other child may inherit the token");
-        let mut text = String::new();
-        std::fs::File::from(read).read_to_string(&mut text).unwrap();
-        assert_eq!(text, "per-launch-secret");
-    }
-
-    fn process_alive(pid: u32) -> bool {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    fn every_start_resolves_the_helper_again_so_a_restart_is_checked_too() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let script = fake_helper(dir.path());
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = starts.clone();
+        // The first start finds the real helper; by the restart the copy has
+        // been swapped and the check refuses it.
+        let mut provider = MacosNativeProvider::new(move || {
+            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let check: CodeCheck = if n == 0 { accept_all() } else { std::sync::Arc::new(|_| Err("swapped".into())) };
+            Ok(HelperLaunch { executable: script.clone(), check })
+        });
+        assert_eq!(provider.capabilities().unwrap()["provider"], "fake");
+        // The helper dies (killed by whoever swapped its bundle).
+        let pid = provider.session.as_ref().unwrap().child.id();
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(provider.list_apps().is_err(), "the dead helper's socket fails");
+        let error = provider.list_apps().unwrap_err();
+        assert!(error.message.contains("swapped"), "{}", error.message);
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
 }

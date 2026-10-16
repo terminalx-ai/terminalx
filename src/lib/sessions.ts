@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, type WorkspaceRemoveOptions } from "@/lib/api";
+import { getPrefs } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
 import { closeSessionShells, dropSessionTerminals, dropTabTerminals, setArchivedTerminalSessions, setSelectedAgent } from "@/lib/terminal";
@@ -24,6 +25,8 @@ interface State {
   lastProject: string | null;
   sessions: SessionEntry[];
   harnesses: HarnessInfo[];
+  /** The folder New chat runs in; its sessions are chats, listed apart from projects. */
+  chatsPath: string | null;
   selectedSessionId: string | null;
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
@@ -64,6 +67,7 @@ let state: State = {
   lastProject: null,
   sessions: [],
   harnesses: [],
+  chatsPath: null,
   selectedSessionId: null,
   navigationVersion: 0,
   view: "new",
@@ -132,6 +136,7 @@ export async function bootSessions() {
   const [projects, sessions] = await Promise.all([api.listProjects(), api.listSessions()]);
   set({ loaded: true, projects: projects.projects, lastProject: projects.lastSelected, sessions });
   void api.listHarnesses().then((harnesses) => set({ harnesses })).catch(() => {});
+  void api.chatsDir().then((chatsPath) => set({ chatsPath })).catch(() => {});
   try {
     await listen<SessionEntry>("session_created", (e) => upsertSession(e.payload));
     await listen<SessionEntry>("session_updated", (e) => upsertSession(e.payload));
@@ -182,6 +187,13 @@ export function upsertSession(s: SessionEntry) {
   const known = state.workspaces[s.projectPath] ?? [];
   const stale = !s.worktreeRemoved && !known.some((w) => w.path === s.cwd);
   if (stale && !state.workspacesLoading[s.projectPath]) void refreshWorkspaces(s.projectPath);
+  // A chat that followed its agent into a repo the app had not seen: the
+  // backend registered it as a project, so the list catches up.
+  const linked = s.link?.path;
+  if (linked && !state.projects.some((project) => project.path === linked)) {
+    void api.listProjects().then((projects) => set({ projects: projects.projects })).catch(() => {});
+    if (!state.workspacesLoading[linked]) void refreshWorkspaces(linked);
+  }
 }
 
 /** Forget sessions the backend has deleted, dropping the selection if it was one of them. */
@@ -453,6 +465,40 @@ export async function addProject(path: string) {
   const exists = state.projects.some((x) => x.path === p.path);
   set({ projects: exists ? state.projects.map((existing) => existing.path === p.path ? p : existing) : [...state.projects, p], lastProject: p.path });
   return p;
+}
+
+/**
+ * The sidebar's New chat: an agent conversation in the store's Chats folder,
+ * so talking to a model needs no project. The folder is a plain directory, so
+ * the session runs in place with no worktree, and it is never added as a
+ * project: the sidebar lists its sessions on their own.
+ */
+export async function startChat(place?: { projectPath: string; cwd?: string; fromBranch?: string }): Promise<SessionEntry> {
+  const harness = state.harnesses.find((item) => item.id === "claude" && item.available) ?? state.harnesses.find((item) => item.available);
+  if (!harness) throw new Error("Install and sign in to an agent to start a chat.");
+  // Without a place, a chat of its own; with one, another session in that
+  // checkout, on its branch, or in a new workspace branched from `fromBranch`.
+  const chatsPath = place ? null : (state.chatsPath ?? (await api.chatsDir()));
+  if (chatsPath && chatsPath !== state.chatsPath) set({ chatsPath });
+  const prefs = getPrefs();
+  const session = await api.createSession({
+    projectPath: place?.projectPath ?? chatsPath!,
+    cwd: place?.fromBranch ? null : (place?.cwd ?? chatsPath!),
+    title: "Chat",
+    useWorktree: !!place?.fromBranch,
+    baseRef: place?.fromBranch ?? null,
+    // The workspace is named after the branch it comes from (made unique), not after the chat.
+    worktreeName: place?.fromBranch ? (place.fromBranch.split("/").pop() ?? null) : null,
+    tab: {
+      harness: harness.id,
+      model: prefs.lastModel[harness.id] ?? "",
+      effort: prefs.lastEffort[harness.id] ?? null,
+      permissionMode: prefs.lastMode,
+    },
+  });
+  upsertSession(session);
+  selectSession(session.id);
+  return session;
 }
 
 export async function removeProject(path: string) {

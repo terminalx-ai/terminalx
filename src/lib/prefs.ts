@@ -44,6 +44,12 @@ export interface Prefs {
   organizationDisplay: "all" | "one";
   selectedOrganization: string | null;
   /**
+   * The sidebar's shape: "simple" groups the conversations under their
+   * projects; "list" is one flat list of chats, newest first, as a messaging
+   * app draws it.
+   */
+  sidebarLayout: "simple" | "list";
+  /**
    * Cloud projects the reader added with "+ Add project", per organization:
    * repository identities (`host/owner/name`). Projects with workspaces show
    * without being added.
@@ -108,6 +114,7 @@ const DEFAULTS: Prefs = {
   useWorktree: true,
   bypassConfirmed: false,
   sidebarSections: {},
+  sidebarLayout: "simple",
   hiddenOrganizations: [],
   organizationDisplay: "all",
   selectedOrganization: null,
@@ -157,6 +164,8 @@ function load(): Prefs {
     prefs.hiddenOrganizations = Array.isArray(prefs.hiddenOrganizations) ? [...new Set(prefs.hiddenOrganizations.filter((id: unknown) => typeof id === "string"))] : [];
     prefs.organizationDisplay = prefs.organizationDisplay === "one" ? "one" : "all";
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
+    // The project tree ("detailed") is gone; anyone who had it gets the default.
+    prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,

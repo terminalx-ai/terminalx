@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Loader2, Pencil } from "lucide-react";
+import { Check, Loader2, Pencil } from "@/icons";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";

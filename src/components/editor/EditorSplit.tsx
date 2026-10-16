@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { PanelRightClose, X } from "lucide-react";
+import { PanelRightClose, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";

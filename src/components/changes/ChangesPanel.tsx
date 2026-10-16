@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Columns2, Rows2 } from "lucide-react";
+import { Columns2, Rows2 } from "@/icons";
 import { changeRange, useChanges, useGitWorkingChanges, type ChangeRange } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
 import { cn } from "@/lib/cn";

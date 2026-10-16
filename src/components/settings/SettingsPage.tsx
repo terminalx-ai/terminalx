@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -51,9 +51,15 @@ export function SettingsPage({
   onBack,
   initialTab = DEFAULT_SETTINGS_TAB,
   openRequest = 0,
+  onOpenSkills,
+  onOpenUsage,
 }: {
   onBack: () => void;
   initialTab?: SettingsTab;
+  /** Open the Skills page (leaving Settings); the Agents section offers it. */
+  onOpenSkills?: () => void;
+  /** Open the usage page (leaving Settings); the Appearance section offers it, beside the status bar's usage switch. */
+  onOpenUsage?: () => void;
   /**
    * Counts each time Settings is asked for. Asking again while it is open
    * goes to `initialTab` even when that is the section it opened on and the
@@ -116,9 +122,9 @@ export function SettingsPage({
             {tab === "account" && <AccountTab />}
             {tab === "devices" && <DevicesTab />}
             {tab === "general" && <GeneralTab />}
-            {tab === "appearance" && <AppearanceTab />}
+            {tab === "appearance" && <AppearanceTab onOpenUsage={onOpenUsage} />}
             {tab === "organizations" && <OrganizationsTab />}
-            {tab === "agents" && <AgentsTab />}
+            {tab === "agents" && <AgentsTab onOpenSkills={onOpenSkills} />}
             {tab === "transcription" && <TranscriptionTab />}
             {tab === "integrations" && <IntegrationsTab />}
             {tab === "storage" && (
@@ -236,7 +242,7 @@ function GeneralTab() {
   );
 }
 
-function AppearanceTab() {
+function AppearanceTab({ onOpenUsage }: { onOpenUsage?: () => void }) {
   const { theme, mode, resolvedMode } = useTheme();
   const prefs = usePrefs();
   const light = hasLightMode(theme);
@@ -335,6 +341,17 @@ function AppearanceTab() {
           />
         }
       />
+      {onOpenUsage && (
+        <SettingRow
+          label="Usage"
+          description="Tokens, cost and rate limits across every agent, by day and by project."
+          control={
+            <Button size="sm" variant="outline" onClick={onOpenUsage}>
+              Open usage <ExternalLink />
+            </Button>
+          }
+        />
+      )}
       <SettingRow
         label="Status bar"
         description="Show app-wide agent usage and the resources used by live tabs along the bottom edge."
@@ -453,7 +470,7 @@ function BrowserRuntimeRow() {
 }
 
 /** What is installed, where, and how to get the rest. Nothing is installed by the app. */
-function AgentsTab() {
+function AgentsTab({ onOpenSkills }: { onOpenSkills?: () => void }) {
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
   const [skill, setSkill] = useState<SkillInstallStatus | null>(null);
@@ -475,6 +492,17 @@ function AgentsTab() {
   };
   return (
     <div className="flex flex-col gap-3">
+      {onOpenSkills && (
+        <SettingRow
+          label="Skills"
+          description="The skills your agents can use: what is installed, and what to add."
+          control={
+            <Button size="sm" variant="outline" onClick={onOpenSkills}>
+              Open skills <ExternalLink />
+            </Button>
+          }
+        />
+      )}
       <div className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5">
         <div className="min-w-0">
           <div className="text-sm font-medium">TerminalX agent skill</div>

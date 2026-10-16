@@ -12,7 +12,7 @@ import {
   Loader2,
   RefreshCw,
   Sparkles,
-} from "lucide-react";
+} from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";

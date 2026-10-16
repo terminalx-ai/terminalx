@@ -1,6 +1,7 @@
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, Globe, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "lucide-react";
+import { CalendarClock, CircleDot, Cloud, FolderOpen, GitBranch, Globe, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "@/icons";
+import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -195,6 +196,15 @@ const HEADER_CHIP_ICON = "my-1 size-3 shrink-0";
 const HEADER_CHIP_LABEL = "min-w-[2ch] grow basis-0";
 const HEADER_PROJECT_YIELDS = "min-w-0 shrink-[40]";
 const HEADER_TIGHT = "@max-[360px]/session-header:hidden";
+
+/** GitHub's mark (the Octicons `mark-github` outline, MIT), since the icon set carries no brand marks. */
+function GithubMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden className={className} fill="currentColor">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  );
+}
 
 /**
  * A local session's header with the tab strip in it (the main window, unless
@@ -405,6 +415,8 @@ export function SessionView({
   // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
   const localWorkspace = cloud ? undefined : localRemovableWorkspace(session);
   const project = store.projects.find((p) => p.path === session.projectPath);
+  // The GitHub account the folder is connected to: a chat's is its linked repo's; a plain folder has none; a cloud session's is not this computer's to say.
+  const githubIdentity = useGithubIdentity(cloud || !isGit ? null : (session.link?.path ?? session.cwd));
   const terminals = useTerminals();
   // A shell an agent was started in is that agent's tab (#437), drawn by its tab view and not as a shell beside it.
   const shellPanes = local ? terminals.panes.filter((pane) => pane.sessionId === session.id && !pane.hidden && !session.tabs.some((tab) => tab.pane === pane.id)) : [];
@@ -522,6 +534,20 @@ export function SessionView({
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
           /* Beside the tabs its parts are items of the header's own row (it has no box), so each gives way in its turn and none runs under a tab. */
           <div className={cn("text-sm", strip ? "contents" : "flex min-w-0 flex-1 items-center gap-1.5 px-1", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
+            {/* The GitHub account the folder is connected to, first: the mark alone, the account on hover; a click asks GitHub again. */}
+            {githubIdentity?.login && (
+              <WithTooltip label={`Connected to GitHub as ${githubIdentity.login}. ${describeGithubIdentity(githubIdentity)}`}>
+                <button
+                  type="button"
+                  onClick={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)}
+                  aria-label={`Connected to GitHub as ${githubIdentity.login}`}
+                  className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-veil-raised hover:text-foreground"
+                  data-testid="session-github-account"
+                >
+                  <GithubMark className="size-3.5" />
+                </button>
+              </WithTooltip>
+            )}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
             {/* With the tabs in the title bar the project is on the title's hover, not beside it. */}
             {!strip && !(cloud && cloud.projectName === session.title) && (
@@ -532,15 +558,40 @@ export function SessionView({
                 <span className={cn("text-faint", cloud && HEADER_TIGHT)}>/</span>
               </>
             )}
-            <span
-              className={cn("truncate text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
-              // Beside the tabs the name keeps about its first ten characters, or all of a shorter one.
-              style={strip ? { minWidth: `${Math.min(session.title.length, 10)}ch` } : undefined}
-              title={strip ? [`${quick ? sessionProjectName(session, project) : (project?.name ?? "project")} / ${session.title}`, workspaceTitle, baseNote].filter(Boolean).join("\n") : session.title}
-              data-testid="session-title"
-            >
-              {session.title}
-            </span>
+            {local && workspaceLabel ? (
+              /* A local chat is placed by its branch, not named by its title (the sidebar names it): "terminalx / main". */
+              <span
+                className={cn("flex min-w-0 items-center gap-1 text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
+                title={[session.title, workspaceTitle, baseNote].filter(Boolean).join("\n")}
+                data-testid="session-branch"
+              >
+                <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+                {session.worktreeName && !session.worktreeRemoved ? (
+                  <WorkspaceNameEditor
+                    value={session.worktreeName}
+                    onCommit={async (requested) => {
+                      const renamed = await renameWorkspace(session.projectPath, session.cwd, requested);
+                      return renamed.name;
+                    }}
+                    onError={setRenameError}
+                    className="max-w-52"
+                  />
+                ) : (
+                  <span className="truncate">{workspaceLabel}</span>
+                )}
+                {session.worktreeRemoved && <span className="shrink-0 text-[11px] text-faint">· workspace removed</span>}
+              </span>
+            ) : (
+              <span
+                className={cn("truncate text-foreground", strip && cn("ml-1 max-w-56", STRIP_TITLE_YIELDS, STRIP_TIGHT))}
+                // Beside the tabs the name keeps about its first ten characters, or all of a shorter one.
+                style={strip ? { minWidth: `${Math.min(session.title.length, 10)}ch` } : undefined}
+                title={strip ? [`${quick ? sessionProjectName(session, project) : (project?.name ?? "project")} / ${session.title}`, workspaceTitle, baseNote].filter(Boolean).join("\n") : session.title}
+                data-testid="session-title"
+              >
+                {session.title}
+              </span>
+            )}
             {session.issue && (
               <WithTooltip label={session.issue.title}>
                 <button
@@ -604,7 +655,8 @@ export function SessionView({
                 <span className={cn("truncate", strip && HEADER_CHIP_LABEL)}>{quickChatPlace(session)}</span>
               </span>
             )}
-            {workspaceLabel && (
+            {/* A cloud session's branch is a chip after its title; a local one's is the crumb above. */}
+            {!local && workspaceLabel && (
               <span
                 className={cn(
                   "ml-1 flex items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground",

@@ -459,6 +459,39 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(guard.calls.filter((call) => call.command === "pty_kill")).toHaveLength(1);
   });
 
+  it("reads GitHub mark, project, branch: the account on the mark's hover, the chat's title nowhere in it", async () => {
+    guard.strict = false;
+    guard.local = () => null;
+    guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
+    guard.handlers.github_identity = () => ({ login: "trade100x", source: "ssh", email: "me@example.com", repo: "me/api" });
+    const local: SessionEntry = {
+      id: "local-gh",
+      projectPath: "/Users/me/shop",
+      cwd: "/Users/me/shop",
+      branch: "main",
+      title: "Local work",
+      created: "",
+      modified: "",
+      archived: false,
+      pinned: false,
+      worktreeRemoved: false,
+      tabs: [{ id: "lt-gh", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }],
+    };
+    upsertSession(local);
+    render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    const chip = await screen.findByTestId("session-github-account");
+    // The mark alone; the account is what it says on hover.
+    expect(chip.textContent).toBe("");
+    expect(chip.getAttribute("aria-label")).toBe("Connected to GitHub as trade100x");
+    const crumb = screen.getByTestId("session-breadcrumb");
+    expect(crumb.firstElementChild).toBe(chip);
+    expect(screen.getByTestId("session-project").textContent).toBe("project");
+    expect(screen.getByTestId("session-branch").textContent).toBe("main");
+    expect(screen.queryByTestId("session-title")).toBeNull();
+    // Asked about the folder the session works in, once.
+    expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: false }]);
+  });
+
   it("in the main window, is named a quick chat and says where it runs instead of showing a project or a branch", async () => {
     const session = { ...quick(), cwd: "/Users/me/notes" };
     guard.handlers.work_status = () => ({ isRepo: false, dirty: false, branch: null, ahead: 0, behind: 0 });

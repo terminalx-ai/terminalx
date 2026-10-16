@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText, Search } from "lucide-react";
+import { FileText, Search } from "@/icons";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { FileHit } from "@/lib/api";
 import { openFile } from "@/lib/editors";

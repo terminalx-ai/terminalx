@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ShieldAlert, MessageCircleQuestion } from "lucide-react";
+import { ShieldAlert, MessageCircleQuestion } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";

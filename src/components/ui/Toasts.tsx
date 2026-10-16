@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, MessageCircleQuestion, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, MessageCircleQuestion, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
 import { dismissNotice, openNotice, useNotices } from "@/lib/notify";

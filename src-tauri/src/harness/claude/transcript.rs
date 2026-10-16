@@ -326,6 +326,17 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             decode_queued_prompt(&v, out);
             return (out.len() > before).then_some(TurnMark::Opened);
         }
+        // The plan's window ran out: the CLI records the limit as an API
+        // error, with the reset time beside it.
+        "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) && (v["error"] == "rate_limit" || v["apiError"] == "usage_limit_reached") => {
+            let quota = if v["quotaLimits"].is_object() { &v["quotaLimits"] } else { &v["apiErrorParams"]["rate_limit_info"] };
+            out.push(Payload::RateLimited {
+                status: Some("rejected".into()),
+                resets_at: quota["resetsAt"].as_u64().map(|seconds| seconds.saturating_mul(1000)),
+                window: quota["rateLimitType"].as_str().map(String::from),
+                message: Some(text_of(&v["message"]["content"])),
+            });
+        }
         "assistant" if v["isApiErrorMessage"].as_bool() == Some(true) => {
             out.push(Payload::Error { message: text_of(&v["message"]["content"]), fatal: false });
         }

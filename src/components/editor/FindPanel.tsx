@@ -12,7 +12,7 @@ import {
   search,
   setSearchQuery,
 } from "@codemirror/search";
-import { ArrowDown, ArrowUp, CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, WholeWord, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search, WholeWord, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { SearchToggle } from "@/components/editor/SearchControls";

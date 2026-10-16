@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronDown, Globe, Lock, Terminal, TerminalSquare, X } from "lucide-react";
+import { ChevronDown, Globe, Lock, Terminal, TerminalSquare, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { StatusStripe } from "@/components/layout/SidebarRows";
 import { Button } from "@/components/ui/button";

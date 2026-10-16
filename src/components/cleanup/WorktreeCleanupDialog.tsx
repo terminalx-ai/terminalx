@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CleanupCandidate, CleanupVerdict } from "@terminalx/portable/workspace";
-import { Cloud, Loader2, Lock, Monitor, RefreshCw, Trash2 } from "lucide-react";
+import { Cloud, Loader2, Lock, Monitor, RefreshCw, Trash2 } from "@/icons";
 import { CleanupRunView } from "@/components/cleanup/CleanupRunView";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";

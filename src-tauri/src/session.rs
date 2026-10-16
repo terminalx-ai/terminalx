@@ -161,6 +161,14 @@ struct ComposerEcho {
     seq: u64,
 }
 
+/// A prompt typed behind a running turn, as it was typed: what to type again
+/// should the reader want it sent at once.
+#[derive(Debug, Clone)]
+struct HeldPrompt {
+    text: String,
+    attachments: Vec<String>,
+}
+
 /// A composer prompt the CLI's record was matched to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Echoed {
@@ -225,19 +233,24 @@ impl ComposerEcho {
     }
 }
 
-/// Peel the run of `[Image #1] [Image #2] …` labels off the front of an echoed
-/// prompt: how many there were, and the text after them. The labels have to be
-/// numbered in order from one; anything else is prose and stays put.
+/// Peel the run of `[Image #N] [Image #N+1] …` labels off the front of an
+/// echoed prompt: how many there were, and the text after them. The labels
+/// have to be numbered in order, but not from one: Claude Code counts the
+/// images pasted over a whole session, so the twelfth is `[Image #12]`.
+/// Anything out of order is prose and stays put.
 fn strip_image_labels(mut text: &str) -> (usize, &str) {
     let mut count = 0;
+    let mut expected: Option<usize> = None;
     loop {
         let candidate = text.trim_start();
         let Some(after_open) = candidate.strip_prefix("[Image #") else { break };
         let digits = after_open.len() - after_open.trim_start_matches(|c: char| c.is_ascii_digit()).len();
         let Some(rest) = after_open[digits..].strip_prefix(']') else { break };
-        if after_open[..digits].parse::<usize>().ok() != Some(count + 1) {
+        let Some(number) = after_open[..digits].parse::<usize>().ok().filter(|n| *n > 0) else { break };
+        if expected.is_some_and(|next| next != number) {
             break;
         }
+        expected = Some(number + 1);
         count += 1;
         text = rest;
     }
@@ -348,6 +361,13 @@ pub struct CliTab {
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     echoed: std::collections::VecDeque<ComposerEcho>,
+    /// Prompts typed behind a running turn, which the CLI holds, by their
+    /// composer `seq`: what to type again should the reader want one sent
+    /// at once. Forgotten as their echoes are.
+    held: Vec<(u64, HeldPrompt)>,
+    /// A held prompt the turn is being interrupted for: typed as a new
+    /// prompt once the turn has ended, the rest of the held ones behind it.
+    resend_after_abort: Option<u64>,
     /// The initial composer prompt, until the CLI confirms it through a
     /// transcript echo or turn activity. Startup readiness is not delivery.
     awaiting_delivery: Option<u64>,
@@ -357,6 +377,9 @@ pub struct CliTab {
     /// acknowledged it by. Past it the reader is told, rather than left
     /// looking at a message the agent may never have been given (#403).
     accept_by: Option<Instant>,
+    /// Set with `accept_by`: when, still unacknowledged, the Enter is written
+    /// once more, in case the CLI let the first one go by.
+    nudge_by: Option<Instant>,
     /// Hook threads parked on a decision, by request id.
     pub decisions: HashMap<String, std::sync::mpsc::Sender<Decision>>,
     /// Keeps the turn's reply from being drawn twice when the `Stop` hook and
@@ -387,6 +410,8 @@ pub struct CliTab {
     pub by_hand: Option<Box<follow::ByHand>>,
 }
 
+// One runtime per tab, so the CLI variant's size costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum Engine {
     Cli(CliTab),
     Acp(acp::Acp),
@@ -724,6 +749,26 @@ impl SessionManager {
                 self.after_turn_completed(&rt_arc, rt, final_message);
                 continue;
             }
+            // A prompt still unacknowledged a few seconds after its Enter has
+            // most likely kept its text in the input, the Enter having gone
+            // by (a CLI still settling after a resume does that). Enter is
+            // written once more: it sends what is there, and does nothing on
+            // an input the CLI has emptied. Not while the CLI is asking
+            // something, where an Enter would answer it.
+            let nudge = match &mut rt.engine {
+                Engine::Cli(p) if p.awaiting_delivery.is_some() && p.nudge_by.is_some_and(|by| now >= by) => {
+                    p.nudge_by = None;
+                    p.awaiting_delivery.map(|seq| (seq, p.pane_id.clone(), p.delivery_sent_at))
+                }
+                _ => None,
+            };
+            if let Some((seq, pane, sent_at)) = nudge {
+                if rt.pending.is_empty() {
+                    let written = self.terminals.write(&pane, tui::SUBMIT).map_err(|e| log::warn!("[{pane}] write the Enter again: {e:#}")).is_ok();
+                    let elapsed = sent_at.map_or(std::time::Duration::ZERO, |at| now.saturating_duration_since(at));
+                    recovery::diagnose_delivery(&rt.diagnostics_path(), seq, "nudged", elapsed, serde_json::json!({ "queued": false, "written": written }));
+                }
+            }
             // A prompt whose Enter was written to an idle CLI is acknowledged
             // at once or not at all. The pane drawing is no acknowledgement —
             // a paste landing in the composer draws too — so this does not
@@ -927,6 +972,7 @@ impl SessionManager {
         if let Engine::Cli(p) = &mut rt.engine {
             accepted = p.awaiting_delivery.take().zip(p.delivery_sent_at.take());
             p.accept_by = None;
+            p.nudge_by = None;
             p.ready.mark();
         }
         if let Some((seq, sent_at)) = accepted {
@@ -1582,6 +1628,66 @@ impl SessionManager {
         self.apply_actions(rt, actions);
         for request_id in asks {
             self.publish(rt, Payload::PermissionDecided { request_id, tool_use_id: None, allowed: false, label: "Cancelled".into(), automatic: true }, None);
+        }
+    }
+
+    /// Send a prompt the CLI is holding behind its running turn now. The turn
+    /// is interrupted; once it has ended, the prompt is typed again as a new
+    /// one, and the rest of the held prompts behind it, for the CLI to hold
+    /// again. The chat keeps the message where it was: its record is the
+    /// echo of that second typing, not a second message.
+    pub fn send_queued_now(&self, session_id: &str, tab_id: &str, seq: u64) -> Result<()> {
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        {
+            let mut rt = rt_arc.lock().unwrap();
+            let turn_open = rt.turn_open;
+            let Engine::Cli(p) = &mut rt.engine else { bail!("Only a Claude Code or Codex tab holds messages this way.") };
+            if !p.held.iter().any(|(held, _)| *held == seq) {
+                bail!("That message is no longer waiting: the agent has taken it.");
+            }
+            if !turn_open {
+                // The turn is over, so the CLI is sending what it held itself.
+                return Ok(());
+            }
+            p.resend_after_abort = Some(seq);
+            // Every held prompt is typed again after the interruption, so each
+            // record stays what it was and its echo is awaited afresh.
+            let held: Vec<u64> = p.held.iter().map(|(seq, _)| *seq).collect();
+            for echo in p.echoed.iter_mut().filter(|echo| held.contains(&echo.seq)) {
+                echo.queued = false;
+                echo.submitted = false;
+                echo.sent_at = Instant::now();
+            }
+        }
+        self.interrupt(session_id, tab_id).map(|_| ())
+    }
+
+    /// The turn was interrupted for a held prompt (`send_queued_now`): type
+    /// it now as a new prompt, and the rest of the held ones behind it.
+    fn resend_held_after_abort(&self, rt: &mut TabRuntime) {
+        let Some(rt_arc) = rt.me.upgrade() else { return };
+        let plan = match &mut rt.engine {
+            Engine::Cli(p) => p.resend_after_abort.take().and_then(|first| {
+                let at = p.held.iter().position(|(seq, _)| *seq == first)?;
+                let mut rest = std::mem::take(&mut p.held);
+                let chosen = rest.remove(at);
+                p.held = rest.clone();
+                p.turn_tail.opened();
+                p.awaiting_delivery = Some(first);
+                p.delivery_sent_at = Some(Instant::now());
+                p.accept_by = None;
+                p.nudge_by = None;
+                Some((p.pane_id.clone(), p.ready.clone(), chosen, rest))
+            }),
+            _ => None,
+        };
+        let Some((pane, ready, (seq, prompt), rest)) = plan else { return };
+        rt.open_turn();
+        rt.turn_started_at = Some(Instant::now());
+        self.set_status(rt, TabStatus::InProgress);
+        self.type_prompt(&rt_arc, &pane, prompt.text, prompt.attachments, PromptDelivery { ready: Some(ready.clone()), seq: Some(seq), queued: false, receipt: None, shared: None });
+        for (seq, prompt) in rest {
+            self.type_prompt(&rt_arc, &pane, prompt.text, prompt.attachments, PromptDelivery { ready: Some(ready.clone()), seq: Some(seq), queued: true, receipt: None, shared: None });
         }
     }
 
@@ -2300,6 +2406,9 @@ impl SessionManager {
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,
+            nudge_by: None,
+            held: Vec::new(),
+            resend_after_abort: None,
             decisions: HashMap::new(),
             turn_tail: Default::default(),
             transcript_turn: None,
@@ -2762,6 +2871,14 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
+        if queued {
+            if let Engine::Cli(p) = &mut rt.engine {
+                // Held while its echo is awaited, no longer.
+                let awaited: Vec<u64> = p.echoed.iter().map(|echo| echo.seq).collect();
+                p.held.retain(|(seq, _)| awaited.contains(seq));
+                p.held.push((ev.seq, HeldPrompt { text: agent.clone(), attachments: paths.clone() }));
+            }
+        }
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
             ready: Some(ready),
             seq: Some(ev.seq),
@@ -2914,6 +3031,7 @@ impl SessionManager {
                         }
                         if acknowledged && p.awaiting_delivery == Some(seq) {
                             p.accept_by = Some(Instant::now() + tui::ACCEPT_TIMEOUT);
+                            p.nudge_by = Some(Instant::now() + tui::NUDGE_AFTER);
                         }
                     }
                 }
@@ -3161,6 +3279,17 @@ impl SessionManager {
             if matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
                 self.delivery_confirmed(&mut rt);
             }
+        }
+
+        // A chat links itself to the repo its agent just worked in. Off the
+        // hook's thread: git answers fast, but the CLI is waiting on this reply.
+        if frame.event == "PostToolUse" {
+            let (sink, session, payload) = (self.sink.clone(), frame.session.clone(), frame.payload.clone());
+            std::thread::spawn(move || match crate::chat_link::follow(&session, &payload) {
+                Ok(Some(entry)) => sink.emit("session_updated", &entry),
+                Ok(None) => {}
+                Err(error) => log::warn!("link chat {session}: {error:#}"),
+            });
         }
 
         match frame.event.as_str() {
@@ -3611,6 +3740,9 @@ impl SessionManager {
                 }
             }
             self.set_status(rt, if rt.recovery.is_some() { TabStatus::Waiting } else if aborted { TabStatus::Idle } else { TabStatus::Completed });
+            if aborted {
+                self.resend_held_after_abort(rt);
+            }
         }
     }
 
@@ -3752,6 +3884,12 @@ mod tests {
         assert!(!echo.matches("[Image #1] [Image #3] [Image #2]create another issue"));
         assert!(!ComposerEcho::new("[Image #1] literal".into(), 0).matches("[Image #1] literal"));
         assert_eq!(strip_image_labels("[Image #1] [Image #12]x"), (1, " [Image #12]x"));
+        // Claude Code numbers pasted images across the session: a later prompt's labels start where the count stands.
+        assert_eq!(strip_image_labels("[Image #12]beside dust, add an option"), (1, "beside dust, add an option"));
+        assert_eq!(strip_image_labels("[Image #7] [Image #8] compare"), (2, " compare"));
+        assert_eq!(strip_image_labels("[Image #7] [Image #9] compare"), (1, " [Image #9] compare"));
+        assert_eq!(strip_image_labels("[Image #0] x"), (0, "[Image #0] x"));
+        assert!(ComposerEcho::new("beside dust, add an option".into(), 1).matches("[Image #12]beside dust, add an option"));
         assert_eq!(strip_image_labels("[Image #] x"), (0, "[Image #] x"));
         assert_eq!(strip_image_labels("[Image #1 x"), (0, "[Image #1 x"));
     }

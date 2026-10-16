@@ -273,3 +273,41 @@ describe("a refreshed session list", () => {
     expect(terminal.getTerminalState().panes.map((pane) => pane.id)).toEqual([kept.id]);
   });
 });
+
+describe("new chat", () => {
+  const chats = "/home/me/.raccoon/Chats";
+
+  function answer(harnesses: { id: string; available: boolean }[]) {
+    mocks.invoke.mockImplementation(async (command: string, args?: { req?: { tab?: { harness: string } } }) => {
+      if (command === "list_harnesses") return harnesses;
+      if (command === "chats_dir") return chats;
+      if (command === "create_session") return { ...attached, id: "chat-1", projectPath: chats, cwd: chats, title: "Chat", tabs: [{ ...attached.tabs[0], harness: args!.req!.tab!.harness }] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+  }
+
+  it("starts Claude in the Chats folder, in place, without making it a project", async () => {
+    answer([{ id: "codex", available: true }, { id: "claude", available: true }]);
+    await sessions.refreshHarnesses();
+
+    const session = await sessions.startChat();
+
+    expect(mocks.invoke).not.toHaveBeenCalledWith("add_project", expect.anything());
+    expect(mocks.invoke).toHaveBeenCalledWith("create_session", {
+      req: expect.objectContaining({ projectPath: chats, cwd: chats, useWorktree: false, tab: expect.objectContaining({ harness: "claude" }) }),
+    });
+    expect(sessions.getSessionStore().selectedSessionId).toBe(session.id);
+    expect(sessions.getSessionStore().chatsPath).toBe(chats);
+    expect(sessions.getSessionStore().projects.some((project) => project.path === chats)).toBe(false);
+  });
+
+  it("falls back to another installed agent and refuses when there is none", async () => {
+    answer([{ id: "claude", available: false }, { id: "codex", available: true }]);
+    await sessions.refreshHarnesses();
+    expect((await sessions.startChat()).tabs[0].harness).toBe("codex");
+
+    answer([{ id: "claude", available: false }]);
+    await sessions.refreshHarnesses();
+    await expect(sessions.startChat()).rejects.toThrow("Install and sign in to an agent");
+  });
+});

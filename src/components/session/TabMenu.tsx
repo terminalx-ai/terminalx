@@ -28,7 +28,7 @@ import {
   Trash2,
   Undo2,
   X,
-} from "lucide-react";
+} from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";

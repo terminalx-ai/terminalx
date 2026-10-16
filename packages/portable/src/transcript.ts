@@ -72,7 +72,7 @@ export interface Transcript {
   modelRequestOpen: boolean;
   workingSince?: number;
   authFailed: boolean;
-  rateLimit?: { status?: string; resetsAt?: number };
+  rateLimit?: { status?: string; resetsAt?: number; window?: string };
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
 }
@@ -331,7 +331,12 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         retry = { attempt: payload.attempt, maxRetries: payload.maxRetries, reason: payload.reason };
         break;
       case "rate_limited":
-        rateLimit = { status: payload.status, resetsAt: payload.resetsAt };
+        rateLimit = { status: payload.status, resetsAt: payload.resetsAt, window: payload.window };
+        // A warning changes nothing in the conversation; a refused request ended the turn.
+        if (payload.status === "rejected" && payload.message) {
+          const turn = ensureTurn(event);
+          turn.work.push({ kind: "error", text: payload.message, key: `e${event.seq}`, seq: event.seq });
+        }
         break;
       case "status":
         // Older apps persisted a readiness guess as a permanent transcript

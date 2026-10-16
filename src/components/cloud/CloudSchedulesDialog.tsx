@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "lucide-react";
+import { CalendarClock, Loader2, Pause, Play, Plus, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";

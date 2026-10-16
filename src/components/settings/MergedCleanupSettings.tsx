@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Loader2, Undo2 } from "lucide-react";
+import { Loader2, Undo2 } from "@/icons";
 import type { MergedRemovalView } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";

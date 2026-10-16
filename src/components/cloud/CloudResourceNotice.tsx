@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle } from "@/icons";
 import { memoryNoticeText, storageNotice, useCloudResources } from "@/lib/cloudResources";
 import { cn } from "@/lib/cn";
 

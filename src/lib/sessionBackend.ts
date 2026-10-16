@@ -110,6 +110,8 @@ export interface SessionBackend {
    */
   send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
+  /** Local only: send a message queued behind the running turn now, interrupting the turn. `seq` is the message's event. */
+  sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /**
    * Escape, as the agent's own screen takes it (#427): the running turn is
    * interrupted and the agent's process stays. Nothing is queued or dropped
@@ -201,6 +203,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     },
     send: (tabId, text, images) => agent.send(sessionId, tabId, text, images),
     steer: (tabId, text) => agent.send(sessionId, tabId, text, []).then(() => undefined),
+    sendQueuedNow: (tabId, seq) => agent.sendQueuedNow(sessionId, tabId, seq),
     interrupt: (tabId) => agent.interrupt(sessionId, tabId).then(() => undefined),
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),

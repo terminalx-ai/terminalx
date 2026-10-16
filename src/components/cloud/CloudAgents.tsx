@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, Loader2, Plus, X } from "lucide-react";
+import { Bot, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { Chat } from "@/components/chat/Chat";
 import { LinkedText } from "@/components/chat/LinkedText";

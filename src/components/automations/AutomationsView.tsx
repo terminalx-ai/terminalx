@@ -17,7 +17,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-} from "lucide-react";
+} from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AutomationEditor } from "@/components/automations/AutomationEditor";
 import { Markdown } from "@/components/chat/Markdown";

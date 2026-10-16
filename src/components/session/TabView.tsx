@@ -18,7 +18,7 @@ import { Composer, type Handoff } from "@/components/chat/Composer";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
-import { History, MessageSquare, Play } from "lucide-react";
+import { History, MessageSquare, Play } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
@@ -248,6 +248,15 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // A message queued behind the running turn, sent now: the turn is interrupted and the message typed again.
+  const sendQueuedNow = useCallback(
+    (seq: number) => {
+      setError(null);
+      backend.sendQueuedNow?.(tab.id, seq).catch((e) => setError(local ? safeError(e) : commandError(e)));
+    },
+    [backend, local, tab.id],
+  );
+
   // The newest event when the last interrupt was sent. Until a turn has ended
   // after it, the agent has not answered: the tab is still working on the turn
   // Escape was meant for.
@@ -388,6 +397,22 @@ export function TabView({
   );
   const deciding = !!outbox && transcript.pendingAsks.some((ask) => outbox.deciding(ask.requestId));
 
+  // Pending requests and recovery sit with the composer in the chat, where the
+  // reply goes; over a terminal there is no composer, so they head the pane.
+  const banner = (placement: "top" | "composer") => (
+    <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null} askDetail={!!shared}
+        models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
+        onRetry={retry} onStop={stop} onContinue={() => {
+          if (recoveryLock.current) return;
+          recoveryLock.current = true;
+          setRecovering(true);
+          void backend.stop(tab.id).then(() => setContinueOpen(true)).catch(e => setError(safeError(e))).finally(() => {
+            recoveryLock.current = false;
+            setRecovering(false);
+          });
+        }} />
+  );
+
   const chat = (
     <Chat
       sessionId={backend.logSessionId}
@@ -400,6 +425,7 @@ export function TabView({
       answering={answering || deciding}
       onAnswerPermission={answerPermission}
       onAnswerQuestions={answerQuestions}
+      onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       footer={
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
@@ -423,6 +449,7 @@ export function TabView({
           </div>
         ) : (
         <>
+        {banner("composer")}
         {backend.caps.steer && backend.caps.write && !gate?.blocked && live && draft.trim() && (
           <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-muted-foreground">
             <span>Send queues it for when the agent pauses.</span>
@@ -622,17 +649,7 @@ export function TabView({
       Session closed. Untracked or remote commands may still be running; verify their outcome before continuing.
       <Button size="sm" disabled={recovering} onClick={() => void retry()}>Resume safely</Button>
     </div>}
-    <RecoveryBanner kind={recovery} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null} askDetail={!!shared}
-      models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
-      onRetry={retry} onStop={stop} onContinue={() => {
-        if (recoveryLock.current) return;
-        recoveryLock.current = true;
-        setRecovering(true);
-        void backend.stop(tab.id).then(() => setContinueOpen(true)).catch(e => setError(safeError(e))).finally(() => {
-          recoveryLock.current = false;
-          setRecovering(false);
-        });
-      }} />
+    {terminalMode && banner("top")}
     {continueOpen && <ContinuationDialog session={session} source={tab} onClose={() => setContinueOpen(false)} />}
     {collabLive && notesOpen && shared?.client ? (
       <div className="flex min-h-0 flex-1">

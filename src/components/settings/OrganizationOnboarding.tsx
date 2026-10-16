@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type OrganizationSummary } from "@/lib/api";
 import { refreshAccount } from "@/lib/account";

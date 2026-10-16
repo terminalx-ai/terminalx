@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronRight, CloudDownload, Loader2, RotateCcw, TriangleAlert } from "@/icons";
 import { useGitWorkingChanges } from "@/lib/changes";
 import { localGitSource, type GitSource, type SourceStatus } from "@/lib/gitSource";
 import { Button } from "@/components/ui/button";

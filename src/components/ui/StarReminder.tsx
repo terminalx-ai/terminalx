@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ExternalLink, Loader2, Star, X } from "lucide-react";
+import { ExternalLink, Loader2, Star, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 

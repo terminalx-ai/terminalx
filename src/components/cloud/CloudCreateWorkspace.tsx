@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Circle, GitBranch, Loader2, Plus, RotateCcw, X } from "lucide-react";
+import { Check, Circle, GitBranch, Loader2, Plus, RotateCcw, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import {

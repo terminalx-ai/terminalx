@@ -7,12 +7,16 @@ use serde::{Deserialize, Serialize};
 /// `Tool` is no longer raised (#400): a failed tool is a row in the transcript,
 /// not a state of the session. It stays for the logs that recorded it and for
 /// the text a failed tool's result is replaced with.
-pub enum RecoveryKind { Capacity, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, Failed }
+pub enum RecoveryKind { Capacity, UsageLimit, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, Failed }
 
 impl RecoveryKind {
     pub fn classify(message: &str) -> Self {
         let text = message.to_ascii_lowercase();
-        if ["capacity", "overloaded", "rate limit", "rate_limit", "too many requests", "429", "529"].iter().any(|s| text.contains(s)) {
+        // The user's own plan ran out, not the provider: retrying before the
+        // reset fails the same way.
+        if ["usage limit", "usage_limit", "hit your", "limit reached", "quota"].iter().any(|s| text.contains(s)) {
+            Self::UsageLimit
+        } else if ["capacity", "overloaded", "rate limit", "rate_limit", "too many requests", "429", "529"].iter().any(|s| text.contains(s)) {
             Self::Capacity
         } else if ["timeout", "timed out", "no progress"].iter().any(|s| text.contains(s)) {
             Self::Timeout
@@ -23,6 +27,7 @@ impl RecoveryKind {
     pub fn message(self) -> &'static str {
         match self {
             Self::Capacity => "The provider is at capacity. Retry or choose another available model.",
+            Self::UsageLimit => "Your plan's usage limit is reached. Wait for it to reset, or continue on another model.",
             Self::Tool => "A tool or command failed. Review its outcome before continuing.",
             Self::Timeout => "No progress was confirmed before the timeout. The process outcome is unknown.",
             Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
@@ -82,7 +87,7 @@ pub fn failure(payload: &Payload) -> Option<RecoveryKind> {
         Payload::Error { message, .. } => Some(RecoveryKind::classify(message)),
         Payload::TurnCompleted { status: TurnStatus::Error, final_text, .. } => Some(RecoveryKind::classify(final_text.as_deref().unwrap_or(""))),
         // Some providers emit rate-limit warnings while requests still succeed.
-        Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => Some(RecoveryKind::Capacity),
+        Payload::RateLimited { status, .. } if status.as_deref() == Some("rejected") => Some(RecoveryKind::UsageLimit),
         Payload::ApiRetry { attempt, max_retries, reason } if attempt >= max_retries => Some(RecoveryKind::classify(reason.as_deref().unwrap_or(""))),
         _ => None,
     }
@@ -138,9 +143,12 @@ pub fn sanitize(payload: &mut Payload) {
             result.images.clear();
         }
         Payload::ApiRetry { reason, .. } => *reason = reason.as_ref().map(|s| RecoveryKind::classify(s).message().into()),
-        Payload::RateLimited { message, status, .. } => {
-            *message = Some(RecoveryKind::Capacity.message().into());
+        Payload::RateLimited { message, status, window, .. } => {
+            let rejected = status.as_deref() == Some("rejected");
+            *message = Some(if rejected { RecoveryKind::UsageLimit } else { RecoveryKind::Capacity }.message().into());
             *status = status.as_ref().map(|s| if s == "rejected" { "rejected".into() } else { "limited".into() });
+            // The reset time and the window name are shown; both are kept to known values.
+            *window = window.as_ref().filter(|w| matches!(w.as_str(), "five_hour" | "seven_day")).cloned();
         }
         Payload::PermissionDenied { message, .. } => *message = "Permission was denied. Review the request before continuing.".into(),
         _ => {}
@@ -261,9 +269,23 @@ mod lifecycle_tests {
     }
     #[test]
     fn warning_limits_are_not_terminal_but_rejected_requests_are() {
-        assert_eq!(failure(&Payload::RateLimited { status: Some("allowed_warning".into()), resets_at: None, message: None }), None);
-        assert_eq!(failure(&Payload::RateLimited { status: Some("rejected".into()), resets_at: None, message: None }), Some(RecoveryKind::Capacity));
+        assert_eq!(failure(&Payload::RateLimited { status: Some("allowed_warning".into()), resets_at: None, window: None, message: None }), None);
+        assert_eq!(failure(&Payload::RateLimited { status: Some("rejected".into()), resets_at: None, window: None, message: None }), Some(RecoveryKind::UsageLimit));
         assert_eq!(failure(&Payload::ApiRetry { attempt: 3, max_retries: 3, reason: Some("capacity".into()) }), Some(RecoveryKind::Capacity));
+    }
+    #[test]
+    fn a_spent_plan_keeps_its_reset_time_and_window_but_not_the_provider_text() {
+        let line = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","apiError":"usage_limit_reached","apiErrorStatus":429,"quotaLimits":{"status":"rejected","resetsAt":1791745200,"rateLimitType":"seven_day"},"message":{"content":[{"type":"text","text":"You've hit your weekly limit · resets Oct 11 at 11pm (Asia/Dubai)"}]}}"#;
+        let mut payloads = Vec::new();
+        crate::harness::claude::transcript::decode_line(line, &Default::default(), &mut payloads);
+        assert_eq!(failure(&payloads[0]), Some(RecoveryKind::UsageLimit));
+        sanitize(&mut payloads[0]);
+        let Payload::RateLimited { status, resets_at, window, message } = &payloads[0] else { panic!("{:?}", payloads[0]) };
+        assert_eq!((status.as_deref(), *resets_at, window.as_deref()), (Some("rejected"), Some(1_791_745_200_000), Some("seven_day")));
+        assert_eq!(message.as_deref(), Some(RecoveryKind::UsageLimit.message()));
+        // The same words from a provider that only gives text still land on the right kind.
+        assert_eq!(RecoveryKind::classify("You've hit your weekly limit · resets Oct 11"), RecoveryKind::UsageLimit);
+        assert_eq!(RecoveryKind::classify("rate limit exceeded, retry later"), RecoveryKind::Capacity);
     }
     #[test]
     fn provider_capacity_records_reach_recovery() {

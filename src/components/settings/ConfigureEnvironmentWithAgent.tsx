@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, type AgentLoginProvider, type CloudWorkspace, type CloudWorkspaceProviderId } from "@/lib/api";
 import { refreshCloudWorkspaces, useCloudCatalog } from "@/lib/cloudCatalog";

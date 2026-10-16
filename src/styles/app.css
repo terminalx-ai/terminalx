@@ -60,6 +60,10 @@
 }
 
 @layer base {
+  /* The drawn icons keep a 1.25px line at any size, as Cursor's 16px set does: a row's 14px icon is not thinner than a button's 16px one. */
+  .tx-icon * {
+    vector-effect: non-scaling-stroke;
+  }
   * {
     @apply border-border;
   }

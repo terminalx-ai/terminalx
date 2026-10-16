@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import type { CleanupStep } from "@terminalx/portable/workspace";
-import { Cloud, Loader2, Monitor } from "lucide-react";
+import { Cloud, Loader2, Monitor } from "@/icons";
 import { DialogScrollArea } from "@/components/ui/dialog";
 import { summarize, type CleanupRun, type CleanupRunSummary } from "@/lib/cleanupRun";
 import { formatSize } from "@/lib/workspaceSizes";

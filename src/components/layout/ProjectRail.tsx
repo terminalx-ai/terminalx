@@ -1,67 +1,27 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BarChart3, Check, ListFilter, CalendarClock, ChevronDown, CircleDot, Ellipsis, FolderOpen, FolderPlus, GitPullRequest, ImagePlus, LayoutGrid, MessageCircle, Pin, PinOff, RefreshCw, Search, Settings, Sparkles, Trash2 } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { CalendarClock, CircleDot, Folder, FolderOpen, ImagePlus, LayoutGrid } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
-import { WithTooltip } from "@/components/ui/tooltip";
-import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
-import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
-import { useShortcutKeys } from "@/lib/hotkeys";
+import { usePrefs } from "@/lib/prefs";
+import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
 import type { ShortcutId } from "@/lib/shortcuts";
-import { errorMessage } from "@/lib/api";
-import {
-  addProject,
-  refreshEverything,
-  refreshWorkspaces,
-  removeProject,
-  selectProjectInSidebar,
-  setShowArchived as setSessionsArchived,
-  setProjectLogo,
-  startSessionIn,
-  updateProject,
-  useSessionStore,
-} from "@/lib/sessions";
+import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
 import { bucketSessions, COLUMNS, type ColumnId } from "@/lib/dashboard";
-import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { useCloudDashboard } from "@/lib/cloudDashboard";
-import { START_ACTIONS } from "@/lib/projectStart";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
-import { TITLEBAR_INSET } from "./AppShell";
 import { useAutomationStore } from "@/lib/automations";
-import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
-import { ProjectNavigation } from "./SidebarTree";
-import { QuickChatsSection } from "./QuickChatsSection";
-import { showFloatingWindow, useFloating } from "@/lib/floating";
-import { bindingText } from "@/lib/shortcuts";
-import { isQuickChat } from "@/lib/quickChats";
-import { navigateTree } from "./treeKeyboard";
-import { refreshAccountRoles } from "@/lib/accountRoles";
-import { refreshCloudCatalog } from "@/lib/cloudCatalog";
-import { TreeToggle } from "./SidebarRows";
-import { CloudSections, useCloudSections, useSectionCollapsed } from "./cloud/CloudSections";
-import { DevelopmentSection } from "@/components/cloud/DevRuntime";
+import { useCloudSections } from "./cloud/CloudSections";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
-import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
+import { SessionSidebar } from "./SessionSidebar";
+import { ChatListSidebar } from "./ChatListSidebar";
 
-/**
- * The unified sidebar: global destinations followed by an expandable project
- * tree. The project menu remains the home for naming, appearance and refresh.
- */
-export function ProjectRail({
-  onOpenSettings,
-  onOpenAccount,
-  onOpenIssues,
-  onOpenAgents,
-  onOpenStats,
-  onOpenAutomations,
-  onOpenSkills,
-  onSearch,
-}: {
+export interface RailProps {
+  /** Hide the sidebar; its button leads the titlebar, so the window's own controls, then it, then the sidebar's. */
+  onHide: () => void;
   onOpenSettings: (tab?: SettingsTab) => void;
   onOpenAccount: () => void;
   onOpenIssues: () => void;
@@ -70,405 +30,139 @@ export function ProjectRail({
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
-}) {
-  const store = useSessionStore();
-  // The floating window's system-wide shortcut, when it has one that is registered.
-  const floating = useFloating().status;
-  const quickChatKeys = floating?.shortcut && !floating.shortcutError ? bindingText(floating.shortcut) : null;
-  // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
-  const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
-  // Section headers appear only when an organization section exists; otherwise the sidebar is as it was.
-  const cloud = useCloudSections();
-  const sectioned = cloud.all.length > 0;
-  const [localCollapsedPref, toggleLocal] = useSectionCollapsed("local");
-  const localCollapsed = sectioned && localCollapsedPref;
-  const automationStore = useAutomationStore();
-  const [error, setError] = useState<string | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
-  const [spinning, setSpinning] = useState(false);
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+}
 
-  const filter = useSidebarFilter();
-  // Opens on a click, an accessibility press and the keyboard alike (Radix alone opens only on pointerdown).
-  const filterMenu = useRowMenu();
-  const projects = [...store.projects]
-    .filter((p) => !!p.archived === showArchived || store.sessions.some((s) => s.id === store.selectedSessionId && s.projectPath === p.path))
-    // Unread or Needs you: only the projects with such a session.
-    .filter((p) => !filter.active || filter.showsProject(p.path))
-    .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || a.name.localeCompare(b.name));
-  const archivedCount = store.projects.filter((p) => p.archived).length;
+/** The sidebar in the shape the reader chose: the projects with their conversations, or one flat list of chats. */
+export function ProjectRail(props: RailProps) {
+  const { sidebarLayout } = usePrefs();
+  return sidebarLayout === "list" ? <ChatListSidebar {...props} /> : <SessionSidebar {...props} />;
+}
+
+/**
+ * Issues, the dashboard, stats, automations and skills, each carrying its own
+ * status: a strip of icons, or a labelled list where there is room to name them.
+ */
+export function AppDestinations({
+  onOpenIssues,
+  onOpenAgents,
+  onOpenAutomations,
+}: Pick<RailProps, "onOpenIssues" | "onOpenAgents" | "onOpenAutomations">) {
+  const store = useSessionStore();
+  const automationStore = useAutomationStore();
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
   const cloudSessions = useCloudDashboard();
+  const cloud = useCloudSections();
   const dashboardBuckets = useMemo(() => bucketSessions([...store.sessions, ...visibleDashboardSessions(cloudSessions, cloud.visibleIds)]), [store.sessions, cloudSessions, cloud.visibleIds]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
-  const selectedSession = store.sessions.find((session) => session.id === store.selectedSessionId) ?? null;
-  // A quick chat has no project: opening one leaves the project in focus where it was, and never focuses its scratch folder.
-  const sessionProject = selectedSession && !isQuickChat(selectedSession) ? selectedSession.projectPath : null;
-  const focus = store.selectedProject ?? sessionProject ?? store.lastProject ?? store.projects[0]?.path ?? null;
-
-  useEffect(() => {
-    if (!store.selectedProject && focus) selectProjectInSidebar(focus);
-  }, [focus, store.selectedProject]);
-
-  useEffect(() => {
-    const path = focus;
-    if (!path) return;
-    setExpandedProjects((current) => {
-      if (current.has(path)) return current;
-      const next = new Set(current);
-      next.add(path);
-      return next;
-    });
-  }, [focus, store.navigationVersion]);
-
-  const pickProject = async () => {
-    try {
-      const dir = await openDialog({ directory: true, multiple: false, title: "Add a project" });
-      if (typeof dir === "string") {
-        const p = await addProject(dir);
-        selectProjectInSidebar(p.path);
-      }
-      setError(null);
-    } catch (e) {
-      setError(errorMessage(e));
-    }
+  // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
+  const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
+  const active = onNavView ? store.view : null;
+  const dashboard = { id: "agents", label: "Agent dashboard", shortcut: "app.agentDashboard", icon: <LayoutGrid />, onOpen: onOpenAgents, ...dashboardStatus(dashboardBuckets) } satisfies Destination;
+  const issues = { id: "issues", label: "Issues", shortcut: "app.issues", icon: <CircleDot />, onOpen: onOpenIssues } satisfies Destination;
+  const automations: Destination = {
+    id: "automations",
+    label: "Automations",
+    shortcut: "app.automations",
+    icon: <CalendarClock />,
+    onOpen: onOpenAutomations,
+    dot: automationFailures > 0 ? { tone: "warning", label: `${automationFailures} failed` } : automationRunning ? { tone: "info", label: "Running" } : null,
+    count: automationFailures || undefined,
   };
+  // Skills and Usage are reached from Settings (and their shortcuts), not from here.
+  // Named rows, the same in both sidebar layouts: the dashboard leads and says what is waiting on you, or what is still running.
+  const waiting = dashboardBuckets.needs.length || dashboardBuckets.working.length;
+  return <DestinationList active={active} destinations={[{ ...dashboard, label: "Dashboard", count: waiting || undefined }, issues, automations]} />;
+}
 
-  const refreshAll = async () => {
-    setSpinning(true);
-    try {
-      // The account too: its organizations, roles and capabilities are read again from the server (a role may have changed, or a token refresh brought new ones).
-      await Promise.all([refreshEverything(), refreshAccountRoles(true).then(() => refreshCloudCatalog())]);
-    } finally {
-      setSpinning(false);
-    }
-  };
+/** `status` is read out with the label; `dot` marks it when something there wants a look; `count` is shown beside it in a list. */
+type Destination = { id: string; label: string; shortcut: ShortcutId; icon: ReactNode; onOpen: () => void; status?: string; dot?: Dot; count?: number };
 
-  const filterLabel = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
-  const headerActions = (
-    <div className="flex items-center">
-      <DropdownMenu {...filterMenu.root}>
-        <WithTooltip label={filter.active ? `Showing: ${filterLabel}` : "Filter sessions"}>
-          <DropdownMenuTrigger asChild {...filterMenu.trigger}>
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label={filter.active ? `Filter sessions: ${filterLabel}` : "Filter sessions"}
-              className={filter.active ? "bg-veil-strong text-foreground" : undefined}
-              data-testid="sidebar-filter"
-              data-filter={filter.filter}
-            >
-              <ListFilter />
-            </Button>
-          </DropdownMenuTrigger>
-        </WithTooltip>
-        <DropdownMenuContent align="end">
-          {SIDEBAR_FILTERS.map((entry) => (
-            <DropdownMenuItem key={entry.id} onSelect={() => setSidebarFilter(entry.id)} aria-checked={filter.filter === entry.id} role="menuitemradio">
-              {filter.filter === entry.id ? <Check /> : <span aria-hidden className="size-4" />}
-              {entry.label}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      <WithTooltip label={store.showArchived ? "Show active sessions" : "Show archived sessions"}>
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={store.showArchived ? "Show active sessions" : "Show archived sessions"}
-          aria-pressed={store.showArchived}
-          className={store.showArchived ? "bg-veil-strong text-foreground" : undefined}
-          onClick={() => setSessionsArchived(!store.showArchived)}
-        >
-          <Archive />
-        </Button>
-      </WithTooltip>
-      <WithTooltip label="Refresh every project">
-        <Button variant="ghost" size="icon-xs" aria-label="Refresh all" onClick={() => void refreshAll()}>
-          <RefreshCw className={cn(spinning && "animate-spin")} />
-        </Button>
-      </WithTooltip>
-      <WithTooltip label="Add project">
-        <Button variant="ghost" size="icon-xs" aria-label="Add project" onClick={() => void pickProject()}>
-          <FolderPlus />
-        </Button>
-      </WithTooltip>
-    </div>
-  );
-
-  const localRows = (
-    <>
-      {!localCollapsed && projects.length === 0 && (
-        <div className="px-2 py-6 text-center text-xs text-muted-foreground" data-testid={filter.active ? "sidebar-filter-empty" : undefined}>
-          {filter.active ? (
-            <>
-              {filter.empty}{" "}
-              <button type="button" className="underline underline-offset-2 hover:text-foreground" onClick={() => setSidebarFilter("all")}>
-                Show all sessions
-              </button>
-            </>
-          ) : showArchived ? (
-            "Nothing archived."
-          ) : (
-            <StartLinks onError={setError} />
-          )}
-        </div>
-      )}
-      {!localCollapsed && projects.map((project) => {
-        // A filter shows what it found: its projects are open while it is on.
-        const expanded = filter.active || expandedProjects.has(project.path);
+/** The destinations as named rows, each with its count or dot on the right. */
+function DestinationList({ active, destinations }: { active: string | null; destinations: Destination[] }) {
+  return (
+    <div className="flex flex-col" role="toolbar" aria-orientation="vertical" aria-label="Destinations" data-testid="destination-list">
+      {destinations.map((destination) => {
+        const status = destination.status ?? destination.dot?.label;
+        const pressed = active === destination.id;
         return (
-          <ProjectRow
-            key={project.path}
-            project={project}
-            selected={store.selectedProject === project.path}
-            active={selectedSession?.projectPath === project.path}
-            expanded={expanded}
-            onToggle={() =>
-              setExpandedProjects((current) => {
-                const next = new Set(current);
-                if (next.has(project.path)) next.delete(project.path);
-                else next.add(project.path);
-                return next;
-              })
-            }
+          <Button
+            key={destination.id}
+            variant="ghost"
+            className={cn("justify-start gap-2 px-2", pressed && "bg-selected text-foreground")}
+            aria-label={status ? `${destination.label}, ${status}` : destination.label}
+            aria-pressed={pressed}
+            title={status}
+            onClick={destination.onOpen}
           >
-            <ProjectNavigation project={project} expanded={expanded} />
-          </ProjectRow>
+            {destination.icon}
+            {destination.label}
+            {destination.count ? (
+              <span
+                aria-hidden
+                className={cn(
+                  "ml-auto min-w-4 rounded-full px-1.5 text-center text-[10px] font-medium tabular-nums",
+                  destination.dot?.tone === "warning" ? "bg-warning/15 text-warning" : "bg-info/15 text-info",
+                )}
+              >
+                {destination.count}
+              </span>
+            ) : destination.dot ? (
+              <span aria-hidden className={cn("ml-auto size-1.5 rounded-full", destination.dot.tone === "warning" ? "bg-warning" : "bg-info animate-pulse-soft")} />
+            ) : null}
+          </Button>
         );
       })}
-    </>
-  );
-
-  return (
-    <div className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline" data-testid="sidebar-rail">
-      <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" style={{ paddingLeft: TITLEBAR_INSET }} />
-      <div className="flex shrink-0 flex-col gap-0.5 px-2">
-        <Button variant="ghost" className="justify-start gap-2 px-2" onClick={onSearch}>
-          <Search />
-          Search
-          <Keys shortcut="app.commandPalette" />
-        </Button>
-        <Button
-          variant="ghost"
-          className={cn("justify-start gap-2 px-2", store.view === "issues" && onNavView ? "bg-selected text-foreground" : "")}
-          onClick={onOpenIssues}
-        >
-          <CircleDot />
-          Issues
-          <Keys shortcut="app.issues" />
-        </Button>
-        <WithTooltip label="Agent dashboard" shortcut="app.agentDashboard">
-          <Button
-            variant="ghost"
-            className={cn("min-w-0 justify-start gap-2 px-2", store.view === "agents" && onNavView ? "bg-selected text-foreground" : "")}
-            onClick={onOpenAgents}
-          >
-            <LayoutGrid />
-            <span className="min-w-0 truncate">Agent Dashboard</span>
-            <DashboardTotals buckets={dashboardBuckets} />
-          </Button>
-        </WithTooltip>
-        <WithTooltip label="Stats & Usage" shortcut="app.stats">
-          <Button
-            variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "stats" && onNavView ? "bg-selected text-foreground" : "")}
-            onClick={onOpenStats}
-          >
-            <BarChart3 />
-            <span className="truncate">Stats &amp; Usage</span>
-          </Button>
-        </WithTooltip>
-        <WithTooltip label="Automations" shortcut="app.automations">
-          <Button
-            variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "automations" && onNavView ? "bg-selected text-foreground" : "")}
-            onClick={onOpenAutomations}
-          >
-            <CalendarClock />
-            <span className="truncate">Automations</span>
-            {(automationRunning || automationFailures > 0) && (
-              <span className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums">
-                {automationRunning && <span className="size-1.5 rounded-full bg-info animate-pulse-soft" title="Automation running" />}
-                {automationFailures > 0 && <span className="text-warning">{automationFailures}</span>}
-              </span>
-            )}
-          </Button>
-        </WithTooltip>
-        <WithTooltip label="Skills" shortcut="app.skills">
-          <Button
-            variant="ghost"
-            className={cn("justify-start gap-2 px-2", store.view === "skills" && onNavView ? "bg-selected text-foreground" : "")}
-            onClick={onOpenSkills}
-          >
-            <Sparkles />
-            Skills
-            <Keys shortcut="app.skills" />
-          </Button>
-        </WithTooltip>
-        <WithTooltip label={quickChatKeys ? `Open the floating chat window (${quickChatKeys} from any app)` : "Open the floating chat window: a chat or terminal with no project"}>
-          <Button variant="ghost" className="justify-start gap-2 px-2" onClick={() => void showFloatingWindow()} data-testid="open-floating-window">
-            <MessageCircle />
-            <span className="truncate">Quick Chat</span>
-            {quickChatKeys && <span className="ml-auto shrink-0 text-[10px] text-faint">{quickChatKeys}</span>}
-          </Button>
-        </WithTooltip>
-      </div>
-
-      {!sectioned && (
-        <div className="mt-3 flex shrink-0 items-center justify-between pl-4 pr-2">
-          <button
-            type="button"
-            onClick={() => setShowArchived((v) => !v)}
-            className="text-[11px] font-medium uppercase tracking-wide text-faint hover:text-muted-foreground"
-            title={archivedCount ? `${archivedCount} archived` : undefined}
-          >
-            {showArchived ? "Archived" : "Projects"}
-          </button>
-          {headerActions}
-        </div>
-      )}
-      {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
-
-      {/*
-        The one scroll container between the fixed top and the fixed footer: Local and every
-        organization section. `basis-0` (not a 0% basis) so WebKit sizes it from the rail, not
-        from its content, in a short window.
-      */}
-      <div className="mt-1 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2" role="tree" data-testid="sidebar-tree" aria-label="Projects, workspaces, sessions, and tabs" onKeyDown={navigateTree}>
-        {sectioned ? (
-          // With organization sections, Local is a section of the tree like them (PRO-23 CS-19):
-          // its header is a node the arrow keys reach, and its projects sit under it.
-          <div role="treeitem" aria-label="Local section" aria-expanded={!localCollapsed} className="min-w-0" data-testid="local-section">
-            <div data-tree-row className="mt-2 flex h-7 min-w-0 items-center justify-between">
-              <span className="flex min-w-0 items-center gap-1" data-testid="local-section-header">
-                <TreeToggle expanded={!localCollapsed} label="Local" onToggle={toggleLocal} />
-                <button
-                  type="button"
-                  onClick={() => setShowArchived((v) => !v)}
-                  className="truncate rounded-sm text-[11px] font-medium uppercase tracking-wide text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-                  title={archivedCount ? `Projects on this computer · ${archivedCount} archived` : "Projects on this computer"}
-                >
-                  {showArchived ? "Local · Archived" : "Local"}
-                </button>
-              </span>
-              {headerActions}
-            </div>
-            {!localCollapsed && <div role="group">{localRows}</div>}
-          </div>
-        ) : (
-          localRows
-        )}
-        <QuickChatsSection />
-        {sectioned && <CloudSections onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />}
-        <DevelopmentSection />
-      </div>
-
-      {/* One row: the account (which opens Account) takes the width and truncates; the gear is its own target at the right end. */}
-      <div className="flex shrink-0 items-center gap-1 border-t border-hairline p-2" data-testid="sidebar-account-row">
-        <div className="min-w-0 flex-1">
-          <AccountSidebarEntry onOpenAccount={onOpenAccount} />
-        </div>
-        <WithTooltip label="Settings" shortcut="app.settings" side="top">
-          <Button variant="ghost" size="icon-sm" className="shrink-0" aria-label="Settings" onClick={() => onOpenSettings()}>
-            <Settings />
-          </Button>
-        </WithTooltip>
-      </div>
     </div>
   );
 }
 
-/** The empty sidebar points at the same three ways to a project as the start screen. */
-function StartLinks({ onError }: { onError: (message: string | null) => void }) {
-  return (
-    <div data-testid="sidebar-start">
-      Add a project to get started.
-      <div className="mt-2 flex flex-col items-center gap-1">
-        {START_ACTIONS.map((action) => (
-          <button
-            key={action.id}
-            type="button"
-            className="rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-            onClick={() => {
-              onError(null);
-              void Promise.resolve(action.run()).catch((cause) => onError(errorMessage(cause)));
-            }}
-          >
-            {action.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+type Dot = { tone: "warning" | "info" | "add"; label: string } | null;
+
+/** The dashboard's totals, read out in full, and one dot: needs you before working. */
+function dashboardStatus(buckets: Record<ColumnId, readonly unknown[]>): { status: string; dot: Dot } {
+  const status = COLUMNS.map(({ id, label }) => `${buckets[id].length} ${label.toLowerCase()}`).join(", ");
+  const dot: Dot = buckets.needs.length ? { tone: "warning", label: status } : buckets.working.length ? { tone: "info", label: status } : null;
+  return { status, dot };
 }
 
-/** Full column totals, including zero counts and read Done sessions. */
-function DashboardTotals({ buckets }: { buckets: Record<ColumnId, readonly unknown[]> }) {
-  return (
-    <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
-      {COLUMNS.map(({ id, label }) => {
-        const count = buckets[id].length;
-        const description = `${count} ${label.toLowerCase()}`;
-        return (
-          <span
-            key={id}
-            role="img"
-            aria-label={description}
-            title={description}
-            className={cn("flex items-center gap-1", id === "needs" && "text-warning", id === "working" && "text-info", id === "done" && "text-add")}
-          >
-            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
-            {count}
-          </span>
-        );
-      })}
-    </span>
-  );
-}
-
-function Keys({ shortcut }: { shortcut: ShortcutId }) {
-  const keys = useShortcutKeys(shortcut);
-  return (
-    <span className="ml-auto flex gap-0.5 text-[10px] text-faint">
-      {keys.map((k) => (
-        <kbd key={k} className="rounded-sm bg-veil-raised px-1 font-sans">
-          {k}
-        </kbd>
-      ))}
-    </span>
-  );
-}
 
 export function ProjectGlyph({ project, size = 16 }: { project: Project; size?: number }) {
+  // A repository with no look of its own wears its GitHub picture: the one of
+  // the organisation or user that owns it, as GitHub shows it. A plain folder has none.
+  const identity = useGithubIdentity(project.logo || project.mascot || project.kind === "folder" ? null : project.path);
+  const [unavailable, setUnavailable] = useState<string | null>(null);
   if (project.logo) {
     return <img src={convertFileSrc(project.logo)} alt="" width={size} height={size} className="shrink-0 rounded-sm object-cover" style={{ width: size, height: size }} />;
   }
   if (project.mascot) return <PixelMascot id={project.mascot} color={project.color} size={size} />;
-  return <FolderOpen className="shrink-0" style={{ width: size, height: size, color: colorCss(project.color) }} />;
+  const owner = identity?.repo?.split("/")[0];
+  if (owner && unavailable !== owner) {
+    return (
+      <img
+        src={githubAvatarUrl(owner, size * 2)}
+        alt=""
+        title={`On GitHub as ${identity?.repo}`}
+        width={size}
+        height={size}
+        loading="lazy"
+        className="shrink-0 rounded-full object-cover"
+        style={{ width: size, height: size }}
+        onError={() => setUnavailable(owner)}
+        data-testid="project-avatar"
+      />
+    );
+  }
+  return <Folder className="shrink-0" style={{ width: size, height: size, color: colorCss(project.color) }} />;
 }
 
-function ProjectRow({
-  project,
-  selected,
-  active,
-  expanded,
-  onToggle,
-  children,
-}: {
-  project: Project;
-  selected: boolean;
-  active: boolean;
-  expanded: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  const store = useSessionStore();
-  const main = store.workspaces[project.path]?.find((w) => w.isMain);
+/**
+ * How a project looks and is called: its name, an optional logo, its colour
+ * and its mascot. Drawn inside a project's menu; the name is kept on Enter or
+ * when the field is left.
+ */
+export function ProjectAppearance({ project }: { project: Project }) {
   const [name, setName] = useState(project.name);
-  const [busy, setBusy] = useState(false);
-  const [pipelineOpen, setPipelineOpen] = useState(false);
 
   const commitName = () => {
     const n = name.trim();
@@ -478,172 +172,88 @@ function ProjectRow({
     const file = await openDialog({ multiple: false, title: "Project logo", filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "svg", "webp"] }] });
     if (typeof file === "string") await setProjectLogo(project.path, file);
   };
-  const refresh = async () => {
-    setBusy(true);
-    try {
-      await refreshWorkspaces(project.path);
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
-    <DropdownMenu onOpenChange={(o) => o && setName(project.name)}>
-      <div role="treeitem" aria-label={project.name} aria-expanded={expanded} className="min-w-0">
-        <div
-          data-tree-row
-          className={cn(
-            actionRow,
-            "relative flex h-8 cursor-default items-center gap-1 rounded-md px-1 outline-none",
-            selected ? "bg-selected" : active ? "bg-selected/50" : "hover:bg-selected/50",
-          )}
-          title={project.path}
-        >
-          <button
-            type="button"
-            data-tree-toggle
-            aria-label={`${expanded ? "Collapse" : "Expand"} ${project.name}`}
-            onClick={onToggle}
-            className="shrink-0 rounded-sm p-0.5 outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+    <div className="w-[17rem] p-1" data-testid="project-appearance">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onBlur={commitName}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commitName();
+          }
+          e.stopPropagation();
+        }}
+        className="mb-2 h-8 w-full rounded-md bg-well px-2 text-[13px] outline-none focus:ring-2 focus:ring-ring/40"
+        aria-label="Project name"
+      />
+      <button
+        type="button"
+        onClick={() => void pickLogo()}
+        className="mb-2 flex w-full items-center gap-3 rounded-md px-1 py-1 text-left hover:bg-veil-raised"
+      >
+        <span className="flex size-9 items-center justify-center rounded-md bg-well">
+          {project.logo ? <ProjectGlyph project={project} size={20} /> : <ImagePlus className="size-4 text-muted-foreground" />}
+        </span>
+        <span className="min-w-0">
+          <span className="block text-[13px]">Project logo</span>
+          <span className="block text-[11px] text-faint">{project.logo ? "Click to replace" : "Optional, replaces the mascot"}</span>
+        </span>
+        {project.logo && (
+          <span
+            role="button"
+            className="ml-auto text-[11px] text-faint hover:text-foreground"
+            onClick={(e) => {
+              e.stopPropagation();
+              void setProjectLogo(project.path, null);
+            }}
           >
-            <ChevronDown className={cn("size-3 text-faint transition-transform", !expanded && "-rotate-90")} />
-          </button>
-          <button
-            type="button"
-            onClick={() => selectProjectInSidebar(project.path)}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            <ProjectGlyph project={project} />
-            <span className="min-w-0 flex-1 truncate text-[13px]">{project.name}</span>
-            {project.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-            {project.archived && <Archive className="size-3 shrink-0 text-faint" aria-label="Archived project" />}
-            {main && (main.additions > 0 || main.deletions > 0) && (
-              <span className={cn("shrink-0 text-[11px] tabular-nums", yieldsToRowActions)}>
-                {main.additions > 0 && <span className="text-add">+{main.additions}</span>}
-                {main.deletions > 0 && <span className="ml-1 text-destructive">−{main.deletions}</span>}
-              </span>
-            )}
-          </button>
-          <RowActions>
-            <WithTooltip label={`New session in ${project.name}`}>
-              <Button variant="ghost" size="icon-xs" aria-label={`New session in ${project.name}`} onClick={() => startSessionIn(project.path, null)}>
-                <FolderPlus />
-              </Button>
-            </WithTooltip>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-xs" aria-label={`Project menu for ${project.name}`}>
-                <Ellipsis />
-              </Button>
-            </DropdownMenuTrigger>
-          </RowActions>
-        </div>
-        {children}
-      </div>
-      <DropdownMenuContent align="start" className="w-[19rem] p-2">
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={commitName}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commitName();
-            }
-            e.stopPropagation();
-          }}
-          className="mb-2 h-8 w-full rounded-md bg-well px-2 text-[13px] outline-none focus:ring-2 focus:ring-ring/40"
-          aria-label="Project name"
-        />
-        <button
-          type="button"
-          onClick={() => void pickLogo()}
-          className="mb-2 flex w-full items-center gap-3 rounded-md px-1 py-1 text-left hover:bg-veil-raised"
-        >
-          <span className="flex size-9 items-center justify-center rounded-md bg-well">
-            {project.logo ? <ProjectGlyph project={project} size={20} /> : <ImagePlus className="size-4 text-muted-foreground" />}
+            Remove
           </span>
-          <span className="min-w-0">
-            <span className="block text-[13px]">Project logo</span>
-            <span className="block text-[11px] text-faint">{project.logo ? "Click to replace" : "Optional, replaces the mascot"}</span>
-          </span>
-          {project.logo && (
-            <span
-              role="button"
-              className="ml-auto text-[11px] text-faint hover:text-foreground"
-              onClick={(e) => {
-                e.stopPropagation();
-                void setProjectLogo(project.path, null);
-              }}
-            >
-              Remove
-            </span>
-          )}
-        </button>
-        <div className="mb-2 flex items-center gap-1.5 px-1" role="radiogroup" aria-label="Colour">
-          {PROJECT_COLORS.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              role="radio"
-              aria-checked={(project.color ?? "slate") === c.id}
-              onClick={() => void updateProject(project.path, { color: c.id })}
-              className={cn("size-5 rounded-full ring-offset-2 ring-offset-popover", (project.color ?? "slate") === c.id && "ring-2 ring-foreground/60")}
-              style={{ background: c.css }}
-              title={c.id}
-            />
-          ))}
-        </div>
-        <div className="px-1 text-[11px] text-faint">Mascot</div>
-        <div className="mb-1 flex flex-wrap gap-1 px-1" role="radiogroup" aria-label="Mascot">
+        )}
+      </button>
+      <div className="mb-2 flex items-center gap-1.5 px-1" role="radiogroup" aria-label="Colour">
+        {PROJECT_COLORS.map((c) => (
           <button
+            key={c.id}
             type="button"
             role="radio"
-            aria-checked={!project.mascot}
-            onClick={() => void updateProject(project.path, { mascot: null })}
-            className={cn("flex size-7 items-center justify-center rounded-md hover:bg-veil-raised", !project.mascot && "bg-veil-strong")}
-            title="Folder"
+            aria-checked={(project.color ?? "slate") === c.id}
+            onClick={() => void updateProject(project.path, { color: c.id })}
+            className={cn("size-5 rounded-full ring-offset-2 ring-offset-popover", (project.color ?? "slate") === c.id && "ring-2 ring-foreground/60")}
+            style={{ background: c.css }}
+            title={c.id}
+          />
+        ))}
+      </div>
+      <div className="px-1 text-[11px] text-faint">Mascot</div>
+      <div className="mb-1 flex flex-wrap gap-1 px-1" role="radiogroup" aria-label="Mascot">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={!project.mascot}
+          onClick={() => void updateProject(project.path, { mascot: null })}
+          className={cn("flex size-7 items-center justify-center rounded-md hover:bg-veil-raised", !project.mascot && "bg-veil-strong")}
+          title="Folder"
+        >
+          <FolderOpen className="size-4" style={{ color: colorCss(project.color) }} />
+        </button>
+        {MASCOTS.map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="radio"
+            aria-checked={project.mascot === m}
+            onClick={() => void updateProject(project.path, { mascot: m })}
+            className={cn("flex size-7 items-center justify-center rounded-md hover:bg-veil-raised", project.mascot === m && "bg-veil-strong")}
+            title={m}
           >
-            <FolderOpen className="size-4" style={{ color: colorCss(project.color) }} />
+            <PixelMascot id={m} color={project.color} size={16} />
           </button>
-          {MASCOTS.map((m) => (
-            <button
-              key={m}
-              type="button"
-              role="radio"
-              aria-checked={project.mascot === m}
-              onClick={() => void updateProject(project.path, { mascot: m })}
-              className={cn("flex size-7 items-center justify-center rounded-md hover:bg-veil-raised", project.mascot === m && "bg-veil-strong")}
-              title={m}
-            >
-              <PixelMascot id={m} color={project.color} size={16} />
-            </button>
-          ))}
-        </div>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void updateProject(project.path, { pinned: !project.pinned })}>
-          {project.pinned ? <PinOff /> : <Pin />} {project.pinned ? "Unpin project" : "Pin project"}
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void revealItemInDir(project.path)}>
-          <FolderOpen /> Reveal in Finder
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void refresh()} disabled={busy}>
-          <RefreshCw className={cn(busy && "animate-spin")} /> Refresh workspaces
-        </DropdownMenuItem>
-        {project.kind !== "folder" && (
-          <DropdownMenuItem onSelect={() => setPipelineOpen(true)}>
-            <GitPullRequest /> Issue pipeline…
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void updateProject(project.path, { archived: !project.archived })}>
-          <Archive /> {project.archived ? "Unarchive" : "Archive"}
-        </DropdownMenuItem>
-        <DropdownMenuItem destructive onSelect={() => void removeProject(project.path)}>
-          <Trash2 /> Remove from TerminalX
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-      {/* Mounted only while open: a row per project would otherwise each hold a dialog. */}
-      {pipelineOpen && <IssuePipelineSettingsDialog project={project} open onOpenChange={setPipelineOpen} />}
-    </DropdownMenu>
+        ))}
+      </div>
+    </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderGit2, FolderOpen, LoaderCircle } from "lucide-react";
+import { FolderGit2, FolderOpen, LoaderCircle } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";

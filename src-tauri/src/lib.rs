@@ -13,6 +13,7 @@ mod desktop_links;
 #[cfg(feature = "desktop")]
 mod automations;
 mod binpath;
+mod chat_link;
 mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
@@ -80,6 +81,7 @@ mod media;
 mod media_types;
 mod git;
 mod github;
+mod github_identity;
 mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
@@ -233,6 +235,17 @@ pub fn run() {
             // A Codex sign-in home left by an app that crashed or was force-quit (PRO-79).
             #[cfg(feature = "desktop")]
             std::thread::spawn(|| codex_device_login::sweep_stale(&codex_device_login::homes_parent()));
+            // Attachments are shown from the data folder, wherever
+            // TERMINALX_HOME put it; the scope in tauri.conf.json only names
+            // the default one.
+            match store::root() {
+                Ok(root) => {
+                    if let Err(error) = app.asset_protocol_scope().allow_directory(root.join("attachments"), true) {
+                        log::warn!("allow attachments in the asset scope: {error:#}");
+                    }
+                }
+                Err(error) => log::warn!("allow attachments in the asset scope: {error:#}"),
+            }
             // Shells ended with the last run of the app; a tab layout that still names one names nothing.
             if let Err(error) = store::index::forget_shell_tabs() {
                 log::warn!("forget the shell tabs of the last run: {error:#}");
@@ -469,6 +482,7 @@ pub fn run() {
             commands::pairing_revoke,
             commands::pairing_set_host_name,
             commands::add_project,
+            commands::chats_dir,
             commands::remove_project,
             commands::select_project,
             commands::github_repositories,
@@ -537,6 +551,7 @@ pub fn run() {
             commands::ensure_tab_started,
             commands::tab_pane,
             commands::cancel_queued,
+            commands::send_queued_now,
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,
@@ -646,6 +661,7 @@ pub fn run() {
             commands::linear_set_api_key,
             commands::linear_teams,
             commands::github_repo,
+            commands::github_identity,
             commands::transcription_models,
             commands::transcription_download,
             commands::transcription_cancel_download,

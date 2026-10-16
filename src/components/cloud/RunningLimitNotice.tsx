@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pause } from "lucide-react";
+import { Pause } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { actionsFor } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { WorkspaceLifecycleDialog, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";

@@ -262,6 +262,33 @@ pub fn add(path: &str) -> Result<Project> {
     Ok(p)
 }
 
+/// Register a folder as a project if it is not one yet, without making it the
+/// selected project: for projects the app finds rather than ones the reader adds.
+pub fn ensure(path: &str) -> Result<Project> {
+    ensure_as(path, None)
+}
+
+/// Register a folder as a plain folder project, whatever git says about it:
+/// for a folder inside a repository that does not really own it (a `git init`
+/// run in Documents or the home folder by mistake).
+pub fn ensure_folder(path: &str) -> Result<Project> {
+    ensure_as(path, Some(ProjectKind::Folder))
+}
+
+fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
+    let path = canonical_directory(path)?;
+    refuse_mirror(&path)?;
+    let mut f = load()?;
+    if let Some(existing) = f.projects.iter().find(|p| p.path == path) {
+        return Ok(existing.clone());
+    }
+    let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None };
+    f.projects.push(p.clone());
+    save(&f)?;
+    Ok(p)
+}
+
 pub fn remove(path: &str) -> Result<()> {
     let mut f = load()?;
     f.projects.retain(|p| p.path != path);

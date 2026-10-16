@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "lucide-react";
+import { Archive, ArchiveRestore, CalendarClock, Lock, Pause, Play, Trash2, Users } from "@/icons";
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/menu";
 import { CloudWorkspaceLifecycleDialog, actionsFor, type LifecycleAction } from "@/components/cloud/CloudWorkspaceLifecycle";
 import { openSchedulesDialog } from "@/components/cloud/CloudSchedulesDialog";

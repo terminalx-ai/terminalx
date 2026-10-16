@@ -224,6 +224,7 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
         archived: false,
         pinned: false,
         active_tab: first_tab.as_ref().map(|tab| tab.id.clone()),
+        link: None,
         tabs: first_tab.into_iter().collect(),
         unknown: BTreeMap::new(),
     };
@@ -311,6 +312,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
         let entry = SessionEntry {
             id: id.clone(),
             kind: SessionKind::Quick,
+            link: None,
             project_path: scratch.clone(),
             // The scratch directory is on no branch even when the TerminalX
             // home happens to sit inside a repository (dotfiles kept in git).

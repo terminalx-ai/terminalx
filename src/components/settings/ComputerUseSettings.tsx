@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { SettingRow } from "@/components/ui/controls";
 import { api, errorMessage, type ComputerPermissionId, type ComputerPermissionStatus } from "@/lib/api";

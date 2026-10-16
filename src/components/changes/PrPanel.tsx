@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, X } from "lucide-react";
+import { Check, CircleAlert, CircleDot, ExternalLink, GitMerge, GitPullRequestDraft, Loader2, X } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type PullRequest } from "@/lib/api";
 import { localGitSource, type GitSource } from "@/lib/gitSource";

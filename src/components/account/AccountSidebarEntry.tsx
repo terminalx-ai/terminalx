@@ -1,4 +1,4 @@
-import { Loader2, UserRound } from "lucide-react";
+import { Loader2, UserRound } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";
 import { usePairing } from "@/lib/pairing";

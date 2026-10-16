@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, FileCode2, FolderOpen, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, FileCode2, FolderOpen, Loader2, RefreshCw, Search } from "@/icons";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { Markdown } from "@/components/chat/Markdown";

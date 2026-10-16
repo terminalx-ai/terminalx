@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, type HTMLAttributes, type ReactNode, type Ref } from "react";
-import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "lucide-react";
+import { Archive, ArrowUp, ChevronDown, Globe, Lock, Pin, Terminal, X } from "@/icons";
 import { AgentMark, agentName } from "@/components/AgentMark";
 import { actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { formatSize } from "@/lib/workspaceSizes";

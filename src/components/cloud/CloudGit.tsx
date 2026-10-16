@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GitBranch, Loader2, Plus, RefreshCw, ShieldAlert } from "lucide-react";
+import { GitBranch, Loader2, Plus, RefreshCw, ShieldAlert } from "@/icons";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import {
   RemoteGit,

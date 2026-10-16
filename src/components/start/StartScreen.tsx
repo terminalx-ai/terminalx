@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { CircleAlert, ExternalLink, FolderGit2, FolderOpen, Loader2, RefreshCw, Zap, type LucideIcon } from "lucide-react";
+import { CircleAlert, ExternalLink, FolderGit2, FolderOpen, Loader2, RefreshCw, Zap, type LucideIcon } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";

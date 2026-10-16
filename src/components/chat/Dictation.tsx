@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, Mic } from "lucide-react";
+import { ExternalLink, Mic } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";

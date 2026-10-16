@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { FolderOpen, RotateCcw, ZoomIn, ZoomOut } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { fs, type MediaFile } from "@/lib/api";

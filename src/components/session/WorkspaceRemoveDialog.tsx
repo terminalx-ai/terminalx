@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, FolderInput, GitMerge, GitPullRequest, Loader2, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, FolderInput, GitMerge, GitPullRequest, Loader2, Trash2 } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";

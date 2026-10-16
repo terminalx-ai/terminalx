@@ -12,6 +12,43 @@ private let providerName = "terminalx-computer-use-macos"
 // Why: read before anything else runs. Once the launcher dies this process is
 // re-parented to launchd, and a later getppid() would name the wrong process.
 private let helperLauncherPid: pid_t = getppid()
+
+/// The helper bundle the drag tile may offer: the one TerminalX named with
+/// `--drag-source`, only if it is signed, intact, and runs exactly this
+/// code. See `DragSource`.
+private let verifiedDragSource: URL? = {
+    guard let path = DragSource.path(in: CommandLine.arguments) else { return nil }
+    let url = URL(fileURLWithPath: path)
+    return DragSource.accepts(candidateCdhash: verifiedCdhash(ofBundleAt: url), ownCdhash: ownVerifiedCdhash()) ? url : nil
+}()
+
+private func cdhash(of code: SecStaticCode) -> Data? {
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess else {
+        return nil
+    }
+    return (information as? [String: Any])?[kSecCodeInfoUnique as String] as? Data
+}
+
+private func verifiedCdhash(ofBundleAt url: URL) -> Data? {
+    var code: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+    let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSRestrictSymlinks)
+    guard SecStaticCodeCheckValidity(code, flags, nil) == errSecSuccess else { return nil }
+    return cdhash(of: code)
+}
+
+private func ownVerifiedCdhash() -> Data? {
+    var selfCode: SecCode?
+    var staticCode: SecStaticCode?
+    guard SecCodeCopySelf([], &selfCode) == errSecSuccess, let selfCode,
+          SecCodeCheckValidity(selfCode, [], nil) == errSecSuccess,
+          SecCodeCopyStaticCode(selfCode, [], &staticCode) == errSecSuccess, let staticCode
+    else {
+        return nil
+    }
+    return cdhash(of: staticCode)
+}
 private let providerVersion = "1.0.0"
 private let providerProtocolVersion = 1
 
@@ -3254,6 +3291,17 @@ private enum PermissionKind: CaseIterable {
         }
     }
 
+    /// Shown instead of the drag tile when TerminalX gave no verified copy
+    /// of the helper to offer.
+    var manualInstruction: String {
+        switch self {
+        case .accessibility:
+            "Click + under the list above and choose TerminalX Computer Use Helper in TerminalX.app › Contents › Resources."
+        case .screenshots:
+            "Click + under the list above and choose TerminalX Computer Use Helper in TerminalX.app › Contents › Resources."
+        }
+    }
+
     var title: String {
         switch self {
         case .accessibility:
@@ -3550,7 +3598,7 @@ private final class PermissionDragAssistantController: NSWindowController {
             onRefreshPermissions: onRefreshPermissions,
             onClose: onClose
         )
-        window.contentView = PermissionDragAssistantView(permission: permission, appURL: Bundle.main.bundleURL) { [weak self] in
+        window.contentView = PermissionDragAssistantView(permission: permission, appURL: verifiedDragSource) { [weak self] in
             self?.dismissFromCloseButton()
         }
     }
@@ -3825,10 +3873,11 @@ private final class PermissionDragAssistantController: NSWindowController {
 
 private final class PermissionDragAssistantView: NSView {
     private let permission: PermissionKind
-    private let appURL: URL
+    /// `nil` when no verified drag source was given: then there is no tile.
+    private let appURL: URL?
     private let close: () -> Void
 
-    init(permission: PermissionKind, appURL: URL, close: @escaping () -> Void) {
+    init(permission: PermissionKind, appURL: URL?, close: @escaping () -> Void) {
         self.permission = permission
         self.appURL = appURL
         self.close = close
@@ -3860,15 +3909,28 @@ private final class PermissionDragAssistantView: NSView {
         closeButton.action = #selector(ButtonTarget.run)
         objc_setAssociatedObject(closeButton, "terminalx-action", target, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
-        let instruction = label(permission.dragInstruction, size: 12, weight: .semibold)
+        let instruction = label(appURL == nil ? permission.manualInstruction : permission.dragInstruction, size: 12, weight: .semibold)
         instruction.textColor = PermissionPalette.primaryText
-        instruction.maximumNumberOfLines = 2
-
-        let dragTile = DraggableAppTile(appURL: appURL)
-        dragTile.translatesAutoresizingMaskIntoConstraints = false
+        instruction.maximumNumberOfLines = appURL == nil ? 3 : 2
 
         addSubview(closeButton)
         addSubview(instruction)
+
+        guard let appURL else {
+            NSLayoutConstraint.activate([
+                closeButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+                closeButton.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+                closeButton.widthAnchor.constraint(equalToConstant: 18),
+                closeButton.heightAnchor.constraint(equalToConstant: 18),
+                instruction.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 36),
+                instruction.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+                instruction.topAnchor.constraint(equalTo: closeButton.topAnchor),
+                instruction.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -10)
+            ])
+            return
+        }
+        let dragTile = DraggableAppTile(appURL: appURL)
+        dragTile.translatesAutoresizingMaskIntoConstraints = false
         addSubview(dragTile)
 
         NSLayoutConstraint.activate([

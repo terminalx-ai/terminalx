@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { AlertCircle, CheckCircle2, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { freedText } from "@/components/cleanup/CleanupRunView";
 import { clearCleanupRun, summarize, useCleanupRun, type CleanupRun } from "@/lib/cleanupRun";

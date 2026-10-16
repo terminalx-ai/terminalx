@@ -183,6 +183,9 @@ impl Rig {
                 awaiting_delivery: None,
                 delivery_sent_at: None,
                 accept_by: None,
+                nudge_by: None,
+                held: Vec::new(),
+                resend_after_abort: None,
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,
@@ -1576,4 +1579,91 @@ fn a_shared_session_is_restarted_out_of_a_mode_it_may_not_be_in() {
     rig.hook("UserPromptSubmit", json!({ "permission_mode": "acceptEdits" }));
     assert_eq!(rig.mode(), now_in("acceptEdits"));
     assert!(!rig.released());
+}
+
+/// The composer's prompt went into the pane and its Enter was written; the
+/// CLI has not acknowledged it.
+fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
+    let mut rt = rig.rt.lock().unwrap();
+    if let Engine::Cli(p) = &mut rt.engine {
+        p.awaiting_delivery = Some(seq);
+        p.delivery_sent_at = Some(rig.now.get());
+        p.accept_by = Some(rig.now.get() + tui::ACCEPT_TIMEOUT);
+        p.nudge_by = Some(rig.now.get() + tui::NUDGE_AFTER);
+    }
+}
+
+fn delivery_stages(rig: &Rig) -> Vec<String> {
+    let path = rig.rt.lock().unwrap().diagnostics_path();
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).filter_map(|v| v["stage"].as_str().map(String::from)).collect()
+}
+
+#[test]
+fn an_enter_the_cli_let_go_by_is_written_once_more_before_the_reader_is_told() {
+    let rig = Rig::with_live_pane();
+    enter_written_unacknowledged(&rig, 7);
+    rig.tick();
+    assert!(delivery_stages(&rig).is_empty(), "not at once: the CLI gets its moment");
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged"]);
+    assert_eq!(rig.recovery(), None, "a nudge is not a warning");
+    rig.advance(Duration::from_secs(1));
+    rig.tick();
+    assert_eq!(delivery_stages(&rig), ["nudged"], "once only");
+    // Still nothing: now the reader is told, as before.
+    rig.advance(tui::ACCEPT_TIMEOUT);
+    rig.tick();
+    assert_eq!(rig.recovery(), Some(RecoveryKind::DeliveryUnconfirmed));
+    assert_eq!(delivery_stages(&rig), ["nudged", "unconfirmed"]);
+}
+
+#[test]
+fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer() {
+    let rig = Rig::with_live_pane();
+    enter_written_unacknowledged(&rig, 8);
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
+            input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
+        }, None);
+        assert!(!rt.pending.is_empty());
+    }
+    rig.advance(tui::NUDGE_AFTER);
+    rig.tick();
+    assert!(delivery_stages(&rig).is_empty(), "an Enter here would answer the question");
+}
+
+#[test]
+fn a_held_prompt_sent_now_is_typed_again_once_the_interrupted_turn_ends_and_the_rest_held_behind_it() {
+    let rig = Rig::with_live_pane();
+    rig.start_turn();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        if let Engine::Cli(p) = &mut rt.engine {
+            for (seq, text) in [(41, "first held"), (42, "second held")] {
+                p.held.push((seq, HeldPrompt { text: text.into(), attachments: Vec::new() }));
+                let mut echo = ComposerEcho::new(text.into(), 0);
+                echo.queued = true;
+                echo.seq = seq;
+                p.echoed.push_back(echo);
+            }
+        }
+    }
+    assert!(rig.manager.send_queued_now(SESSION, TAB, 7).is_err(), "a message the CLI has taken cannot be sent now");
+    rig.manager.send_queued_now(SESSION, TAB, 42).unwrap();
+    // The Escape went in; the CLI ends the turn as interrupted.
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }, None);
+    }
+    let rt = rig.rt.lock().unwrap();
+    assert!(rt.turn_open, "the chosen message opens a turn of its own");
+    assert_eq!(rt.status, TabStatus::InProgress);
+    let Engine::Cli(p) = &rt.engine else { panic!("a CLI tab") };
+    assert_eq!(p.awaiting_delivery, Some(42));
+    assert_eq!(p.held.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), vec![41], "the other one is held again, behind it");
+    assert_eq!(p.echoed.iter().map(|echo| (echo.seq, echo.queued)).collect::<Vec<_>>(), vec![(41, false), (42, false)], "both records stay; their echoes are awaited afresh");
+    assert!(p.resend_after_abort.is_none());
 }

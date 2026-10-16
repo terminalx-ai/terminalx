@@ -1,4 +1,4 @@
-import { CircleDot, Link2 } from "lucide-react";
+import { CircleDot, Link2 } from "@/icons";
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { Issue } from "@/lib/api";

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2, MessageCircle } from "lucide-react";
+import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2, MessageCircle } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";

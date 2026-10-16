@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle, Terminal, Users, ListChecks, CircleAlert } from "lucide-react";
+import { ChevronRight, FileCode2, FilePen, FolderSearch, Globe, Loader2, Puzzle, Terminal, Users, ListChecks, CircleAlert } from "@/icons";
 import { cn } from "@/lib/cn";
 import { callTarget, groupTargets, type ToolCall } from "@/lib/transcript";
 import { fileName, shortPath } from "@/lib/paths";

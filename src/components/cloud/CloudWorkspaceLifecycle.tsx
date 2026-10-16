@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Archive, Check, Clock, GitBranch, Loader2, Pause, Trash2 } from "lucide-react";
+import { AlertTriangle, Archive, Check, Clock, GitBranch, Loader2, Pause, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Segmented } from "@/components/ui/controls";

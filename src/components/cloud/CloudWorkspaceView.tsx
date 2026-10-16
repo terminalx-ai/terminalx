@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlus, X } from "lucide-react";
+import { Bot, Cloud, FolderTree, GitBranch, Globe, Plus, TerminalSquare, UserPlus, X } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";

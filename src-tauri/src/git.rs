@@ -683,7 +683,7 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
 
 /// Keep the worktree directory out of the project's own status without
 /// touching `.gitignore`: `.git/info/exclude` is local to this clone.
-fn ensure_worktree_dir_ignored(project: &Path) {
+pub(crate) fn ensure_worktree_dir_ignored(project: &Path) {
     let dir = crate::store::settings::load().worktree_dir;
     let top = dir.split('/').next().unwrap_or(".raccoon").to_string();
     if let Ok(git_dir) = run(project, &["rev-parse", "--git-common-dir"]) {

@@ -110,7 +110,7 @@ export type Delta =
   | { delta: "input_delta"; block: BlockRef; partialJson: string }
   | { delta: "block_stop"; block: BlockRef };
 
-export type RecoveryKind = "capacity" | "tool" | "timeout" | "delivery_unconfirmed" | "disconnected" | "permission_expired" | "failed";
+export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "disconnected" | "permission_expired" | "failed";
 
 export type Payload =
   | { type: "recovery"; kind: RecoveryKind | null }
@@ -175,7 +175,7 @@ export type Payload =
   | { type: "context_compaction_started" }
   | { type: "context_compacted"; preTokens?: number; postTokens?: number }
   | { type: "api_retry"; attempt: number; maxRetries: number; reason?: string }
-  | { type: "rate_limited"; status?: string; resetsAt?: number; message?: string }
+  | { type: "rate_limited"; status?: string; resetsAt?: number; window?: string; message?: string }
   | { type: "status"; text: string }
   /**
    * The tab's terminal changed hands (#437): the events from here to the next

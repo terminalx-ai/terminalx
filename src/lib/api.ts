@@ -455,6 +455,7 @@ export const api = {
   // projects
   listProjects: () => invoke<{ projects: Project[]; lastSelected: string | null }>("list_projects"),
   addProject: (path: string) => invoke<Project>("add_project", { path }),
+  chatsDir: () => invoke<string>("chats_dir"),
   removeProject: (path: string) => invoke<void>("remove_project", { path }),
   selectProject: (path: string) => invoke<void>("select_project", { path }),
   updateProject: (path: string, patch: ProjectPatch) => invoke<Project>("update_project", { path, patch }),
@@ -1633,6 +1634,8 @@ export const agent = {
   stop: (sessionId: string, tabId: string) => invoke<void>("stop_tab", { sessionId, tabId }),
   cancelQueued: (sessionId: string, tabId: string, messageId: string) =>
     invoke<QueuedMessage | null>("cancel_queued", { sessionId, tabId, messageId }),
+  /** Send a message the CLI holds behind its running turn now: the turn is interrupted and the message typed again. */
+  sendQueuedNow: (sessionId: string, tabId: string, seq: number) => invoke<void>("send_queued_now", { sessionId, tabId, seq }),
   listQueued: (sessionId: string, tabId: string) => invoke<QueuedMessage[]>("list_queued", { sessionId, tabId }),
   respondPermission: (sessionId: string, tabId: string, requestId: string, optionId: string) =>
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
@@ -1976,8 +1979,17 @@ export const issues = {
   linearSetApiKey: (key: string) => invoke<LinearStatus>("linear_set_api_key", { key }),
   linearTeams: () => invoke<IssueTeam[]>("linear_teams"),
   githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
+  /** The GitHub account a project is connected to: the one its pushes land as, else the CLI's. */
+  githubIdentity: (projectPath: string, refresh = false) => invoke<GithubIdentity>("github_identity", { projectPath, refresh }),
 };
 
+export interface GithubIdentity {
+  login: string | null;
+  /** `ssh`: the folder's key, so pushes land as this account; `gh`: the CLI's active account. */
+  source: "ssh" | "gh" | null;
+  email: string | null;
+  repo: string | null;
+}
 /** Sessions started from an issue, carried on to a pull request, a review and a merge. */
 export const issuePipelines = {
   list: () => invoke<IssuePipeline[]>("issue_pipelines_list"),

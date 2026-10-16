@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GitMerge, Loader2, Trash2, Undo2, X } from "lucide-react";
+import { GitMerge, Loader2, Trash2, Undo2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { branchOutcome, dismissMergedNotice, holdMergedWorkspace, mergedDue, restoreMergedRemoval, useMergedCleanup, type MergedNotice } from "@/lib/mergedCleanup";

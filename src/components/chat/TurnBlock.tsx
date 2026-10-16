@@ -1,6 +1,8 @@
 import { memo, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, RefreshCw, Shrink, Users, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { Brain, Check, ChevronRight, CircleAlert, Clock, Image as ImageIcon, RefreshCw, Send, Shrink, Users, X } from "@/icons";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
 import type { Turn, WorkItem } from "@/lib/transcript";
@@ -22,6 +24,7 @@ export const TurnBlock = memo(function TurnBlock({
   stream,
   working,
   streamingTool,
+  onSendQueuedNow,
 }: {
   turn: Turn;
   sessionId: string;
@@ -29,6 +32,8 @@ export const TurnBlock = memo(function TurnBlock({
   stream: StreamBlock[];
   working: boolean;
   streamingTool?: StreamBlock;
+  /** Send a message queued behind the running turn now; absent where that cannot be done (a cloud session). */
+  onSendQueuedNow?: (seq: number) => void;
 }) {
   const prefs = usePrefs();
   const layout = prefs.transcriptLayout;
@@ -84,15 +89,15 @@ export const TurnBlock = memo(function TurnBlock({
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-2">
-              {turn.work.map((w) => (w.kind === "text" ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} />))}
+              {turn.work.map((w) => (w.kind === "text" ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />))}
             </div>
           )}
-          {turn.work.map((w) => (w.kind === "text" ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} /> : null))}
+          {turn.work.map((w) => (w.kind === "text" ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
           {turn.work.map((w) => (
-            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} />
+            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />
           ))}
         </div>
       )}
@@ -172,7 +177,7 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string } }) {
+function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void }) {
   switch (item.kind) {
     case "text":
       return <Markdown text={item.text} className="mb-3" linkContext={linkContext} />;
@@ -184,10 +189,17 @@ function WorkRow({ item, cwd, linkContext }: { item: WorkItem; cwd?: string; lin
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "queued":
       return (
-        <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground">
-          <Clock className="size-3.5" />
+        <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
+          <Clock className="size-3.5 shrink-0" />
           {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-          <span className="whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
+          <span className="min-w-0 flex-1 whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /></span>
+          {onSendQueuedNow && (
+            <WithTooltip label="Interrupt the agent and send this now">
+              <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
+                <Send /> Send now
+              </Button>
+            </WithTooltip>
+          )}
         </div>
       );
     case "status":

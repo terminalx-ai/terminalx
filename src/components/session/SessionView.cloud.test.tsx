@@ -457,7 +457,8 @@ describe("the same SessionView for local and cloud sessions", () => {
     };
     upsertSession(local);
     const { unmount } = render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
-    expect(await screen.findByText("Local work")).toBeTruthy();
+    // A local header places the chat by project and branch; the sidebar names it.
+    expect((await screen.findByTestId("session-branch")).textContent).toBe("main");
     expect(screen.queryByTestId("session-location")).toBeNull();
     // A local tab keeps its cwd for slash commands and @-mentions.
     expect(composer().dataset.cwd).toBe("/Users/me/api");

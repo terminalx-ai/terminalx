@@ -107,6 +107,8 @@ export interface SessionEntry {
   pinned: boolean;
   tabs: TabEntry[];
   activeTab?: string | null;
+  /** A chat's link: the repo its agent last worked in, and the branch there. */
+  link?: { path: string; branch?: string | null } | null;
 }
 
 export interface Project {

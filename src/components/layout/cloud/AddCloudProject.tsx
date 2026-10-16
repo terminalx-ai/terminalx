@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FolderGit2, Loader2, Lock } from "lucide-react";
+import { FolderGit2, Loader2, Lock } from "@/icons";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";

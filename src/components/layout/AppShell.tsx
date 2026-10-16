@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { onOpenAgentLogins } from "@/lib/settingsLinks";
-import { PanelLeft, PanelRight } from "lucide-react";
+import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -190,7 +190,19 @@ export function AppShell() {
       <div className="flex min-h-0 flex-1">
         {settingsOpen ? (
           <Suspense fallback={viewFallback}>
-            <SettingsPage initialTab={settingsTab} openRequest={settingsRequest} onBack={() => setSettingsOpen(false)} />
+            <SettingsPage
+              initialTab={settingsTab}
+              openRequest={settingsRequest}
+              onBack={() => setSettingsOpen(false)}
+              onOpenSkills={() => {
+                setSettingsOpen(false);
+                showSkills();
+              }}
+              onOpenUsage={() => {
+                setSettingsOpen(false);
+                showStats();
+              }}
+            />
           </Suspense>
         ) : (
           <>

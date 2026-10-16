@@ -498,6 +498,7 @@ mod tests {
             title: "Safe session".into(),
             created: String::new(), modified: String::new(), archived: false, pinned: false, tabs: vec![tab],
             active_tab: Some("t1".into()), unknown: Default::default(),
+            link: None,
         };
         let process = bound_pane(&pane, &[session], &HashMap::new(), Some(Aggregate::default()));
         assert_eq!(process.kill_rule, KillRule::None);

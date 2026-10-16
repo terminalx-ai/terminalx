@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppWindow, ChevronDown, Ellipsis, MessageCirclePlus, Pin, PinOff, Trash2 } from "lucide-react";
+import { AppWindow, ChevronDown, Ellipsis, MessageCirclePlus, Pin, PinOff, Trash2 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";

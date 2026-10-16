@@ -506,6 +506,7 @@ mod tests {
             archived: false,
             pinned: false,
             active_tab: tabs.first().map(|t| t.id.clone()),
+            link: None,
             tabs,
             unknown: Default::default(),
         }

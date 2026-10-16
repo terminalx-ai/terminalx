@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowLeft, ArrowRight, ExternalLink, Globe, Pause, Play, RotateCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, ExternalLink, Globe, Pause, Play, RotateCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { BrowserPage } from "@/lib/api";

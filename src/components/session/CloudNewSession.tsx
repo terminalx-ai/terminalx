@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Cloud, Loader2 } from "lucide-react";
+import { Cloud, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";

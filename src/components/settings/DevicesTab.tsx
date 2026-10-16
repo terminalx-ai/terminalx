@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, Loader2, QrCode, RotateCw, Smartphone, Trash2 } from "lucide-react";
+import { Check, Copy, Loader2, QrCode, RotateCw, Smartphone, Trash2 } from "@/icons";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
 import { signIn, useAccount } from "@/lib/account";

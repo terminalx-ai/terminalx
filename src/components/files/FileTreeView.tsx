@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useWorkingChanges } from "@/lib/changes";
 import { getDraft, setDraft } from "@/lib/drafts";

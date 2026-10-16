@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
   X,
-} from "lucide-react";
+} from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";

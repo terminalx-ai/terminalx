@@ -1,4 +1,4 @@
-import { Activity } from "lucide-react";
+import { Activity } from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenuItem } from "@/components/ui/menu";
 import { OrganizationDiagnostics } from "@/components/settings/OrganizationDiagnostics";

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowDown, Loader2 } from "lucide-react";
+import { ArrowDown, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import type { Transcript } from "@/lib/transcript";
@@ -44,6 +44,7 @@ export function Chat({
   askDetail = false,
   loading = false,
   footer,
+  onSendQueuedNow,
 }: {
   sessionId: string;
   transcript: Transcript;
@@ -61,6 +62,8 @@ export function Chat({
   /** The conversation is on its way (a cloud tab opened here for the first time): empty is not "nothing yet". */
   loading?: boolean;
   footer: React.ReactNode;
+  /** Send a message queued behind the running turn now, where the backend can (local). */
+  onSendQueuedNow?: (seq: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -227,6 +230,7 @@ export function Chat({
                 stream={isLast && live ? stream : []}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}
+                onSendQueuedNow={live ? onSendQueuedNow : undefined}
               />
             );
           })}

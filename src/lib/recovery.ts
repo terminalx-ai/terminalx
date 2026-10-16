@@ -2,6 +2,7 @@ import type { AgentEvent, RecoveryKind } from "@/types/events";
 
 export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
   capacity: "The provider is at capacity. Retry or choose another available model.",
+  usage_limit: "Your plan's usage limit is reached. Wait for it to reset, or continue on another model.",
   tool: "A tool or command failed. Review its outcome before continuing.",
   timeout: "No progress was confirmed before the timeout. The process outcome is unknown.",
   delivery_unconfirmed: "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
@@ -12,6 +13,7 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
 
 /** Never echo arbitrary IPC/provider errors in recovery controls. */
 export function classifyRecovery(message: string): RecoveryKind {
+  if (/usage.?limit|hit your|limit reached|quota/i.test(message)) return "usage_limit";
   if (/capacity|overloaded|rate.?limit|too many requests|429|529/i.test(message)) return "capacity";
   if (/timeout|timed out|no progress/i.test(message)) return "timeout";
   if (/network|disconnect|connection|broken pipe|closed|eof/i.test(message)) return "disconnected";

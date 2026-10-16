@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn().mockResolvedValue
 vi.mock("@/lib/browser", () => ({ openBrowserTab: vi.fn() }));
 
 import { TurnBlock } from "./TurnBlock";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Turn } from "@/lib/transcript";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { setPrefs } from "@/lib/prefs";
@@ -69,5 +70,19 @@ describe("a prompt's images", () => {
     );
     expect(container.querySelector("img")).toBeNull();
     expect(screen.getAllByTestId("prompt-image-name").map((chip) => chip.textContent)).toEqual(["shot.png", "Image"]);
+  });
+});
+
+describe("a message queued behind the running turn", () => {
+  it("offers Send now where the backend can interrupt for it, and nowhere else", () => {
+    const queued: Turn = { ...turn([]), live: true, work: [{ kind: "queued", text: "also run this on localhost again", key: "q9", seq: 9 }] };
+    const sendNow = vi.fn();
+    render(<TooltipProvider><TurnBlock turn={queued} sessionId="s" stream={[]} working onSendQueuedNow={sendNow} /></TooltipProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+    expect(sendNow).toHaveBeenCalledWith(9);
+    cleanup();
+    render(<TurnBlock turn={queued} sessionId="s" stream={[]} working />);
+    expect(screen.getByTestId("queued-message").textContent).toContain("also run this on localhost again");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
 });

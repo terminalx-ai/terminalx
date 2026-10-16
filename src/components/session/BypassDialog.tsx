@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ShieldOff } from "lucide-react";
+import { ShieldOff } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { closeBypass, useDialogs } from "@/lib/dialogs";

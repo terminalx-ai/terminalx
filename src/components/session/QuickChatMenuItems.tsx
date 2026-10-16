@@ -1,4 +1,4 @@
-import { FolderInput, FolderOpen, MessageCircle, Pencil } from "lucide-react";
+import { FolderInput, FolderOpen, MessageCircle, Pencil } from "@/icons";
 import { message, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { DropdownMenuItem } from "@/components/ui/menu";
 import { errorMessage } from "@/lib/api";

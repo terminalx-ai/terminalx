@@ -16,14 +16,18 @@
 //! separate bundle and not a library linked into the app.
 
 pub mod cli;
+pub mod code_identity;
 pub mod desktop_script;
+#[cfg(unix)]
+pub mod helper_install;
 pub mod macos_native;
 pub mod permissions;
 pub mod screenshot;
 pub mod validation;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -232,6 +236,95 @@ pub fn helper_app_path(resource_dir: Option<&Path>) -> Option<PathBuf> {
         .find(|candidate| helper_executable_in(candidate).is_some())
 }
 
+/// A helper ready to use: where it is shipped, where it runs from, which
+/// identity its signature declares, and how to recognise it running.
+#[derive(Clone)]
+pub struct ResolvedHelper {
+    /// Inside the app (or a dev build's output): read-only to the app.
+    pub bundled: PathBuf,
+    /// The bundle to run: `bundled`, or its copy outside the app (#480).
+    pub run: PathBuf,
+    /// The signing identifier of the bundled helper; the id its TCC rows
+    /// carry. Never read from the copy, which anyone of this user can edit.
+    pub bundle_id: String,
+    /// Accepts only a process running the bundled helper's exact code.
+    pub check: macos_native::CodeCheck,
+}
+
+impl ResolvedHelper {
+    pub fn executable(&self) -> Option<PathBuf> {
+        helper_executable_in(&self.run)
+    }
+}
+
+/// Where copies of a shipped helper run from: the app's own folder, not
+/// temporary and not inside any app.
+#[cfg(target_os = "macos")]
+fn helper_copy_base() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("TerminalX").join("computer-use-helper"))
+}
+
+/// Read the bundled helper's identity, then put its copy in place (#480).
+/// macOS charges a helper's screen captures to the app around it, so a
+/// helper inside TerminalX.app runs from a copy outside it; see
+/// [`helper_install`] and [`code_identity`].
+#[cfg(target_os = "macos")]
+fn resolve_helper(bundled: PathBuf, app_identifier: Option<&str>) -> Result<ResolvedHelper, ComputerError> {
+    let expected = code_identity::expected_for(&bundled, app_identifier).map_err(|detail| {
+        ComputerError::new("provider_incompatible", format!("{HELPER_APP_NAME} cannot be used: {detail}"))
+    })?;
+    let unavailable = |detail: String| {
+        ComputerError::new(
+            "unsupported_capability",
+            format!("TerminalX could not set up {HELPER_APP_NAME} outside the app, where macOS needs it to be to honour its Screen Recording permission: {detail}"),
+        )
+    };
+    let base = helper_copy_base().ok_or_else(|| unavailable("no Application Support folder".into()))?;
+    let run = helper_install::helper_to_run(&bundled, &base).map_err(|e| unavailable(e.to_string()))?;
+    let bundle_id = expected.identifier.clone();
+    let check: macos_native::CodeCheck = Arc::new(move |peer| code_identity::check(peer, &expected));
+    Ok(ResolvedHelper { bundled, run, bundle_id, check })
+}
+
+/// How long a resolution may be reused by status and permission requests.
+/// A helper start always resolves afresh.
+const RESOLVED_HELPER_REUSE: Duration = Duration::from_secs(10);
+
+type ResolvedCache = Arc<Mutex<Option<(Instant, ResolvedHelper)>>>;
+
+/// The helper for `bundled`, reusing a resolution younger than `reuse`.
+fn resolve_cached(
+    cache: &ResolvedCache,
+    bundled: Option<PathBuf>,
+    app_identifier: Option<&str>,
+    reuse: Duration,
+) -> Result<Option<ResolvedHelper>, ComputerError> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+    let Some(bundled) = bundled else {
+        return Ok(None);
+    };
+    let mut cached = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((at, helper)) = cached.as_ref() {
+        if helper.bundled == bundled && at.elapsed() < reuse {
+            return Ok(Some(helper.clone()));
+        }
+    }
+    *cached = None;
+    #[cfg(target_os = "macos")]
+    {
+        let helper = resolve_helper(bundled, app_identifier)?;
+        *cached = Some((Instant::now(), helper.clone()));
+        Ok(Some(helper))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app_identifier;
+        Ok(None)
+    }
+}
+
 pub fn helper_executable_in(app: &Path) -> Option<PathBuf> {
     let executable = app.join("Contents/MacOS").join(HELPER_EXECUTABLE_NAME);
     executable.is_file().then_some(executable)
@@ -256,6 +349,7 @@ pub struct ComputerService {
     resource_dir: Mutex<Option<PathBuf>>,
     app_identifier: Mutex<Option<String>>,
     provider: Mutex<Option<Box<dyn ComputerProvider>>>,
+    resolved: ResolvedCache,
 }
 
 impl ComputerService {
@@ -264,6 +358,7 @@ impl ComputerService {
             resource_dir: Mutex::new(resource_dir),
             app_identifier: Mutex::new(None),
             provider: Mutex::new(None),
+            resolved: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -275,7 +370,7 @@ impl ComputerService {
         *self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()) = Some(app_identifier.to_owned());
         // Older helpers must lose their permissions before the current one
         // is started or probed (PRO-90). Off the main thread: it runs tccutil.
-        let helper = self.helper_app_path();
+        let helper = self.bundled_helper_app_path();
         let identifier = app_identifier.to_owned();
         std::thread::spawn(move || {
             permissions::legacy_cleanup(Some(&identifier), helper.as_deref());
@@ -289,9 +384,19 @@ impl ComputerService {
         }
     }
 
-    pub fn helper_app_path(&self) -> Option<PathBuf> {
+    /// The helper bundle shipped with (or built for) this app.
+    pub fn bundled_helper_app_path(&self) -> Option<PathBuf> {
         let dir = self.resource_dir.lock().unwrap_or_else(|p| p.into_inner()).clone();
         helper_app_path(dir.as_deref())
+    }
+
+    fn app_identifier(&self) -> Option<String> {
+        self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// The helper to probe and ask permissions for (macOS only).
+    pub fn helper(&self) -> Result<Option<ResolvedHelper>, ComputerError> {
+        resolve_cached(&self.resolved, self.bundled_helper_app_path(), self.app_identifier().as_deref(), RESOLVED_HELPER_REUSE)
     }
 
     /// Dispatch one control command (`computer.<method>`), validating action
@@ -330,15 +435,15 @@ impl ComputerService {
                         ))
                     }
                 };
-                return serde_json::to_value(permissions::open_setup(self.helper_app_path().as_deref(), id)?)
+                return serde_json::to_value(permissions::open_setup(self.helper()?.as_ref(), id)?)
                     .map_err(|e| ComputerError::accessibility(e.to_string()));
             }
             "permissionsStatus" => {
-                return serde_json::to_value(permissions::status(self.helper_app_path().as_deref())?)
+                return serde_json::to_value(permissions::status(self.helper()?.as_ref())?)
                     .map_err(|e| ComputerError::accessibility(e.to_string()));
             }
             "permissionsReset" => {
-                return serde_json::to_value(permissions::reset(self.helper_app_path().as_deref())?)
+                return serde_json::to_value(permissions::reset(self.helper()?.as_ref())?)
                     .map_err(|e| ComputerError::accessibility(e.to_string()));
             }
             _ => {}
@@ -358,7 +463,7 @@ impl ComputerService {
                 // A helper without its permissions answers the handshake all
                 // the same; say so here instead of at the first action.
                 if cfg!(target_os = "macos") {
-                    if let Ok(status) = permissions::status(self.helper_app_path().as_deref()) {
+                    if let Ok(status) = self.helper().and_then(|helper| permissions::status(helper.as_ref())) {
                         permissions::attach_to_capabilities(&mut capabilities, &status);
                     }
                 }
@@ -405,26 +510,30 @@ impl ComputerService {
         if !cfg!(target_os = "macos") || !macos_native::is_macos_14_or_newer() {
             return Ok(None);
         }
-        let Some(app) = self.helper_app_path() else {
+        let Some(bundled) = self.bundled_helper_app_path() else {
             return Ok(None);
         };
-        let Some(executable) = helper_executable_in(&app) else {
-            return Ok(None);
+        // Resolved again before every start, a restart included: the copy
+        // may have been changed since. A helper from before PRO-90 (it
+        // trusts whoever starts it), an unsigned one, and any code that is
+        // not exactly the bundled helper are refused (see code_identity).
+        let identifier = self.app_identifier();
+        let cache = self.resolved.clone();
+        let resolve_bundled = bundled.clone();
+        let resolve_identifier = identifier.clone();
+        let resolve = move || {
+            let helper = resolve_cached(&cache, Some(resolve_bundled.clone()), resolve_identifier.as_deref(), Duration::ZERO)?
+                .ok_or_else(|| ComputerError::new("unsupported_capability", provider_unavailable_message()))?;
+            let executable = helper
+                .executable()
+                .ok_or_else(|| ComputerError::new("unsupported_capability", provider_unavailable_message()))?;
+            Ok(macos_native::HelperLaunch { executable, check: helper.check })
         };
-        // A helper from before PRO-90 trusts whoever starts it. Never run one,
-        // wherever the override or a stale build points.
-        if cfg!(target_os = "macos") && permissions::read_bundle_id(&app).is_ok_and(|id| permissions::is_legacy_helper(&id)) {
-            return Err(ComputerError::new(
-                "provider_incompatible",
-                format!("{} is a computer-use helper from an older TerminalX, which this app does not use", app.display()),
-            ));
-        }
         // Before every helper start, not only at launch: an old helper that
         // was granted again while the app runs loses the grant here. Provider
         // calls never run on the main thread.
-        let identifier = self.app_identifier.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let provider = macos_native::MacosNativeProvider::new(executable).before_each_start(move || {
-            permissions::legacy_cleanup(identifier.as_deref(), Some(&app));
+        let provider = macos_native::MacosNativeProvider::new(resolve).before_each_start(move || {
+            permissions::legacy_cleanup(identifier.as_deref(), Some(&bundled));
         });
         Ok(Some(Box::new(provider)))
     }
@@ -442,7 +551,7 @@ impl Drop for ComputerService {
 pub fn computer_permission_status(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<permissions::PermissionStatusResult, String> {
-    permissions::status(state.computer.helper_app_path().as_deref()).map_err(|e| e.to_string())
+    permissions::status(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -450,14 +559,14 @@ pub fn computer_open_permission(
     state: tauri::State<'_, crate::AppState>,
     id: Option<permissions::PermissionId>,
 ) -> Result<permissions::PermissionSetupResult, String> {
-    permissions::open_setup(state.computer.helper_app_path().as_deref(), id).map_err(|e| e.to_string())
+    permissions::open_setup(state.computer.helper().map_err(|e| e.to_string())?.as_ref(), id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn computer_reset_permissions(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<permissions::PermissionResetResult, String> {
-    let result = permissions::reset(state.computer.helper_app_path().as_deref()).map_err(|e| e.to_string())?;
+    let result = permissions::reset(state.computer.helper().map_err(|e| e.to_string())?.as_ref()).map_err(|e| e.to_string())?;
     // A helper that already holds a session keeps its old TCC decision
     // cached; restart it so the next call sees the reset.
     state.computer.shutdown();

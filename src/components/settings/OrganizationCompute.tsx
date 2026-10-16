@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
   COMPUTE_PROVIDERS,

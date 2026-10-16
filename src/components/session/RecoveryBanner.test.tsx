@@ -77,6 +77,23 @@ describe("session recovery UI smoke", () => {
     expect(p.onStop).toHaveBeenCalledOnce();
   });
 
+  it("names the plan window that ran out and when it resets, and offers another model", () => {
+    const p = props();
+    const resetsAt = Date.now() + 23 * 3_600_000 + 5 * 60_000;
+    render(<RecoveryBanner {...p} kind="usage_limit" limit={{ status: "rejected", resetsAt, window: "seven_day" }} models={[{ id: "other", label: "Other model" } as ModelInfo]} />);
+    expect(screen.getByText("Usage limit reached")).toBeTruthy();
+    expect(screen.getByText(/plan's usage limit is reached/)).toBeTruthy();
+    const reset = screen.getByTestId("usage-limit-reset").textContent!;
+    expect(reset).toMatch(/^Weekly limit · resets .+ \(in 23h [45]m\)$/);
+    expect(reset).toContain(new Date(resetsAt).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Choose another model" }), { target: { value: "other" } });
+    expect(p.onRetry).toHaveBeenCalledWith("other");
+    // Without a reset time there is nothing to count down to; the window alone is not worth a line.
+    cleanup();
+    render(<RecoveryBanner {...p} kind="usage_limit" limit={{ status: "rejected" }} />);
+    expect(screen.queryByTestId("usage-limit-reset")).toBeNull();
+  });
+
   it.each(["timeout", "disconnected"] as const)("distinguishes unknown %s outcomes from exit", kind => {
     render(<RecoveryBanner {...props()} kind={kind} />);
     expect(screen.getByText(/process outcome is unknown/)).toBeTruthy();

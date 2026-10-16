@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "lucide-react";
+import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { Working } from "@/components/ui/StatusMark";
 import { AgentMark, agentName as agentDisplayName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -266,7 +267,14 @@ export function CloudAgentCard({
           </span>
         </div>
 
-        <Snippet who={agentName} text={state} tone={column === "needs" ? "warning" : undefined} />
+        {column === "working" ? (
+          <div className="flex items-center gap-1.5">
+            <Working className="size-3" />
+            <Snippet who={agentName} text={state} />
+          </div>
+        ) : (
+          <Snippet who={agentName} text={state} tone={column === "needs" ? "warning" : undefined} />
+        )}
 
         <div className="flex min-w-0 items-center gap-1.5 pt-0.5 text-[11px] text-faint">
           <FolderGit2 className="size-3 shrink-0" />

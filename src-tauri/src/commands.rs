@@ -1603,6 +1603,19 @@ pub fn add_project(app: AppHandle, path: String) -> CmdResult<Project> {
     Ok(project)
 }
 
+/// The folder the sidebar's New chat runs in: a plain directory in the store,
+/// so a chat needs no project of the user's and no worktree.
+#[tauri::command]
+pub fn chats_dir() -> CmdResult<String> {
+    let dir = store::ensure_dir(store::root().map_err(err)?.join("Chats")).map_err(err)?;
+    // Its agents are told to start a branch as a worktree, not in the reader's checkout.
+    if let Err(error) = crate::chat_link::ensure_instructions(&dir) {
+        log::warn!("write the chats' agent note: {error:#}");
+    }
+    // Canonical, as a session's project path is, so the sidebar can match them.
+    Ok(std::fs::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn remove_project(app: AppHandle, path: String) -> CmdResult<()> {
     projects::remove(&path).map_err(err)?;
@@ -2161,6 +2174,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             pinned: false,
             tabs: vec![new_tab.clone()],
             active_tab: Some(new_tab.id.clone()),
+            link: None,
             unknown: BTreeMap::new(),
         };
         if src.worktree_name.is_some() && !src.worktree_removed {
@@ -2377,6 +2391,12 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
 pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
     let m = state.manager().ok_or("not ready")?;
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
+}
+
+/// Send a message the CLI holds behind its running turn now: interrupt, then type it.
+#[tauri::command]
+pub fn send_queued_now(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<()> {
+    state.manager().ok_or("not ready")?.send_queued_now(&session_id, &tab_id, seq).map_err(err)
 }
 
 #[tauri::command]
@@ -3196,6 +3216,14 @@ pub fn github_repo(project_path: String) -> Option<String> {
     crate::issues::github_repo(Path::new(&project_path))
 }
 
+/// The GitHub account a project is connected to: the one its pushes land as.
+#[tauri::command]
+pub async fn github_identity(project_path: String, refresh: Option<bool>) -> CmdResult<crate::github_identity::GithubIdentity> {
+    tauri::async_runtime::spawn_blocking(move || crate::github_identity::identity(Path::new(&project_path), refresh.unwrap_or(false)))
+        .await
+        .map_err(err)
+}
+
 // ------------------------------------------------------------------ issue pipelines
 
 /// A pipeline as it starts, with what the author's first prompt must carry
@@ -3740,6 +3768,7 @@ mod command_tests {
             archived: false,
             pinned: false,
             tabs: Vec::new(),
+            link: None,
             active_tab: None,
             unknown: Default::default(),
         };

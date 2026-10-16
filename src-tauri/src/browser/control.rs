@@ -272,6 +272,7 @@ mod tests {
             pinned: false,
             tabs: Vec::new(),
             active_tab: None,
+            link: None,
             unknown: Default::default(),
         };
         crate::store::index::update(|sessions| {

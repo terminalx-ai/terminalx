@@ -14,7 +14,7 @@ import {
   Terminal,
   Trash2,
   X,
-} from "lucide-react";
+} from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
 import { WorkspaceNameEditor } from "@/components/session/WorkspaceNameEditor";

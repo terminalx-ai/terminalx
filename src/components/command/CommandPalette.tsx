@@ -36,7 +36,7 @@ import {
   Cloud,
   type LucideIcon,
   Trash2,
-} from "lucide-react";
+} from "@/icons";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { AgentMark } from "@/components/AgentMark";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";

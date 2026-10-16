@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Check, ChevronRight, CircleAlert, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";

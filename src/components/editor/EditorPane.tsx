@@ -15,7 +15,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { highlightSelectionMatches, openSearchPanel, searchKeymap } from "@codemirror/search";
-import { AlertTriangle, FolderOpen, Save } from "lucide-react";
+import { AlertTriangle, FolderOpen, Save } from "@/icons";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Segmented } from "@/components/ui/controls";
 import { Markdown } from "@/components/chat/Markdown";

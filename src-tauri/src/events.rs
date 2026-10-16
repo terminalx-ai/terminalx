@@ -386,8 +386,12 @@ pub enum Payload {
     RateLimited {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// Unix milliseconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at: Option<u64>,
+        /// The plan window that ran out: `five_hour` or `seven_day`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },

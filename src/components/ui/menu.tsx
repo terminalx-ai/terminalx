@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ContextMenu as Ctx, DropdownMenu as Prim } from "radix-ui";
-import { Check, ChevronRight } from "lucide-react";
+import { Check, ChevronRight } from "@/icons";
 import { cn } from "@/lib/cn";
 
 export const DropdownMenu = Prim.Root;

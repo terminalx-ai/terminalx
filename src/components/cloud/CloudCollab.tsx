@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useState } from "react";
-import { Keyboard, Loader2, Lock, StickyNote, Users, X } from "lucide-react";
+import { Keyboard, Loader2, Lock, StickyNote, Users, X } from "@/icons";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";

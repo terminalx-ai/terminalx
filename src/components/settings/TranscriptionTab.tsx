@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check, Download, ExternalLink, Trash2, X } from "lucide-react";
+import { Check, Download, ExternalLink, Trash2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { SettingRow, Switch } from "@/components/ui/controls";
 import { TranscriptionInputPicker } from "@/components/chat/TranscriptionInputPicker";

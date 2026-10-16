@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, usableProviders, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";

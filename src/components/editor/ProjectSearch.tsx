@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search } from "lucide-react";
+import { CaseSensitive, ChevronDown, ChevronRight, Regex, Replace, ReplaceAll, Search } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";

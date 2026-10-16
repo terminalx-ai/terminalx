@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Check, Minus } from "lucide-react";
+import { Check, Minus } from "@/icons";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 
@@ -42,7 +42,7 @@ export function SearchCheck({ label, checked, onChange, className }: { label: st
         className,
       )}
     >
-      {checked === "mixed" ? <Minus className="size-2.5" strokeWidth={3} /> : on ? <Check className="size-2.5" strokeWidth={3} /> : null}
+      {checked === "mixed" ? <Minus className="size-2.5" strokeWidth={2} /> : on ? <Check className="size-2.5" strokeWidth={2} /> : null}
     </button>
   );
 }

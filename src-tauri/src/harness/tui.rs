@@ -41,12 +41,28 @@ pub const SUBMIT: &[u8] = b"\r";
 ///
 /// An embedded Escape would close the frame early and run the rest as
 /// keystrokes, so escapes are replaced with the printable symbol for one.
+///
+/// Two endings change what the Enter after the paste means, so each gets a
+/// space after it; the CLI records the prompt without it. A paste that ends
+/// in an `@path` mention opens the file picker once it has landed, with the
+/// cursor at the end of the path, and Enter picks the suggestion instead of
+/// sending. A paste that ends in a backslash makes Enter a line break, as it
+/// does when typed.
 pub fn body_bytes(text: &str) -> Vec<u8> {
-    let sanitized = text.replace('\u{1b}', "\u{241b}").replace("\r\n", "\r").replace('\n', "\r");
+    let mut sanitized = text.replace('\u{1b}', "\u{241b}").replace("\r\n", "\r").replace('\n', "\r");
     if is_slash_command(text) {
         return sanitized.into_bytes();
     }
+    if ends_in_mention(text) || sanitized.ends_with('\\') {
+        sanitized.push(' ');
+    }
     format!("{BRACKETED_PASTE_START}{sanitized}{BRACKETED_PASTE_END}").into_bytes()
+}
+
+/// Whether the prompt's last word is an `@path` mention, the position where
+/// the CLI's picker opens on it.
+pub fn ends_in_mention(text: &str) -> bool {
+    text.rsplit(char::is_whitespace).next().is_some_and(|word| word.len() > 1 && word.starts_with('@'))
 }
 
 pub fn is_slash_command(text: &str) -> bool {
@@ -85,6 +101,13 @@ pub const PASTE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// pane are not an acknowledgement, and neither is the pane redrawing — the
 /// paste appearing in the composer is itself a redraw.
 pub const ACCEPT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long after the Enter an idle CLI is given before the Enter is written
+/// once more. A CLI that took the prompt acknowledges it well inside a second;
+/// one that let the Enter go by (still settling after a resume, say) keeps
+/// the prompt in its input, where a second Enter sends it. On an input the
+/// CLI has already emptied, an Enter does nothing.
+pub const NUDGE_AFTER: Duration = Duration::from_secs(4);
 
 /// Whether the CLI read what was written into its pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,8 +777,8 @@ mod tests {
 
     #[test]
     fn a_prompt_is_pasted_and_submitted_separately() {
-        let body = body_bytes("hello @src/main.rs");
-        assert_eq!(String::from_utf8(body.clone()).unwrap(), "\x1b[200~hello @src/main.rs\x1b[201~");
+        let body = body_bytes("hello, look at src/main.rs");
+        assert_eq!(String::from_utf8(body.clone()).unwrap(), "\x1b[200~hello, look at src/main.rs\x1b[201~");
         assert!(!body.ends_with(SUBMIT));
         assert!(submit_delay(body.len()) >= Duration::from_millis(250));
         // A long paste gets longer to arrive, so its Enter waits longer.
@@ -780,6 +803,27 @@ mod tests {
     fn newlines_become_carriage_returns_and_escapes_lose_their_bite() {
         let s = String::from_utf8(body_bytes("one\ntwo\r\nthree\u{1b}[31m")).unwrap();
         assert_eq!(s, "\x1b[200~one\rtwo\rthree\u{241b}[31m\x1b[201~");
+    }
+
+    #[test]
+    fn a_prompt_ending_in_a_mention_gets_a_space_so_the_picker_does_not_take_the_enter() {
+        // An attached file is sent as its mention, alone or last: the picker would open on it.
+        assert_eq!(String::from_utf8(body_bytes("@/Users/x/notes.md")).unwrap(), "\x1b[200~@/Users/x/notes.md \x1b[201~");
+        assert_eq!(String::from_utf8(body_bytes("@/a/one.md @/a/two.md")).unwrap(), "\x1b[200~@/a/one.md @/a/two.md \x1b[201~");
+        assert_eq!(String::from_utf8(body_bytes("read\n@/a/one.md")).unwrap(), "\x1b[200~read\r@/a/one.md \x1b[201~");
+        // Words after the mention, a lone "@", or an address are left as they are.
+        assert_eq!(String::from_utf8(body_bytes("@/a/one.md read it")).unwrap(), "\x1b[200~@/a/one.md read it\x1b[201~");
+        assert_eq!(String::from_utf8(body_bytes("ping me @")).unwrap(), "\x1b[200~ping me @\x1b[201~");
+        assert!(ends_in_mention("mail @sam"));
+        assert!(!ends_in_mention("mail sam@example.com"));
+    }
+
+    #[test]
+    fn a_prompt_ending_in_a_backslash_gets_a_space_so_the_enter_sends_instead_of_breaking_the_line() {
+        assert_eq!(String::from_utf8(body_bytes("yes, \\")).unwrap(), "\x1b[200~yes, \\ \x1b[201~");
+        assert_eq!(String::from_utf8(body_bytes("C:\\path\\")).unwrap(), "\x1b[200~C:\\path\\ \x1b[201~");
+        // A backslash anywhere else is prose.
+        assert_eq!(String::from_utf8(body_bytes("a \\ b")).unwrap(), "\x1b[200~a \\ b\x1b[201~");
     }
 
     #[test]

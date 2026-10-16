@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Plus, QrCode, Share2 } from "lucide-react";
+import { Copy, Plus, QrCode, Share2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {

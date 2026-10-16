@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CaseSensitive, FileText, Loader2, Regex, Search } from "lucide-react";
+import { CaseSensitive, FileText, Loader2, Regex, Search } from "@/icons";
 import type { WorkspaceConnectionState, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { EditorSplit } from "@/components/editor/EditorSplit";

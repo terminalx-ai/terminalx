@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Cloud, PanelLeft, Plug, Unplug } from "lucide-react";
+import { Cloud, PanelLeft, Plug, Unplug } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";

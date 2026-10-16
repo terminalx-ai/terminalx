@@ -41,6 +41,16 @@ describe("buildTranscript", () => {
     expect(call.kind === "tool" && call.call.abandoned).toBeUndefined();
   });
 
+  it("shows a refused request's limit in the conversation, and keeps a warning out of it", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Go on", queued: false }),
+      ev({ type: "rate_limited", status: "allowed_warning", resetsAt: 1_791_745_200_000, window: "seven_day", message: "Nearly there" }),
+      ev({ type: "rate_limited", status: "rejected", resetsAt: 1_791_745_200_000, window: "seven_day", message: "Your plan's usage limit is reached." }),
+    ], false);
+    expect(t.turns[0].work).toEqual([expect.objectContaining({ kind: "error", text: "Your plan's usage limit is reached." })]);
+    expect(t.rateLimit).toEqual({ status: "rejected", resetsAt: 1_791_745_200_000, window: "seven_day" });
+  });
+
   it("removes nested and unfinished harness blocks while preserving surrounding user text", () => {
     const t = buildTranscript([
       ev({ type: "user_message", text: "Before <system-reminder source=\"cli\">secret <system-reminder>nested</system-reminder> more</system-reminder> after", queued: false }),
