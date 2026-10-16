@@ -181,7 +181,7 @@ export function agentLoginMessage(error: unknown, agent?: AgentLoginProvider): s
     case "cloud_agent_codex_cli_missing":
       return "Codex is not installed on this Mac, so its sign-in cannot run here. Install Codex, or connect with an API key.";
     case "cloud_agent_codex_cli_untrusted":
-      return "The codex found on this Mac could be changed by another account on it (it, or its folder, is writable by others), so it was not run. Fix its permissions, or connect with an API key.";
+      return "The codex found on this Mac, or the node it runs on, could be changed by another account on it (it, or its folder, is writable by others), so it was not run. Fix the permissions, or connect with an API key.";
     case "cloud_agent_codex_login_unavailable":
       return "Codex could not start a sign-in just now; it needs to reach OpenAI. Nothing was stored; try again in a moment.";
     case "cloud_agent_local_login_cancelled":

@@ -1046,7 +1046,11 @@ pub async fn cloud_agent_codex_login_start(
     if !crate::codex_device_login::trusted_program(&program) {
         return Err(CloudWorkspaceClientError::local(crate::codex_device_login::DeviceLoginError::CliUntrusted.code(), false));
     }
-    let path = crate::binpath::login_path();
+    // Only directories no other account can write: `codex` from npm runs whichever `node` PATH finds first.
+    let path = crate::codex_device_login::trusted_path(&crate::binpath::login_path());
+    if !crate::codex_device_login::runs_trusted(&program, &path) {
+        return Err(CloudWorkspaceClientError::local(crate::codex_device_login::DeviceLoginError::CliUntrusted.code(), false));
+    }
     let (login, code) = tauri::async_runtime::spawn_blocking(move || crate::codex_device_login::start(&program, &args, &path, &crate::codex_device_login::homes_parent()))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Mutation))?

@@ -328,14 +328,26 @@ pub fn sign_in_from_raw(raw: &str) -> Option<SignIn> {
     Some(SignIn { secret: Zeroizing::new(secret.to_string()), account: crate::agent_local_login::codex_account(id_token) })
 }
 
-/// Open a file that is a regular file at `path` itself, never through a link.
+/// Open a file that is a regular file at `path` itself, never through a
+/// link: not a symbolic one (`O_NOFOLLOW`), and not a hard link that shares
+/// its contents with a file elsewhere, which zeroing would reach.
 fn open_regular(path: &Path, write: bool) -> Option<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(!write).write(write);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK);
     let file = options.open(path).ok()?;
-    file.metadata().ok().filter(|meta| meta.is_file()).map(|_| file)
+    file.metadata().ok().filter(|meta| meta.is_file() && single_link(meta)).map(|_| file)
+}
+
+#[cfg(unix)]
+fn single_link(meta: &std::fs::Metadata) -> bool {
+    std::os::unix::fs::MetadataExt::nlink(meta) == 1
+}
+
+#[cfg(not(unix))]
+fn single_link(_meta: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// `<home>/.codex/auth.json`, when `.codex` is a real directory inside the home (not a link out of it).
@@ -557,17 +569,61 @@ pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Pat
 /// only one that another account on this Mac could have swapped.
 #[cfg(unix)]
 pub fn trusted_program(program: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let me = unsafe { libc::getuid() };
-    let safe = |path: &Path| std::fs::metadata(path).is_ok_and(|meta| (meta.uid() == me || meta.uid() == 0) && meta.mode() & 0o022 == 0);
     let Ok(real) = std::fs::canonicalize(program) else { return false };
-    let checked = [Some(real.as_path()), real.parent(), program.parent()].into_iter().all(|path| path.is_some_and(safe));
+    let checked = [Some(real.as_path()), real.parent(), program.parent()].into_iter().all(|path| path.is_some_and(owned_safely));
     checked
 }
 
 #[cfg(not(unix))]
 pub fn trusted_program(_program: &Path) -> bool {
     true
+}
+
+/// `path_env` without the directories another account could write into.
+/// The npm `codex` is a `#!/usr/bin/env node` script, so whatever `node`
+/// comes first in PATH runs the sign-in; a group- or world-writable
+/// directory ahead of the real one could hold a planted `node`. Relative
+/// and empty entries (the working directory) are dropped too.
+#[cfg(unix)]
+pub fn trusted_path(path_env: &str) -> String {
+    let kept: Vec<&str> = std::env::split_paths(path_env)
+        .zip(path_env.split(':'))
+        .filter(|(dir, _)| dir.is_absolute() && owned_safely(dir) && std::fs::canonicalize(dir).is_ok_and(|real| owned_safely(&real)))
+        .map(|(_, entry)| entry)
+        .collect();
+    kept.join(":")
+}
+
+#[cfg(not(unix))]
+pub fn trusted_path(path_env: &str) -> String {
+    path_env.to_string()
+}
+
+/// Whether `program` can run on `path_env` with nothing another account
+/// could swap: a `#!/usr/bin/env <interpreter>` script needs that
+/// interpreter in `path_env`, and the first one found must pass
+/// `trusted_program` too. Refusing here says why, instead of the CLI
+/// dying with "env: node: No such file" (e.g. node only in a
+/// group-writable Homebrew folder).
+pub fn runs_trusted(program: &Path, path_env: &str) -> bool {
+    let mut head = [0u8; 128];
+    let read = std::fs::File::open(program).and_then(|mut file| file.read(&mut head)).unwrap_or(0);
+    let first_line = String::from_utf8_lossy(&head[..read]).lines().next().unwrap_or("").to_string();
+    let Some(interpreter) = first_line.strip_prefix("#!").and_then(|line| {
+        let mut words = line.split_whitespace();
+        (words.next()? == "/usr/bin/env").then(|| words.find(|word| !word.starts_with('-'))).flatten()
+    }) else {
+        return true;
+    };
+    std::env::split_paths(path_env).map(|dir| dir.join(interpreter)).find(|candidate| candidate.is_file()).is_some_and(|found| trusted_program(&found))
+}
+
+/// Belongs to this user or to root, and no one else can write to it.
+#[cfg(unix)]
+fn owned_safely(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let me = unsafe { libc::getuid() };
+    std::fs::metadata(path).is_ok_and(|meta| (meta.uid() == me || meta.uid() == 0) && meta.mode() & 0o022 == 0)
 }
 
 /// Where throwaway homes go: this user's own temporary directory.
@@ -812,7 +868,10 @@ echo 'Successfully logged in' >&2
             }
         });
         let parent = tempfile::tempdir().unwrap();
-        let (login, code) = start(&program, &["--experimental_issuer".into(), issuer.clone()], &crate::binpath::login_path(), parent.path()).unwrap();
+        // The PATH and checks the app uses: only directories no other account can write, and a node that passes too.
+        let path = trusted_path(&crate::binpath::login_path());
+        assert!(trusted_program(&program) && runs_trusted(&program, &path), "this Mac's codex or its node would be refused");
+        let (login, code) = start(&program, &["--experimental_issuer".into(), issuer.clone()], &path, parent.path()).unwrap();
         assert_eq!(code.verification_url, format!("{issuer}/codex/device"));
         assert_eq!(code.user_code.as_str(), "TEST-12345");
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -904,6 +963,68 @@ echo 'Successfully logged in' >&2
         wipe_dir(&kept);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
         assert!(!kept.exists());
+        // `auth.json` a hard link to a file elsewhere: neither read nor zeroed.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".codex")).unwrap();
+        std::fs::hard_link(&target, home.path().join(".codex/auth.json")).unwrap();
+        assert!(read_auth(home.path()).is_none());
+        let kept = home.path().to_path_buf();
+        wipe_dir(&kept);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert!(!kept.exists());
+        // The CLI's own file, linked nowhere else, is read.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".codex")).unwrap();
+        std::fs::write(home.path().join(".codex/auth.json"), "{}").unwrap();
+        assert_eq!(read_auth(home.path()).as_deref().map(String::as_str), Some("{}"));
+    }
+
+    #[test]
+    fn the_path_the_cli_gets_leaves_out_directories_another_account_could_write() {
+        let mode = |dir: &Path, mode: u32| std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        let [safe, group, world, linked_to_unsafe] = std::array::from_fn(|_| tempfile::tempdir().unwrap());
+        mode(safe.path(), 0o755);
+        mode(group.path(), 0o775);
+        mode(world.path(), 0o777);
+        mode(linked_to_unsafe.path(), 0o755);
+        let link = linked_to_unsafe.path().join("bin");
+        std::os::unix::fs::symlink(world.path(), &link).unwrap();
+        let missing = safe.path().join("missing");
+        let path = [world.path(), group.path(), &link, Path::new("relative/bin"), Path::new(""), &missing, safe.path()]
+            .map(|dir| dir.to_str().unwrap().to_string())
+            .join(":");
+        assert_eq!(trusted_path(&path), safe.path().to_str().unwrap());
+        // A planted `node` in the writable directory ahead of the real one is never what `env node` finds.
+        std::fs::write(world.path().join("node"), "#!/bin/sh\n").unwrap();
+        assert!(!trusted_path(&path).split(':').any(|dir| Path::new(dir).join("node").exists()));
+    }
+
+    #[test]
+    fn a_node_script_codex_runs_only_with_a_node_no_one_else_can_swap() {
+        let mode = |path: &Path, mode: u32| std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        let [bin, other] = std::array::from_fn(|_| tempfile::tempdir().unwrap());
+        mode(bin.path(), 0o755);
+        mode(other.path(), 0o755);
+        let codex = bin.path().join("codex");
+        std::fs::write(&codex, "#!/usr/bin/env node\nrequire('./codex.js')\n").unwrap();
+        mode(&codex, 0o755);
+        let path = |dirs: &[&Path]| dirs.iter().map(|dir| dir.to_str().unwrap()).collect::<Vec<_>>().join(":");
+        // No node at all on the PATH it gets (e.g. node only in a group-writable folder that was dropped).
+        assert!(!runs_trusted(&codex, &path(&[bin.path()])));
+        // A node of its own, safe.
+        let node = other.path().join("node");
+        std::fs::write(&node, "#!/bin/sh\n").unwrap();
+        mode(&node, 0o755);
+        assert!(runs_trusted(&codex, &path(&[bin.path(), other.path()])));
+        // The first node found is writable by others: refused, even with a good one later.
+        let writable = tempfile::tempdir().unwrap();
+        mode(writable.path(), 0o755);
+        std::fs::write(writable.path().join("node"), "#!/bin/sh\n").unwrap();
+        mode(&writable.path().join("node"), 0o777);
+        assert!(!runs_trusted(&codex, &path(&[writable.path(), other.path()])));
+        // A native binary (no `#!/usr/bin/env`) needs nothing from PATH.
+        std::fs::write(&codex, b"\xcf\xfa\xed\xfe").unwrap();
+        assert!(runs_trusted(&codex, &path(&[bin.path()])));
     }
 
     #[test]

@@ -663,7 +663,7 @@ describe("agent logins in Settings (PRO-79)", () => {
         "only workspaces that nobody but owners and admins can drive",
       );
       expect(agentLoginMessage({ code: "cloud_agent_codex_login_unavailable" }, "codex")).toContain("it needs to reach OpenAI");
-      expect(agentLoginMessage({ code: "cloud_agent_codex_cli_untrusted" }, "codex")).toContain("so it was not run");
+      expect(agentLoginMessage({ code: "cloud_agent_codex_cli_untrusted" }, "codex")).toContain("or the node it runs on");
     });
   });
 });
