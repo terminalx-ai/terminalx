@@ -207,6 +207,12 @@ describe("organization provider controls", () => {
     expect((await screen.findByRole("alert")).textContent).toMatch(/valid but lacks a permission/);
     expect(screen.getByText("Original account")).toBeTruthy();
   });
+  it("says a hidden provider is not offered, and that its saved connection can still be disconnected", async () => {
+    vi.mocked(api.cloudProviderConnect).mockRejectedValue({ code: "cloud_provider_disabled" });
+    await ready();
+    await replace();
+    expect((await screen.findByRole("alert")).textContent).toBe("This provider isn't offered right now. A saved connection can still be disconnected.");
+  });
   it("requires an explicit disposition and keeps unavailable cleanup visible after retry", async () => {
     detail.state = "attention-required";
     detail.disconnectDisposition = "destroy";

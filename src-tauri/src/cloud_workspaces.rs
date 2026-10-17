@@ -3076,6 +3076,7 @@ fn known_error_code(code: &str) -> bool {
             | "cloud_workspace_operation_not_found"
             | "machine0_connection_required"
             | "cloud_provider_not_found"
+            | "cloud_provider_disabled"
             | "cloud_provider_connection_required"
             | "cloud_provider_connection_attention_required"
             | "cloud_provider_operation_in_progress"
@@ -5584,6 +5585,24 @@ mod tests {
         assert_eq!(service.share_put(None, "workspace-1", "../x", ShareRole::Viewer, false).unwrap_err().code, "cloud_workspace_request_invalid");
         assert_eq!(service.share_revoke(None, "", "user-2").unwrap_err().code, "cloud_workspace_request_invalid");
         assert_eq!(service.shares(None, "a/b").unwrap_err().code, "cloud_workspace_request_invalid");
+    }
+
+    #[test]
+    fn a_hidden_provider_refuses_setup_and_create_definitely() {
+        let body = r#"{"error":"cloud_provider_disabled"}"#;
+        let (base, _, request) = serve_once(response("403 Forbidden", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.setup(None, CloudWorkspaceProviderId::Machine0).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("cloud_provider_disabled", Some(403)));
+        assert!(!error.retryable);
+
+        let (base, _, request) = serve_once(response("403 Forbidden", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let error = service.create(None, launch_input(vec![repo("app", None)], None)).unwrap_err();
+        request.join().unwrap();
+        assert_eq!((error.code.as_str(), error.status), ("cloud_provider_disabled", Some(403)));
+        assert!(!error.retry_with_same_idempotency_key, "a hidden provider is a refusal, not outcome unknown");
     }
 
     #[test]

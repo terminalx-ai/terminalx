@@ -125,6 +125,10 @@ describe("createWorkspace", () => {
     expect(kept.at(-1)).toBeNull();
   });
 
+  it("says a hidden provider is not offered rather than naming its code", () => {
+    expect(createErrorMessage("cloud_provider_disabled")).toBe("This provider isn't offered right now. Choose another provider.");
+  });
+
   it("stops at a failed preflight without quoting", async () => {
     const { api, calls } = fakeApi({
       cloudWorkspacePreflight: vi.fn(async () => ({

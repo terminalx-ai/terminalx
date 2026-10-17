@@ -1294,6 +1294,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_operation_not_found"
   | "machine0_connection_required"
   | "cloud_provider_not_found"
+  | "cloud_provider_disabled"
   | "cloud_provider_connection_required"
   | "cloud_provider_connection_attention_required"
   | "cloud_provider_operation_in_progress"
