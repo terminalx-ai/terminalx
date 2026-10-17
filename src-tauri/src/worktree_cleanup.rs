@@ -470,10 +470,11 @@ impl<'a> Repository<'a> {
     }
 
     /// The patterns of [`DECLARED_FILE`] on the default branch, as the remote
-    /// has it, else as this machine has it. None when neither holds the file.
+    /// has it, else as this machine has it. None when neither holds the file,
+    /// or when no branch is known to be the default.
     fn declared(&self) -> &[Declared] {
         self.declared.get_or_init(|| {
-            let Some(default) = git::default_branch(&self.root) else { return Vec::new() };
+            let Some(default) = declared_branch(&self.root) else { return Vec::new() };
             let commit = [format!("refs/remotes/origin/{default}"), format!("refs/heads/{default}")]
                 .into_iter()
                 .find(|reference| git::run(&self.root, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]).is_ok());
@@ -481,6 +482,17 @@ impl<'a> Repository<'a> {
             git::run(&self.root, &["cat-file", "blob", &format!("{commit}:{DECLARED_FILE}")]).map(|text| parse_declared(&text)).unwrap_or_default()
         })
     }
+}
+
+/// The branch [`DECLARED_FILE`] is read from: the one `origin/HEAD` names,
+/// else a local `main` or `master`. Never whatever the main directory has
+/// checked out, which may be a branch nobody has reviewed.
+fn declared_branch(root: &Path) -> Option<String> {
+    if let Ok(head) = git::run(root, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]) {
+        let head = head.trim();
+        return Some(head.strip_prefix("origin/").unwrap_or(head).to_string());
+    }
+    ["main", "master"].into_iter().find(|name| git::run(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok()).map(str::to_string)
 }
 
 /// One pattern of [`DECLARED_FILE`].

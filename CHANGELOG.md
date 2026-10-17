@@ -8,7 +8,7 @@
   that has been built. SwiftPM's `.build` is known build output, and a
   repository can list its own regenerable ignored paths (generated code, a
   downloaded sidecar) in `.terminalx/cleanup` on its default branch; this
-  repository lists `src-tauri/gen/` and its agent-browser sidecar. An ignored
+  repository lists `src-tauri/gen/schemas/` and its agent-browser sidecar. An ignored
   file nobody listed, such as `.env`, still keeps the workspace. A newly
   merged workspace that is kept says so in a notice with the full reason, and
   its row's **Why** shows that reason in full. (#476)

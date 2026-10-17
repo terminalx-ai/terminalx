@@ -460,6 +460,36 @@ fn build_outputs_the_repository_declares_on_its_default_branch_do_not_keep_a_wor
 }
 
 #[test]
+fn the_declared_list_is_never_read_from_a_branch_that_is_not_known_to_be_the_default() {
+    let f = Fixture::new();
+    let alpha = f.alpha();
+    commit_text(&alpha, ".gitignore", "node_modules/\n.env\nlocal.db\nsrc-tauri/gen/\n");
+    commit_text(&alpha, "src-tauri/README", "the app");
+    let wt = f.pushed(&alpha, "built");
+    std::fs::create_dir_all(wt.join("src-tauri/gen/schemas")).unwrap();
+    std::fs::write(wt.join("src-tauri/gen/schemas/desktop-schema.json"), "{}").unwrap();
+    assert_eq!(f.find(&wt).ignored_data, vec!["src-tauri/gen/"]);
+
+    // No origin/HEAD and no local main or master: the main directory has an
+    // unreviewed branch checked out that declares the folder disposable.
+    sh(&alpha, &["branch", "-m", "main", "trunk"]);
+    sh(&alpha, &["checkout", "-q", "-b", "feature"]);
+    let declared = alpha.join(DECLARED_FILE);
+    std::fs::create_dir_all(declared.parent().unwrap()).unwrap();
+    std::fs::write(&declared, "src-tauri/gen/\n").unwrap();
+    sh(&alpha, &["add", "."]);
+    sh(&alpha, &["commit", "-q", "-m", "declare"]);
+    assert!(git::run(&alpha, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]).is_err());
+    let found = f.find(&wt);
+    assert_eq!((found.verdict, found.ignored_data.clone()), (Verdict::IgnoredData, vec!["src-tauri/gen/".to_string()]));
+
+    // The same list, on the branch origin/HEAD names, counts.
+    sh(&alpha, &["push", "-q", "origin", "feature:main"]);
+    sh(&alpha, &["remote", "set-head", "origin", "main"]);
+    assert_eq!(f.find(&wt).verdict, Verdict::Eligible);
+}
+
+#[test]
 fn live_work_is_never_stopped_or_removed() {
     let f = Fixture::new();
     let alpha = f.alpha();
