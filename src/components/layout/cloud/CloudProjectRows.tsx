@@ -36,6 +36,7 @@ import {
   deleteCloudSession,
   NEEDS_SECOND_CONFIRMATION,
   updateCloudSession,
+  useCloudAgentRan,
   useCloudWorkspaceSessions,
   type CloudSessionRow,
 } from "@/lib/cloudSessions";
@@ -183,7 +184,8 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const pendingBlank = project.blank && !project.workspaces.length;
   const removable = !project.workspaces.length && (added || pendingBlank);
   // One workspace has no row of its own: its state, extra repositories and access show on the project's row.
-  const onlyState = only ? deriveCloudActivity(only.item) : null;
+  const onlyAgentRan = useCloudAgentRan(only?.item ?? null);
+  const onlyState = only ? deriveCloudActivity(only.item, { agentRan: onlyAgentRan }) : null;
   const extra = only ? extraRepositories(only.item) : null;
 
   return (

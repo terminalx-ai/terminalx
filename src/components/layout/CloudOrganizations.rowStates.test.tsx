@@ -194,6 +194,24 @@ describe("row states from the server's list", () => {
   });
 });
 
+describe("a failed first prompt on a project's only workspace (#513)", () => {
+  const failed = { repositories: [acmeApi], launch: { phase: "failed", state: "failed", category: "agent-sign-in-required" } };
+
+  it("needs attention while no agent has run there", async () => {
+    await load([item("solo", failed)], { solo: { sessions: [], capabilities: ["session/1"] } });
+    mount();
+    await waitFor(() => expect(rowState("acme/api")).toContain("Needs attention"));
+  });
+
+  it("stops needing attention once a session with a tab is known, as the workspace view does (#499)", async () => {
+    await load([item("solo", failed)], { solo: { sessions: [session("s1", "Echo hello")], capabilities: ["session/1"] } });
+    mount();
+    await screen.findAllByTestId("cloud-session-row");
+    expect(rowState("acme/api") ?? "").not.toContain("Needs attention");
+    expectNoAttachOrResume();
+  });
+});
+
 describe("a workspace never opened on this desktop", () => {
   // An admin can list the workspace's checkpoints (a member cannot): those name tabs, not sessions.
   it("offers Open to load sessions even when its checkpoints are listed, and opening it reaches the session from the sidebar, the Dashboard and Search", async () => {

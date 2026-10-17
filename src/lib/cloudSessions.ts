@@ -419,6 +419,15 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
   };
 }
 
+const NO_ITEM = { workspace: { orgId: "", id: "" } } as CloudWorkspaceListItem;
+
+/** `cloudAgentRan`, following the sessions as they change: a failed first task is then history (#499). */
+export function useCloudAgentRan(item: CloudWorkspaceListItem | null): boolean {
+  const node = useMemo(() => ({ key: cloudWorkspaceKey(item?.workspace.orgId ?? "", item?.workspace.id ?? ""), item: item ?? NO_ITEM, placedBy: null }), [item]);
+  const { sessions } = useCloudWorkspaceSessions(node, { load: false, showArchived: false, selectedKey: null });
+  return !!item && sessions.some((row) => row.tabs.length > 0);
+}
+
 // ---- session/2 actions ----------------------------------------------------
 
 const CONNECT_WITHIN_MS = 30_000;
