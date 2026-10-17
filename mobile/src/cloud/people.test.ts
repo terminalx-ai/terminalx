@@ -26,4 +26,14 @@ describe("names for the people of a shared workspace", () => {
     await expect(people.roster("org-1")).rejects.toThrow("forbidden");
     expect(await people.roster("org-1")).toEqual([]);
   });
+
+  it("reads the members again when asked for a fresh list, and keeps that one (#501)", async () => {
+    const members = vi.fn().mockResolvedValueOnce([{ userId: "u-bob", email: "bob@example.com", role: "member" }]).mockResolvedValueOnce([]);
+    const people = new CloudPeople({ members });
+    expect(await people.roster("org-1")).toHaveLength(1);
+    // Bob was removed from the organization since.
+    expect(await people.roster("org-1", { fresh: true })).toEqual([]);
+    expect(await people.roster("org-1")).toEqual([]);
+    expect(members).toHaveBeenCalledTimes(2);
+  });
 });

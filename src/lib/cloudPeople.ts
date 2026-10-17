@@ -27,8 +27,13 @@ export function rememberPeople(people: { userId: string; name?: string | null; d
   if (any) changed();
 }
 
-/** The organization's members, loaded once per session (and remembered as names). */
-export function loadRoster(): Promise<OrganizationMember[]> {
+/**
+ * The organization's members, loaded once per session (and remembered as
+ * names). `fresh` reads them again: a list that offers people to share with
+ * must not offer someone removed since (#501).
+ */
+export function loadRoster(options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  if (options.fresh) roster = null;
   roster ??= Promise.resolve()
     .then(() => organizationMembers.list())
     .then((listed) => {
@@ -47,12 +52,13 @@ const rosters = new Map<string, Promise<OrganizationMember[]>>();
 
 /**
  * The members of the organization a workspace is in, which need not be the
- * default one (every organization is live, PRO-71). Rejects with the reason
- * when they cannot be read (an older server, or the organization was left),
- * so a dialog can say so instead of offering nobody.
+ * default one (every organization is live, PRO-71), read once per session
+ * unless `fresh`. Rejects with the reason when they cannot be read (an older
+ * server, or the organization was left), so a dialog can say so instead of
+ * offering nobody.
  */
-export function loadRosterIn(orgId: string): Promise<OrganizationMember[]> {
-  let pending = rosters.get(orgId);
+export function loadRosterIn(orgId: string, options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
+  let pending = options.fresh ? undefined : rosters.get(orgId);
   if (!pending) {
     pending = Promise.resolve()
       .then(() => organizationMembers.listIn(orgId))

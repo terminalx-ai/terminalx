@@ -21,9 +21,13 @@ export class CloudPeople {
   /** Changes whenever a name was learned. */
   getVersion = (): number => this.version;
 
-  /** The organization's members, read once; rejects when they cannot be read, so a screen can say so. */
-  roster(orgId: string): Promise<CloudMember[]> {
-    let pending = this.rosters.get(orgId);
+  /**
+   * The organization's members, read once, or again with `fresh` (a list that
+   * offers people to share with must not offer someone removed since, #501);
+   * rejects when they cannot be read, so a screen can say so.
+   */
+  roster(orgId: string, options: { fresh?: boolean } = {}): Promise<CloudMember[]> {
+    let pending = options.fresh ? undefined : this.rosters.get(orgId);
     if (!pending) {
       pending = this.api.members(orgId).then((members) => {
         this.remember(members);

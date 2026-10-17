@@ -54,7 +54,8 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
       catalog.people.remember(next.shares);
       if (!next.you.canManageShares) return { state: next, failure: null };
       try {
-        return { state: next, failure: null, members: await catalog.people.roster(orgId), rosterFailure: null };
+        // Read afresh, not the copy from earlier: someone removed from the organization since is not offered (#501).
+        return { state: next, failure: null, members: await catalog.people.roster(orgId, { fresh: true }), rosterFailure: null };
       } catch (error) {
         return { state: next, failure: null, rosterFailure: explain(error) };
       }
@@ -91,6 +92,11 @@ function Shares({ catalog, orgId, workspaceId }: { catalog: CloudCatalog; orgId:
       // The list of workspaces carries "shared with N".
       void catalog.refresh();
     } catch (error) {
+      // They left the organization: their share went with them, and they are not to be offered again.
+      if ((error as { code?: unknown })?.code === "organization_member_not_found") {
+        const next = await read();
+        setView((before) => ({ ...before, ...next }));
+      }
       setFailure(explain(error, who));
     } finally {
       setBusy(null);
