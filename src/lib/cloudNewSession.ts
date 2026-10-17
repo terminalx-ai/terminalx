@@ -11,11 +11,11 @@ import {
   preflightCreate,
   repositoriesInput,
   savePending,
-  usableProviders,
   validateForm,
   type CreateForm,
   type PendingCreate,
 } from "@/lib/cloudCreate";
+import { creatableProviders, machine0Offered } from "@/lib/hiddenProviders";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
@@ -201,12 +201,13 @@ const PROVIDER_ORDER: readonly CloudWorkspaceProviderId[] = ["machine0", "box", 
 async function providerFor(orgId: string): Promise<{ id: CloudWorkspaceProviderId; label: string; setup: CloudWorkspaceSetup | null }> {
   const status = getAccount().status;
   if (!isMultiOrg(status) || orgId === defaultOrgId(status)) {
-    const provider = usableProviders((await api.cloudProviders()).providers)[0];
+    const provider = creatableProviders((await api.cloudProviders()).providers, orgId)[0];
     if (!provider) throw new CreateRefused("cloud_provider_connection_required");
     return { id: provider.id, label: provider.displayName || provider.id, setup: null };
   }
   const flags = status.organizations?.find((org) => org.id === orgId)?.cloud?.flags ?? {};
-  for (const id of PROVIDER_ORDER.filter((provider) => flags[`cloud.workspaces.provider.${provider}.v1`] === true)) {
+  const offered = (provider: CloudWorkspaceProviderId) => flags[`cloud.workspaces.provider.${provider}.v1`] === true && (provider !== "machine0" || machine0Offered(orgId));
+  for (const id of PROVIDER_ORDER.filter(offered)) {
     try {
       return { id, label: providerLabel(id), setup: await api.cloudWorkspaceSetup(id, orgId) };
     } catch (error) {
