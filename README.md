@@ -107,7 +107,9 @@ Some detail on each:
   machine authority, not terminal contents. Pairing codes are made locally.
   **TerminalX Relay** codes carry both a direct endpoint and a short-lived,
   single-use relay invite, so a nearby phone tries LAN/Tailscale first and can
-  fall back to `relay.terminalx.ai`; **LAN** codes contain no relay invite and
+  fall back to `relay.terminalx.ai` (a debug build never contacts it: its
+  Relay is off unless `TERMINALX_DEV_RELAY_DIRECTOR_URL` names a loopback or
+  HTTPS director); **LAN** codes contain no relay invite and
   require no account. Traffic after the pinned-key handshake uses end-to-end
   authenticated encryption on either path. Revoking a device removes its local
   authority and drops its live socket immediately.

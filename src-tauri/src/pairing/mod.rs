@@ -1179,7 +1179,7 @@ impl PairingManager {
             "directEndpoints": advertised_endpoints(),
             "relay": {
                 "v": 1,
-                "directorUrl": cloud::RELAY_DIRECTOR_URL,
+                "directorUrl": relay.director_url,
                 "cellUrl": relay.cell_url,
                 "assignmentEpoch": relay.assignment_epoch,
                 "relayHostId": relay.relay_host_id,

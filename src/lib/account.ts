@@ -266,6 +266,11 @@ export function bootAccount(): Promise<void> {
       // new active organization; the native side announces it, and a focus
       // re-reads it too, in case an announcement was missed.
       if (typeof window !== "undefined") window.addEventListener("focus", refreshOnFocus);
+      // Nothing is refused when someone is added back to an organization (or
+      // accepts an invite in the browser), so while the window can be seen the
+      // list is also read again about once a minute, and when it is shown again.
+      if (typeof document !== "undefined") document.addEventListener("visibilitychange", refreshWhenShown);
+      if (typeof window !== "undefined") window.setInterval(refreshWhileVisible, VISIBLE_REFRESH_MS);
     } catch (error) {
       set({ status: { ...signedOut, lastError: errorMessage(error) }, ready: true });
     }
@@ -280,6 +285,23 @@ function refreshOnFocus() {
   lastFocusRefresh = now;
   // The status, and (at most once a minute, throttled natively) the
   // organizations and roles from the server.
+  void refreshAccountRoles();
+}
+
+/** How often the organizations are read again while the window is visible; the native side reads the server at most once a minute. */
+export const VISIBLE_REFRESH_MS = 60_000;
+
+function windowVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+function refreshWhenShown() {
+  if (windowVisible()) refreshOnFocus();
+}
+
+function refreshWhileVisible() {
+  // A hidden window, or nobody signed in, asks for nothing.
+  if (!windowVisible() || reported.state !== "signed-in") return;
   void refreshAccountRoles();
 }
 
