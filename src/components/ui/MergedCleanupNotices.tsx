@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { GitMerge, Loader2, Trash2, Undo2, X } from "@/icons";
+import { GitMerge, Loader2, ShieldCheck, Trash2, Undo2, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
+import { openWorktreeCleanup } from "@/lib/dialogs";
 import { branchOutcome, dismissMergedNotice, holdMergedWorkspace, mergedDue, restoreMergedRemoval, useMergedCleanup, type MergedNotice } from "@/lib/mergedCleanup";
 
 /** How many notices are shown at once; the rest are in Settings → Storage. */
@@ -14,6 +15,7 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
   const [notes, setNotes] = useState<string[] | null>(null);
   const { status } = notice;
   const removed = notice.kind === "removed";
+  const kept = notice.kind === "kept";
   const act = (work: () => Promise<string[] | void>) => {
     setBusy(true);
     setError(null);
@@ -22,19 +24,21 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
       .catch((e: unknown) => setError(errorMessage(e)))
       .finally(() => setBusy(false));
   };
-  const Icon = removed ? Trash2 : GitMerge;
+  const Icon = removed ? Trash2 : kept ? ShieldCheck : GitMerge;
   return (
     <aside role="status" aria-busy={busy} data-testid="merged-notice" className="pointer-events-auto rounded-xl bg-popover glass p-3 text-sm text-popover-foreground shadow-surface hairline animate-fade-in">
       <div className="flex items-start gap-2.5">
-        <Icon aria-hidden className="mt-0.5 size-4 shrink-0 text-merged" />
+        <Icon aria-hidden className={kept ? "mt-0.5 size-4 shrink-0 text-warning" : "mt-0.5 size-4 shrink-0 text-merged"} />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-medium">{notes ? `Brought back ${status.name}` : removed ? `Deleted workspace ${status.name}` : `Pull request #${status.pr.number} merged`}</div>
+          <div className="truncate font-medium">{notes ? `Brought back ${status.name}` : removed ? `Deleted workspace ${status.name}` : kept ? `Kept workspace ${status.name}` : `Pull request #${status.pr.number} merged`}</div>
           <div className="text-xs leading-relaxed text-muted-foreground">
             {notes
               ? notes.join(" ")
               : removed
                 ? `Its pull request #${status.pr.number} was merged. ${status.record ? branchOutcome(status.record) : ""}`
-                : `The workspace ${status.name} and its branch will be deleted ${mergedDue(status)}.`}
+                : kept
+                  ? `Its pull request #${status.pr.number} was merged, but it was not deleted: ${status.reason ?? "it could not be checked"}. ${status.detail ?? ""}`.trim()
+                  : `The workspace ${status.name} and its branch will be deleted ${mergedDue(status)}.`}
           </div>
           {error ? (
             <div role="alert" className="mt-1 text-xs text-destructive">
@@ -43,7 +47,18 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
           ) : null}
           {notes ? null : (
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              {removed ? (
+              {kept ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    dismissMergedNotice(notice.id);
+                    openWorktreeCleanup();
+                  }}
+                >
+                  Review in clean-up
+                </Button>
+              ) : removed ? (
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => restoreMergedRemoval(notice.hostId, notice.id).then((restored) => restored.notes))}>
                   {busy ? <Loader2 aria-hidden className="animate-spin" /> : <Undo2 aria-hidden />} Undo
                 </Button>
@@ -66,7 +81,8 @@ function NoticeCard({ notice }: { notice: MergedNotice }) {
 /**
  * Notices of the removal that follows a merged pull request, bottom right:
  * one when a workspace is about to go (Keep workspace), one when it has gone
- * (Undo). Mounted once by AppShell.
+ * (Undo), and one when a newly merged one stays, with why. Mounted once by
+ * AppShell.
  */
 export function MergedCleanupNotices() {
   const { notices } = useMergedCleanup();

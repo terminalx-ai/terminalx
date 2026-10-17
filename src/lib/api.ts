@@ -1294,6 +1294,7 @@ export type CloudWorkspaceSafeErrorCode =
   | "cloud_workspace_operation_not_found"
   | "machine0_connection_required"
   | "cloud_provider_not_found"
+  | "cloud_provider_disabled"
   | "cloud_provider_connection_required"
   | "cloud_provider_connection_attention_required"
   | "cloud_provider_operation_in_progress"
@@ -1384,6 +1385,7 @@ export type CloudWorkspaceOperationErrorCode =
   | "provider_permanent_delete_unavailable"
   | "runtime_checkpoint_pending"
   | "cloud_workspace_runtime_bootstrap_failed"
+  | "cloud_workspace_provisioning_timeout"
   | "cloud_provider_permission_denied";
 
 export interface CliToolStatus {

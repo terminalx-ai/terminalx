@@ -95,10 +95,15 @@ describe("a workspace's row after its pull request merged", () => {
     await act(async () => requestMergedSweep());
 
     const kept = await within(rowOf("dirty-one")).findByTestId("merged-note");
-    expect(kept.textContent).toBe("kept: 2 uncommitted files");
+    expect(kept.textContent).toBe("kept: 2 uncommitted filesWhy");
     expect(within(kept).getByText("kept: 2 uncommitted files").getAttribute("title")).toBe("Pull request #62 was merged. It has 2 untracked files.");
-    // What is kept for a reason offers nothing to press: the reason is what to deal with.
-    expect(within(kept).queryByRole("button")).toBeNull();
+    // What is kept for a reason offers no Keep: the reason is what to deal with. It can be read in full (#476).
+    expect(within(kept).getAllByRole("button").map((button) => button.textContent)).toEqual(["Why"]);
+    fireEvent.click(within(kept).getByRole("button", { name: "Why" }));
+    expect(within(kept).getByRole("button", { name: "Why" }).getAttribute("aria-expanded")).toBe("true");
+    expect(kept.textContent).toBe("kept: 2 uncommitted filesWhyPull request #62 was merged. It has 2 untracked files.");
+    fireEvent.click(within(kept).getByRole("button", { name: "Why" }));
+    expect(kept.textContent).toBe("kept: 2 uncommitted filesWhy");
 
     const due = within(rowOf("due-soon")).getByTestId("merged-note");
     expect(due.textContent).toBe("merged: deleting in 8 minKeep");

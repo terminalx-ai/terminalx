@@ -27,7 +27,10 @@
 //!   as clean.
 //! - **ignoredData**: clean, but it holds ignored files that are not known
 //!   build or dependency output (`.env`, a local database). Removable only
-//!   when the request says so for that worktree.
+//!   when the request says so for that worktree. Known output is a fixed list
+//!   of names (`node_modules`, `target`, `.build`, ...) plus what the
+//!   repository itself declares regenerable in [`DECLARED_FILE`] on its
+//!   default branch.
 //! - **eligible**: none of the above.
 //!
 //! [`remove`] inspects each named worktree again, immediately before it is
@@ -65,10 +68,20 @@ const NAMED: usize = 5;
 /// Ignored directories and files that a build or an install makes again.
 const DISPOSABLE_NAMES: &[&str] = &[
     "node_modules", "target", "dist", "build", "out", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", ".vite", ".svelte-kit", ".angular", ".expo",
-    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", ".gradle", "Pods", "DerivedData", "coverage", ".nyc_output",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv", ".gradle", ".build", "Pods", "DerivedData", "coverage", ".nyc_output",
     ".eslintcache", ".stylelintcache", ".DS_Store", "Thumbs.db",
 ];
 const DISPOSABLE_SUFFIXES: &[&str] = &[".pyc", ".pyo", ".o", ".obj", ".class", ".tsbuildinfo"];
+
+/// Where a repository lists the ignored paths of its own that a build makes
+/// again (`src-tauri/gen/`, a downloaded sidecar), one pattern a line. It is
+/// read from the default branch, never from the worktree being judged: a
+/// branch cannot declare its own files disposable. A pattern is a path from
+/// the repository's root; `*` and `?` match within a name, `**` any number of
+/// folders, and a trailing `/` matches folders only. It covers what is below
+/// it too. A pattern made only of wildcards, or that climbs out with `..`, is
+/// ignored. `#` starts a comment.
+pub const DECLARED_FILE: &str = ".terminalx/cleanup";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -433,6 +446,8 @@ pub(crate) struct Repository<'a> {
     /// What unpushed commits are compared with, read (and fetched) only
     /// when some worktree has any.
     base: OnceCell<(Option<String>, bool)>,
+    /// What the repository declares regenerable, read once.
+    declared: OnceCell<Vec<Declared>>,
 }
 
 impl<'a> Repository<'a> {
@@ -443,7 +458,7 @@ impl<'a> Repository<'a> {
         }
         let listed = list_worktrees(&root).map_err(|error| format!("Git could not list its worktrees: {error:#}"))?;
         let primary = listed.first().map(|entry| canonical(Path::new(&entry.path))).ok_or("Git lists no worktree for it.")?;
-        Ok(Self { project, root, primary, listed, fetch, base: OnceCell::new() })
+        Ok(Self { project, root, primary, listed, fetch, base: OnceCell::new(), declared: OnceCell::new() })
     }
 
     /// `(base, verified against the remote as it is now)`.
@@ -452,6 +467,79 @@ impl<'a> Repository<'a> {
             let (base, not_verified, fresh) = landed::base_for(&self.root, self.fetch);
             (base, fresh && not_verified.is_none())
         })
+    }
+
+    /// The patterns of [`DECLARED_FILE`] on the default branch, as the remote
+    /// has it, else as this machine has it. None when neither holds the file,
+    /// or when no branch is known to be the default.
+    fn declared(&self) -> &[Declared] {
+        self.declared.get_or_init(|| {
+            let Some(default) = declared_branch(&self.root) else { return Vec::new() };
+            let commit = [format!("refs/remotes/origin/{default}"), format!("refs/heads/{default}")]
+                .into_iter()
+                .find(|reference| git::run(&self.root, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]).is_ok());
+            let Some(commit) = commit else { return Vec::new() };
+            git::run(&self.root, &["cat-file", "blob", &format!("{commit}:{DECLARED_FILE}")]).map(|text| parse_declared(&text)).unwrap_or_default()
+        })
+    }
+}
+
+/// The branch [`DECLARED_FILE`] is read from: the one `origin/HEAD` names,
+/// else a local `main` or `master`. Never whatever the main directory has
+/// checked out, which may be a branch nobody has reviewed.
+fn declared_branch(root: &Path) -> Option<String> {
+    if let Ok(head) = git::run(root, &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]) {
+        let head = head.trim();
+        return Some(head.strip_prefix("origin/").unwrap_or(head).to_string());
+    }
+    ["main", "master"].into_iter().find(|name| git::run(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")]).is_ok()).map(str::to_string)
+}
+
+/// One pattern of [`DECLARED_FILE`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Declared {
+    segments: Vec<String>,
+    dir_only: bool,
+}
+
+pub(crate) fn parse_declared(text: &str) -> Vec<Declared> {
+    text.lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim())
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let dir_only = line.ends_with('/');
+            let segments: Vec<String> = line.trim_matches('/').split('/').filter(|segment| !segment.is_empty() && *segment != ".").map(str::to_string).collect();
+            let literal = segments.iter().any(|segment| segment.chars().any(|c| c != '*' && c != '?'));
+            let climbs = segments.iter().any(|segment| segment == ".." || segment == ".git");
+            (literal && !climbs).then_some(Declared { segments, dir_only })
+        })
+        .collect()
+}
+
+fn name_matches(pattern: &[u8], name: &[u8]) -> bool {
+    match pattern.split_first() {
+        None => name.is_empty(),
+        Some((b'*', rest)) => name_matches(rest, name) || (!name.is_empty() && name_matches(pattern, &name[1..])),
+        Some((b'?', rest)) => !name.is_empty() && name_matches(rest, &name[1..]),
+        Some((c, rest)) => name.first() == Some(c) && name_matches(rest, &name[1..]),
+    }
+}
+
+fn path_matches(pattern: &[String], path: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => path.is_empty(),
+        Some((first, rest)) if first == "**" => path_matches(rest, path) || (!path.is_empty() && path_matches(pattern, &path[1..])),
+        Some((first, rest)) => path.first().is_some_and(|name| name_matches(first.as_bytes(), name.as_bytes())) && path_matches(rest, &path[1..]),
+    }
+}
+
+impl Declared {
+    /// Whether the ignored entry `entry` (as `git ls-files` spells it: a
+    /// folder ends in `/`) is this pattern or lies below it.
+    fn covers(&self, entry: &str) -> bool {
+        let folder = entry.ends_with('/');
+        let names: Vec<&str> = entry.trim_end_matches('/').split('/').collect();
+        (1..=names.len()).any(|n| (!self.dir_only || n < names.len() || folder) && path_matches(&self.segments, &names[..n]))
     }
 }
 
@@ -710,12 +798,24 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         let Ok(ignored) = git::run(&path, &["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]) else {
             return unverifiable("Git could not list the ignored files.");
         };
-        for name in ignored.split('\0').filter(|name| !name.is_empty()) {
-            if disposable(name) { candidate.disposable.push(name.to_string()) } else { candidate.ignored_data.push(name.to_string()) }
+        let names: Vec<&str> = ignored.split('\0').filter(|name| !name.is_empty()).collect();
+        // An untracked folder that holds only ignored entries is listed as
+        // well as each of them (`native/` with `native/helper/.build/`):
+        // what it holds is judged by those lines, not by the folder.
+        let container = |name: &str| name.ends_with('/') && names.iter().any(|other| other.len() > name.len() && other.starts_with(name));
+        let mut containers = Vec::new();
+        for name in names.iter().copied() {
+            if container(name) {
+                containers.push(name.to_string());
+            } else if disposable(name) || repository.declared().iter().any(|declared| declared.covers(name)) {
+                candidate.disposable.push(name.to_string())
+            } else {
+                candidate.ignored_data.push(name.to_string())
+            }
         }
         // An ignored folder can hold a whole checkout (a clone, or a worktree
         // of some other repository) whose state nothing here has read.
-        let holds_checkout = candidate.disposable.iter().chain(&candidate.ignored_data).find(|name| name.ends_with('/') && holds_git_dir(&path.join(name), NESTED_CHECKOUT_DEPTH));
+        let holds_checkout = candidate.disposable.iter().chain(&candidate.ignored_data).chain(&containers).find(|name| name.ends_with('/') && holds_git_dir(&path.join(name), NESTED_CHECKOUT_DEPTH));
         if let Some(name) = holds_checkout {
             return unverifiable(&format!("The ignored folder {name} holds another Git checkout, and work in it cannot be checked from here."));
         }
@@ -723,7 +823,13 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
             candidate.brief = Some(format!("ignored local files: {}", named(&candidate.ignored_data)));
             return (
                 Verdict::IgnoredData,
-                Some(format!("{} may be local data: {}.", plural(candidate.ignored_data.len(), "ignored file or folder", "ignored files or folders"), named(&candidate.ignored_data))),
+                Some(format!(
+                    "{} may be local data: {}. If a build makes {} again, list {} in {DECLARED_FILE} on the default branch.",
+                    plural(candidate.ignored_data.len(), "ignored file or folder", "ignored files or folders"),
+                    named(&candidate.ignored_data),
+                    if candidate.ignored_data.len() == 1 { "it" } else { "them" },
+                    if candidate.ignored_data.len() == 1 { "it" } else { "them" },
+                )),
             );
         }
         (Verdict::Eligible, None)

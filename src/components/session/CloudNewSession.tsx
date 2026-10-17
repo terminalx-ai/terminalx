@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Cloud, Loader2 } from "@/icons";
+import { WorkspaceRpcError } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
 import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
@@ -80,6 +81,14 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
   if (isRoleRefusal(error)) return roleRefusedMessage("start a new cloud session");
   if (error instanceof CreateRefused) return createErrorMessage(error.code, error.detail, managesOrganization(getAccount().status, orgId));
   if (isClientError(error)) return createErrorMessage(error.code);
+  // The workspace's runtime refused the new tab ("Claude Code is not installed
+  // in this workspace"): its message is written for the reader, and its code
+  // (`unavailable`, `invalid`) is no create refusal. It comes off the wire:
+  // bounded, and an empty one falls back to the code's own wording.
+  if (error instanceof WorkspaceRpcError) {
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    return message ? message.slice(0, 300) : createErrorMessage(error.code);
+  }
   const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : error instanceof Error ? error.message : null;
   if (code === "cloud_workspace_unreachable") return "The cloud workspace did not come up in time. Try again.";
   if (code === "cloud_runtime_update_required") return "The cloud workspace's runtime needs an update before it can start sessions.";

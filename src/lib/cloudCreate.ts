@@ -17,6 +17,14 @@ import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { formatDuration } from "@/lib/time";
 
 /**
+ * A create whose machine never checked in before the server's deadline (saas #203): the server
+ * deleted the machine at the provider and the workspace with it, so it is created again, not retried.
+ */
+export const PROVISIONING_TIMEOUT_CODE = "cloud_workspace_provisioning_timeout";
+export const PROVISIONING_TIMEOUT_MESSAGE =
+  "The workspace's machine did not finish setting up in time, so it was deleted at the provider. Create the workspace again.";
+
+/**
  * Creating a cloud workspace from repositories and a first prompt (PRO-21,
  * terminalx-saas contract §19): the form's checks, the create sequence, and
  * the startup phases the page shows while it runs.
@@ -410,6 +418,7 @@ const MESSAGES: Record<string, string> = {
   // Offered because the app still held an owner's or admin's role: it changed since.
   organization_admin_required: ROLE_REFUSED_WORKSPACE,
   forbidden: ROLE_REFUSED_WORKSPACE,
+  cloud_provider_disabled: "This provider isn't offered right now. Choose another provider.",
   cloud_provider_connection_required: "Connect a compute provider in Settings first.",
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",
@@ -487,5 +496,6 @@ export function failureMessage(item: CloudWorkspaceListItem | CloudWorkspaceSnap
   if (item.workspace.launch?.state === "expired") return "The workspace took too long to start, and its first prompt expired.";
   const operation = "operation" in item ? item.operation : item.latestOperation;
   const code = operation?.errorCode;
+  if (code === PROVISIONING_TIMEOUT_CODE) return PROVISIONING_TIMEOUT_MESSAGE;
   return code ? `Provisioning failed (${code}).` : "Provisioning failed.";
 }

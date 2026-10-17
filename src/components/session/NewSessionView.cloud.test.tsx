@@ -250,6 +250,44 @@ describe("a start refused for lack of role (a demoted admin with the form still 
   });
 });
 
+describe("a start the workspace's runtime refused", () => {
+  it("shows the runtime's reason, never a create failure", async () => {
+    const { WorkspaceRpcError } = await import("@terminalx/portable/workspace");
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue(new WorkspaceRpcError("unavailable", "Claude Code is not installed in this workspace", "session.create"));
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Claude Code is not installed in this workspace")).toBeTruthy();
+    expect(screen.queryByText(/could not be created|unavailable/)).toBeNull();
+  });
+
+  it.each([
+    ["empty", "   "],
+    ["not a string", { text: "no" } as unknown as string],
+  ])("falls back to the code's wording when the runtime's message is %s", async (_name, message) => {
+    const { WorkspaceRpcError } = await import("@terminalx/portable/workspace");
+    const refusal = new WorkspaceRpcError("unavailable", "", "session.create");
+    Object.defineProperty(refusal, "message", { value: message });
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue(refusal);
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("The workspace could not be created (unavailable).")).toBeTruthy();
+  });
+
+  it("keeps a long runtime message to 300 characters", async () => {
+    const { WorkspaceRpcError } = await import("@terminalx/portable/workspace");
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue(new WorkspaceRpcError("unavailable", ` ${"x".repeat(400)} `, "session.create"));
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("x".repeat(300))).toBeTruthy();
+  });
+});
+
 describe("the running limit (saas PRO-76)", () => {
   it("explains a resume refused at the running limit and offers to stop a running workspace", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });

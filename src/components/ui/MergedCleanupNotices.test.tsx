@@ -83,6 +83,16 @@ describe("merged workspace notices", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("merged_cleanup_hold", { path, held: true });
   });
 
+  it("says why a newly merged workspace was kept, and opens the clean-up to review it (#476)", async () => {
+    render(<MergedCleanupNotices />);
+    await pass([status({ phase: "kept", fresh: true, reason: "ignored local files: .env", detail: "1 ignored file or folder may be local data: .env." })]);
+    const notice = screen.getByTestId("merged-notice");
+    expect(notice.textContent).toContain("Kept workspace quiet-amber-fox");
+    expect(notice.textContent).toContain("Its pull request #62 was merged, but it was not deleted: ignored local files: .env. 1 ignored file or folder may be local data: .env.");
+    fireEvent.click(within(notice).getByRole("button", { name: "Review in clean-up" }));
+    expect(screen.queryByTestId("merged-notice")).toBeNull();
+  });
+
   it("says what was deleted and what became of the branches, and undoes it", async () => {
     render(<MergedCleanupNotices />);
     await pass([status({ phase: "removed", record })]);
