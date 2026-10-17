@@ -99,15 +99,20 @@ impl Serve {
     }
 
     pub fn control(&self, command: &str, params: Value) -> Value {
+        let response = self.try_control(command, params);
+        assert_eq!(response["ok"], true, "{command} failed: {response}");
+        response["result"].clone()
+    }
+
+    /// The whole response, for a command that may be refused.
+    pub fn try_control(&self, command: &str, params: Value) -> Value {
         let mut stream = UnixStream::connect(&self.socket).expect("connect the control socket");
         stream.set_read_timeout(Some(AGENT_WAIT)).unwrap();
         let request = json!({ "id": "t", "token": self.token, "command": command, "params": params });
         stream.write_all(format!("{request}\n").as_bytes()).unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
-        let response: Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("{command}: {line:?}"));
-        assert_eq!(response["ok"], true, "{command} failed: {response}");
-        response["result"].clone()
+        serde_json::from_str(&line).unwrap_or_else(|_| panic!("{command}: {line:?}"))
     }
 
     pub fn events(&self, tab: &str) -> Vec<Value> {

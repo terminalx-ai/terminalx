@@ -5,7 +5,9 @@
 //! installs. Resolution escalates by cost: the inherited PATH, then the usual
 //! install directories, then `$SHELL -lc 'command -v <name>'` — `-l` matters,
 //! because zsh reads `.zshrc` only without it and misses `PATH` exported from
-//! `.zprofile`. Answers are cached for the life of the process.
+//! `.zprofile`. A hit is cached for the life of the process; a miss is looked
+//! for again, in the directories only, once it is a moment old, so a CLI
+//! installed while the app or runtime runs is found without a restart (#496).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,9 +16,21 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-fn cache() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
-    static C: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
+/// How long a miss is believed before the directories are looked through
+/// again. Every agent check resolves every CLI, so this bounds the cost.
+const MISS_RECHECK: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+enum Lookup {
+    Found(PathBuf),
+    /// Not found, as of this instant.
+    Missing(Instant),
+}
+
+fn cache() -> &'static Mutex<HashMap<String, Lookup>> {
+    static C: OnceLock<Mutex<HashMap<String, Lookup>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -115,14 +129,23 @@ pub fn login_path() -> String {
     .clone()
 }
 
-/// Absolute path of `name`, if it can be found. The result is cached, including
-/// a miss, so a CLI installed while the app runs reads as missing until restart.
+/// Absolute path of `name`, if it can be found. A hit is cached; a miss is
+/// re-checked once it is [`MISS_RECHECK`] old, by the cheap directory scan
+/// only, since the login shell already said no.
 pub fn resolve(name: &str) -> Option<PathBuf> {
-    if let Some(hit) = cache().lock().unwrap().get(name) {
-        return hit.clone();
-    }
-    let found = resolve_uncached(name);
-    cache().lock().unwrap().insert(name.to_string(), found.clone());
+    resolve_at(name, Instant::now())
+}
+
+fn resolve_at(name: &str, now: Instant) -> Option<PathBuf> {
+    let cached = cache().lock().unwrap().get(name).cloned();
+    let found = match cached {
+        Some(Lookup::Found(path)) => return Some(path),
+        Some(Lookup::Missing(at)) if now.saturating_duration_since(at) < MISS_RECHECK => return None,
+        Some(Lookup::Missing(_)) => scan(name),
+        None => resolve_uncached(name),
+    };
+    let entry = found.clone().map_or(Lookup::Missing(now), Lookup::Found);
+    cache().lock().unwrap().insert(name.to_string(), entry);
     found
 }
 
@@ -132,17 +155,24 @@ pub fn invalidate() {
     cache().lock().unwrap().clear();
 }
 
+/// `name` itself when it is a path, else the first executable of that name in
+/// [`login_path`]'s directories.
 #[cfg(unix)]
-fn resolve_uncached(name: &str) -> Option<PathBuf> {
+fn scan(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
         return is_executable(&p).then_some(p);
     }
-    for dir in login_path().split(':') {
-        let p = PathBuf::from(dir).join(name);
-        if is_executable(&p) {
-            return Some(p);
-        }
+    login_path().split(':').map(|dir| PathBuf::from(dir).join(name)).find(|p| is_executable(p))
+}
+
+#[cfg(unix)]
+fn resolve_uncached(name: &str) -> Option<PathBuf> {
+    if let Some(found) = scan(name) {
+        return Some(found);
+    }
+    if name.contains('/') {
+        return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let out = Command::new(shell).args(["-lc", &format!("command -v {name}")]).output().ok()?;
@@ -167,6 +197,11 @@ fn resolve_uncached(name: &str) -> Option<PathBuf> {
     which::which_in(name, Some(login_path()), std::env::current_dir().ok()?).ok()
 }
 
+#[cfg(windows)]
+fn scan(name: &str) -> Option<PathBuf> {
+    resolve_uncached(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +212,23 @@ mod tests {
         assert!(resolve("definitely-not-a-binary-raccoon").is_none());
         #[cfg(unix)]
         assert!(login_path().contains("/usr/bin"));
+    }
+
+    /// #496: a CLI installed after a miss is found once the miss has aged,
+    /// with no restart and no Re-check.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_installed_after_a_miss_is_found_once_the_miss_has_aged() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cli = dir.path().join("late-cli");
+        let name = cli.to_str().unwrap();
+        let start = Instant::now();
+        assert_eq!(resolve_at(name, start), None);
+        std::fs::write(&cli, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A fresh miss is believed, so a burst of checks costs one scan.
+        assert_eq!(resolve_at(name, start + MISS_RECHECK / 2), None);
+        assert_eq!(resolve_at(name, start + MISS_RECHECK), Some(cli));
     }
 }
