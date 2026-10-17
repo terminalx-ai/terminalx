@@ -681,7 +681,8 @@ mod tests {
         // A port nothing listens on yet. Below every system's ephemeral range,
         // so while it is free no other test's port-0 bind or outgoing
         // connection is handed it before the server below takes it.
-        let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as usize;
+        // A random start, so test processes running side by side seldom try the same one.
+        let start = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ()) as usize;
         let port = (0..12_000)
             .map(|i| 20_000 + ((start + i) % 12_000) as u16)
             .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
