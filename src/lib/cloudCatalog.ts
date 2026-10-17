@@ -18,7 +18,7 @@ import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
@@ -1080,6 +1080,7 @@ function syncAccount() {
     listedAt.clear();
     names.clear();
     providers.clear();
+    forgetDeletedCloudWorkspaces();
     projectNames.clear();
     resetFeed();
     set({ ...EMPTY, owner, revision }, false);
@@ -1163,6 +1164,7 @@ export function resetCloudCatalog() {
   flights.clear();
   names.clear();
   providers.clear();
+  forgetDeletedCloudWorkspaces();
   projectNames.clear();
   listedAt.clear();
   state = EMPTY;

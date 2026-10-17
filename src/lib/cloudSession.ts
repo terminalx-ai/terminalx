@@ -31,7 +31,7 @@ import {
 } from "@/lib/cloudAgents";
 import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isOpen, machineRunning, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
+import { deletion, isOpen, machineRunning, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -294,7 +294,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const workspaceState = item?.workspace.state ?? null;
   // #502: deleted, from here or elsewhere (a tombstone): nothing is left to connect to or wait for.
   const deletedHere = useCloudWorkspaceDeleted(orgId, workspaceId);
-  const deleted = workspaceState === "destroyed" || (!item && deletedHere);
+  // Deleted here while the list still shows it mid-delete counts too.
+  const deleted = workspaceState === "destroyed" || (deletedHere && (!item || deletion(item) !== null));
 
   // The lease this view holds, and through it the workspace's connection of
   // now and that connection's own transport state. Both come from the

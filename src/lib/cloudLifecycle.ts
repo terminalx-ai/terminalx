@@ -426,6 +426,13 @@ export function noteCloudWorkspaceDeleted(orgId: string, workspaceId: string): v
   for (const listener of [...deletedListeners]) listener();
 }
 
+/** Forget them all: signed out, another user, or a reset catalog. */
+export function forgetDeletedCloudWorkspaces(): void {
+  if (!deletedHere.size) return;
+  deletedHere.clear();
+  for (const listener of [...deletedListeners]) listener();
+}
+
 /** Whether this workspace was deleted in this run of the app. */
 export function cloudWorkspaceDeleted(orgId: string, workspaceId: string): boolean {
   return deletedHere.has(`${orgId}:${workspaceId}`);
@@ -496,7 +503,7 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
 /** For tests. */
 export function resetPurged(): void {
   purged.clear();
-  deletedHere.clear();
+  forgetDeletedCloudWorkspaces();
 }
 
 export function purgeNoticeText(notice: PurgeNotice): string {

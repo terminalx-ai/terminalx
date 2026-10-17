@@ -2136,6 +2136,20 @@ describe("a session of a workspace that was deleted", () => {
     expect(getSessionStore().selectedSessionId).toBeNull();
   });
 
+  it("says so at once while the list still shows the workspace mid-delete", async () => {
+    await listedBefore();
+    await openConnected();
+    const { noteCloudWorkspaceDeleted } = await import("@/lib/cloudLifecycle");
+    // The delete went through here; the list read after it still has the row, its delete running.
+    setCatalog({ ...workspaceItem("ready"), latestOperation: { id: "op-d", workspaceId: WS, action: "delete", type: "delete", state: "running", stage: "queued", cancelable: false, createdAt: 1, updatedAt: 2 } } as unknown as CloudWorkspaceListItem);
+    await act(async () => {
+      noteCloudWorkspaceDeleted(ORG, WS);
+      closeCloudConnection({ orgId: ORG, workspaceId: WS });
+    });
+    await screen.findByTestId("cloud-workspace-deleted");
+    expectDeletedPane();
+  });
+
   it("says so when the list's tombstone says it was deleted elsewhere", async () => {
     guard.handlers.cloud_agent_purge_workspace = () => ({ removed: true, unsentCommands: 0, cachedTabs: 1 });
     await listedBefore();

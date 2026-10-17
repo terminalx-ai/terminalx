@@ -16,6 +16,8 @@ const running = (action: string) => ({ id: "op", action, state: "running", type:
 describe("deriveCloudActivity", () => {
   it("1: archived, archiving and deleting come first", () => {
     expect(deriveCloudActivity(item({ state: "archived", archivedAt: 1 })).label).toBe("Archived");
+    // Deleted is not archived: it has its own words.
+    expect(deriveCloudActivity(item({ state: "destroyed" })).label).toBe("Deleted");
     expect(deriveCloudActivity(item({}, running("archive"))).label).toBe("Archiving");
     expect(deriveCloudActivity(item({}, running("delete"))).label).toBe("Deleting");
   });
