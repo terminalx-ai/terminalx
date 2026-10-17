@@ -11,6 +11,7 @@ import { CloudPortsView } from "./CloudPorts";
 import { NotSharedNotice, ParticipantsBar } from "./CloudCollab";
 import { CloudShareDialog } from "./CloudShareDialog";
 import { failureMessage, PHASES, phaseOf, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
+import { launchFailureStands } from "@/lib/cloudRowState";
 import { archiving, deletion, isOpen, workspaceFailureText } from "@/lib/cloudLifecycle";
 import { api, workspaceTargetKey, type CloudWorkspaceConnection, type CloudWorkspaceListItem } from "@/lib/api";
 import {
@@ -71,7 +72,7 @@ const STATE_TEXT: Record<string, string> = {
  * resuming, stopped, needing attention) comes first; the startup phase of its
  * first task only while it is otherwise ready or starting.
  */
-export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()): string {
+export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now(), agentRan = false): string {
   const { state, launch } = item.workspace;
   const operation = item.latestOperation;
   // A delete that stopped says why on its own line below; the row keeps its state.
@@ -86,7 +87,7 @@ export function describeWorkspace(item: CloudWorkspaceListItem, now = Date.now()
     return "Needs attention";
   }
   if (state === "suspended" || state === "archived" || state === "destroyed") return STATE_TEXT[state];
-  if (phase === "failed" && launch) return `The agent did not start: ${failureMessage(item)}`;
+  if (phase === "failed" && launch && launchFailureStands(item, { agentRan })) return `The agent did not start: ${failureMessage(item)}`;
   if (runtimeNotPickedUp(item, now) !== null) return "Ready · the runtime has not picked up the first task";
   if (state === "provisioning" || (launch && !settled(phase))) return PHASES.find((p) => p.id === phase)?.label ?? phase;
   return STATE_TEXT[state] ?? state;
