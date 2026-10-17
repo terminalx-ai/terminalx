@@ -11,6 +11,7 @@ import type { TabStatus } from "@/types/session";
  *
  * 1. archived, being deleted or archived → Archived, Deleting, Archiving
  * 2. attention required, a failed launch or delete, a runtime update → Needs attention
+ *    (a failed launch only until an agent runs in the workspace: see `launchFailureStands`)
  * 3. an operation running → Stopping, Resuming
  * 4. provisioning → Starting: <launch phase>
  * 5. suspended → Stopped, even if the cache says a tab was working
@@ -40,6 +41,20 @@ export interface ActivityInput {
   tabs?: readonly { status: TabStatus; unread?: boolean; pendingApprovals?: number; live?: boolean }[];
   /** The tab states come from the cache or a checkpoint, not the live runtime. */
   fromCache?: boolean;
+  /** The workspace has a session with a tab, for a caller that does not pass `tabs`. */
+  agentRan?: boolean;
+}
+
+/**
+ * Whether a failed first task still needs the reader. A failed launch starts
+ * no session, so any session the workspace has, or a turn its runtime
+ * reports, came after it: the workspace works, and the failure is history
+ * rather than something to recover from (#499).
+ */
+export function launchFailureStands(item: CloudWorkspaceListItem, input: Pick<ActivityInput, "tabs" | "agentRan"> = {}): boolean {
+  if (input.agentRan || input.tabs?.length) return false;
+  const runtime = item.workspace.runtimeActivity;
+  return !(runtime?.online && (runtime.activeTurns > 0 || runtime.pendingApprovals > 0));
 }
 
 const idle = (label: string, tone: RowTone, lastKnown = false): CloudActivity => ({ label, tone, status: "idle", lastKnown });
@@ -53,7 +68,7 @@ export function deriveCloudActivity(item: CloudWorkspaceListItem, input: Activit
   if (state === "archived" || state === "destroyed") return idle("Archived", "archived");
   // 2
   const phase = phaseOf(item);
-  if (state === "attention-required" || (launch && phase === "failed") || deletion(item) === "failed" || input.connection === "updateRequired") {
+  if (state === "attention-required" || (launch && phase === "failed" && launchFailureStands(item, input)) || deletion(item) === "failed" || input.connection === "updateRequired") {
     return idle("Needs attention", "attention");
   }
   // 3

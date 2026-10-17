@@ -318,6 +318,8 @@ describe("the list's state line", () => {
     const failed = row("ready", { launch: launch("failed", { state: "failed", category: "runtime-unsupported" }) });
     expect(describeWorkspace(failed)).toMatch(/^The agent did not start: This workspace's runtime cannot start agents/);
     expect(describeWorkspace(failed)).not.toMatch(/runtime-unsupported|attention-required/);
+    // Once an agent has run in the workspace, the first task's failure is history (#499).
+    expect(describeWorkspace(failed, Date.now(), true)).toBe("Ready");
   });
 
   it("says when a Ready workspace's runtime has not picked up its first task", () => {

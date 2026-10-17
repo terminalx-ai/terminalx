@@ -14,6 +14,7 @@ import { retainCloudConnection, setSelectedCloudConnection, subscribeCloudConnec
 import { findCloudWorkspace, refreshCloudCatalog, resumeCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CloudResourceNotice } from "@/components/cloud/CloudResourceNotice";
 import { archiving, deletion, isOpen, lastSavedText, lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { useCloudWorkspaceSessions } from "@/lib/cloudSessions";
 import { errorCode } from "@/lib/cloudTerminals";
 import { selectSession } from "@/lib/sessions";
 import { cloudWorkspaceKey, parseCloudWorkspaceKey } from "@/types/target";
@@ -23,6 +24,15 @@ const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
 /** What selecting a workspace may do: connect to one that is running or stopped, never wake it; nothing while it starts, is deleted or needs attention. */
 function openable(item: CloudWorkspaceListItem): boolean {
   return ["ready", "suspended", "archived"].includes(item.workspace.state) && !deletion(item) && !archiving(item);
+}
+
+const NO_ITEM = { workspace: { orgId: "", id: "" } } as CloudWorkspaceListItem;
+
+/** Whether the workspace has a session with a tab, as the sidebar knows it: a failed first task is then history (#499). */
+function useAgentRan(item: CloudWorkspaceListItem | null): boolean {
+  const node = useMemo(() => ({ key: cloudWorkspaceKey(item?.workspace.orgId ?? "", item?.workspace.id ?? ""), item: item ?? NO_ITEM, placedBy: null }), [item]);
+  const { sessions } = useCloudWorkspaceSessions(node, { load: false, showArchived: false, selectedKey: null });
+  return !!item && sessions.some((row) => row.tabs.length > 0);
 }
 
 /**
@@ -103,7 +113,8 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
     }
   };
 
-  const rowState = item ? workspaceRowState(item) : null;
+  const agentRan = useAgentRan(item);
+  const rowState = item ? workspaceRowState(item, agentRan) : null;
   const stopped = item?.workspace.state === "suspended";
   const saved = item ? lastSavedText(item) : null;
   const deleting = item ? deletion(item) : null;
@@ -126,7 +137,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
         <Cloud className="size-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 truncate text-sm font-medium">{item?.workspace.name ?? "Cloud workspace"}</span>
         {item && <ExecutionLocation provider={item.workspace.provider} name={item.workspace.name} />}
-        <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item) : undefined}>
+        <span className="ml-auto min-w-0 truncate text-xs text-muted-foreground" data-testid="cloud-connection-state" title={item ? describeWorkspace(item, Date.now(), agentRan) : undefined}>
           {rowState?.label}
           {opened && state.state !== "idle" && state.state !== "suspended" ? ` · ${describe(state)}` : ""}
         </span>

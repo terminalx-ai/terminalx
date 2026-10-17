@@ -26,6 +26,18 @@ describe("deriveCloudActivity", () => {
     expect(deriveCloudActivity(item(), { connection: "updateRequired" }).label).toBe("Needs attention");
   });
 
+  it("2: a failed first prompt stops needing attention once an agent runs in the workspace (#499)", () => {
+    const failed = { launch: { phase: "failed", state: "failed", category: "agent-sign-in-required" } };
+    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "in_progress" }], connection: "connected" }).label).toBe("Working");
+    expect(deriveCloudActivity(item(failed), { tabs: [{ status: "idle" }] }).label).toBe("Idle");
+    expect(deriveCloudActivity(item(failed), { agentRan: true }).label).toBe("Ready");
+    // The list alone: a runtime that reports a turn has an agent working.
+    expect(deriveCloudActivity(item({ ...failed, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 1, pendingApprovals: 0 } })).label).toBe("Working");
+    // Nothing has run since: it still needs attention, and a workspace the server flags always does.
+    expect(deriveCloudActivity(item(failed), { tabs: [] }).label).toBe("Needs attention");
+    expect(deriveCloudActivity(item({ state: "attention-required" }), { tabs: [{ status: "idle" }] }).label).toBe("Needs attention");
+  });
+
   it("3 and 4: operations, then starting phases", () => {
     expect(deriveCloudActivity(item({ state: "suspended" }, running("resume"))).label).toBe("Resuming");
     expect(deriveCloudActivity(item({}, running("suspend"))).label).toBe("Stopping");
