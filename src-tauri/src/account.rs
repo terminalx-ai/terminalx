@@ -55,6 +55,12 @@ pub(crate) fn api_base_url() -> String {
 }
 
 fn dev_api_base_url(debug_build: bool, value: Option<&str>) -> Option<String> {
+    dev_origin(debug_build, DEV_API_BASE_URL_ENV, value)
+}
+
+/// A debug-only override origin read from `name`: an HTTPS origin or a
+/// loopback HTTP one. A release build never takes one.
+pub(crate) fn dev_origin(debug_build: bool, name: &str, value: Option<&str>) -> Option<String> {
     if !debug_build {
         return None;
     }
@@ -62,7 +68,7 @@ fn dev_api_base_url(debug_build: bool, value: Option<&str>) -> Option<String> {
     let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
     let allowed = url.scheme() == "https" || (url.scheme() == "http" && loopback);
     if !allowed || url.path() != "/" || url.query().is_some() || !url.username().is_empty() {
-        log::warn!("ignoring {DEV_API_BASE_URL_ENV}: expected an HTTPS or loopback HTTP origin");
+        log::warn!("ignoring {name}: expected an HTTPS or loopback HTTP origin");
         return None;
     }
     Some(url.origin().ascii_serialization())
