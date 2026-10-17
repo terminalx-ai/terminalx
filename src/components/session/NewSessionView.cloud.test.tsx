@@ -250,6 +250,19 @@ describe("a start refused for lack of role (a demoted admin with the form still 
   });
 });
 
+describe("a start the workspace's runtime refused", () => {
+  it("shows the runtime's reason, never a create failure", async () => {
+    const { WorkspaceRpcError } = await import("@terminalx/portable/workspace");
+    flow.planCloudStart.mockReturnValue({ kind: "wake", node });
+    flow.startInWorkspace.mockRejectedValue(new WorkspaceRpcError("unavailable", "Claude Code is not installed in this workspace", "session.create"));
+    render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
+    type("Fix the login redirect");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Claude Code is not installed in this workspace")).toBeTruthy();
+    expect(screen.queryByText(/could not be created|unavailable/)).toBeNull();
+  });
+});
+
 describe("the running limit (saas PRO-76)", () => {
   it("explains a resume refused at the running limit and offers to stop a running workspace", async () => {
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
