@@ -748,7 +748,7 @@ mod intercept_tests {
         let key = crate::cloud_agents::crypto::b64(&[7u8; 32]);
         let answer = json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": key, "createdAt": 1 }] });
         agents.store_keys("user", "org-a", "ws_1", &answer).unwrap();
-        agents.cache_save("org-a", "ws_1", "tab-1", Some(json!({ "events": [1] }))).unwrap();
+        agents.cache_save(&account.current_account_key().unwrap(), "org-a", "ws_1", "tab-1", Some(json!({ "events": [1] }))).unwrap();
         let kept_dir = dir.path().join("cloud-agent").join("user").join("org-a").join("ws_1");
         let intact = || kept_dir.join("keys.json").exists() && kept_dir.join("cache.json").exists() && keys.get("org-a", "ws_1", KEY_ID).unwrap().is_some();
         // The watcher has seen who is signed in.

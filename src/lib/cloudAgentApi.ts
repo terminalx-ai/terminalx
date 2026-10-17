@@ -113,6 +113,8 @@ export interface CachedTab {
   completed: boolean;
   /** Model, effort or mode chosen offline, still to go with the next send. */
   pendingConfig?: { model?: string; effort?: string | null; mode?: string } | null;
+  /** Unsent composer text. */
+  draft?: string;
   updatedAt: number;
 }
 
@@ -139,6 +141,12 @@ export const cloudAgentApi = {
       afterVersion: after?.version ?? null,
     }),
   hasKey: (scope: CloudAgentScope) => invoke<boolean>("cloud_agent_has_key", { ...scope }),
-  cacheLoad: (scope: CloudAgentScope) => invoke<{ tabs: Record<string, CachedTab> }>("cloud_agent_cache_load", { ...scope }),
-  cacheSave: (scope: CloudAgentScope, tabId: string, entry: CachedTab | null) => invoke<void>("cloud_agent_cache_save", { ...scope, tabId, entry }),
+  /**
+   * `account` is the one the cache is read or written for (the status's
+   * `context.account`): the native side refuses it once another account is
+   * signed in, so a save queued before a user change never lands in the
+   * next account's cache.
+   */
+  cacheLoad: (account: string, scope: CloudAgentScope) => invoke<{ tabs: Record<string, CachedTab> }>("cloud_agent_cache_load", { account, ...scope }),
+  cacheSave: (account: string, scope: CloudAgentScope, tabId: string, entry: CachedTab | null) => invoke<void>("cloud_agent_cache_save", { account, ...scope, tabId, entry }),
 };

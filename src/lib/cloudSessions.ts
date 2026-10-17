@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { RuntimeSession, RuntimeSessionPatch, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { applyLiveTabs, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
-import { cacheCloudSessions, dropCachedCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
+import { applyLiveTabs, getCloudAgents, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
+import { cacheCloudSessions, dropCachedCloudSessions, getCloudCatalog, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { cloudTabTitle } from "@/lib/cloudRowState";
 import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
@@ -334,6 +334,22 @@ export function buildCloudSessions(input: {
     .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.modified.localeCompare(a.modified));
 }
 
+/**
+ * Whether an agent has run in the workspace: a session with a tab, from what
+ * this desktop knows (the saved list, a live one, its agent tabs), never by
+ * connecting. A failed first prompt is then history (#499, `launchFailureStands`).
+ */
+export function cloudAgentRan(item: CloudWorkspaceListItem): boolean {
+  const { orgId, id: workspaceId } = item.workspace;
+  const rows = buildCloudSessions({
+    item,
+    cached: getCloudCatalog().orgs[orgId]?.sessions[workspaceId] ?? null,
+    live: live.get(cloudWorkspaceKey(orgId, workspaceId))?.sessions ?? null,
+    agentTabs: getCloudAgents({ organizationId: orgId, workspaceId }).tabs,
+  });
+  return rows.some((row) => row.tabs.length > 0);
+}
+
 /** The status a session row's stripe shows: the most urgent of its tabs. */
 export function cloudSessionStatus(row: CloudSessionRow): TabStatus {
   let out: TabStatus = "idle";
@@ -398,7 +414,8 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
     sessions,
     capabilities: liveList?.capabilities ?? cached?.capabilities ?? null,
     manage: liveList ? liveList.manage : node.item.workspace.you ? node.item.workspace.you.role === "manager" : true,
-    known: !!liveList || !!cached || agents.tabs.length > 0 || !!node.item.workspace.launch?.sessionId,
+    // A tab known only from a checkpoint names no session yet (an admin can list them where a member cannot): it is not knowing the sessions.
+    known: !!liveList || !!cached || agents.tabs.some((tab) => !tab.placeholder && !!tab.info.sessionId) || !!node.item.workspace.launch?.sessionId,
   };
 }
 

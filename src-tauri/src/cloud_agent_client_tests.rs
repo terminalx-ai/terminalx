@@ -21,6 +21,11 @@ impl AccountSource for Fixed {
         }
         Ok(Ctx { user_id, organization_id: organization_id.into(), access_token: Zeroizing::new("token".into()) })
     }
+
+    /// The page's account key is the user id here.
+    fn account_key(&self) -> Option<String> {
+        self.0.lock().unwrap().as_ref().map(|(user_id, _)| user_id.clone())
+    }
 }
 
 fn kept(orgs: &[&str]) -> Option<KeptIdentity> {
@@ -506,14 +511,50 @@ fn cancel_before_the_api_has_it_settles_locally() {
 #[test]
 fn the_cache_round_trips_and_is_bounded() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
-    fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({ "events": [1, 2], "unread": true }))).unwrap();
-    fixture.client.cache_save(ORG, WS, "tab-2", Some(json!({ "events": [] }))).unwrap();
-    let loaded = fixture.client.cache_load(ORG, WS).unwrap();
+    fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({ "events": [1, 2], "unread": true }))).unwrap();
+    fixture.client.cache_save(USER, ORG, WS, "tab-2", Some(json!({ "events": [] }))).unwrap();
+    let loaded = fixture.client.cache_load(USER, ORG, WS).unwrap();
     assert_eq!(loaded["tabs"]["tab-1"]["unread"], json!(true));
-    fixture.client.cache_save(ORG, WS, "tab-2", None).unwrap();
-    assert!(fixture.client.cache_load(ORG, WS).unwrap()["tabs"].get("tab-2").is_none());
+    fixture.client.cache_save(USER, ORG, WS, "tab-2", None).unwrap();
+    assert!(fixture.client.cache_load(USER, ORG, WS).unwrap()["tabs"].get("tab-2").is_none());
     let huge = json!({ "blob": "x".repeat(CACHE_ENTRY_LIMIT) });
-    assert_eq!(fixture.client.cache_save(ORG, WS, "tab-1", Some(huge)).unwrap_err(), "cloud_agent_cache_too_large");
+    assert_eq!(fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(huge)).unwrap_err(), "cloud_agent_cache_too_large");
+}
+
+#[test]
+fn a_cache_save_made_for_one_account_never_lands_in_the_next_ones_cache() {
+    const USER_2: &str = "user_2";
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    let cache_of = |user: &str| fixture._dir.path().join("cloud-agent").join(user).join(ORG).join(WS).join("cache.json");
+    fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({ "draft": "A's text" }))).unwrap();
+
+    // The native side switches to user_2 before the page has cleared user_1's tabs.
+    *fixture.account.0.lock().unwrap() = Some((USER_2.into(), ORG.into()));
+    // A debounced save that fires in that gap, and a read for user_1, are refused.
+    assert_eq!(fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({ "draft": "A's text" }))).unwrap_err(), "cloud_agent_account_changed");
+    assert_eq!(fixture.client.cache_load(USER, ORG, WS).unwrap_err(), "cloud_agent_account_changed");
+    assert!(!cache_of(USER_2).exists());
+
+    // One already in flight: past its checks, waiting on the lock, when the user changes back and forth.
+    *fixture.account.0.lock().unwrap() = Some((USER.into(), ORG.into()));
+    std::thread::scope(|scope| {
+        let guard = fixture.client.lock.lock().unwrap();
+        let save = scope.spawn(|| fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({ "draft": "typed just before" }))));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        *fixture.account.0.lock().unwrap() = Some((USER_2.into(), ORG.into()));
+        drop(guard);
+        assert_eq!(save.join().unwrap().unwrap_err(), "cloud_agent_account_changed");
+    });
+    assert!(!cache_of(USER_2).exists());
+
+    // user_2's own saves and reads work, and see nothing of user_1's.
+    fixture.client.cache_save(USER_2, ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
+    let loaded = fixture.client.cache_load(USER_2, ORG, WS).unwrap();
+    assert_eq!(loaded["tabs"]["tab-1"], json!({ "events": [] }));
+    assert!(!std::fs::read_to_string(cache_of(USER_2)).unwrap().contains("A's text"));
+    // Signed out: nobody's cache is read or written.
+    *fixture.account.0.lock().unwrap() = None;
+    assert!(fixture.client.cache_save(USER_2, ORG, WS, "tab-1", None).is_err());
 }
 
 #[test]
@@ -536,7 +577,7 @@ fn an_identity_change_drops_the_previous_identitys_keys_outbox_and_cache() {
     fixture.client.observe_identity(kept(&[ORG]));
     give_key(&fixture);
     fixture.client.enqueue(ORG, WS, "tab-1", "stop", json!({}), true).unwrap();
-    fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({}))).unwrap();
+    fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({}))).unwrap();
     // Unchanged or not yet loaded: nothing is dropped.
     fixture.client.observe_identity(kept(&[ORG]));
     assert!(fixture.keys.get(ORG, WS, KEY_ID).unwrap().is_some());
@@ -556,13 +597,13 @@ fn fill(fixture: &Fixture, org: &str) {
         .store_keys(USER, org, WS, &json!({ "currentKeyId": KEY_ID, "keys": [{ "keyId": KEY_ID, "key": crypto::b64(&key()), "createdAt": 1 }] }))
         .unwrap();
     fixture.client.enqueue(org, WS, "tab-1", "stop", json!({}), true).unwrap();
-    fixture.client.cache_save(org, WS, "tab-1", Some(json!({ "seen": org }))).unwrap();
+    fixture.client.cache_save(USER, org, WS, "tab-1", Some(json!({ "seen": org }))).unwrap();
 }
 
 fn kept_everything(fixture: &Fixture, org: &str) -> bool {
     fixture.keys.get(org, WS, KEY_ID).unwrap().is_some()
         && fixture.client.outbox(org, WS, None).unwrap().iter().filter(|entry| !TERMINAL_STATES.contains(&entry.state.as_str())).count() == 1
-        && fixture.client.cache_load(org, WS).unwrap()["tabs"].get("tab-1").is_some()
+        && fixture.client.cache_load(USER, org, WS).unwrap()["tabs"].get("tab-1").is_some()
 }
 
 #[test]
@@ -696,17 +737,17 @@ fn a_deleted_workspace_loses_its_outbox_cache_and_keys_and_only_its_own() {
     give_key(&fixture);
     // Unsent: the API never answers.
     fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "not delivered" }), true).unwrap();
-    fixture.client.cache_save(ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
-    fixture.client.cache_save(ORG, "ws_2", "tab-1", Some(json!({ "events": [] }))).unwrap();
+    fixture.client.cache_save(USER, ORG, WS, "tab-1", Some(json!({ "events": [] }))).unwrap();
+    fixture.client.cache_save(USER, ORG, "ws_2", "tab-1", Some(json!({ "events": [] }))).unwrap();
 
     let purged = fixture.client.purge_workspace(ORG, WS).unwrap();
     assert_eq!(purged, Purged { removed: true, unsent_commands: 1, cached_tabs: 1 });
     assert!(fixture.keys.get(ORG, WS, KEY_ID).unwrap().is_none());
     assert!(fixture.client.outbox(ORG, WS, None).unwrap().is_empty());
-    assert!(fixture.client.cache_load(ORG, WS).unwrap()["tabs"].as_object().unwrap().is_empty());
+    assert!(fixture.client.cache_load(USER, ORG, WS).unwrap()["tabs"].as_object().unwrap().is_empty());
     assert!(!fixture.client.has_key(ORG, WS).unwrap());
     // Another workspace keeps its cache, and purging again is a no-op.
-    assert!(fixture.client.cache_load(ORG, "ws_2").unwrap()["tabs"].get("tab-1").is_some());
+    assert!(fixture.client.cache_load(USER, ORG, "ws_2").unwrap()["tabs"].get("tab-1").is_some());
     assert_eq!(fixture.client.purge_workspace(ORG, WS).unwrap(), Purged::default());
     // Only the signed-in organization's workspaces can be purged.
     assert_eq!(fixture.client.purge_workspace("org_2", WS).unwrap_err(), "cloud_remote_organization_mismatch");

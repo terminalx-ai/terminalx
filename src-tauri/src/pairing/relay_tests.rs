@@ -203,6 +203,7 @@ async fn supervisor_recovers_pairs_and_resets_backoff_after_another_disconnect()
                 let (tx, rx) = mpsc::unbounded_channel();
                 let live = RelayLive {
                     tx,
+                    director_url: "https://relay.example.invalid".into(),
                     cell_url: assignment.cell_url,
                     assignment_epoch: 1,
                     relay_host_id: keypair.host_id(),

@@ -12,7 +12,11 @@ use super::model::{
     CAPABILITY,
 };
 
-pub const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
+const RELAY_DIRECTOR_URL: &str = "https://relay.terminalx.ai";
+/// Debug builds only: the relay director of a local or staging stack, e.g. the
+/// one terminalx-saas starts beside its API. The director runs on its own
+/// origin, so it cannot be derived from the dev API base URL.
+pub const DEV_RELAY_DIRECTOR_URL_ENV: &str = "TERMINALX_DEV_RELAY_DIRECTOR_URL";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -255,12 +259,31 @@ fn relay_authorization_at(
     )
 }
 
+/// The relay director origin, or `None` when Relay is off. A release build
+/// always uses production. A debug build uses [`DEV_RELAY_DIRECTOR_URL_ENV`]
+/// and never production, so a Dev app pointed at a local stack does not
+/// contact the production relay.
+pub fn relay_director_url() -> Option<String> {
+    relay_director_url_for(
+        cfg!(debug_assertions),
+        std::env::var(DEV_RELAY_DIRECTOR_URL_ENV).ok().as_deref(),
+    )
+}
+
+fn relay_director_url_for(debug_build: bool, dev_value: Option<&str>) -> Option<String> {
+    if !debug_build {
+        return Some(RELAY_DIRECTOR_URL.to_string());
+    }
+    crate::account::dev_origin(true, DEV_RELAY_DIRECTOR_URL_ENV, dev_value)
+}
+
 pub fn relay_assignment(
+    director_url: &str,
     authorization: &RelayAuthorization,
     relay_host_id: &str,
     reconnect: bool,
 ) -> Result<RelayAssignment> {
-    relay_assignment_at(RELAY_DIRECTOR_URL, authorization, relay_host_id, reconnect)
+    relay_assignment_at(director_url, authorization, relay_host_id, reconnect)
 }
 
 fn relay_assignment_at(
@@ -348,6 +371,31 @@ pub(super) fn allowed_https_origin(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_builds_use_the_production_relay_director() {
+        assert_eq!(relay_director_url_for(false, None).as_deref(), Some("https://relay.terminalx.ai"));
+        assert_eq!(
+            relay_director_url_for(false, Some("http://127.0.0.1:8471")).as_deref(),
+            Some("https://relay.terminalx.ai"),
+            "release builds ignore the dev override"
+        );
+    }
+
+    #[test]
+    fn debug_builds_never_contact_the_production_relay_director() {
+        assert_eq!(relay_director_url_for(true, None), None, "Relay is off without a dev director");
+        assert_eq!(
+            relay_director_url_for(true, Some("http://127.0.0.1:8471")).as_deref(),
+            Some("http://127.0.0.1:8471")
+        );
+        assert_eq!(
+            relay_director_url_for(true, Some("https://relay.staging.example/")).as_deref(),
+            Some("https://relay.staging.example")
+        );
+        assert_eq!(relay_director_url_for(true, Some("http://relay.example")), None, "plain HTTP only on loopback");
+        assert_eq!(relay_director_url_for(true, Some("https://relay.example/v1")), None);
+    }
 
     #[test]
     fn guest_identity_is_verified_with_bearer_token_without_an_organization() {

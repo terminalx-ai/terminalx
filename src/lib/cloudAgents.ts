@@ -18,6 +18,7 @@ import {
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
 import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
+import { clearDrafts, getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -57,6 +58,8 @@ export interface CloudAgentTab {
    * for that reason. Shown until the next change or message; not saved.
    */
   settingsIgnored?: boolean;
+  /** Unsent composer text, kept with the cache so a relaunch brings it back. */
+  draft?: string;
 }
 
 export interface CloudAgentsSnapshot {
@@ -71,6 +74,8 @@ export interface CloudAgentsSnapshot {
 
 interface Store {
   scope: CloudAgentScope;
+  /** The account the store was made for: its cache is read and written for it alone. */
+  account: string;
   tabs: Map<string, CloudAgentTab>;
   outbox: OutboxEntry[];
   loaded: boolean;
@@ -97,6 +102,19 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+/** The signed-in account (`context.account`), as `@/lib/account` reports it; "" while signed out. */
+let account = "";
+
+/** Told by `@/lib/account` whenever the status changes. Stores made from now on are this account's. */
+export function setCloudAgentAccount(next: string | null) {
+  account = next ?? "";
+}
+
+/** The account a store's cache belongs to; one made before anyone was known takes the first account it is used under. */
+function cacheAccount(s: Store): string {
+  if (!s.account) s.account = account;
+  return s.account;
+}
 /** Told when any workspace's tabs change (the dashboard, notifications and palette read every workspace). */
 const anyListeners = new Set<() => void>();
 
@@ -129,6 +147,7 @@ function store(scope: CloudAgentScope): Store {
   if (!s) {
     s = {
       scope,
+      account,
       tabs: new Map(),
       outbox: [],
       loaded: false,
@@ -172,7 +191,11 @@ export function getCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
   return store(scope).snapshot;
 }
 
-/** Forget every workspace's tabs and stop polling (sign-out, organization switch, tests). */
+/**
+ * Forget every workspace's tabs, their unsent drafts and polling (sign-out,
+ * another user signing in, tests). Saves still queued are dropped, not
+ * written: they would land in the next account's cache.
+ */
 export function resetCloudAgents() {
   sentImages.clear();
   for (const s of stores.values()) {
@@ -181,6 +204,10 @@ export function resetCloudAgents() {
     for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   }
   stores.clear();
+  // After the stores are gone, so clearing a draft queues no save.
+  const typed = new Set(draftTabs);
+  draftTabs.clear();
+  clearDrafts((tabId) => typed.has(tabId));
 }
 
 /**
@@ -197,6 +224,9 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   const count = s.tabs.size;
   stores.delete(k);
+  const ids = new Set(s.tabs.keys());
+  clearDrafts((tabId) => ids.has(tabId));
+  for (const id of ids) draftTabs.delete(id);
   return count;
 }
 
@@ -303,13 +333,43 @@ async function saveNow(s: Store, tabId: string) {
     unread: tab.unread,
     completed: tab.completed,
     pendingConfig: tab.pendingConfig,
+    draft: tab.draft || undefined,
     updatedAt: Date.now(),
   };
   try {
-    await cloudAgentApi.cacheSave(s.scope, tabId, entry);
+    await cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tabId, entry);
   } catch {
     // The cache is only a head start; the checkpoint and the runtime hold the truth.
   }
+}
+
+/** Cloud tabs with a draft in `@/lib/drafts`, to forget with this account (a tab the runtime closed keeps its id there). */
+const draftTabs = new Set<string>();
+
+/**
+ * What is typed in a cloud tab's composer and not sent (`@/lib/drafts`, by
+ * tab id) is saved with the tab's cache, this account's and dropped with the
+ * workspace, so a relaunch brings it back. Nothing is published: the
+ * composer holds the text it shows.
+ */
+function keepDraft(tabId: string, text: string) {
+  for (const s of stores.values()) {
+    const tab = s.tabs.get(tabId);
+    if (!tab) continue;
+    draftTabs.add(tabId);
+    if ((tab.draft ?? "") === text) continue;
+    tab.draft = text;
+    scheduleSave(s, tabId);
+  }
+}
+subscribeDrafts(keepDraft);
+
+/** A draft read back from the cache, unless something is typed in the tab already, or the store was dropped meanwhile (another account). */
+function restoreDraft(s: Store, tab: CloudAgentTab, draft: string | undefined) {
+  if (!draft || stores.get(cloudAgentsKey(s.scope)) !== s || getDraft(tab.tabId)) return;
+  tab.draft = draft;
+  draftTabs.add(tab.tabId);
+  setDraft(tab.tabId, draft);
 }
 
 /** Write pending cache entries now (e.g. before leaving the page). */
@@ -338,9 +398,12 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
   }
   s.loading = (async () => {
     try {
-      const cached = await cloudAgentApi.cacheLoad(scope);
+      const cached = await cloudAgentApi.cacheLoad(cacheAccount(s), scope);
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
-        if (!entry?.tab || s.tabs.has(tabId)) continue;
+        const known = s.tabs.get(tabId);
+        // A tab the live runtime listed first still gets back what was being typed in it.
+        if (known) restoreDraft(s, known, entry?.draft);
+        if (!entry?.tab || known) continue;
         const tab = newTab(entry.tab, "cache");
         tab.cursor = entry.cursor ?? null;
         tab.checkpoint = entry.checkpoint ?? null;
@@ -349,6 +412,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         tab.pendingConfig = entry.pendingConfig ?? null;
         if (entry.events?.length) tab.historyRead = true;
         s.tabs.set(tabId, tab);
+        restoreDraft(s, tab, entry.draft);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
       }
     } catch (error) {
@@ -479,7 +543,7 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
   if (pending) clearTimeout(pending);
   s.saves.delete(tab.tabId);
   if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
-  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(s.scope, tab.tabId, null).catch(() => undefined);
+  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tab.tabId, null).catch(() => undefined);
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {

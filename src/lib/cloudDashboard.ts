@@ -329,6 +329,19 @@ export function openCloudSession(key: string, tabId?: string | null) {
   if (tabId) selectSessionTab(key, { kind: "agent", id: tabId });
 }
 
+/**
+ * The mark a cloud session's sidebar row shows, from the same projection the
+ * Dashboard and the sidebar filter read: the most urgent of its tabs. So a
+ * workspace this desktop is not attached to shows what the server's list
+ * says, and a cached "working" is not believed on its own.
+ */
+export function cloudSessionMark(session: Pick<CloudDashboardSession, "tabs">): DashboardTabStatus {
+  if (session.tabs.some((tab) => tab.status === "waiting")) return "waiting";
+  if (session.tabs.some((tab) => tab.status === "in_progress")) return "in_progress";
+  if (session.tabs.some((tab) => tab.status === "completed")) return "completed";
+  return "idle";
+}
+
 /** The tab a cloud session opens on: the one waiting, else the one working, else the first. */
 export function attentionTab(session: CloudDashboardSession): CloudDashboardTab | undefined {
   return session.tabs.find((tab) => tab.status === "waiting") ?? session.tabs.find((tab) => tab.status === "in_progress") ?? session.tabs.find((tab) => tab.status === "completed") ?? session.tabs[0];

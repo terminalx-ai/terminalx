@@ -67,6 +67,11 @@ pub trait AccountSource: Send + Sync {
     fn still_allowed(&self, user_id: &str, organization_id: &str) -> bool {
         self.context_in(organization_id).is_ok_and(|ctx| ctx.user_id == user_id)
     }
+
+    /// The signed-in account as the page knows it (the status's
+    /// `context.account`), to refuse a call the page made for an earlier
+    /// one; `None` while signed out. Must not block on the network.
+    fn account_key(&self) -> Option<String>;
 }
 
 impl AccountSource for crate::account::AccountManager {
@@ -79,6 +84,10 @@ impl AccountSource for crate::account::AccountManager {
 
     fn still_allowed(&self, user_id: &str, organization_id: &str) -> bool {
         self.current_scope().is_some_and(|scope| scope.user_id == user_id && scope.allows(organization_id))
+    }
+
+    fn account_key(&self) -> Option<String> {
+        self.current_account_key()
     }
 }
 
@@ -994,15 +1003,28 @@ impl CloudAgentClient {
 
     // ------------------------------------------------------------ cache
 
-    pub fn cache_load(&self, organization_id: &str, workspace_id: &str) -> Result<Value, String> {
+    /// The page's account and the native one can differ for a moment after
+    /// a user change: the native side switches first. A cache call made for
+    /// the earlier account is refused, so it neither reads the next one's
+    /// cache nor writes into it.
+    fn same_account(&self, account: &str) -> Result<(), String> {
+        if self.accounts.account_key().is_some_and(|current| current == account) {
+            Ok(())
+        } else {
+            Err("cloud_agent_account_changed".into())
+        }
+    }
+
+    pub fn cache_load(&self, account: &str, organization_id: &str, workspace_id: &str) -> Result<Value, String> {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
         let _guard = self.lock.lock().unwrap();
+        self.same_account(account)?;
         let tabs: BTreeMap<String, Value> = read_json(&dir.join("cache.json")).ok().flatten().unwrap_or_default();
         Ok(json!({ "tabs": tabs }))
     }
 
-    pub fn cache_save(&self, organization_id: &str, workspace_id: &str, tab_id: &str, entry: Option<Value>) -> Result<(), String> {
+    pub fn cache_save(&self, account: &str, organization_id: &str, workspace_id: &str, tab_id: &str, entry: Option<Value>) -> Result<(), String> {
         let ctx = self.ctx(organization_id)?;
         let dir = self.dir(&ctx, workspace_id)?;
         if !valid_id(tab_id) {
@@ -1012,6 +1034,8 @@ impl CloudAgentClient {
             return Err("cloud_agent_cache_too_large".into());
         }
         let _guard = self.lock.lock().unwrap();
+        // Right before the write, under the lock: the account may have changed since the call began.
+        self.same_account(account)?;
         if !self.writable(&dir) {
             return Err("cloud_remote_organization_mismatch".into());
         }
@@ -1249,15 +1273,15 @@ pub async fn cloud_agent_has_key(client: Client<'_>, organization_id: String, wo
 }
 
 #[tauri::command]
-pub async fn cloud_agent_cache_load(client: Client<'_>, organization_id: String, workspace_id: String) -> Result<Value, String> {
+pub async fn cloud_agent_cache_load(client: Client<'_>, account: String, organization_id: String, workspace_id: String) -> Result<Value, String> {
     let client = client.inner().clone();
-    blocking(move || client.cache_load(&organization_id, &workspace_id)).await
+    blocking(move || client.cache_load(&account, &organization_id, &workspace_id)).await
 }
 
 #[tauri::command]
-pub async fn cloud_agent_cache_save(client: Client<'_>, organization_id: String, workspace_id: String, tab_id: String, entry: Option<Value>) -> Result<(), String> {
+pub async fn cloud_agent_cache_save(client: Client<'_>, account: String, organization_id: String, workspace_id: String, tab_id: String, entry: Option<Value>) -> Result<(), String> {
     let client = client.inner().clone();
-    blocking(move || client.cache_save(&organization_id, &workspace_id, &tab_id, entry)).await
+    blocking(move || client.cache_save(&account, &organization_id, &workspace_id, &tab_id, entry)).await
 }
 
 #[tauri::command]

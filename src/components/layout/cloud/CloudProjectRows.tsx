@@ -27,9 +27,11 @@ import { useAccount } from "@/lib/account";
 import { refreshCloudWorkspaces } from "@/lib/cloudCatalog";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { useCloudConnection } from "@/lib/cloudConnections";
+import { cloudSessionMark, useCloudDashboard } from "@/lib/cloudDashboard";
 import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import {
+  cloudAgentRan,
   cloudSessionStatus,
   deleteCloudSession,
   NEEDS_SECOND_CONFIRMATION,
@@ -45,6 +47,7 @@ import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { getSessionStore, selectCloudSession, selectCloudWorkspace, selectSession, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
 import { cn } from "@/lib/cn";
 import { parseCloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
+import type { TabStatus } from "@/types/session";
 import { RowTime } from "../SidebarRows";
 import { useFold } from "../useFold";
 
@@ -359,12 +362,16 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
 
 /**
  * Whether a workspace's own view (its terminals, files, Git and ports) can be
- * opened: it is running or stopped, and not mid-change or failed. Opening it
- * may connect to a running machine; it never wakes a stopped one.
+ * opened: it is running or stopped, and not mid-change or failed. A failed
+ * first prompt counts only while `launchFailureStands` (no agent has run
+ * there since), the rule "+" reuses a workspace by (`planCloudStart`).
+ * Opening it may connect to a running machine; it never wakes a stopped one.
+ * `tone`: the row's own state, when it already judged the workspace's tabs.
  */
-export function workspaceOpenable(item: CloudWorkspaceListItem, tone: RowTone = deriveCloudActivity(item).tone): boolean {
+export function workspaceOpenable(item: CloudWorkspaceListItem, tone?: RowTone): boolean {
   const { state } = item.workspace;
-  return (state === "ready" || state === "suspended") && tone !== "changing" && tone !== "attention";
+  const judged = tone ?? deriveCloudActivity(item, { agentRan: cloudAgentRan(item) }).tone;
+  return (state === "ready" || state === "suspended") && judged !== "changing" && judged !== "attention";
 }
 
 /** "Open workspace" in a menu: the workspace's view, the one way to its terminals, files, Git and ports. */
@@ -392,6 +399,9 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
     return !found.length && filter.showsWorkspace(node.key) ? every : found;
   }, [every, filter, node.key]);
   const activity = useWorkspaceActivity(node, every, !known || every.every((row) => row.source !== "live"));
+  // Each session's mark as the Dashboard shows it: the live tabs while connected, else the server's list.
+  const dashboard = useCloudDashboard();
+  const marks = useMemo(() => new Map(dashboard.filter((session) => session.orgId === node.item.workspace.orgId && session.workspaceId === node.item.workspace.id).map((session) => [session.key, cloudSessionMark(session)])), [dashboard, node.item.workspace.orgId, node.item.workspace.id]);
   const connection = useCloudConnection(node.key);
   // What this desktop may do here: the attach result's authority once it has
   // connected, else what the list says opening would grant. A participant is
@@ -407,7 +417,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const rows = (
     <>
       {sessions.map((row) => (
-        <CloudSessionItem key={row.key} row={row} manage={manage} selected={store.selectedSessionId === row.key} />
+        <CloudSessionItem key={row.key} row={row} status={marks.get(row.key) ?? cloudSessionStatus(row)} manage={manage} selected={store.selectedSessionId === row.key} />
       ))}
       {sessions.length === 0 && (
         <li className="truncate px-2 py-1 text-[12px] text-faint" data-testid="cloud-workspace-empty" data-workspace={workspace.id} title={workspaceCard(node.item, activity)}>
@@ -484,8 +494,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
  * manages the workspace, on a runtime with session/2) renames, pins, archives
  * and deletes it, as a local conversation's does.
  */
-function CloudSessionItem({ row, manage, selected }: { row: CloudSessionRow; manage: boolean; selected: boolean }) {
-  const status = cloudSessionStatus(row);
+function CloudSessionItem({ row, status, manage, selected }: { row: CloudSessionRow; status: TabStatus; manage: boolean; selected: boolean }) {
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState(row.title);

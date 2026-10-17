@@ -23,6 +23,7 @@ const BACKOFF_MS: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 6
 #[derive(Clone)]
 pub struct RelayLive {
     tx: mpsc::UnboundedSender<ControlCommand>,
+    pub director_url: String,
     pub cell_url: String,
     pub assignment_epoch: u64,
     pub relay_host_id: String,
@@ -53,7 +54,7 @@ impl RelayLive {
             .map_err(|_| anyhow!("relay control closed before creating the invite"))??;
         Ok(RelayPairingOffer {
             v: 1,
-            director_url: cloud::RELAY_DIRECTOR_URL.into(),
+            director_url: self.director_url.clone(),
             cell_url: self.cell_url.clone(),
             assignment_epoch: self.assignment_epoch,
             relay_host_id: self.relay_host_id.clone(),
@@ -308,8 +309,16 @@ struct HostHello<'a> {
 }
 
 pub async fn supervise(manager: Arc<PairingManager>) {
-    supervise_with(manager, |manager, context, retry| {
-        Box::pin(connect_once(manager, context, retry))
+    let Some(director_url) = cloud::relay_director_url() else {
+        log::info!(
+            "Relay is off: debug builds need {} and never use the production relay",
+            cloud::DEV_RELAY_DIRECTOR_URL_ENV
+        );
+        manager.set_relay_off();
+        return;
+    };
+    supervise_with(manager, move |manager, context, retry| {
+        Box::pin(connect_once(manager, context, retry, director_url.clone()))
     })
     .await;
 }
@@ -411,6 +420,7 @@ async fn connect_once(
     manager: Arc<PairingManager>,
     context: AccountContext,
     retry: &mut RetryState,
+    director_url: String,
 ) -> Result<()> {
     let reconnect = retry.reconnect;
     let keypair = manager.host_key(true).context(Stage::LocalIdentity)?;
@@ -430,7 +440,8 @@ async fn connect_once(
     let relay_jwt = authorization.relay_token.clone();
     let assignment = tokio::task::spawn_blocking({
         let relay_host_id = relay_host_id.clone();
-        move || cloud::relay_assignment(&authorization, &relay_host_id, reconnect)
+        let director_url = director_url.clone();
+        move || cloud::relay_assignment(&director_url, &authorization, &relay_host_id, reconnect)
     })
     .await
     .context(Stage::Assignment)?
@@ -439,6 +450,7 @@ async fn connect_once(
     let (tx, rx) = mpsc::unbounded_channel();
     let live = RelayLive {
         tx,
+        director_url,
         cell_url: assignment.cell_url.clone(),
         assignment_epoch: assignment.assignment_epoch,
         relay_host_id: keypair.host_id(),

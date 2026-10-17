@@ -22,6 +22,7 @@ import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purge
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
+import { resetCloudAgents } from "@/lib/cloudAgents";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { cloudProjectKey, cloudWorkspaceKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
 
@@ -1072,8 +1073,10 @@ function syncAccount() {
   const owner = signedIn ? status.identity!.email : null;
   const revision = signedIn ? (status.context?.revision ?? null) : null;
   if (owner !== state.owner) {
-    // Signed out, or another user: nothing of the previous one stays in memory.
+    // Signed out, or another user: nothing of the previous one stays in memory,
+    // its agent tabs and unsent drafts included (another account may open the same shared workspace).
     // The file stays for the same user and is deleted natively if another signs in.
+    if (state.owner !== null) resetCloudAgents();
     if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = null;
     flights.clear();

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Send, Square } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
@@ -32,6 +32,8 @@ export default function CloudWorkspaceScreen() {
   const access = catalog && orgId ? catalog.access(orgId, params.workspaceId) : "unknown";
   // Leaving lets go of the connection; nothing keeps a phone attached unseen.
   useEffect(() => (catalog && orgId && access === "ok" ? catalog.retain(orgId, params.workspaceId) : undefined), [catalog, orgId, params.workspaceId, access]);
+  // While in front, the list is read now and then, so a start or stop from elsewhere shows (#500); not under a screen pushed over this one.
+  useFocusEffect(useCallback(() => catalog?.watch(), [catalog]));
   const session = catalog && orgId && access === "ok" ? catalog.opened(orgId, params.workspaceId) : null;
 
   const listed = catalog && orgId ? catalog.workspace(orgId, params.workspaceId) : null;

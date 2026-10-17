@@ -13,13 +13,13 @@ const mocks = vi.hoisted(() => ({
   listProps: {} as any,
   push: vi.fn(),
   alert: vi.fn(),
-  focus: [] as (() => void)[],
+  focus: [] as (() => void | (() => void))[],
 }));
 vi.mock("expo-router", () => ({
   Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> },
   useLocalSearchParams: () => mocks.params,
   useRouter: () => ({ push: mocks.push }),
-  useFocusEffect: (run: () => void) => { mocks.focus.push(run); },
+  useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); },
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
@@ -89,11 +89,13 @@ function world(options: { state?: string | null; role?: string | null; canApprov
     outbox: { isDeciding: () => false },
   };
   const release = vi.fn();
+  const unwatch = vi.fn();
   const listed = state === null ? null : item("ws-1", { name: "fix-login", state }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1 }),
     refresh: vi.fn(async () => undefined),
+    watch: vi.fn(() => unwatch),
     workspace: () => listed,
     access: () => options.access ?? (listed ? (options.role === "none" ? "not-shared" : "ok") : "gone"),
     retain: vi.fn(() => release),
@@ -143,9 +145,11 @@ describe("the Cloud tab", () => {
     expect(button("fix-login, Running, 2 waiting for an answer, Can send").textContent).toContain("acme/web · tx/fix-login");
     expect(button("old-work, Stopped, View only, Shared with 3")).toBeTruthy();
     expect(text()).toContain("The cloud provider is not answering right now.");
-    // Coming to the tab reads the list; nothing else is asked for.
-    mocks.focus.at(-1)!();
+    // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
+    const leave = mocks.focus.at(-1)!();
     expect(mocks.catalog.refresh).toHaveBeenCalled();
+    expect(mocks.catalog.watch).toHaveBeenCalledTimes(1);
+    expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(mocks.catalog.retain).not.toHaveBeenCalled();
     await click("old-work, Stopped, View only, Shared with 3");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "old-work", orgId: "org-1", title: "old-work" } });
@@ -535,6 +539,17 @@ describe("a shared cloud workspace on the phone", () => {
     await show(<CloudWorkspaceScreen />);
     await click("Sharing");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/shares", params: { orgId: "org-1", workspaceId: mocks.params.workspaceId } });
+  });
+
+  it("has the list read now and then only while the workspace is in front, and keeps it open under another screen", async () => {
+    const { release } = world();
+    await show(<CloudWorkspaceScreen />);
+    expect(mocks.catalog.retain).toHaveBeenCalledTimes(1);
+    // In front: watching. Another screen pushed over it ends the watch; the workspace stays open.
+    const leave = mocks.focus.at(-1)!();
+    expect(mocks.catalog.watch).toHaveBeenCalledTimes(1);
+    expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
+    expect(release).not.toHaveBeenCalled();
   });
 });
 

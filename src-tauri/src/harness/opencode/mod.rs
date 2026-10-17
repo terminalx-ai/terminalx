@@ -679,30 +679,42 @@ mod tests {
     fn a_request_waits_for_a_server_that_is_still_starting() {
         use std::io::{Read, Write};
         // A port nothing listens on yet. Below every system's ephemeral range,
-        // so while it is free no other test's port-0 bind or outgoing
-        // connection is handed it before the server below takes it.
+        // so no other test's port-0 bind or outgoing connection is handed it
+        // before the server below takes it. Free means free on any address:
+        // the check binds without address reuse, which on macOS would let it
+        // succeed beside another program's wildcard listener (`cloud_ports`).
         // A random start, so test processes running side by side seldom try the same one.
         let start = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ()) as usize;
-        let port = (0..12_000)
-            .map(|i| 20_000 + ((start + i) % 12_000) as u16)
-            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
-            .unwrap();
-        let server = std::thread::spawn(move || {
+        let free = |port: u16| tokio::net::TcpSocket::new_v4().and_then(|socket| socket.bind((std::net::Ipv4Addr::LOCALHOST, port).into())).is_ok();
+        let port = (0..12_000).map(|i| 20_000 + ((start + i) % 12_000) as u16).find(|&port| free(port)).unwrap();
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
-            let (mut stream, _) = listener.accept().unwrap();
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+            // Bounded, so a request that went elsewhere fails the test instead of hanging it.
+            listener.set_nonblocking(true)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(e) => return Err(e),
+                }
+            };
+            stream.set_nonblocking(false)?;
             let mut request = [0u8; 1024];
             let _ = stream.read(&mut request);
             let body = r#"{"id":"ses_1"}"#;
-            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())?;
             // The request's body may land after the read above. Closed with it
             // unread, the socket resets, and the reset can beat the answer.
-            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            stream.shutdown(std::net::Shutdown::Write)?;
             let _ = std::io::copy(&mut stream, &mut std::io::sink());
+            Ok(())
         });
         let line: Value = serde_json::from_str(&perform("session_new", "POST", &format!("http://127.0.0.1:{port}/session"), Some(json!({})))).unwrap();
-        server.join().unwrap();
+        let served = server.join().unwrap();
         assert_eq!(line["raccoon_http"], json!({ "tag": "session_new", "status": 200, "body": { "id": "ses_1" } }));
+        served.unwrap();
     }
 
     // ---- #427: Escape for a running turn, against a live server's own words

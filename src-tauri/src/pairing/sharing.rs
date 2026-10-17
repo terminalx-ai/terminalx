@@ -97,7 +97,7 @@ pub(crate) fn decode_link(link: &str) -> Result<ShareOffer> {
     if let Some(relay) = &offer.pairing.relay {
         if relay.v != 1
             || relay.e2ee_framing != 2
-            || relay.director_url != super::cloud::RELAY_DIRECTOR_URL
+            || super::cloud::relay_director_url().as_deref() != Some(relay.director_url.as_str())
             || !super::cloud::allowed_https_origin(&relay.cell_url)
         {
             bail!("Invalid relay endpoint.");
