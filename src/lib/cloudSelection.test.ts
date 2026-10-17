@@ -9,12 +9,14 @@ const mocks = vi.hoisted(() => ({
   status: null as unknown as AccountStatus,
   ready: true,
   listeners: new Set<() => void>(),
-  api: { cloudCatalogLoad: vi.fn(), cloudCatalogSave: vi.fn(), cloudAgentPurgeWorkspace: vi.fn(), cloudWorkspaceRepositories: vi.fn() },
+  api: { cloudCatalogLoad: vi.fn(), cloudCatalogSave: vi.fn(), cloudAgentPurgeWorkspace: vi.fn(), cloudWorkspaceRepositories: vi.fn(), cloudWorkspaceResume: vi.fn(), cloudRemoteAttach: vi.fn() },
+  invoke: vi.fn(async (_command: string, _args?: unknown) => undefined),
+  workspaceConnection: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined), convertFileSrc: (path: string) => path }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
-vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), api: mocks.api }));
+vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), api: mocks.api, workspaceConnection: mocks.workspaceConnection }));
 vi.mock("@/lib/account", () => ({
   getAccount: () => ({ status: mocks.status, ready: mocks.ready, busy: false }),
   useAccount: () => ({ status: mocks.status, ready: mocks.ready, busy: false }),
@@ -78,13 +80,18 @@ afterEach(() => {
 });
 
 describe("the selected cloud session across a relaunch", () => {
-  it("comes back once the catalog lists its workspace, as its row would select it", async () => {
+  it("comes back once the catalog lists its workspace, as its row would select it, and nothing is woken", async () => {
     bootCloudSelection();
     sessions.selectCloudSession(KEY);
     relaunch();
     expect(selected()).toBeNull();
-    await catalog.ingestCloudList({ workspaces: [item("alpha")] } as never, ORG);
+    // Stopped: restoring only selects; the view looks without waking.
+    await catalog.ingestCloudList({ workspaces: [item("alpha", { state: "suspended" })] } as never, ORG);
     expect(selected()).toBe(KEY);
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([command]) => /wake|resume|attach/i.test(String(command)))).toEqual([]);
   });
 
   it("waits for the account, and is never another account's", async () => {

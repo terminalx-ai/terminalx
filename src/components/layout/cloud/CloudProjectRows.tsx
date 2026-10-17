@@ -364,6 +364,7 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
  * opened: it is running or stopped, and not mid-change or failed. Opening it
  * may connect to a running machine; it never wakes a stopped one.
  */
+// TODO(#505): decide a failed launch with `launchFailureStands` once it is on main, as `planCloudStart`'s reuse will.
 export function workspaceOpenable(item: CloudWorkspaceListItem, tone: RowTone = deriveCloudActivity(item).tone): boolean {
   const { state } = item.workspace;
   return (state === "ready" || state === "suspended") && tone !== "changing" && tone !== "attention";

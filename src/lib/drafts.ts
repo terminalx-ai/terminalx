@@ -19,6 +19,15 @@ export function setDraft(tabId: string, text: string) {
   for (const change of changes) change(tabId, text);
 }
 
+/** Forget the drafts of the tabs that match, e.g. another account's cloud tabs. Views showing one go empty. */
+export function clearDrafts(matches: (tabId: string) => boolean) {
+  for (const tabId of [...drafts.keys()]) {
+    if (!matches(tabId)) continue;
+    drafts.delete(tabId);
+    for (const l of listeners.get(tabId) ?? []) l();
+  }
+}
+
 export function subscribeDrafts(change: (tabId: string, text: string) => void): () => void {
   changes.add(change);
   return () => changes.delete(change);

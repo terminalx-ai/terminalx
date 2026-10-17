@@ -18,7 +18,7 @@ import {
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
 import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
-import { getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
+import { clearDrafts, getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -175,7 +175,11 @@ export function getCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
   return store(scope).snapshot;
 }
 
-/** Forget every workspace's tabs and stop polling (sign-out, organization switch, tests). */
+/**
+ * Forget every workspace's tabs, their unsent drafts and polling (sign-out,
+ * another user signing in, tests). Saves still queued are dropped, not
+ * written: they would land in the next account's cache.
+ */
 export function resetCloudAgents() {
   sentImages.clear();
   for (const s of stores.values()) {
@@ -184,6 +188,10 @@ export function resetCloudAgents() {
     for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   }
   stores.clear();
+  // After the stores are gone, so clearing a draft queues no save.
+  const typed = new Set(draftTabs);
+  draftTabs.clear();
+  clearDrafts((tabId) => typed.has(tabId));
 }
 
 /**
@@ -200,6 +208,9 @@ export function dropCloudAgents(scope: CloudAgentScope): number {
   for (const tab of s.tabs.values()) if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
   const count = s.tabs.size;
   stores.delete(k);
+  const ids = new Set(s.tabs.keys());
+  clearDrafts((tabId) => ids.has(tabId));
+  for (const id of ids) draftTabs.delete(id);
   return count;
 }
 
@@ -316,6 +327,9 @@ async function saveNow(s: Store, tabId: string) {
   }
 }
 
+/** Cloud tabs with a draft in `@/lib/drafts`, to forget with this account (a tab the runtime closed keeps its id there). */
+const draftTabs = new Set<string>();
+
 /**
  * What is typed in a cloud tab's composer and not sent (`@/lib/drafts`, by
  * tab id) is saved with the tab's cache, this account's and dropped with the
@@ -325,17 +339,20 @@ async function saveNow(s: Store, tabId: string) {
 function keepDraft(tabId: string, text: string) {
   for (const s of stores.values()) {
     const tab = s.tabs.get(tabId);
-    if (!tab || (tab.draft ?? "") === text) continue;
+    if (!tab) continue;
+    draftTabs.add(tabId);
+    if ((tab.draft ?? "") === text) continue;
     tab.draft = text;
     scheduleSave(s, tabId);
   }
 }
 subscribeDrafts(keepDraft);
 
-/** A draft read back from the cache, unless something is typed in the tab already. */
-function restoreDraft(tab: CloudAgentTab, draft: string | undefined) {
-  if (!draft || getDraft(tab.tabId)) return;
+/** A draft read back from the cache, unless something is typed in the tab already, or the store was dropped meanwhile (another account). */
+function restoreDraft(s: Store, tab: CloudAgentTab, draft: string | undefined) {
+  if (!draft || stores.get(cloudAgentsKey(s.scope)) !== s || getDraft(tab.tabId)) return;
   tab.draft = draft;
+  draftTabs.add(tab.tabId);
   setDraft(tab.tabId, draft);
 }
 
@@ -369,7 +386,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
         const known = s.tabs.get(tabId);
         // A tab the live runtime listed first still gets back what was being typed in it.
-        if (known) restoreDraft(known, entry?.draft);
+        if (known) restoreDraft(s, known, entry?.draft);
         if (!entry?.tab || known) continue;
         const tab = newTab(entry.tab, "cache");
         tab.cursor = entry.cursor ?? null;
@@ -379,7 +396,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         tab.pendingConfig = entry.pendingConfig ?? null;
         if (entry.events?.length) tab.historyRead = true;
         s.tabs.set(tabId, tab);
-        restoreDraft(tab, entry.draft);
+        restoreDraft(s, tab, entry.draft);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
       }
     } catch (error) {

@@ -54,6 +54,7 @@ function usable(node: CloudWorkspaceNode): boolean {
   // A preparation workspace (PRO-20) does one job and is stopped for good after an hour: never a home for another session.
   if (item.workspace.preparation) return false;
   // A failed launch on a machine that is Ready failed its first prompt, not the machine: like a local checkout, it takes the next session.
+  // TODO(#505): once `launchFailureStands` (cloudRowState) is on main, decide this and `workspaceOpenable` with it, so "+" and Open workspace agree.
   return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && (phaseOf(item) !== "failed" || item.workspace.state === "ready");
 }
 
