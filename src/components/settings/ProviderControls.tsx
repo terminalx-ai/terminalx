@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { listedProviders } from "@/lib/hiddenProviders";
 import {
   api,
   type CloudProviderConnection,
@@ -65,16 +66,17 @@ export function ProviderControls({
     setLoading(true);
     try {
       const result = await api.cloudProviders();
+      const providers = listedProviders(result.providers);
       // Without a choice, open on the provider the organization connected, not
       // the first one listed (which reads "setup incomplete" when another is in use).
       const next =
-        result.providers.find((item) => item.id === preferred) ??
-        result.providers.find((item) => item.connection?.state === "connected") ??
-        result.providers.find((item) => item.connection) ??
-        result.providers[0];
+        providers.find((item) => item.id === preferred) ??
+        providers.find((item) => item.connection?.state === "connected") ??
+        providers.find((item) => item.connection) ??
+        providers[0];
       const detail = next ? await api.cloudProvider(next.id) : null;
       if (request !== epoch.current) return;
-      setProviders(result.providers);
+      setProviders(providers);
       setSelected(next?.id ?? "");
       setConnection(detail);
     } catch (failure) {

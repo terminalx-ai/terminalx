@@ -18,7 +18,7 @@ import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
@@ -294,6 +294,8 @@ function emptyOrg(orgId: string): OrgCatalog {
 const names = new Map<string, string>();
 /** The project each workspace was last listed under, by workspace id (this launch only). */
 const projectNames = new Map<string, string>();
+/** The provider each workspace was last listed on, by workspace id (this launch only). */
+const providers = new Map<string, string | null>();
 
 /**
  * What a workspace no longer in this person's list was last called here: its
@@ -301,9 +303,9 @@ const projectNames = new Map<string, string>();
  * launch. Nothing is read from the server for it and nothing is saved, so
  * after a relaunch there is no name to show. Null when it was never listed.
  */
-export function lastKnownWorkspace(workspaceId: string): { name: string; project: string } | null {
+export function lastKnownWorkspace(workspaceId: string): { name: string; project: string; provider: string | null } | null {
   const name = names.get(workspaceId);
-  return name ? { name, project: projectNames.get(workspaceId) ?? name } : null;
+  return name ? { name, project: projectNames.get(workspaceId) ?? name, provider: providers.get(workspaceId) ?? null } : null;
 }
 /** Per organization, when the list now shown was asked for. */
 const listedAt = new Map<string, number>();
@@ -338,6 +340,7 @@ export async function ingestCloudList(
   const workspaces = list.workspaces.filter((item) => !deleted.has(item.workspace.id));
   for (const item of list.workspaces) {
     names.set(item.workspace.id, item.workspace.name);
+    providers.set(item.workspace.id, item.workspace.provider ?? null);
     const repository = repositoryOf(item, state.createMemory);
     projectNames.set(item.workspace.id, repository ? (repository.fullName ?? nameOfIdentity(repository.identity)) : item.workspace.name);
   }
@@ -1076,6 +1079,8 @@ function syncAccount() {
     flights.clear();
     listedAt.clear();
     names.clear();
+    providers.clear();
+    forgetDeletedCloudWorkspaces();
     projectNames.clear();
     resetFeed();
     set({ ...EMPTY, owner, revision }, false);
@@ -1158,6 +1163,8 @@ export function resetCloudCatalog() {
   booted = false;
   flights.clear();
   names.clear();
+  providers.clear();
+  forgetDeletedCloudWorkspaces();
   projectNames.clear();
   listedAt.clear();
   state = EMPTY;

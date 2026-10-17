@@ -1,8 +1,10 @@
-import { FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
+import { Check, FolderPlus, FolderTree, LayoutList, PanelLeft, Plus, Search, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { useRowMenu } from "@/components/ui/useRowMenu";
 import { cn } from "@/lib/cn";
+import { SIDEBAR_FILTERS, setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { startSessionIn } from "@/lib/sessions";
 import type { Project } from "@/types/session";
@@ -11,9 +13,10 @@ import { TITLEBAR_INSET } from "./AppShell";
 
 /**
  * The sidebar's titlebar, the same in both layouts: after the window's own
- * controls, Hide sidebar; at the right, the switch between conversations
- * grouped by project and one flat list, then Search and New chat, all plain
- * icon buttons like the one that hides the sidebar.
+ * controls, Hide sidebar; at the right, the View menu (conversations grouped
+ * by project or one flat list, and which sessions show: all, Unread or Needs
+ * you), then Search and New chat, all plain icon buttons like the one that
+ * hides the sidebar.
  */
 export function SidebarTitlebar({
   onHide,
@@ -38,18 +41,7 @@ export function SidebarTitlebar({
         </Button>
       </WithTooltip>
       <div className="flex-1" />
-      <WithTooltip label={grouped ? "Grouped by project. Click for one list of chats" : "One list of chats. Click to group by project"}>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Group by project"
-          aria-pressed={grouped}
-          onClick={() => setPrefs({ sidebarLayout: grouped ? "list" : "simple" })}
-          className={cn(grouped ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
-        >
-          {grouped ? <FolderTree /> : <LayoutList />}
-        </Button>
-      </WithTooltip>
+      <ViewMenu grouped={grouped} />
       <WithTooltip label="Search" shortcut="app.commandPalette">
         <Button variant="ghost" size="icon-sm" className="text-faint hover:text-foreground" aria-label="Search" onClick={onSearch}>
           <Search />
@@ -85,5 +77,54 @@ export function SidebarTitlebar({
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  );
+}
+
+/**
+ * How the list is drawn and what it shows. The icon is the layout's; while a
+ * filter narrows the list the button looks pressed and says which. The filter
+ * covers local and cloud sessions alike (`useSidebarFilter`) and opens on a
+ * click, an accessibility press and the keyboard (`useRowMenu`).
+ */
+function ViewMenu({ grouped }: { grouped: boolean }) {
+  const filter = useSidebarFilter();
+  const menu = useRowMenu();
+  const showing = SIDEBAR_FILTERS.find((entry) => entry.id === filter.filter)!.label;
+  const label = filter.active ? `View: showing ${showing}` : "View";
+  return (
+    <DropdownMenu {...menu.root}>
+      <WithTooltip label={filter.active ? `Showing: ${showing}` : grouped ? "Grouped by project" : "One list of chats"}>
+        <DropdownMenuTrigger asChild {...menu.trigger}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={label}
+            className={cn(filter.active ? "bg-veil-raised text-foreground" : "text-faint hover:text-foreground")}
+            data-testid="sidebar-filter"
+            data-filter={filter.filter}
+          >
+            {grouped ? <FolderTree /> : <LayoutList />}
+          </Button>
+        </DropdownMenuTrigger>
+      </WithTooltip>
+      <DropdownMenuContent align="end" className="w-52">
+        <DropdownMenuItem role="menuitemradio" aria-checked={grouped} onSelect={() => setPrefs({ sidebarLayout: "simple" })}>
+          <FolderTree /> Group by project
+          {grouped && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuItem role="menuitemradio" aria-checked={!grouped} onSelect={() => setPrefs({ sidebarLayout: "list" })}>
+          <LayoutList /> One list of chats
+          {!grouped && <Check className="ml-auto" />}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Show</DropdownMenuLabel>
+        {SIDEBAR_FILTERS.map((entry) => (
+          <DropdownMenuItem key={entry.id} role="menuitemradio" aria-checked={filter.filter === entry.id} onSelect={() => setSidebarFilter(entry.id)}>
+            {filter.filter === entry.id ? <Check /> : <span aria-hidden className="size-4 shrink-0" />}
+            {entry.label}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

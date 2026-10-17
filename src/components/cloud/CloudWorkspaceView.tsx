@@ -113,7 +113,7 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   const client = connection.client;
   const key = workspaceTargetKey(connection.target);
   const agentScope = connection.target.kind === "cloud" ? connection.target : { organizationId: "", workspaceId: key };
-  const { terminals, selected, reveal } = useCloudTerminals(key);
+  const { terminals, selected } = useCloudTerminals(key);
   const [view, setView] = useState<View>({ kind: "terminal" });
   // This window asked for a wake (a command went out) and it has neither connected nor failed yet.
   // Not latched: a wake that fails, like a Resume refused at the running limit, reads stopped again.
@@ -127,10 +127,6 @@ export function WorkspaceView({ opened, state }: { opened: OpenedWorkspace; stat
   }, [state.state]);
   useEffect(() => setWoke(false), [connection]);
   const waking = woke || !!opened.waking;
-  // A terminal row chosen in the sidebar shows that terminal, whatever view was up.
-  useEffect(() => {
-    if (reveal) setView({ kind: "terminal" });
-  }, [reveal]);
   // The sidebar marks the terminal's row only while the terminal is what shows.
   const terminalShown = view.kind === "terminal";
   useEffect(() => {

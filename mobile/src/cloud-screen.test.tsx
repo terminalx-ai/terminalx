@@ -637,6 +637,30 @@ describe("the sharing screen", () => {
     expect(alert()).toBe("That did not work. Try again in a moment.");
   });
 
+  it("reads the organization's members afresh on opening, so someone removed since is not offered (#501)", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    expect(mocks.catalog.people.roster).toHaveBeenCalledWith("org-1", { fresh: true });
+  });
+
+  it("reads the share list and members again when the server says the person left the organization (#501)", async () => {
+    world();
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [share("u-bob")], you: { role: "manager", canApprove: true, canManageShares: true } });
+    await show(<CloudSharesScreen />);
+    expect(button("Bob: Can send")).toBeTruthy();
+    // Bob is removed from the organization while the screen is open: the server revoked his share with it.
+    mocks.catalog.api.shares.mockResolvedValue({ shares: [], you: { role: "manager", canApprove: true, canManageShares: true } });
+    mocks.catalog.people.roster.mockResolvedValue([{ userId: "u-me", email: "me@example.com", role: "admin" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }]);
+    mocks.catalog.api.putShare.mockRejectedValueOnce(Object.assign(new Error("x"), { code: "organization_member_not_found" }));
+    await click("Bob: View only");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Bob is no longer a member of this organization.");
+    expect(() => button("Bob: View only")).toThrow();
+    expect(() => button("Add Bob as view only")).toThrow();
+    expect(text()).not.toContain("bob@example.com");
+    expect(button("Add Alice as view only")).toBeTruthy();
+  });
+
   it("does not offer owners, admins or the creator, who already have access", async () => {
     world();
     mocks.catalog.workspace = () => item("ws-1", { createdBy: "u-carol" }).workspace;

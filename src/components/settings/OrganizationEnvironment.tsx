@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { listedProviders } from "@/lib/hiddenProviders";
 import { api } from "@/lib/api";
 import { providerLabel } from "@/lib/organizationCompute";
 import {
@@ -216,7 +217,7 @@ export function OrganizationEnvironment({ contextRevision, organizationId = null
       .cloudProviders()
       .then((response) => {
         if (context !== contextEpoch.current) return;
-        const options = response.providers.map((summary) => ({ id: summary.id as string, connected: summary.connection !== null }));
+        const options = listedProviders(response.providers).map((summary) => ({ id: summary.id as string, connected: summary.connection !== null }));
         setProviders(options);
         const first = options.find((option) => option.connected) ?? options[0];
         if (first) setProvider(first.id);

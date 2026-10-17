@@ -1,5 +1,7 @@
 # PRO-9 review
 
+> Machine0 is hidden (2026-10-17). The server offers it only with `CLOUD_MACHINE0_ENABLED=true` (terminalx-saas `apps/api/docs/machine0-hidden.md`), and this desktop shows it as a new choice only when the organization's `cloud.machine0-byok-pilot.v1` flag says so (`src/lib/hiddenProviders.ts`). An existing Machine0 connection still shows in provider settings until it is disconnected, and existing Machine0 workspaces still list so they can be deleted.
+
 Implemented admin provider replacement, validation and disconnect across the current desktop and its existing SaaS contracts. The backend now preserves the provider-account ownership anchor across disconnect, blocks provisioning during repair/cleanup, retains secret access while dependent operations need it, and finalizes revocation durably. No new HTTP endpoints were introduced.
 
 ## Review locations and dependency readiness

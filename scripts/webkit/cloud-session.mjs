@@ -26,14 +26,11 @@
 // session…", then its title): the chat-first sidebar lists no cloud sessions.
 //
 // Not checked since the chat-first sidebar (#484): the session's sidebar row
-// (its title keeping its first 12 characters next to its location, access and
-// share chips, at the sidebar's width and in a tighter row with a pin and a
-// 236 px sidebar, and the lock chip collapsing to its icon), the terminal's
-// row under its session and which row is selected (a cloud session has no
-// tab strip and no sidebar rows; its tabs are switched by shortcut), and the
-// "Workspace terminals" group of an older runtime's session-less terminals
-// (listed nowhere now). All were rows of the cloud tree the sidebar no
-// longer mounts.
+// with its location, access and share chips, the terminal rows under a
+// session and the "Workspace terminals" group of an older runtime. The
+// sidebar draws a cloud session as it draws a local conversation (its name,
+// state, and branch or age, with its menu), with no tab or terminal rows;
+// its tabs are reached from the session itself.
 //
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-layout
 import { launch, open, openCloudSession, openConversation, report, serve, sidebar, tab } from "./harness.mjs";

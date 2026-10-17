@@ -70,7 +70,7 @@ import {
   usesCatalogFeed,
   type OrgCatalog,
 } from "./cloudCatalog";
-import { resetPurged } from "./cloudLifecycle";
+import { cloudWorkspaceDeleted, noteCloudWorkspaceDeleted, resetPurged } from "./cloudLifecycle";
 import { registerAccountRoles } from "./accountRoles";
 import { notifyAccessChanged } from "./cloudCollab";
 import { createWorkspace, type CreateApi } from "./cloudCreate";
@@ -526,10 +526,20 @@ describe("saved cache", () => {
     signIn();
     bootCloudCatalog();
     await vi.waitFor(() => expect(getCloudCatalog().orgs[ORG]?.workspaces).toHaveLength(1));
+    noteCloudWorkspaceDeleted(ORG, "w0");
     mocks.account.status = { state: "signed-out", identity: null, expiresAt: null, lastError: null };
     for (const listener of mocks.listeners) listener();
     expect(getCloudCatalog().orgs).toEqual({});
     expect(getCloudCatalog().owner).toBeNull();
+    // Nor which workspaces were deleted.
+    expect(cloudWorkspaceDeleted(ORG, "w0")).toBe(false);
+  });
+
+  it("forgets which workspaces were deleted when the catalog is reset", () => {
+    noteCloudWorkspaceDeleted(ORG, "w0");
+    expect(cloudWorkspaceDeleted(ORG, "w0")).toBe(true);
+    resetCloudCatalog();
+    expect(cloudWorkspaceDeleted(ORG, "w0")).toBe(false);
   });
 });
 
@@ -1224,8 +1234,8 @@ describe("a workspace no longer in this person's list", () => {
     // Made private again: the next list no longer has them.
     await ingestCloudList({ workspaces: [] }, ORG, 20, 20);
     expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
-    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api" });
-    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo" });
+    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api", provider: "box" });
+    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo", provider: "box" });
     // Nothing of it is saved for the next launch.
     expect(JSON.stringify(serializeCatalog(getCloudCatalog()))).not.toContain("share-demo");
   });

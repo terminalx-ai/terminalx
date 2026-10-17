@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MergedStatus } from "@terminalx/portable/workspace";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -17,7 +17,7 @@ vi.mock("@/lib/tabViews", () => ({ useTabViews: () => ({ views: {} }) }));
 const { ProjectNavigation } = await import("./SidebarTree");
 const { MergedNote } = await import("./MergedNote");
 const { bootSessions } = await import("@/lib/sessions");
-const { LOCAL_HOST, bootMergedCleanup, requestMergedSweep, resetMergedCleanupForTest, useMergedStatusOfSession } = await import("@/lib/mergedCleanup");
+const { LOCAL_HOST, bootMergedCleanup, requestMergedSweep, resetMergedCleanupForTest } = await import("@/lib/mergedCleanup");
 
 const projectPath = "/repos/app";
 const main: Workspace = { path: projectPath, name: "app", branch: "main", head: "abc1234", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 };
@@ -144,20 +144,5 @@ describe("a workspace's row after its pull request merged", () => {
     render(<MergedNote status={{ ...status("due-soon", { phase: "scheduled", due: new Date(Date.now() + 60_000).toISOString() }), hostId: LOCAL_HOST }} />);
     fireEvent.click(screen.getByRole("button", { name: "Keep" }));
     expect((await screen.findByRole("alert")).textContent).toBe("that workspace is not waiting to be removed");
-  });
-});
-
-describe("a cloud session's row", () => {
-  it("finds its worktree's status by the session, on its own workspace only", async () => {
-    mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "merged_cleanup_settings") return { enabled: true, projects: {}, deleteConversations: false, graceMinutes: 10 };
-      if (command === "merged_cleanup_sweep") return { statuses: [status("dirty-one", { reason: "1 unpushed commit" })], unreadable: [] };
-      return undefined;
-    });
-    await act(async () => bootMergedCleanup());
-    await act(async () => requestMergedSweep());
-    expect(renderHook(() => useMergedStatusOfSession(LOCAL_HOST, "session-dirty-one")).result.current).toMatchObject({ reason: "1 unpushed commit" });
-    expect(renderHook(() => useMergedStatusOfSession(LOCAL_HOST, "session-other")).result.current).toBeUndefined();
-    expect(renderHook(() => useMergedStatusOfSession("cloud:org-1:ws-1", "session-dirty-one")).result.current).toBeUndefined();
   });
 });

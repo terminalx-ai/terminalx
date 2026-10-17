@@ -16,9 +16,9 @@ vi.mock("@/lib/cloudTerminals", () => ({
   errorCode: (error: unknown) => (error as { code?: string }).code ?? "unknown",
 }));
 vi.mock("@/components/layout/AppShell", () => ({ TITLEBAR_INSET: 78 }));
-vi.mock("@/components/layout/cloud/CloudSections", async () => {
+vi.mock("@/components/layout/useFold", async () => {
   const { useState } = await import("react");
-  return { useSectionCollapsed: (_key: string, byDefault: boolean) => { const [collapsed, set] = useState(byDefault); return [collapsed, () => set((value: boolean) => !value)]; } };
+  return { useFold: (_key: string, byDefault: boolean) => { const [open, set] = useState(byDefault); return [open, () => set((value: boolean) => !value)]; } };
 });
 vi.mock("./CloudWorkspaceView", () => ({
   ExecutionLocation: () => <span data-testid="cloud-execution-location" />,

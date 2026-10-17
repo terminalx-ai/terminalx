@@ -60,7 +60,7 @@ const connections = await import("@/lib/cloudConnections");
 const { resetCloudAgents } = await import("@/lib/cloudAgents");
 const { resetCloudSessions } = await import("@/lib/cloudSessions");
 const prefs = await import("@/lib/prefs");
-const { CloudSections } = await import("@/components/layout/cloud/CloudSections");
+const { CloudOrganizations } = await import("@/components/layout/CloudOrganizations");
 
 const ORG = "org-a";
 const OTHER = "org-b";
@@ -161,8 +161,9 @@ describe("a waiting cloud tab", () => {
   it("notifies and badges a hidden organization's question, and reveals its section when the notice opens", async () => {
     prefs.setPrefs({ hiddenOrganizations: [OTHER] });
     window.dispatchEvent(new Event("focus"));
-    render(<TooltipProvider><CloudSections /><Toasts /></TooltipProvider>);
-    expect(screen.queryByRole("treeitem", { name: "Beta organization" })).toBeNull();
+    render(<TooltipProvider><CloudOrganizations /><Toasts /></TooltipProvider>);
+    const beta = () => screen.queryAllByTestId("cloud-org-list").find((section) => section.getAttribute("data-org") === OTHER) ?? null;
+    expect(beta()).toBeNull();
     await poll(OTHER, [item("ws-b", OTHER, { repositories: [betaSite], runtimeActivity: pending(1) })]);
     await settle();
     expect(mocks.badge).toHaveBeenLastCalledWith(1);
@@ -170,10 +171,10 @@ describe("a waiting cloud tab", () => {
     expect(toast.textContent).toContain("Claude needs attention");
     fireEvent.click(toast);
     expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${OTHER}:ws-b:sb`);
-    expect(screen.getByRole("treeitem", { name: "Beta organization" }).getAttribute("aria-expanded")).toBe("true");
+    expect(within(beta()!).getByRole("button", { name: "Beta" }).getAttribute("aria-expanded")).toBe("true");
     expect(prefs.getPrefs().hiddenOrganizations).toEqual([OTHER]);
     act(() => sessions.selectSession(null));
-    expect(screen.queryByRole("treeitem", { name: "Beta organization" })).toBeNull();
+    expect(beta()).toBeNull();
     expectNoWake();
   });
 

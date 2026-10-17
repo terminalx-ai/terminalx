@@ -102,12 +102,6 @@ export function useMergedStatus(hostId: string, path: string | null | undefined)
   return path ? statuses[statusKey(hostId, path)] : undefined;
 }
 
-/** The same for the workspace a session runs in, for a host whose rows are sessions. */
-export function useMergedStatusOfSession(hostId: string, sessionId: string): HostedStatus | undefined {
-  const { statuses } = useMergedCleanup();
-  return Object.values(statuses).find((status) => status.hostId === hostId && status.sessions.includes(sessionId));
-}
-
 /** What a workspace's row says: why it stays, or when it goes. */
 export function mergedNote(status: MergedStatus, now = Date.now()): string {
   switch (status.phase) {

@@ -11,15 +11,18 @@ import { SidebarTitlebar } from "./SidebarTitlebar";
 import { IssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
-import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { usePrefs } from "@/lib/prefs";
 import { addProject, archiveSession, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { moveChatToProject } from "@/lib/continuation";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
+import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, Workspace } from "@/types/session";
 import { sessionStatus, type SessionEntry } from "@/types/session";
 import { RowTime } from "./SidebarRows";
+import { useFold } from "./useFold";
 import { StatusMark } from "@/components/ui/StatusMark";
 import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from "./ProjectRail";
+import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
 import { AgentMark } from "@/components/AgentMark";
 
@@ -147,14 +150,6 @@ const ShowAgents = createContext(false);
 /** How many conversations a project shows before "View all". */
 const PEEK = 3;
 
-/** A fold the sidebar remembers between launches. */
-export function useFold(key: string, byDefault: boolean): [boolean, () => void] {
-  const { sidebarSections } = usePrefs();
-  const stored = sidebarSections[key];
-  const open = stored ? stored === "expanded" : byDefault;
-  return [open, () => setPrefs({ sidebarSections: { ...getPrefs().sidebarSections, [key]: open ? "collapsed" : "expanded" } })];
-}
-
 /**
  * The sidebar as a chat app draws it: each project with its conversations
  * under it (a chat joins the project its agent works in), then the chats
@@ -163,14 +158,17 @@ export function useFold(key: string, byDefault: boolean): [boolean, () => void] 
  */
 export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
+  const filter = useSidebarFilter();
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
   const showAgents = useMemo(() => mixesAgents(store.sessions.filter((session) => !session.archived)), [store.sessions]);
   const sectioned = useHasCloudOrganizations();
+  // Unread or Needs you: only the conversations that pass (and the open one), and so only their projects.
+  const listed = useMemo(() => (filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions), [filter, store.sessions]);
   const { groups, chats } = useMemo(
-    () => groupConversations(store.sessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId),
-    [store.sessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId],
+    () => groupConversations(listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId),
+    [listed, store.projects, chatsPath, store.workspaces, store.selectedSessionId],
   );
 
   const run = (action: () => Promise<unknown>) => () => {
@@ -198,7 +196,10 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
 
       <ShowAgents.Provider value={showAgents}>
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-2" aria-label="Conversations" data-testid="conversation-list">
-        {groups.length === 0 && chats.length === 0 ? (
+        {groups.length === 0 && chats.length === 0 && filter.active ? (
+          // Nothing local passed; the organizations below may still hold something that did.
+          filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
+        ) : groups.length === 0 && chats.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -215,6 +216,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                   <ProjectGroup
                     key={group.path}
                     group={group}
+                    filtered={filter.active}
                     selectedId={store.selectedSessionId}
                     workspaces={store.workspaces[group.path] ?? []}
                     onNewSession={(place) => run(() => startChat({ projectPath: group.path, ...place }))()}
@@ -248,7 +250,8 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
             )}
           </>
         )}
-        <CloudOrganizations />
+        <CloudOrganizations onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />
+        <DevelopmentSection />
       </nav>
       </ShowAgents.Provider>
 
@@ -268,20 +271,72 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   );
 }
 
-export function ListSection({ id, label, children, ...rest }: { id: string; label: string; children: ReactNode } & Record<`data-${string}`, string>) {
-  const [open, toggle] = useFold(`list:${id}`, true);
+/** What the list says when the sidebar's filter leaves nothing in it, and the way back to everything. */
+export function FilteredEmpty({ text }: { text: string }) {
+  return (
+    <div className="px-3 py-6 text-center text-[12px] text-faint" data-testid="sidebar-filter-empty">
+      {text}{" "}
+      <button type="button" className="underline underline-offset-2 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => setSidebarFilter("all")}>
+        Show all sessions
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A titled part of the list that folds. `actions` sit at the header's end,
+ * shown on hover or focus like a row's; `notes` are lines under the header
+ * that stay while it is folded (an organization's loading or offline line);
+ * `title` is the header's tooltip; `forceOpen` keeps it open whatever its fold.
+ */
+export function ListSection({
+  id,
+  label,
+  children,
+  actions,
+  notes,
+  title,
+  forceOpen = false,
+  onMenu,
+  ...rest
+}: {
+  id: string;
+  label: string;
+  children: ReactNode;
+  actions?: ReactNode;
+  notes?: ReactNode;
+  title?: string;
+  forceOpen?: boolean;
+  /** Open the section's menu: a right-click, or the context-menu key, on its header. */
+  onMenu?: () => void;
+} & Record<`data-${string}`, string>) {
+  const [expanded, toggle] = useFold(`list:${id}`, true);
+  const open = expanded || forceOpen;
   return (
     <section aria-labelledby={`list-${id}`} className="mb-3" {...rest}>
-      <button
-        type="button"
-        id={`list-${id}`}
-        onClick={toggle}
-        aria-expanded={open}
-        className="flex h-6 items-center gap-1 rounded-sm px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+      <div
+        className={cn(actionRow, "flex h-6 min-w-0 items-center gap-1 pr-1")}
+        onContextMenu={onMenu && ((event) => { event.preventDefault(); onMenu(); })}
+        onKeyDown={onMenu && ((event) => {
+          if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+          event.preventDefault();
+          onMenu();
+        })}
       >
-        {label}
-        <ChevronDown className={cn("size-3 transition-transform", !open && "-rotate-90")} />
-      </button>
+        <button
+          type="button"
+          id={`list-${id}`}
+          onClick={toggle}
+          aria-expanded={open}
+          title={title}
+          className="flex h-6 min-w-0 items-center gap-1 rounded-sm px-2 text-[12px] text-faint outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          <span className="min-w-0 truncate">{label}</span>
+          <ChevronDown className={cn("size-3 shrink-0 transition-transform", !open && "-rotate-90")} />
+        </button>
+        {actions && <div className="ml-auto flex min-w-0 shrink-0 items-center gap-0.5">{actions}</div>}
+      </div>
+      {notes}
       {open && children}
     </section>
   );
@@ -290,11 +345,14 @@ export function ListSection({ id, label, children, ...rest }: { id: string; labe
 /** A project, then its conversations along a guide line: the latest few, the open one, and "View all". */
 function ProjectGroup({
   group,
+  filtered = false,
   selectedId,
   workspaces,
   onNewSession,
 }: {
   group: ConversationGroup;
+  /** The sidebar's filter is on: the project shows everything that passed, opened. */
+  filtered?: boolean;
   selectedId: string | null;
   /** The project's checkouts, to find the folder a branch is checked out in. */
   workspaces: Workspace[];
@@ -314,7 +372,8 @@ function ProjectGroup({
   };
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
   // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
-  const [open, toggle] = useFold(`project:${canon(group.path)}`, true);
+  const [expanded, toggle] = useFold(`project:${canon(group.path)}`, true);
+  const open = expanded || filtered;
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const { animations } = usePrefs();
   // One row per branch, newest work first; the conversations come in that order already.
@@ -326,8 +385,8 @@ function ProjectGroup({
     }
     return [...byBranch.entries()].map(([branch, sessions]) => ({ branch, sessions }));
   }, [group]);
-  const shown = all ? branches : branches.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
-  const more = branches.length > shown.length || (all && branches.length > PEEK);
+  const shown = all || filtered ? branches : branches.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
+  const more = !filtered && (branches.length > shown.length || (all && branches.length > PEEK));
   return (
     <div role="group" aria-label={group.name} className="mb-1">
       <DropdownMenu>
@@ -422,7 +481,7 @@ function ProjectGroup({
               linkTo={null}
             />
           ) : (
-            <BranchRow key={branch} path={group.path} branch={branch} sessions={sessions} selectedId={selectedId} onNewSession={newSessionOn(branch, sessions)} />
+            <BranchRow key={branch} path={group.path} branch={branch} sessions={sessions} selectedId={selectedId} opened={filtered} onNewSession={newSessionOn(branch, sessions)} />
           ),
         )}
         {more && (
@@ -449,17 +508,20 @@ function BranchRow({
   branch,
   sessions,
   selectedId,
+  opened,
   onNewSession,
 }: {
   path: string;
   branch: string;
   sessions: SessionEntry[];
   selectedId: string | null;
+  /** Open whatever its fold: the sidebar's filter is on. */
+  opened: boolean;
   onNewSession: NewSessionAction | null;
 }) {
   const holdsSelected = sessions.some((session) => session.id === selectedId);
   const [open, toggle] = useFold(`branch:${canon(path)}:${branch}`, false);
-  const expanded = open || holdsSelected;
+  const expanded = open || holdsSelected || opened;
   const label = branch || "No branch";
   return (
     <li>

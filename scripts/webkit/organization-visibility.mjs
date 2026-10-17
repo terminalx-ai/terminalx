@@ -4,13 +4,14 @@
 // The preferences are read back from `raccoon.prefs` (what the sidebar and
 // the palette follow) and from the Settings controls after a reload.
 //
-// Not checked since the chat-first sidebar (#484): the organization header's
-// "Hide organization" menu item and "Choose organization in sidebar"
-// switcher, the "1 organization hidden" line opening Settings, the
-// hidden-running indicator, how many organization sections show in One and
-// All modes, the One-mode header fitting 960 px, and Local staying shown
-// after a reload. They were parts of the cloud tree, which the sidebar no
-// longer mounts.
+// In the sidebar (after the reload, Demo hidden, All mode): the "1
+// organization hidden" line with its running indicator stays inside the
+// sidebar and opens Settings, the hidden organization has no section, and an
+// organization's header menu offers "Hide organization".
+//
+// Not checked since the chat-first sidebar (#484): the One-mode header
+// fitting 960 px; One mode now chooses its organization from the header's
+// menu ("Organization in sidebar"), a submenu.
 import { launch, open, report, serve, sidebar } from "./harness.mjs";
 
 const server = await serve();
@@ -70,6 +71,24 @@ try {
   await sidebar(page);
   await openOrganizations();
   const persisted = { demo: await shown("Demo"), prefs: await prefs() };
+  await closeSettings();
+
+  // The sidebar: Demo has no section, and one line says it is hidden and still running.
+  const rail = await sidebar(page);
+  const line = rail.getByTestId("hidden-organizations");
+  await line.waitFor();
+  const railBox = await rail.boundingBox();
+  const lineBox = await line.boundingBox();
+  const sections = await page.getByTestId("cloud-org-list").evaluateAll((all) => all.map((section) => section.dataset.org));
+  const lineText = await line.textContent();
+  const other = page.locator('[data-testid="cloud-org-list"][data-org="o0"]');
+  await other.locator("#list-org\\:o0").hover();
+  await other.getByRole("button", { name: /^Menu for / }).click();
+  const offersHide = (await page.getByRole("menuitem", { name: "Hide organization" }).count()) === 1;
+  await page.keyboard.press("Escape");
+  await line.click();
+  await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
+  const sidebarState = { sections, lineText, lineBox, railBox, offersHide };
   failed += report("organization visibility", {
     "hiding an organization with nothing running asks nothing, unchecks its switch and is saved": hidden.switch === "false" && hidden.prefs.includes("o0") && hidden.asked === 0,
     "running confirmation states the count and continuing cost": /2 running workspaces.*keep running and costing money/.test(confirmation) && demoHidden.switch === "false" && demoHidden.prefs.includes("org-a"),
@@ -78,8 +97,11 @@ try {
     "All restores the hidden choices": restored.prefs.organizationDisplay === "all" && restored.demo === "false" && restored.other === "true" && restored.prefs.hiddenOrganizations.includes("org-a") && !restored.prefs.hiddenOrganizations.includes("o0"),
     "visibility survives reload": persisted.demo === "false" && persisted.prefs.organizationDisplay === "all" && persisted.prefs.hiddenOrganizations.includes("org-a"),
     "Settings controls fit the minimum window width": layout.noOverflow && layout.controlsInside,
+    "the hidden organization has no section in the sidebar": !sidebarState.sections.includes("org-a") && sidebarState.sections.length > 0,
+    "one line says how many are hidden and that they still run, inside the sidebar": /^1 organization hidden.*running/.test(sidebarState.lineText) && sidebarState.lineBox.x >= sidebarState.railBox.x && sidebarState.lineBox.x + sidebarState.lineBox.width <= sidebarState.railBox.x + sidebarState.railBox.width + 1,
+    "an organization's header menu offers Hide organization": sidebarState.offersHide,
     "showing, hiding, and switching never attach, resume, or change the default": !made.some(({ command }) => ["cloud_remote_attach", "cloud_workspace_resume", "cloud_remote_activate", "organization_select"].includes(command)),
-  }, { layout, confirmation, hidden, demoHidden, onePrefs, restored, persisted });
+  }, { layout, confirmation, hidden, demoHidden, onePrefs, restored, persisted, sidebarState });
 } finally {
   await browser.close();
   server.close();

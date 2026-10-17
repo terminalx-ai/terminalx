@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { dispositionFacts, gitErrorMessage, hasUnpublishedWork, RemoteGit, type DispositionFacts, type RepositoryFacts } from "@terminalx/portable/workspaceGit";
 import {
@@ -413,6 +414,40 @@ export function daysText(days: number): string {
 
 // ---- tombstones
 
+/** `organization:workspace` ids deleted in this run of the app: by a delete from here, or a tombstone in a list. */
+const deletedHere = new Set<string>();
+const deletedListeners = new Set<() => void>();
+
+/** Remember that a workspace was deleted, so a view still open on it says so instead of waiting for it. */
+export function noteCloudWorkspaceDeleted(orgId: string, workspaceId: string): void {
+  const id = `${orgId}:${workspaceId}`;
+  if (deletedHere.has(id)) return;
+  deletedHere.add(id);
+  for (const listener of [...deletedListeners]) listener();
+}
+
+/** Forget them all: signed out, another user, or a reset catalog. */
+export function forgetDeletedCloudWorkspaces(): void {
+  if (!deletedHere.size) return;
+  deletedHere.clear();
+  for (const listener of [...deletedListeners]) listener();
+}
+
+/** Whether this workspace was deleted in this run of the app. */
+export function cloudWorkspaceDeleted(orgId: string, workspaceId: string): boolean {
+  return deletedHere.has(`${orgId}:${workspaceId}`);
+}
+
+export function useCloudWorkspaceDeleted(orgId: string, workspaceId: string): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      deletedListeners.add(listener);
+      return () => deletedListeners.delete(listener);
+    },
+    () => cloudWorkspaceDeleted(orgId, workspaceId),
+  );
+}
+
 export interface PurgeNotice {
   workspaceId: string;
   /** From an earlier list; a tombstone itself carries no name. */
@@ -435,6 +470,7 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
   const notices: PurgeNotice[] = [];
   for (const tombstone of tombstones) {
     const id = `${tombstone.orgId}:${tombstone.id}`;
+    noteCloudWorkspaceDeleted(tombstone.orgId, tombstone.id);
     if (purged.has(id)) continue;
     // Claimed now, so an overlapping list reload skips it.
     purged.add(id);
@@ -467,6 +503,7 @@ export async function purgeTombstones(tombstones: CloudWorkspaceTombstone[], nam
 /** For tests. */
 export function resetPurged(): void {
   purged.clear();
+  forgetDeletedCloudWorkspaces();
 }
 
 export function purgeNoticeText(notice: PurgeNotice): string {

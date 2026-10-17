@@ -411,7 +411,7 @@ describe("every organization live (CS-18)", () => {
     mocks.status = {
       ...mocks.status,
       organizations: mocks.status.organizations!.map((org) =>
-        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.machine0-byok-pilot.v1": true, "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
       ),
     };
     mocks.api.cloudWorkspaceSetup.mockImplementation(async (provider: string) => {
@@ -422,6 +422,18 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["machine0", "box"]);
     expect(prepared.form.provider).toBe("box");
     expect(prepared.providerLabel).toBe("Box");
+  });
+
+  it("skips Machine0 when the server hides it, even where its provider flag is on", async () => {
+    mocks.status = {
+      ...mocks.status,
+      organizations: mocks.status.organizations!.map((org) =>
+        org.id === ORG_B ? { ...org, cloud: { enabled: true, flags: { "cloud.machine0-byok-pilot.v1": false, "cloud.workspaces.provider.machine0.v1": true, "cloud.workspaces.provider.box.v1": true } } } : org,
+      ),
+    };
+    const prepared = await flow.prepareCloudCreate(target, request);
+    expect(mocks.api.cloudWorkspaceSetup.mock.calls.map(([provider]) => provider)).toEqual(["box"]);
+    expect(prepared.form.provider).toBe("box");
   });
 
   it("creates on Hetzner in an organization that offers only Hetzner (PRO-10)", async () => {

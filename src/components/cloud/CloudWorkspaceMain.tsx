@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { workspaceRowState } from "@/components/layout/cloud/rowState";
-import { useCloudSections } from "@/components/layout/cloud/CloudSections";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { NotSharedNotice } from "./CloudCollab";
 import { DeletionProgress } from "./CloudWorkspaceLifecycle";
 import { WorkspaceLifecycleDialog } from "./WorkspaceActions";
@@ -50,7 +50,7 @@ function useAgentRan(item: CloudWorkspaceListItem | null): boolean {
  */
 export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar }: { workspaceKey: string; sidebarOpen: boolean; onToggleSidebar: () => void }) {
   const catalog = useCloudCatalog();
-  const sections = useCloudSections();
+  const sections = useOrganizationVisibility();
   const parsed = parseCloudWorkspaceKey(workspaceKey);
   // Signed out, or no longer a member: nothing of the organization is shown or connected.
   const member = !!parsed && sections.live.has(parsed.orgId);

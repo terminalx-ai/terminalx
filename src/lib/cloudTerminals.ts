@@ -55,8 +55,6 @@ interface WorkspaceTerminals {
   selected: string | null;
   /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
   shown?: boolean;
-  /** Counts each request to show the selected terminal there. */
-  reveal?: number;
 }
 
 let state: Record<string, WorkspaceTerminals> = {};
@@ -551,11 +549,6 @@ export function selectCloudTerminal(workspace: string, id: string | null) {
   update(workspace, (current) => (current.selected === id ? current : { ...current, selected: id }));
 }
 
-/** Select a terminal and ask the workspace view to show it (a sidebar row was chosen). */
-export function revealCloudTerminal(workspace: string, id: string) {
-  update(workspace, (current) => ({ ...current, selected: id, reveal: (current.reveal ?? 0) + 1 }));
-}
-
 /** The workspace view says whether it is showing its selected terminal, so the sidebar marks the right row. */
 export function setCloudTerminalShown(workspace: string, shown: boolean) {
   update(workspace, (current) => (!!current.shown === shown ? current : { ...current, shown }));
@@ -599,15 +592,6 @@ export function followCloudTerminals(workspace: string, client: WorkspaceRpcClie
 /** The terminals of one session (`pty/2` names it), in the order they were opened. */
 export function sessionTerminals(terminals: readonly CloudTerminal[], sessionId: string): CloudTerminal[] {
   return terminals.filter((terminal) => terminal.sessionId === sessionId);
-}
-
-/**
- * Terminals that belong to no session shown here: every terminal of a runtime
- * older than `pty/2`, one opened for the workspace itself, or one whose
- * session is gone. The sidebar lists them once, as "Workspace terminals".
- */
-export function workspaceTerminals(terminals: readonly CloudTerminal[], sessionIds: readonly string[]): CloudTerminal[] {
-  return terminals.filter((terminal) => !terminal.sessionId || !sessionIds.includes(terminal.sessionId));
 }
 
 /** Close the tab; a live shell is ended on the runtime too. */
