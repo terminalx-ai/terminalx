@@ -56,10 +56,16 @@ vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => 
     return <div data-testid="lifecycle-dialog">{props.initial}</div>;
   },
 }));
+// The workspace view's terminals and tabs have their own tests (CloudWorkspaceView.test.tsx).
+vi.mock("@/components/cloud/CloudWorkspaceView", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceView")>()),
+  WorkspaceView: () => <div data-testid="workspace-view" />,
+}));
 const openNewWorkspace = vi.hoisted(() => vi.fn());
 vi.mock("@/components/cloud/NewCloudWorkspaceDialog", () => ({ openNewCloudWorkspace: openNewWorkspace }));
 
 const { CloudOrganizations } = await import("./CloudOrganizations");
+const { CloudWorkspaceMain } = await import("@/components/cloud/CloudWorkspaceMain");
 const catalog = await import("@/lib/cloudCatalog");
 const sessions = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
@@ -382,6 +388,57 @@ describe("workspace lifecycle menus", () => {
     // Its submenu in the project's menu offers the same.
     const projectMenu = await openMenu("Project menu for acme/api");
     expect(within(projectMenu).getByRole("menuitem", { name: "fix-login" })).toBeTruthy();
+  });
+
+  it("opens a workspace's own view from the project's menu, running or stopped, without waking it; not while it changes or failed", async () => {
+    await load(
+      [
+        item("site", { repositories: [acmeWeb] }),
+        item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }),
+        item("perf-sweep", { state: "suspended", repositories: [acmeApi], lastActivityAt: 40 }),
+        item("booting", { state: "provisioning", repositories: [{ ...acmeApi, identity: "github.com/acme/boot", fullName: "acme/boot" }] }),
+        item("broken", { state: "attention-required", repositories: [{ ...acmeApi, identity: "github.com/acme/broken", fullName: "acme/broken" }] }),
+      ],
+      // Its sessions are known, so the sidebar shows no "Open to load sessions" line for it.
+      { site: { sessions: [session("s2", "Landing copy")], capabilities: ["session/2"] } },
+    );
+    mount();
+    expect(within(project("acme/web")).queryByTestId("cloud-workspace-empty")).toBeNull();
+    let menu = await openMenu("Project menu for acme/web");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Open workspace" }));
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBe(`cloud:${ORG}:site`);
+    // A stopped workspace of a project with several: from its submenu, and it is not resumed.
+    menu = await openMenu("Project menu for acme/api");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "perf-sweep" }));
+    const submenu = (await screen.findAllByRole("menu")).at(-1)!;
+    fireEvent.click(within(submenu).getByRole("menuitem", { name: "Open workspace" }));
+    expect(sessions.getSessionStore().selectedCloudWorkspace).toBe(`cloud:${ORG}:perf-sweep`);
+    for (const name of ["acme/boot", "acme/broken"]) {
+      menu = await openMenu(`Project menu for ${name}`);
+      expect(within(menu).queryByRole("menuitem", { name: "Open workspace" })).toBeNull();
+      fireEvent.keyDown(menu, { key: "Escape" });
+    }
+    expectNoAttachOrResume();
+  });
+
+  it("shows a stopped workspace's view from Open workspace by connecting, never waking it", async () => {
+    const connection = { target: { kind: "cloud", organizationId: ORG, workspaceId: "perf-sweep" }, client: { onState: () => () => undefined }, activate: vi.fn(), close: vi.fn() };
+    mocks.workspaceConnection.mockResolvedValue(connection);
+    await standard();
+    mount();
+    const menu = await openMenu("Project menu for acme/api");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "perf-sweep" }));
+    fireEvent.click(within((await screen.findAllByRole("menu")).at(-1)!).getByRole("menuitem", { name: "Open workspace" }));
+    const key = sessions.getSessionStore().selectedCloudWorkspace!;
+    expect(key).toBe(`cloud:${ORG}:perf-sweep`);
+    render(<CloudWorkspaceMain workspaceKey={key} sidebarOpen onToggleSidebar={() => undefined} />);
+    await screen.findByTestId("workspace-view");
+    expect(screen.getByTestId("cloud-stopped-banner")).toBeTruthy();
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+    expect(mocks.workspaceConnection).toHaveBeenCalledWith({ kind: "cloud", organizationId: ORG, workspaceId: "perf-sweep" }, "connect");
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+    expect(mocks.api.cloudRemoteAttach).not.toHaveBeenCalled();
+    expect(connection.activate).not.toHaveBeenCalled();
   });
 
   it("lists archived workspaces folded at the organization's end, with their deadline, Read conversations and Unarchive", async () => {

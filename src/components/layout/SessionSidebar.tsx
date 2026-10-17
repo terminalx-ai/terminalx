@@ -310,8 +310,8 @@ export function ListSection({
   /** Open the section's menu: a right-click, or the context-menu key, on its header. */
   onMenu?: () => void;
 } & Record<`data-${string}`, string>) {
-  const [folded, toggle] = useFold(`list:${id}`, true);
-  const open = folded || forceOpen;
+  const [expanded, toggle] = useFold(`list:${id}`, true);
+  const open = expanded || forceOpen;
   return (
     <section aria-labelledby={`list-${id}`} className="mb-3" {...rest}>
       <div
@@ -372,8 +372,8 @@ function ProjectGroup({
   };
   const [all, toggleAll] = useFold(`project-all:${canon(group.path)}`, false);
   // The project folds its branches away: its picture turns into a chevron on hover, and stays one while folded.
-  const [folded, toggle] = useFold(`project:${canon(group.path)}`, true);
-  const open = folded || filtered;
+  const [expanded, toggle] = useFold(`project:${canon(group.path)}`, true);
+  const open = expanded || filtered;
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const { animations } = usePrefs();
   // One row per branch, newest work first; the conversations come in that order already.

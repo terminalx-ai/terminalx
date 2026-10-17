@@ -55,8 +55,6 @@ interface WorkspaceTerminals {
   selected: string | null;
   /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
   shown?: boolean;
-  /** Counts each request to show the selected terminal there. */
-  reveal?: number;
 }
 
 let state: Record<string, WorkspaceTerminals> = {};

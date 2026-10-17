@@ -436,8 +436,8 @@ function PersonalSection({
   filtered: boolean;
   onLifecycle: (request: LifecycleRequest) => void;
 }) {
-  const [folded, toggle] = useFold(`cloud-section:${section.id}`, true);
-  const open = folded || filtered;
+  const [expanded, toggle] = useFold(`cloud-section:${section.id}`, true);
+  const open = expanded || filtered;
   const menu = useRowMenu();
   const [renaming, setRenaming] = useState(() => takeRenameRequest(section.id));
   const label = `${section.name} section`;

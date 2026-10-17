@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
+import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -158,9 +158,9 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const [error, run] = useRowError();
   const [diagnostics, setDiagnostics] = useState(false);
   const foldKey = `cloud-project:${project.key}`;
-  const [folded, toggle] = useFold(foldKey, true);
+  const [expanded, toggle] = useFold(foldKey, true);
   // A filter shows what it found: the project is open while it is on.
-  const open = folded || filter.active;
+  const open = expanded || filter.active;
   const drafting = store.cloudSessionPreset?.projectKey === project.key;
   const grouped = project.workspaces.length > 1;
   const only = project.workspaces.length === 1 ? project.workspaces[0] : null;
@@ -168,7 +168,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const holdsSelection = !!selectedWorkspace && project.workspaces.some((node) => node.item.workspace.id === selectedWorkspace.workspaceId && node.item.workspace.orgId === selectedWorkspace.orgId);
   // A selection inside opens the project, as local navigation does.
   useEffect(() => {
-    if (holdsSelection && !folded) setPrefs({ sidebarSections: { ...getPrefs().sidebarSections, [foldKey]: "expanded" } });
+    if (holdsSelection && !expanded) setPrefs({ sidebarSections: { ...getPrefs().sidebarSections, [foldKey]: "expanded" } });
   }, [holdsSelection, store.navigationVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Starting a session creates a workspace, resumes one, or adds a session to
@@ -259,6 +259,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
                 <>
                   <DropdownMenuSeparator />
                   <DropdownMenuLabel className="truncate">Workspace · {only.item.workspace.name}</DropdownMenuLabel>
+                  <OpenWorkspaceItem node={only} />
                   <WorkspaceActionItems item={only.item} onLifecycle={onLifecycle} run={run} />
                 </>
               )}
@@ -272,6 +273,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
                         <Cloud /> <span className="truncate">{node.item.workspace.name}</span>
                       </DropdownMenuSubTrigger>
                       <DropdownMenuSubContent className="w-[17rem]">
+                        <OpenWorkspaceItem node={node} />
                         <WorkspaceActionItems item={node.item} onLifecycle={onLifecycle} run={run} />
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
@@ -355,6 +357,26 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
 
 // ---- workspaces ------------------------------------------------------------
 
+/**
+ * Whether a workspace's own view (its terminals, files, Git and ports) can be
+ * opened: it is running or stopped, and not mid-change or failed. Opening it
+ * may connect to a running machine; it never wakes a stopped one.
+ */
+export function workspaceOpenable(item: CloudWorkspaceListItem, tone: RowTone = deriveCloudActivity(item).tone): boolean {
+  const { state } = item.workspace;
+  return (state === "ready" || state === "suspended") && tone !== "changing" && tone !== "attention";
+}
+
+/** "Open workspace" in a menu: the workspace's view, the one way to its terminals, files, Git and ports. */
+function OpenWorkspaceItem({ node }: { node: CloudWorkspaceNode }) {
+  if (!workspaceOpenable(node.item)) return null;
+  return (
+    <DropdownMenuItem onSelect={() => selectCloudWorkspace(node.key)} title="Its terminals, files, Git and ports; a stopped workspace is not started" data-testid="cloud-open-workspace">
+      <AppWindow /> Open workspace
+    </DropdownMenuItem>
+  );
+}
+
 /** A workspace's sessions; with several workspaces in the project, under a row that names the workspace. */
 function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspaceNode; named: boolean; open: boolean; onLifecycle: OnLifecycle }) {
   const store = useSessionStore();
@@ -379,7 +401,7 @@ function WorkspaceRows({ node, named, open, onLifecycle }: { node: CloudWorkspac
   const authority = connection.authority ?? node.item.workspace.authority ?? null;
   const manage = manages && !!capabilities?.includes("session/2") && (authority === null || authority === "manage");
   const { workspace } = node.item;
-  const openable = (workspace.state === "ready" || workspace.state === "suspended") && activity.tone !== "changing" && activity.tone !== "attention";
+  const openable = workspaceOpenable(node.item, activity.tone);
   // Filtered: a workspace with no such session has no rows, unless the server's list alone says it waits for a person.
   if (filter.active && !sessions.length && !filter.showsWorkspace(node.key)) return null;
   const rows = (
