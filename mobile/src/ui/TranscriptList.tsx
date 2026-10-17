@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { createElement, isValidElement, useMemo, useRef, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View, type FlatListProps } from "react-native";
 import { useTheme } from "./theme";
 
@@ -13,13 +13,16 @@ type Props<Item> = Pick<FlatListProps<Item>, "data" | "renderItem" | "keyExtract
 // Give this component a conversation key (or remount its parent) when switching
 // agents. Data stays chronological at the call site; native offset zero is the
 // latest edge, even before cache/host data or variable-height rows finish layout.
-export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentContainerStyle, ...props }: Props<Item>) {
+export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentContainerStyle, ListEmptyComponent, ...props }: Props<Item>) {
   const { palette } = useTheme();
   const list = useRef<FlatList<Item>>(null);
   const following = useRef(true);
   const dragging = useRef(false);
   const [awayFromLatest, setAwayFromLatest] = useState(false);
   const newestFirst = useMemo(() => Array.from(data ?? []).reverse(), [data]);
+  // An inverted list counter-flips its empty state through a `style` prop on the
+  // element. Host it on a View so components that ignore `style` stay upright.
+  const empty = ListEmptyComponent ? <View>{isValidElement(ListEmptyComponent) ? ListEmptyComponent : createElement(ListEmptyComponent)}</View> : null;
   const keepLatest = () => {
     if (following.current && !dragging.current) list.current?.scrollToOffset({ offset: 0, animated: false });
   };
@@ -58,6 +61,7 @@ export function TranscriptList<Item>({ data, earlier, latest, onScroll, contentC
       onMomentumScrollEnd={() => { dragging.current = false; }}
       onContentSizeChange={keepLatest}
       onLayout={keepLatest}
+      ListEmptyComponent={empty}
       ListHeaderComponent={latest}
       ListFooterComponent={earlier}
     />
