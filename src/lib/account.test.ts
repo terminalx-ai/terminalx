@@ -214,6 +214,57 @@ describe("a role changed elsewhere (an owner demotes this admin)", () => {
     account.noteListedOrgRole("org-a", false, roleAskStamp());
     expect(role(account)).toBe("member");
   });
+
+  it("shows an organization the user was added back to within a minute while the window is visible, and asks nothing while hidden (#516)", async () => {
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityState = vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    /** The native side, with the account service listing these organizations. */
+    const listing = (orgs: string[]) => {
+      const status = { ...as("member"), organizations: orgs.map((id) => ({ id, name: id, role: "member", isPersonal: false, cloud: { enabled: true, flags: {} } })) };
+      mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+        if (command === "account_refresh_roles") return { status, fresh: true };
+        if (command === "cloud_mirror_list") return [];
+        if (command.startsWith("cloud_mirror_")) return 0;
+        return as("member");
+      });
+    };
+    try {
+      native("member", { role: "member" });
+      const account = await import("./account");
+      await account.bootAccount();
+      await vi.waitFor(() => expect(roleCalls()).toHaveLength(1));
+      await settle();
+      const orgs = () => account.getAccount().status.organizations?.map((org) => org.id);
+      expect(orgs()).toEqual(["org-a"]);
+
+      // Added back to Share Lab elsewhere: nothing on this desktop is refused, and the window keeps its focus.
+      listing(["org-a", "org-b"]);
+      vi.advanceTimersByTime(account.VISIBLE_REFRESH_MS);
+      await vi.waitFor(() => expect(orgs()).toEqual(["org-a", "org-b"]));
+      // Not forced: the native side still reads the server at most once a minute.
+      expect(roleCalls()).toEqual([{ force: false }]);
+
+      // A hidden window asks for nothing.
+      mocks.invoke.mockClear();
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      vi.advanceTimersByTime(account.VISIBLE_REFRESH_MS * 3);
+      await settle();
+      expect(roleCalls()).toEqual([]);
+
+      // Shown again, it asks at once (removed from Share Lab meanwhile). Earlier
+      // tests' modules listen too, so this account's own list is what is checked.
+      listing(["org-a"]);
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.waitFor(() => expect(orgs()).toEqual(["org-a"]));
+    } finally {
+      visibilityState.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("every organization live (CS-18): what a status change tears down", () => {
