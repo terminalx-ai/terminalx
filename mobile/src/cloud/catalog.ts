@@ -22,9 +22,9 @@ import { CloudWorkspaceSession } from "./workspace";
  *
  * While an open workspace is changing state (starting, stopping, or asked to
  * start by a message) the list is read every few seconds until it settles,
- * so the screen goes live by itself. While a workspace or the list is on the
- * screen and settled, the list is still read now and then: someone else may
- * start or stop it from elsewhere (#500). Reading the list starts nothing.
+ * so the screen goes live by itself. While a screen that shows workspaces is
+ * in front (`watch`), the list is also read now and then: someone else may
+ * start or stop one from elsewhere (#500). Reading the list starts nothing.
  */
 
 export interface CatalogOrganization {
@@ -65,7 +65,7 @@ const HELD = "terminalx.cloud.held.v1";
 /** How often the list is read while an open workspace is changing, and for how long at most. */
 export const CHANGING_POLL_MS = 3_000;
 export const CHANGING_POLL_LIMIT_MS = 10 * 60_000;
-/** How often the list is read while a workspace or the list is on the screen and nothing is changing. */
+/** How often the list is read while a screen that shows workspaces is in front (`watch`). */
 export const WATCH_POLL_MS = 15_000;
 /** Why a workspace that was open is not available any more. */
 export type CloudAccess = "ok" | "not-shared" | "deleted" | "gone" | "unknown";
@@ -90,7 +90,7 @@ export class CloudCatalog {
   /** When the pending read is due: a sooner one replaces it, a later one waits for it. */
   private changingDue = 0;
   private changingSince: number | null = null;
-  /** Screens showing the list itself (`watch`). */
+  /** Screens in front that show workspaces (`watch`). */
   private watchers = 0;
   /** One change to the held list at a time. */
   private heldChain: Promise<unknown> = Promise.resolve();
@@ -157,6 +157,8 @@ export class CloudCatalog {
   refresh(): Promise<void> {
     return (this.flight ??= this.read().finally(() => {
       this.flight = null;
+      // Also after a read that failed: the next one is still due (#500).
+      this.followChanges();
     }));
   }
 
@@ -190,9 +192,9 @@ export class CloudCatalog {
   }
 
   /**
-   * A screen shows the list: it is read again now and then until the
-   * returned function is called, so a workspace started or stopped from
-   * elsewhere shows as such.
+   * A screen that shows workspaces (the list, or one workspace) is in front:
+   * the list is read again now and then until the returned function is
+   * called, so a workspace started or stopped from elsewhere shows as such.
    */
   watch(): () => void {
     this.watchers += 1;
@@ -321,13 +323,12 @@ export class CloudCatalog {
     this.publish();
     for (const [orgId, workspaceId] of await this.held()) if (!mayKeep(orgId, workspaceId)) await this.forget(orgId, workspaceId);
     for (const session of this.sessions.values()) session.listChanged();
-    this.followChanges();
   }
 
   /**
    * Read the list again shortly while an open workspace is changing (until
    * all have settled, or for the limit at most), and now and then while a
-   * workspace or the list is on the screen.
+   * screen that shows workspaces is in front.
    */
   private followChanges(): void {
     if (this.closed || this.paused) return this.unfollow();
@@ -336,7 +337,7 @@ export class CloudCatalog {
     if (changing) this.changingSince ??= now;
     else this.changingSince = null;
     const fast = changing && now - (this.changingSince ?? now) <= CHANGING_POLL_LIMIT_MS;
-    const watched = this.retained.size > 0 || this.watchers > 0;
+    const watched = this.watchers > 0;
     if (!fast && !watched) return this.unfollow();
     const delay = fast ? CHANGING_POLL_MS : WATCH_POLL_MS;
     if (this.changingTimer) {

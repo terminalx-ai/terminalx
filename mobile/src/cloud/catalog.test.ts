@@ -229,6 +229,7 @@ describe("the phone's cloud catalog", () => {
     expect(h.api.organizations).toHaveBeenCalledTimes(1);
 
     const release = h.catalog.retain("org-1", "ws-new");
+    const unwatch = h.catalog.watch();
     await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 100);
     expect(h.api.organizations).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 100);
@@ -245,6 +246,7 @@ describe("the phone's cloud catalog", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(h.api.organizations).toHaveBeenCalledTimes(settled + 1);
     release();
+    unwatch();
     await vi.advanceTimersByTimeAsync(4 * WATCH_POLL_MS);
     expect(h.api.organizations).toHaveBeenCalledTimes(settled + 1);
   });
@@ -256,6 +258,7 @@ describe("the phone's cloud catalog", () => {
     h.api.open.mockRejectedValue(new CloudApiError("cloud_workspace_not_found", 404));
     await h.catalog.refresh();
     const release = h.catalog.retain("org-1", "ws-new");
+    const unwatch = h.catalog.watch();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(h.catalog.opened("org-1", "ws-new")?.getSnapshot().connection.state).toBe("suspended");
     expect(h.api.open).not.toHaveBeenCalled();
@@ -266,10 +269,40 @@ describe("the phone's cloud catalog", () => {
     expect(h.catalog.workspace("org-1", "ws-new")).toMatchObject({ state: "ready" });
     await vi.waitFor(() => expect(h.api.open).toHaveBeenCalled());
     release();
+    unwatch();
     // Off the screen: nothing is read any more.
     const reads = h.api.organizations.mock.calls.length;
     await vi.advanceTimersByTimeAsync(4 * WATCH_POLL_MS);
     expect(h.api.organizations).toHaveBeenCalledTimes(reads);
+  });
+
+  it("does not read now and then for an open workspace with another screen in front of it", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const release = h.catalog.retain("org-1", "ws-new");
+    const unwatch = h.catalog.watch();
+    await vi.advanceTimersByTimeAsync(WATCH_POLL_MS + 100);
+    expect(h.api.organizations).toHaveBeenCalledTimes(2);
+    // Sharing is pushed over the workspace: it stays open, and the list is not read for it.
+    unwatch();
+    await vi.advanceTimersByTimeAsync(4 * WATCH_POLL_MS);
+    expect(h.api.organizations).toHaveBeenCalledTimes(2);
+    expect(h.catalog.opened("org-1", "ws-new")).not.toBeNull();
+    release();
+  });
+
+  it("keeps reading now and then after a read that failed", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const unwatch = h.catalog.watch();
+    h.api.organizations.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null));
+    await vi.advanceTimersByTimeAsync(WATCH_POLL_MS + 100);
+    expect(h.api.organizations).toHaveBeenCalledTimes(2);
+    expect(h.catalog.getSnapshot().error).toBe("cloud_workspace_unavailable");
+    await vi.advanceTimersByTimeAsync(WATCH_POLL_MS);
+    expect(h.api.organizations).toHaveBeenCalledTimes(3);
+    expect(h.catalog.getSnapshot().error).toBeNull();
+    unwatch();
   });
 
   it("reads the list now and then while the list is on the screen, and not after", async () => {
@@ -301,6 +334,7 @@ describe("the phone's cloud catalog", () => {
     h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [item("ws-new", { state: "resuming" })] : [], tombstones: [] }));
     await h.catalog.refresh();
     const release = h.catalog.retain("org-1", "ws-new");
+    const unwatch = h.catalog.watch();
     await vi.advanceTimersByTimeAsync(CHANGING_POLL_MS + 100);
     const following = h.api.organizations.mock.calls.length;
     expect(following).toBeGreaterThan(1);
@@ -319,6 +353,7 @@ describe("the phone's cloud catalog", () => {
     await vi.advanceTimersByTimeAsync(4 * WATCH_POLL_MS - 100);
     expect(h.api.organizations.mock.calls.length - stopped).toBeLessThanOrEqual(4);
     release();
+    unwatch();
   });
 
   it("says whether the list it has is fresh", async () => {

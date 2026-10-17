@@ -540,6 +540,17 @@ describe("a shared cloud workspace on the phone", () => {
     await click("Sharing");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/shares", params: { orgId: "org-1", workspaceId: mocks.params.workspaceId } });
   });
+
+  it("has the list read now and then only while the workspace is in front, and keeps it open under another screen", async () => {
+    const { release } = world();
+    await show(<CloudWorkspaceScreen />);
+    expect(mocks.catalog.retain).toHaveBeenCalledTimes(1);
+    // In front: watching. Another screen pushed over it ends the watch; the workspace stays open.
+    const leave = mocks.focus.at(-1)!();
+    expect(mocks.catalog.watch).toHaveBeenCalledTimes(1);
+    expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
+    expect(release).not.toHaveBeenCalled();
+  });
 });
 
 describe("the workspace conversation", () => {
