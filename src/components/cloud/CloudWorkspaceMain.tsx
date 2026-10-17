@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Cloud, Loader2, PanelLeft, Play } from "@/icons";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
 import { Button } from "@/components/ui/button";
@@ -47,12 +47,18 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
   const item = parsed && member ? findCloudWorkspace(catalog, parsed.orgId, parsed.workspaceId) : null;
   const org = parsed ? catalog.orgs[parsed.orgId] : undefined;
   // #497: the API refused `open` for access (a revoked share, a workspace made
-  // private). The refusal is kept with its workspace, and only a list asked
-  // for after it that says this person has a role again opens it again.
-  const [refused, setRefused] = useState<{ key: string; at: number } | null>(null);
+  // private). The refusal is kept with its workspace. A list asked for after
+  // it that names a role for this person opens it again, once: if that open is
+  // refused too (a list that lags the runtime), only Check again retries, so a
+  // refused open never loops with the list it asks for. A row without a role
+  // (an older server) never opens it on its own.
+  const [refused, setRefused] = useState<{ key: string; at: number; autoSpent: boolean } | null>(null);
+  // The workspace whose last unlock was automatic or asked for, until a connect succeeds.
+  const unlocked = useRef<string | null>(null);
   const refusal = refused?.key === workspaceKey ? refused : null;
   const listRequestedAt = org?.requestedAt ?? null;
-  const sharedAgain = !!refusal && !!item && item.workspace.you?.role !== "none" && listRequestedAt !== null && listRequestedAt > refusal.at;
+  const listedRole = item?.workspace.you?.role;
+  const sharedAgain = !!refusal && !refusal.autoSpent && !!listedRole && listedRole !== "none" && listRequestedAt !== null && listRequestedAt > refusal.at;
   const locked = !!refusal && !sharedAgain;
   const canOpen = !!item && openable(item) && !locked;
   // A stopped workspace that was resumed is reconnected, so the view follows it to running.
@@ -101,11 +107,24 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
 
   const refusedNow = state.state === "reconnecting" && accessLostReason(state.reason);
   useEffect(() => {
-    if (refusedNow) setRefused((current) => (current?.key === workspaceKey ? current : { key: workspaceKey, at: Date.now() }));
+    if (!refusedNow) return;
+    setRefused((current) => (current?.key === workspaceKey ? current : { key: workspaceKey, at: Date.now(), autoSpent: unlocked.current === workspaceKey }));
   }, [refusedNow, workspaceKey]);
   useEffect(() => {
-    if (sharedAgain) setRefused(null);
-  }, [sharedAgain]);
+    if (state.state === "connected") unlocked.current = null;
+  }, [state.state]);
+  useEffect(() => {
+    if (!sharedAgain) return;
+    unlocked.current = workspaceKey;
+    setRefused(null);
+  }, [sharedAgain, workspaceKey]);
+  // Check again: one more open, whatever the list says; refused again, it locks again.
+  const recheck = () => {
+    if (!parsed) return;
+    unlocked.current = workspaceKey;
+    setRefused(null);
+    void refreshCloudCatalog(parsed.orgId);
+  };
   // Refused: close the connection, which would only retry `open` for ever, and read the list so the sidebar row follows.
   useEffect(() => {
     if (!locked || !parsed) return;
@@ -181,7 +200,7 @@ export function CloudWorkspaceMain({ workspaceKey, sidebarOpen, onToggleSidebar 
           </span>
         </Centered>
       ) : locked && item && parsed ? (
-        <NotSharedNotice kind="removed" onBack={() => selectSession(null)} onRecheck={() => void refreshCloudCatalog(parsed.orgId)} />
+        <NotSharedNotice kind="removed" onBack={() => selectSession(null)} onRecheck={recheck} />
       ) : !item && org?.fetchedAt ? (
         <Centered>This cloud workspace was deleted, or you no longer have access to it.</Centered>
       ) : !item ? (

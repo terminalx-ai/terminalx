@@ -44,9 +44,9 @@ const { resetCloudConnections } = await import("@/lib/cloudConnections");
 const ORG = "org-a";
 const KEY = `cloud:${ORG}:alpha`;
 
-function shared(role: "driver" | "none"): CloudWorkspaceListItem {
+function shared(role: "driver" | "none" | null): CloudWorkspaceListItem {
   return {
-    workspace: { id: "alpha", orgId: ORG, name: "alpha", provider: "local-docker", state: "ready", accessMode: "organization", authority: "participate", you: { role, canApprove: false }, createdAt: 1, updatedAt: 10, releaseDisposition: null, repositories: [] },
+    workspace: { id: "alpha", orgId: ORG, name: "alpha", provider: "local-docker", state: "ready", accessMode: "organization", authority: "participate", ...(role ? { you: { role, canApprove: false } } : {}), createdAt: 1, updatedAt: 10, releaseDisposition: null, repositories: [] },
     latestOperation: null,
   } as unknown as CloudWorkspaceListItem;
 }
@@ -133,6 +133,59 @@ describe("a workspace whose share is revoked while it is open (#497)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await screen.findByTestId("workspace-view");
     expect(mocks.workspaceConnection).toHaveBeenCalledTimes(2);
+  });
+
+  // Review of #504: a list that lags the runtime, or a row with no role, must not unlock, reopen, be refused and list again for ever.
+  describe("never loops open, refuse, list", () => {
+    let now = 1_800_000_000_000;
+    beforeEach(() => {
+      // Every list is asked for strictly after the refusal before it.
+      vi.spyOn(Date, "now").mockImplementation(() => now++);
+    });
+    afterEach(() => vi.restoreAllMocks());
+    /** The open is refused; `locks` false when the one automatic retry follows at once. */
+    const refuse = async (locks = true) => {
+      await screen.findByTestId("workspace-view");
+      await waitFor(() => expect(listeners.size).toBe(1));
+      await act(async () => emit({ state: "reconnecting", attempt: 1, reason: "cloud_workspace_not_found", retryInMs: 250 }));
+      if (locks) await screen.findByTestId("cloud-access-removed");
+    };
+    const settle = async () => {
+      for (let i = 0; i < 10; i++) await act(async () => undefined);
+    };
+
+    it("a row with no role never opens it again on its own", async () => {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [shared(null)] });
+      render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+      await screen.findByTestId("workspace-view");
+      await refuse();
+      await waitFor(() => expect(mocks.api.cloudWorkspaces).toHaveBeenCalled());
+      await settle();
+      expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+      expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("cloud-access-removed")).toBeTruthy();
+    });
+
+    it("a list that keeps saying shared while every open is refused opens it again once, then waits for Check again", async () => {
+      mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [shared("driver")] });
+      render(<CloudWorkspaceMain workspaceKey={KEY} sidebarOpen onToggleSidebar={() => undefined} />);
+      await screen.findByTestId("workspace-view");
+      await refuse(false);
+      // The one automatic retry.
+      await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalledTimes(2));
+      await refuse();
+      await settle();
+      expect(mocks.workspaceConnection).toHaveBeenCalledTimes(2);
+      expect(mocks.api.cloudWorkspaces).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("cloud-access-removed")).toBeTruthy();
+
+      // Check again is one more open; refused again, it locks again and stays locked.
+      fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalledTimes(3));
+      await refuse();
+      await settle();
+      expect(mocks.workspaceConnection).toHaveBeenCalledTimes(3);
+    });
   });
 
   it("keeps a plain drop as a reconnect", async () => {
