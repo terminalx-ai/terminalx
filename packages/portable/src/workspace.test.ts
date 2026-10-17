@@ -30,6 +30,8 @@ class FakeRuntime implements WorkspaceTransport {
   epoch = "e1";
   /** Answer the next pty.write with this error code instead. */
   refuseWrite: string | null = null;
+  /** The message an unknown method is refused with, in place of the method's name. */
+  refusalMessage: { value: unknown } | null = null;
   sent: RpcWireRequest[] = [];
   /** Requests are received but the answer is lost with the connection. */
   loseAnswers = false;
@@ -220,7 +222,7 @@ class FakeRuntime implements WorkspaceTransport {
         return ok(result);
       }
       default:
-        return { id: frame.id, ok: false, error: { code: "method_not_found", message: frame.method } };
+        return { id: frame.id, ok: false, error: { code: "method_not_found", message: this.refusalMessage ? this.refusalMessage.value : frame.method } };
     }
   }
 }
@@ -517,6 +519,19 @@ describe("workspace RPC client", () => {
     await expect(client.call("pty.attach", { ptyId: "p1" })).rejects.toMatchObject({ code: "capability_not_granted" });
     await expect(client.call("fs.list", {})).rejects.toBeInstanceOf(WorkspaceRpcError);
     await expect(client.call("fs.list", {})).rejects.toMatchObject({ code: "method_not_found" });
+    client.close();
+  });
+
+  it.each([42, null, undefined, { text: "no" }])("reads a refusal whose message is not a string (%s) as its code", async (message) => {
+    const runtime = new FakeRuntime();
+    const client = new WorkspaceRpcClient(runtime, ids);
+    runtime.connect(["fs/1"]);
+    runtime.refusalMessage = { value: message };
+    const refused = await client.call("fs.list", {}).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(WorkspaceRpcError);
+    expect(refused).toMatchObject({ code: "method_not_found", message: "method_not_found", method: "fs.list" });
+    runtime.refusalMessage = { value: "the runtime's own words" };
+    await expect(client.call("fs.list", {})).rejects.toMatchObject({ message: "the runtime's own words" });
     client.close();
   });
   it("keeps a subscription made while disconnected and starts it on connect", async () => {
