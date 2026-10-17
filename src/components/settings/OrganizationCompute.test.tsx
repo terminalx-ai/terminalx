@@ -312,3 +312,15 @@ it("neither shows nor sends the create budget to a server that does not have it,
   render(<OrganizationCompute contextRevision="account-1" />);
   expect((await screen.findByLabelText("Compute limits")).textContent).toContain("Each person can create 3 workspaces an hour and 20 a day.");
 });
+
+it("shows no Machine0 limits row while the server hides Machine0, unless the policy already limits it", async () => {
+  api.policy.mockResolvedValue(view());
+  render(<OrganizationCompute contextRevision="account-1" />);
+  await screen.findByLabelText("Allowed sizes for Box");
+  expect(screen.queryByLabelText("Allowed sizes for Machine0")).toBeNull();
+  cleanup();
+
+  api.policy.mockResolvedValue(view({}, { allowedMachineClasses: { machine0: ["small"] } }));
+  render(<OrganizationCompute contextRevision="account-1" />);
+  expect(((await screen.findByLabelText("Allowed sizes for Machine0")) as HTMLInputElement).value).toBe("small");
+});

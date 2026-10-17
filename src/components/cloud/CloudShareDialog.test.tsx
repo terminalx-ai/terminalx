@@ -148,6 +148,62 @@ describe("share dialog", () => {
     );
   });
 
+  it("reads the organization's members again each time it opens, so someone removed since is not offered (#501)", async () => {
+    dialog();
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    cleanup();
+    // Bob is removed from the organization while the dialog is closed.
+    mocks.members.mockResolvedValue({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "owner" }, { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r2" });
+    dialog();
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
+    expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeNull();
+    expect(mocks.members).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the members and shares again when a share is refused because the person left the organization (#501)", async () => {
+    listed = { ...listed, shares: [share(), share({ userId: "u-bob", email: "bob@example.com", name: "Bob" })] };
+    dialog();
+    await waitFor(() => expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(2));
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
+    // Bob is removed from the organization while the dialog is open: the server revoked his share with it.
+    mocks.members.mockResolvedValue({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "owner" }, { userId: "u-alice", email: "alice@example.com", displayName: "Alice", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r2" });
+    listed = { ...listed, shares: [share()] };
+    mocks.put.mockRejectedValueOnce({ code: "organization_member_not_found", status: 404 });
+    fireEvent.change(screen.getByLabelText("Role for Bob"), { target: { value: "driver" } });
+    expect((await screen.findByTestId("cloud-share-error")).textContent).toBe("Bob is no longer a member of this organization.");
+    await waitFor(() => expect(screen.getAllByTestId("cloud-share-row")).toHaveLength(1));
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeNull());
+    expect(screen.queryByLabelText("Role for Bob")).toBeNull();
+  });
+
+  it("shows the newest read of the members, not an older one that answers late (#501)", async () => {
+    let late!: (value: unknown) => void;
+    // The read on opening is slow and still names Bob; the one after the refusal answers first without him.
+    mocks.members.mockReset().mockImplementationOnce(() => new Promise((resolve) => (late = resolve))).mockResolvedValue({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "owner" }, { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r2" });
+    listed = { ...listed, shares: [share({ userId: "u-bob", email: "bob@example.com", name: "Bob" })] };
+    dialog();
+    await screen.findByTestId("cloud-share-row");
+    listed = { ...listed, shares: [] };
+    mocks.put.mockRejectedValueOnce({ code: "organization_member_not_found", status: 404 });
+    fireEvent.change(screen.getByLabelText("Role for Bob"), { target: { value: "driver" } });
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy());
+    await act(async () => late({ members: [{ userId: "u-bob", email: "bob@example.com", displayName: "Bob", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r1" }));
+    expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeNull();
+    expect(within(screen.getByLabelText("Add person")).queryByText(/Erin/)).toBeTruthy();
+  });
+
+  it("stops offering someone a share was refused for because they left the organization (#501)", async () => {
+    dialog();
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Add person"), { target: { value: "u-bob" } });
+    mocks.members.mockResolvedValue({ members: [{ userId: "u-me", email: "me@example.com", displayName: "Me", role: "owner" }, { userId: "u-erin", email: "erin@example.com", displayName: "Erin", role: "member" }], pendingInvites: [], viewerRole: "owner", canManageMembers: true, contextRevision: "r2" });
+    mocks.put.mockRejectedValueOnce({ code: "organization_member_not_found", status: 404 });
+    fireEvent.click(screen.getByRole("button", { name: /Share/ }));
+    expect((await screen.findByTestId("cloud-share-error")).textContent).toBe("Bob is no longer a member of this organization.");
+    await waitFor(() => expect(within(screen.getByLabelText("Add person")).queryByText(/Bob/)).toBeNull());
+    expect((screen.getByLabelText("Add person") as HTMLSelectElement).value).toBe("");
+  });
+
   it("does not offer the workspace's creator, and says why a driver share is refused for a managers-only login", async () => {
     render(<CloudShareDialog orgId="org-1" workspaceId="ws-1" name="Payments" createdBy="u-bob" onClose={() => undefined} />);
     await screen.findByTestId("cloud-share-row");

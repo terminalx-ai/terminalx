@@ -17,6 +17,7 @@ import {
   type ComputeProviderUsage,
   type ComputeUsageReport,
 } from "@/lib/organizationCompute";
+import { machine0Offered } from "@/lib/hiddenProviders";
 
 const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 
@@ -60,6 +61,11 @@ const allowLists = (texts: Record<string, string>, stored: Record<string, string
     }),
   ),
 });
+
+// A hidden provider (Machine0, see hiddenProviders) gets no row unless the
+// policy already limits it, so an admin can still see and clear those limits.
+const shownProviders = (policy: ComputePolicy) =>
+  COMPUTE_PROVIDERS.filter((provider) => provider !== "machine0" || machine0Offered() || Boolean(policy.allowedMachineClasses[provider]?.length || policy.allowedLocations[provider]?.length));
 
 const formatTime = (timestamp: number | null | undefined) => (timestamp ? new Date(timestamp).toLocaleString() : "never");
 
@@ -408,7 +414,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
               </p>
             )}
             <div className="text-[11px] text-muted-foreground">Allowed sizes and regions (comma-separated IDs; blank allows any)</div>
-            {COMPUTE_PROVIDERS.map((provider) => (
+            {shownProviders(view.policy).map((provider) => (
               <div key={provider} className="grid grid-cols-[5rem_1fr_1fr] items-center gap-2">
                 <span className="text-[11px]">{providerLabel(provider)}</span>
                 <input

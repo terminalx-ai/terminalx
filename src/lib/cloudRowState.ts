@@ -65,7 +65,8 @@ export function deriveCloudActivity(item: CloudWorkspaceListItem, input: Activit
   // 1
   if (deletion(item) === "running") return idle("Deleting", "changing");
   if (archiving(item)) return idle("Archiving", "changing");
-  if (state === "archived" || state === "destroyed") return idle("Archived", "archived");
+  if (state === "destroyed") return idle("Deleted", "archived");
+  if (state === "archived") return idle("Archived", "archived");
   // 2
   const phase = phaseOf(item);
   if (state === "attention-required" || (launch && phase === "failed" && launchFailureStands(item, input)) || deletion(item) === "failed" || input.connection === "updateRequired") {

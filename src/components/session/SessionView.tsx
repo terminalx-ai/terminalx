@@ -126,11 +126,13 @@ function CloudPanelHost({ session, cloud, tab }: { session: SessionEntry; cloud:
       <aside className="flex h-full w-(--panel-w) shrink-0 flex-col border-l border-hairline" data-testid="cloud-panel-offline">
         <div data-tauri-drag-region="deep" className="h-(--titlebar-h) shrink-0" />
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-muted-foreground">
-          {cloud.locked
-            ? "Changes, Files and Git are only shown to people this workspace is shared with."
-            : cloud.asleep
-              ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
-              : "Changes, Files and Git appear once the workspace is connected."}
+          {cloud.locked === "deleted"
+            ? "This workspace was deleted. Its changes, files and Git went with it, and any previews that were open ended."
+            : cloud.locked
+              ? "Changes, Files and Git are only shown to people this workspace is shared with."
+              : cloud.asleep
+                ? "The workspace is stopped. Changes, Files and Git appear once it runs again; sending a message wakes it."
+                : "Changes, Files and Git appear once the workspace is connected."}
         </div>
         {/* Where previews stand while there is no connection: restarting, stopped, or closed with it. */}
         {ports && (
@@ -370,7 +372,7 @@ function CloudLocation({
         </span>
       )}
       {/* While the list and the runtime disagree about a new share, the pane says so; no chip claims either. */}
-      {cloud.locked !== "checking" && cloud.locked !== "pending" && <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />}
+      {cloud.locked !== "checking" && cloud.locked !== "pending" && cloud.locked !== "deleted" && <AccessChip you={cloud.collab.you} viewOnly={cloud.connected && !cloud.manage} className="ml-1" />}
       {cloud.collab.live && <PresenceAvatars collabKey={cloud.collab.key} you={cloud.collab.you} tabLabel={(tabId) => tabLabelOf(cloud, tabId)} />}
     </>
   );

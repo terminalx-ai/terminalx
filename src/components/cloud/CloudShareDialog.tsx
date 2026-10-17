@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Loader2, Lock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -155,11 +155,27 @@ export function CloudShareDialog({
     }
   }, [workspaceId, orgId]);
 
+  // Read again on every open, not once per session: someone removed from the organization since is not offered (#501).
+  // Only the newest read is shown: an older answer that arrives late never replaces it.
+  const membersRead = useRef(0);
   const loadMembers = useCallback(() => {
+    const read = ++membersRead.current;
+    const latest = () => read === membersRead.current;
     setRosterError(null);
-    if (defaultOrg) return void loadRoster().then(setMembers);
-    void loadRosterIn(orgId!).then(setMembers, (e: unknown) => setRosterError(codeOf(e)));
+    if (defaultOrg) return void loadRoster({ fresh: true }).then((next) => latest() && setMembers(next));
+    void loadRosterIn(orgId!, { fresh: true }).then(
+      (next) => latest() && setMembers(next),
+      (e: unknown) => latest() && setRosterError(codeOf(e)),
+    );
   }, [defaultOrg, orgId]);
+
+  /** A refusal that says the person left the organization: what is shown of them is out of date, so both lists are read again. */
+  const leftOrganization = (e: unknown, userId: string) => {
+    if (codeOf(e) !== "organization_member_not_found") return;
+    setAdding((before) => (before.userId === userId ? { userId: "", role: "viewer", canApprove: false } : before));
+    loadMembers();
+    void reload();
+  };
 
   useEffect(() => {
     void reload();
@@ -224,7 +240,7 @@ export function CloudShareDialog({
     }
   };
 
-  const change = async (key: string, who: string, run: () => Promise<unknown>) => {
+  const change = async (key: string, who: string, run: () => Promise<unknown>, userId?: string) => {
     setBusy(key);
     setError(null);
     try {
@@ -235,6 +251,7 @@ export function CloudShareDialog({
       return true;
     } catch (e) {
       setError(shareErrorMessage(e, who));
+      if (userId) leftOrganization(e, userId);
       return false;
     } finally {
       setBusy(null);
@@ -242,7 +259,7 @@ export function CloudShareDialog({
   };
 
   const put = (share: Pick<CloudWorkspaceShare, "userId" | "role" | "canApprove">) =>
-    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId));
+    change(`put:${share.userId}`, nameOf(share.userId), () => api.cloudWorkspaceSharePut(workspaceId, share.userId, share.role, share.canApprove, orgId), share.userId);
 
   /** Grant the share that a visibility change was made for; a refusal leaves the workspace visible but unshared, and says so. */
   const shareAfterVisible = async (person: Person) => {
@@ -252,6 +269,7 @@ export function CloudShareDialog({
       setAdding({ userId: "", role: "viewer", canApprove: false });
     } catch (e) {
       setUnshared({ person, why: shareErrorMessage(e, nameOf(person.userId)) });
+      leftOrganization(e, person.userId);
     }
     await reload();
     notifyAccessChanged(org);

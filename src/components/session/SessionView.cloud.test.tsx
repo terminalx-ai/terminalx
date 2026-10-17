@@ -125,6 +125,7 @@ import { api } from "@/lib/api";
 import { LocalPathLeakError, cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetPanelTabs } from "@/lib/panelTab";
+import { resetPurged } from "@/lib/cloudLifecycle";
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
@@ -421,6 +422,7 @@ afterEach(() => {
   resetCloudConnections();
   resetCollab();
   resetPanelTabs();
+  resetPurged();
   client.close();
 });
 
@@ -2055,5 +2057,110 @@ describe("sharing states found in the live two-user test", () => {
     await act(async () => runtime.notify("notes.posted", { note: note("n4", "u-alice") }));
     expect(screen.queryByTestId("cloud-notes-unread")).toBeNull();
     expect(screen.getAllByTestId("cloud-note")).toHaveLength(4);
+  });
+});
+
+// #502: a session left open on a workspace that was deleted, here or elsewhere.
+describe("a session of a workspace that was deleted", () => {
+  const click = (element: HTMLElement) => {
+    fireEvent.pointerDown(element, { button: 0, pointerType: "mouse" });
+    fireEvent.pointerUp(element, { button: 0, pointerType: "mouse" });
+    fireEvent.click(element, { button: 0 });
+  };
+  /** The list after the delete: the workspace is gone from it. */
+  const listedNone = () => {
+    mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: Date.now(), requestedAt: Date.now(), source: "live", error: null } };
+  };
+  /** The sidebar listed it earlier in this launch, so its names and provider are known here. */
+  const listedBefore = async () => {
+    const catalogModule = await import("@/lib/cloudCatalog");
+    catalogModule.resetCloudCatalog();
+    await catalogModule.ingestCloudList({ workspaces: [workspaceItem("ready")] }, ORG);
+  };
+  afterEach(async () => (await import("@/lib/cloudCatalog")).resetCloudCatalog());
+  const expectDeletedPane = () => {
+    const pane = screen.getByTestId("cloud-workspace-deleted");
+    expect(pane.textContent).toContain("This cloud workspace was deleted");
+    expect(screen.queryByText("Loading the session…")).toBeNull();
+    expect(screen.queryByTestId("session-connection")).toBeNull();
+    // Where it ran, as last listed: never "Development runtime".
+    expect(screen.getByTestId("session-location").textContent).toContain("Boat");
+    expect(screen.getByTestId("session-location").textContent).not.toContain("Development runtime");
+    // The panel says the previews ended with the workspace, not that they come back with the connection.
+    const panel = screen.getByTestId("cloud-panel-offline");
+    expect(panel.textContent).toContain("deleted");
+    expect(panel.textContent).not.toMatch(/once it is back|once the workspace is connected/);
+    return pane;
+  };
+
+  it("says so with a way back after a delete from the header chip, instead of loading for ever", async () => {
+    guard.handlers.cloud_workspace_disposition = () => ({
+      workspaceId: WS,
+      state: "ready",
+      provider: "box",
+      archivedAt: null,
+      deleteAfter: null,
+      activeOperation: null,
+      runtime: { reporting: true, reportedAt: 1, stale: false, activeTurns: 0, pendingApprovals: 0 },
+      attachedClients: 1,
+      providerCapabilities: { permanentDelete: true, releaseDisposition: "destroyed" },
+      archiveRetentionDays: 30,
+      blockers: [],
+      removedOnDelete: ["provider-compute", "provider-storage", "workspace-content"],
+      runtimeFacts: { available: false },
+    });
+    await listedBefore();
+    guard.handlers.cloud_workspace_delete = () => {
+      // The next list no longer has it.
+      listedNone();
+      return { workspace: { ...workspaceItem("ready").workspace, state: "destroyed" }, operation: { id: "op-d", state: "succeeded", action: "delete" } };
+    };
+    await openConnected();
+    click(screen.getByTestId("session-location"));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "Delete…" }));
+    const dialog = await screen.findByTestId("cloud-lifecycle-dialog");
+    fireEvent.click(within(dialog).getByLabelText("I understand this cannot be undone"));
+    const confirm = within(dialog).getByRole("button", { name: "Delete permanently" }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    fireEvent.click(confirm);
+    await waitFor(() => expect(guard.calls.map((call) => call.command)).toContain("cloud_workspace_delete"));
+
+    const pane = await screen.findByTestId("cloud-workspace-deleted");
+    expectDeletedPane();
+    expect(screen.queryByText("Fix login redirect")).toBeNull();
+    // Nothing reconnects to a workspace that is gone.
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+
+    selectCloudSession(KEY);
+    fireEvent.click(within(pane).getByRole("button", { name: "Back" }));
+    expect(getSessionStore().selectedSessionId).toBeNull();
+  });
+
+  it("says so at once while the list still shows the workspace mid-delete", async () => {
+    await listedBefore();
+    await openConnected();
+    const { noteCloudWorkspaceDeleted } = await import("@/lib/cloudLifecycle");
+    // The delete went through here; the list read after it still has the row, its delete running.
+    setCatalog({ ...workspaceItem("ready"), latestOperation: { id: "op-d", workspaceId: WS, action: "delete", type: "delete", state: "running", stage: "queued", cancelable: false, createdAt: 1, updatedAt: 2 } } as unknown as CloudWorkspaceListItem);
+    await act(async () => {
+      noteCloudWorkspaceDeleted(ORG, WS);
+      closeCloudConnection({ orgId: ORG, workspaceId: WS });
+    });
+    await screen.findByTestId("cloud-workspace-deleted");
+    expectDeletedPane();
+  });
+
+  it("says so when the list's tombstone says it was deleted elsewhere", async () => {
+    guard.handlers.cloud_agent_purge_workspace = () => ({ removed: true, unsentCommands: 0, cachedTabs: 1 });
+    await listedBefore();
+    await openConnected();
+    const { purgeTombstones } = await import("@/lib/cloudLifecycle");
+    // Someone else deleted it: the next list carries its tombstone and no row.
+    listedNone();
+    await act(async () => {
+      await purgeTombstones([{ id: WS, orgId: ORG, deletedAt: 2 } as never], new Map([[WS, "login-fix"]]));
+    });
+    await screen.findByTestId("cloud-workspace-deleted");
+    expectDeletedPane();
   });
 });

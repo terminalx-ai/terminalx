@@ -26,7 +26,6 @@ import {
   RUNTIME_NOT_PICKED_UP,
   savePending,
   settled,
-  usableProviders,
   validateForm,
   type CreateForm,
   type CreateStep,
@@ -34,6 +33,7 @@ import {
   type PhaseId,
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
+import { creatableProviders } from "@/lib/hiddenProviders";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
@@ -120,7 +120,7 @@ export function CloudCreateWorkspace({
       .cloudProviders()
       .then((result) => {
         setProviders(result.providers);
-        const usable = usableProviders(result.providers);
+        const usable = creatableProviders(result.providers);
         setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
       })
       .catch((e: unknown) => setLoadError(errorCode(e)));
@@ -192,7 +192,7 @@ export function CloudCreateWorkspace({
     );
   }
 
-  const usable = providers ? usableProviders(providers) : [];
+  const usable = providers ? creatableProviders(providers) : [];
   const available = (selected ?? []).filter((repository) => !form.repositories.some((chosen) => chosen.cloneUrl === repository.cloneUrl));
   const addRepository = (cloneUrl: string) => {
     const repository = selected?.find((item) => item.cloneUrl === cloneUrl);

@@ -31,7 +31,7 @@ import {
 } from "@/lib/cloudAgents";
 import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { isOpen, machineRunning, stopping } from "@/lib/cloudLifecycle";
+import { deletion, isOpen, machineRunning, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -46,7 +46,7 @@ import {
   sharingKnown,
   startCollab,
   useCollab,
-  type AccessLoss,
+  type SessionLock,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
@@ -186,9 +186,10 @@ export interface CloudSessionModel {
    * (`not-shared`), or their access ended (`removed`: a revoked share, a
    * workspace made private, or membership gone). The session then shows the
    * lock pane and nothing of the workspace: no tabs, terminals, lease,
-   * presence or notes, and no connection is held or retried.
+   * presence or notes, and no connection is held or retried. `deleted`: the
+   * workspace itself was deleted (#502), and the pane says so instead.
    */
-  locked: AccessLoss | null;
+  locked: SessionLock | null;
   /** Read the workspace list again, and connect again if it says this person has access now. */
   recheckAccess(): void;
   /** May take control of a terminal: manage, or a driver of a shared workspace. */
@@ -291,6 +292,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const item: CloudWorkspaceListItem | null = catalog.orgs[orgId]?.workspaces.find((candidate) => candidate.workspace.id === workspaceId) ?? null;
   const orgName = status.organizations?.find((org) => org.id === orgId)?.name ?? (status.identity?.organizationId === orgId ? status.identity.organization : null) ?? "Organization";
   const workspaceState = item?.workspace.state ?? null;
+  // #502: deleted, from here or elsewhere (a tombstone): nothing is left to connect to or wait for.
+  const deletedHere = useCloudWorkspaceDeleted(orgId, workspaceId);
+  // Deleted here while the list still shows it mid-delete counts too.
+  const deleted = workspaceState === "destroyed" || (deletedHere && (!item || deletion(item) !== null));
 
   // The lease this view holds, and through it the workspace's connection of
   // now and that connection's own transport state. Both come from the
@@ -383,8 +388,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   // with the sidebar's session list and kept for a few idle minutes after the
   // view goes, so switching between sessions of one workspace reuses it.
   useEffect(() => {
-    // Refused for access: nothing is held or retried until a later list says otherwise.
-    if (!parsed || refusedHeld) return;
+    // Refused for access: nothing is held or retried until a later list says otherwise. Deleted: never again.
+    if (!parsed || refusedHeld || deleted) return;
     let cancelled = false;
     let held: CloudLease | null = null;
     setSelectedCloudConnection(workspaceKey);
@@ -407,7 +412,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
       clearCloudWake(workspaceKey);
       setLease(null);
     };
-  }, [orgId, workspaceId, refusedHeld]);
+  }, [orgId, workspaceId, refusedHeld, deleted]);
   // Connected (again): a later stop needs a new wake.
   useEffect(() => {
     if (generation) clearCloudWake(workspaceKey);
@@ -674,7 +679,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const listSharedTrusted = listShared && (!transition || listAfterLoss);
   const [, graceTick] = useState(0);
   const disagreeingMs = held ? Date.now() - held.at : 0;
-  const locked = accessLoss({ state, you, hadAccess, listShared: listSharedTrusted, disagreeingMs });
+  const locked: SessionLock | null = deleted ? "deleted" : accessLoss({ state, you, hadAccess, listShared: listSharedTrusted, disagreeingMs });
   // "Checking access…" becomes "not shared yet" when the grace period ends.
   useEffect(() => {
     if (locked !== "checking") return;
@@ -684,8 +689,10 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   // While the lock pane shows, the list is read again with backoff (5 s up to
   // 30 s), so a share made meanwhile unlocks within seconds even where no
   // connection can tell (a refused or stopped workspace). Only a list.
+  // A deleted workspace has no access to come back.
+  const pollAccess = !!locked && locked !== "deleted";
   useEffect(() => {
-    if (!locked || !parsed) return;
+    if (!pollAccess || !parsed) return;
     let attempt = 0;
     let timer: ReturnType<typeof setTimeout>;
     const next = () => {
@@ -697,7 +704,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     };
     next();
     return () => clearTimeout(timer);
-  }, [!!locked, orgId]);
+  }, [pollAccess, orgId]);
   const session = useMemo<SessionEntry>(
     () => ({
       id: key,
@@ -786,7 +793,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     root,
     projectName,
     workspaceName,
-    location: { provider: cloudProviderName(item?.workspace.provider), org: orgName },
+    // Where it ran, as last listed, once it has left the list (deleted, unshared).
+    location: { provider: cloudProviderName(item?.workspace.provider ?? lastKnown?.provider), org: orgName },
     connection: chip,
     connected,
     manage,

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
-import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, usableProviders, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
+import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
+import { creatableProviders } from "@/lib/hiddenProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import {
@@ -91,7 +92,7 @@ export function OrganizationSetupSteps({
     setChecking(true);
     const [providers, github, list] = await Promise.all([
       api.cloudProviders().then(
-        (response) => usableProviders(response.providers),
+        (response) => creatableProviders(response.providers),
         () => null,
       ),
       organizationGithubApp.summary().then(

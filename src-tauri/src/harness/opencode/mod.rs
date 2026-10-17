@@ -678,8 +678,15 @@ mod tests {
     #[test]
     fn a_request_waits_for_a_server_that_is_still_starting() {
         use std::io::{Read, Write};
-        // A port nothing listens on yet.
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // A port nothing listens on yet. Below every system's ephemeral range,
+        // so while it is free no other test's port-0 bind or outgoing
+        // connection is handed it before the server below takes it.
+        // A random start, so test processes running side by side seldom try the same one.
+        let start = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), ()) as usize;
+        let port = (0..12_000)
+            .map(|i| 20_000 + ((start + i) % 12_000) as u16)
+            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+            .unwrap();
         let server = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
@@ -688,6 +695,10 @@ mod tests {
             let _ = stream.read(&mut request);
             let body = r#"{"id":"ses_1"}"#;
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            // The request's body may land after the read above. Closed with it
+            // unread, the socket resets, and the reset can beat the answer.
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
         });
         let line: Value = serde_json::from_str(&perform("session_new", "POST", &format!("http://127.0.0.1:{port}/session"), Some(json!({})))).unwrap();
         server.join().unwrap();
