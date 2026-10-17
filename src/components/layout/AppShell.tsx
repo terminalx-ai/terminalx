@@ -47,6 +47,8 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
+import { bootCloudMirrors } from "@/lib/cloudMirror";
+import { bootCloudSessions } from "@/lib/cloudSessions";
 import { bootPairing } from "@/lib/pairing";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
@@ -98,6 +100,10 @@ export function AppShell() {
     void bootStatus();
     void bootAccount();
     bootCloudCatalog();
+    // Live session lists and local mirrors (PRO-25) follow the connections other surfaces open,
+    // from launch and whatever is on screen: hidden sidebar or Settings included (#498).
+    bootCloudSessions();
+    bootCloudMirrors();
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();
