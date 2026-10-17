@@ -212,6 +212,20 @@ describe("one notice per wait", () => {
     expect(observe(project(failure))).toEqual([]);
   });
 
+  it("does not keep a working session in Needs you for a first prompt that failed before it (#499)", () => {
+    const failed = { launch: { launchId: "l1", phase: "failed", state: "failed", category: "agent-sign-in-required", workBranch: "terminalx/ws-1", timings: {} } };
+    const observe = createCloudAttentionTracker(() => 1_000);
+    const projected = project({
+      workspaces: [item("ws-1", failed)],
+      live: { "ws-1": [session("s1", "Fix login", "in_progress")] },
+      tabs: { "ws-1": [agentTab("s1", "in_progress")] },
+      connected: ["ws-1"],
+    });
+    expect(columnOf(projected, `cloud:${ORG}:ws-1:s1`)).toBe("working");
+    expect(projected[0].tabs[0].failure).toBeUndefined();
+    expect(observe(projected)).toEqual([]);
+  });
+
   it("raises a list-reported wait once, however many polls repeat it", () => {
     const observe = createCloudAttentionTracker(() => 1_000);
     const raised = [1, 2, 3, 4].flatMap(() => observe(project(waitingWorld())));

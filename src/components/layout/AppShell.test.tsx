@@ -68,7 +68,22 @@ vi.mock("@/components/layout/StatusBar", () => ({
   ),
 }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
-vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() } }));
+const mirrorApi = vi.hoisted(() => ({
+  cloudMirrorStatus: vi.fn(),
+  cloudMirrorClaimOwner: vi.fn(),
+}));
+vi.mock("@/lib/api", () => ({ agent: { send: vi.fn() }, api: mirrorApi }));
+const { bootCloudSessions } = vi.hoisted(() => ({ bootCloudSessions: vi.fn() }));
+vi.mock("@/lib/cloudSessions", () => ({ bootCloudSessions }));
+// The workspace connections other surfaces open; a test announces one as the connection layer would.
+const connectedListeners = vi.hoisted(() => new Set<(target: { orgId: string; workspaceId: string }, client: unknown) => (() => void) | void>());
+vi.mock("@/lib/cloudConnections", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/cloudConnections")>()),
+  onCloudConnected: (listener: (target: { orgId: string; workspaceId: string }, client: unknown) => (() => void) | void) => {
+    connectedListeners.add(listener);
+    return () => connectedListeners.delete(listener);
+  },
+}));
 vi.mock("@/lib/models", () => ({ loadModels: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn() }));
@@ -131,6 +146,7 @@ vi.mock("@/components/cleanup/CleanupIndicator", () => ({
 
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
+const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
 
 beforeEach(() => {
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
@@ -359,5 +375,30 @@ describe("settings page navigation", () => {
     expect(await section()).toBe("agents");
     pressSettingsShortcut();
     await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account"));
+  });
+});
+
+describe("cloud followers at launch", () => {
+  afterEach(() => resetCloudMirrors());
+
+  // #498: the mirror's follower was started only by the sidebar's cloud tree; with that gone (#484)
+  // nothing followed the connection after a relaunch, and the mirror stayed "paused" while the
+  // workspace was live. It has to follow from launch, whatever the window shows.
+  it("follows a workspace connection into its local mirror with the sidebar hidden", async () => {
+    setPrefs({ sidebarOpen: false });
+    mirrorApi.cloudMirrorClaimOwner.mockResolvedValue(0);
+    mirrorApi.cloudMirrorStatus.mockResolvedValue({ enabled: true, root: "/mirrors/ws-1", revision: null });
+    render(<AppShell />);
+    expect(screen.queryByTestId("sidebar")).toBeNull();
+    await claimCloudMirrorOwner("ada");
+
+    // Opened for the session (Live): a runtime from before mirrors, so the follower stops at saying so.
+    const client = { hasCapability: () => false };
+    for (const listener of [...connectedListeners]) listener({ orgId: "org-1", workspaceId: "ws-1" }, client);
+
+    await waitFor(() => expect(cloudMirrorState("cloud:org-1:ws-1").phase).toBe("unsupported"));
+    expect(mirrorApi.cloudMirrorStatus).toHaveBeenCalledWith("org-1", "ws-1");
+    // Live session lists follow from launch too, for the same reason.
+    expect(bootCloudSessions).toHaveBeenCalled();
   });
 });

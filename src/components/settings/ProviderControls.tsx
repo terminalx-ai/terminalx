@@ -23,6 +23,8 @@ export function providerActionMessage(error: unknown): string {
     case "cloud_provider_connection_required":
     case "cloud_provider_connection_attention_required":
       return "An organization administrator must repair this provider connection. Existing resources may still incur charges.";
+    case "cloud_provider_disabled":
+      return "This provider isn't offered right now. A saved connection can still be disconnected.";
     case "organization_admin_required":
       return "Only an organization owner or administrator can manage this connection.";
     case "cloud_provider_entry_cancelled":

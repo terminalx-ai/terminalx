@@ -1233,7 +1233,7 @@ export class WorkspaceRpcClient {
             this.resuming--;
           }
         }
-        if (!result.ok && spec.onRefused?.(new WorkspaceRpcError(result.refusal.code, result.refusal.message, spec.method))) {
+        if (!result.ok && spec.onRefused?.(refusalError(spec.method, result.refusal))) {
           this.subscriptions.delete(localId);
           return;
         }
@@ -1365,8 +1365,13 @@ export class WorkspaceRpcClient {
 
 function unwrap<T>(method: string, result: RpcCallResult<T>): T {
   if (result.ok) return result.value;
-  const refusal: RpcErrorData = result.refusal;
-  throw new WorkspaceRpcError(refusal.code, refusal.message, method, refusal.data);
+  throw refusalError(method, result.refusal);
+}
+
+/** A runtime's refusal as an error. The refusal comes off the wire unchecked: a message that is not a string reads as the code. */
+function refusalError(method: string, refusal: RpcErrorData): WorkspaceRpcError {
+  const message: unknown = refusal.message;
+  return new WorkspaceRpcError(refusal.code, typeof message === "string" ? message : String(refusal.code), method, refusal.data);
 }
 
 function randomRequestId(): string {

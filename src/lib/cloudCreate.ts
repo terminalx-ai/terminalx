@@ -418,6 +418,7 @@ const MESSAGES: Record<string, string> = {
   // Offered because the app still held an owner's or admin's role: it changed since.
   organization_admin_required: ROLE_REFUSED_WORKSPACE,
   forbidden: ROLE_REFUSED_WORKSPACE,
+  cloud_provider_disabled: "This provider isn't offered right now. Choose another provider.",
   cloud_provider_connection_required: "Connect a compute provider in Settings first.",
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",

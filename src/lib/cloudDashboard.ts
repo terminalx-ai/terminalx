@@ -206,7 +206,7 @@ function projectWorkspace(item: CloudWorkspaceListItem, org: { id: string; name:
   }
   // Recovery failures use the row's existing state rules and remain attention
   // across every organization, including sections hidden on this desktop.
-  if (deriveCloudActivity(item).tone === "attention") {
+  if (deriveCloudActivity(item, { agentRan: sessions.some((row) => row.tabs.length > 0) }).tone === "attention") {
     const target = newestFirstTab as CloudDashboardTab | null;
     if (target) {
       target.status = "waiting";
