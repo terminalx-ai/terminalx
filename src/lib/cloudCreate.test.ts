@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CloudWorkspaceClientError, CloudWorkspaceSnapshot } from "@/lib/api";
+import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
 import {
   CreateRefused,
   createErrorMessage,
@@ -227,6 +228,17 @@ describe("phases", () => {
     expect(phaseOf(snapshot({ workspace: { state: "ready" }, operation: { stage: "ready", state: "succeeded" } }))).toBe("running");
     expect(phaseOf(snapshot({ operation: { state: "canceled" } }))).toBe("canceled");
     expect(phaseOf(snapshot({ workspace: { state: "attention-required" }, operation: { state: "failed" } }))).toBe("failed");
+  });
+
+  it("explains a create the server gave up on because its machine never checked in (saas #203)", () => {
+    const timedOut = failureMessage(
+      snapshot({ workspace: { state: "destroyed" }, operation: { state: "failed", stage: "cleanup", errorCode: "cloud_workspace_provisioning_timeout" } }),
+    );
+    expect(timedOut).toBe("The workspace's machine did not finish setting up in time, so it was deleted at the provider. Create the workspace again.");
+    expect(lifecycleErrorMessage("cloud_workspace_provisioning_timeout")).toBe(timedOut);
+    expect(phaseOf(snapshot({ workspace: { state: "destroyed" }, operation: { state: "failed", errorCode: "cloud_workspace_provisioning_timeout" } }))).toBe("failed");
+    // Other codes keep the generic text.
+    expect(failureMessage(snapshot({ operation: { state: "failed", errorCode: "provider_retry_exhausted" } }))).toBe("Provisioning failed (provider_retry_exhausted).");
   });
 
   it("explains failures and measures the launch", () => {

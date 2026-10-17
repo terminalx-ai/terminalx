@@ -3300,6 +3300,7 @@ fn known_operation_error_code(code: &str) -> bool {
                 | "provider_permanent_delete_unavailable"
                 | "runtime_checkpoint_pending"
                 | "cloud_workspace_runtime_bootstrap_failed"
+                | "cloud_workspace_provisioning_timeout"
         )
 }
 
@@ -3782,7 +3783,7 @@ mod tests {
         assert_eq!(parse(json!("a".repeat(65))), None);
         assert_eq!(parse(json!({ "raw": "body" })), None);
         assert_eq!(parse(Value::Null), None);
-        for code in ["cloud_workspace_runtime_bootstrap_failed", "cloud_provider_permission_denied"] {
+        for code in ["cloud_workspace_runtime_bootstrap_failed", "cloud_workspace_provisioning_timeout", "cloud_provider_permission_denied"] {
             let snapshot: CloudWorkspaceSnapshot = serde_json::from_str(&snapshot_body(Some(code))).unwrap();
             assert_eq!(snapshot.operation.error_code.as_deref(), Some(code));
         }

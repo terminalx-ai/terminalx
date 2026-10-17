@@ -1384,6 +1384,7 @@ export type CloudWorkspaceOperationErrorCode =
   | "provider_permanent_delete_unavailable"
   | "runtime_checkpoint_pending"
   | "cloud_workspace_runtime_bootstrap_failed"
+  | "cloud_workspace_provisioning_timeout"
   | "cloud_provider_permission_denied";
 
 export interface CliToolStatus {

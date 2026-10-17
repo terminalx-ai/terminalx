@@ -12,6 +12,7 @@ import {
   type CloudWorkspaceTombstone,
 } from "@/lib/api";
 import { managerRefusedMessage, roleRefusedMessage } from "@/lib/accountRoles";
+import { PROVISIONING_TIMEOUT_CODE, PROVISIONING_TIMEOUT_MESSAGE } from "@/lib/cloudCreate";
 import { closeCloudConnection } from "@/lib/cloudConnections";
 import { dropCloudAgents } from "@/lib/cloudAgents";
 import { dropCloudTerminals } from "@/lib/cloudTerminals";
@@ -178,6 +179,7 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_credential_invalid: "The provider credential is no longer valid. An admin can repair it, then retry.",
   cloud_provider_permission_denied: "The provider refused this action, though its credential is still valid. Retry, or check the key's permissions at the provider.",
   cloud_workspace_runtime_bootstrap_failed: "The workspace's runtime could not be set up on its machine. Retry; the provider credential is fine.",
+  [PROVISIONING_TIMEOUT_CODE]: PROVISIONING_TIMEOUT_MESSAGE,
   cloud_provider_state_conflict: "The provider reports this resource in a state that does not allow the action yet. Retry in a moment; if it keeps failing, check the resource in the provider's console.",
   cloud_provider_unavailable: "The provider did not answer. Retry resumes where it stopped.",
   cloud_provider_rate_limited: "The provider is rate limiting. Retry resumes where it stopped.",
