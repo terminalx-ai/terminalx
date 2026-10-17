@@ -40,7 +40,7 @@ vi.mock("@/lib/workspaceFiles", () => ({
   resetCloudFiles: mocks.teardown.resetCloudFiles,
   resetCloudFilesIn: mocks.teardown.resetCloudFilesIn,
 }));
-vi.mock("@/lib/cloudAgents", () => ({ dropCloudAgentsIn: mocks.teardown.dropCloudAgentsIn }));
+vi.mock("@/lib/cloudAgents", () => ({ dropCloudAgentsIn: mocks.teardown.dropCloudAgentsIn, setCloudAgentAccount: vi.fn() }));
 
 const signedIn = (cloud: boolean, activeOrg = "org-a") => ({
   state: "signed-in",

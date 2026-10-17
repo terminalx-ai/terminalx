@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, closeWorkspaceConnections, closeWorkspaceConnectionsIn, errorMessage, type AccountStatus } from "@/lib/api";
 import { registerAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg, keptCloudOrgs, mayStartCloudSessions } from "@/lib/multiOrg";
-import { dropCloudAgentsIn } from "@/lib/cloudAgents";
+import { dropCloudAgentsIn, setCloudAgentAccount } from "@/lib/cloudAgents";
 import { closeCloudConnectionsIn, resetCloudConnections } from "@/lib/cloudConnections";
 import { dropCloudTerminalsIn, resetCloudTerminals } from "@/lib/cloudTerminals";
 import { forgetPendingCreates, setPendingCreateUser } from "@/lib/cloudCreate";
@@ -60,6 +60,8 @@ function applyStatus(status: AccountStatus) {
   // What a list implied about one account's role says nothing about another's.
   if (status.identity?.email !== reported.identity?.email) roleHints.clear();
   reported = status;
+  // Before anything reacts to the change: agent tabs opened from now on read and write this account's cache.
+  setCloudAgentAccount(status.state === "signed-in" ? (status.context?.account ?? null) : null);
   status = withRoleHints(status);
   const change = cloudChange(state.status, status);
   if (change.kind === "all") {

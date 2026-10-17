@@ -74,6 +74,8 @@ export interface CloudAgentsSnapshot {
 
 interface Store {
   scope: CloudAgentScope;
+  /** The account the store was made for: its cache is read and written for it alone. */
+  account: string;
   tabs: Map<string, CloudAgentTab>;
   outbox: OutboxEntry[];
   loaded: boolean;
@@ -100,6 +102,19 @@ export const SAVE_DEBOUNCE_MS = 500;
 const CACHE_EVENTS = 2_000;
 
 const stores = new Map<string, Store>();
+/** The signed-in account (`context.account`), as `@/lib/account` reports it; "" while signed out. */
+let account = "";
+
+/** Told by `@/lib/account` whenever the status changes. Stores made from now on are this account's. */
+export function setCloudAgentAccount(next: string | null) {
+  account = next ?? "";
+}
+
+/** The account a store's cache belongs to; one made before anyone was known takes the first account it is used under. */
+function cacheAccount(s: Store): string {
+  if (!s.account) s.account = account;
+  return s.account;
+}
 /** Told when any workspace's tabs change (the dashboard, notifications and palette read every workspace). */
 const anyListeners = new Set<() => void>();
 
@@ -132,6 +147,7 @@ function store(scope: CloudAgentScope): Store {
   if (!s) {
     s = {
       scope,
+      account,
       tabs: new Map(),
       outbox: [],
       loaded: false,
@@ -321,7 +337,7 @@ async function saveNow(s: Store, tabId: string) {
     updatedAt: Date.now(),
   };
   try {
-    await cloudAgentApi.cacheSave(s.scope, tabId, entry);
+    await cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tabId, entry);
   } catch {
     // The cache is only a head start; the checkpoint and the runtime hold the truth.
   }
@@ -382,7 +398,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
   }
   s.loading = (async () => {
     try {
-      const cached = await cloudAgentApi.cacheLoad(scope);
+      const cached = await cloudAgentApi.cacheLoad(cacheAccount(s), scope);
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
         const known = s.tabs.get(tabId);
         // A tab the live runtime listed first still gets back what was being typed in it.
@@ -527,7 +543,7 @@ function forgetTab(s: Store, tab: CloudAgentTab) {
   if (pending) clearTimeout(pending);
   s.saves.delete(tab.tabId);
   if (tab.info.sessionId) dropTabLog(tab.info.sessionId, tab.tabId);
-  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(s.scope, tab.tabId, null).catch(() => undefined);
+  if (!isDevScope(s.scope)) void cloudAgentApi.cacheSave(cacheAccount(s), s.scope, tab.tabId, null).catch(() => undefined);
 }
 
 export async function syncLiveTabs(scope: CloudAgentScope, client: WorkspaceRpcClient) {

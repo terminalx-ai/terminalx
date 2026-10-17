@@ -29,6 +29,7 @@ import {
   sendAgain,
   SEND_AGAIN_IMAGES_GONE,
   sendToCloudAgent,
+  setCloudAgentAccount,
   steerCloudAgent,
   stopCloudAgent,
   POLL_MAX_MS,
@@ -492,6 +493,25 @@ describe("cloud agent tabs store", () => {
     expect(configuresLive(fakeClient(true, { authority: "participate" }))).toBe(false);
     // No member list yet: the attachment decides, as before sharing existed.
     expect(configuresLive(fakeClient(true, { you: { userId: "u-a", role: "none", canApprove: false, listed: false } }))).toBe(true);
+  });
+
+  it("reads and writes a tab's cache for the account its store was made for, even once another is signed in", async () => {
+    vi.useFakeTimers();
+    setCloudAgentAccount("account-a");
+    await loadCloudAgents(scope);
+    applyLiveTabs(scope, [tabInfo()]);
+    setDraft("t-1", "A's text");
+    // The status says B before the queued save fires: the save still names A, so the native side refuses it.
+    setCloudAgentAccount("account-b");
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 1);
+    const accounts = (cmd: string) => backend.calls.filter((call) => call.cmd === cmd).map((call) => call.args.account);
+    expect(accounts("cloud_agent_cache_load")).toEqual(["account-a"]);
+    expect(new Set(accounts("cloud_agent_cache_save"))).toEqual(new Set(["account-a"]));
+    // B's own store, after the reset a user change brings, is B's.
+    resetCloudAgents();
+    await loadCloudAgents(scope);
+    expect(accounts("cloud_agent_cache_load")).toEqual(["account-a", "account-b"]);
+    setCloudAgentAccount(null);
   });
 
   it("keeps an unsent composer draft across a restart, and sending clears it (PRO-23)", async () => {

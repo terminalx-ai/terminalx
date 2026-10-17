@@ -723,6 +723,12 @@ impl AccountManager {
     /// The signed-in user and the webview's context revision, as last loaded,
     /// without a Keychain load or token refresh. Writes of per-user files are
     /// fenced by the revision so a late write never lands in the next account.
+    /// The signed-in account as the page knows it (`context.account`); `None` while signed out.
+    pub(crate) fn current_account_key(&self) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.session.as_ref().map(|session| account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id))
+    }
+
     pub(crate) fn current_revision(&self) -> Option<(String, String)> {
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(|session| {
@@ -1312,7 +1318,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
         session_unreadable: inner.session_unreadable && inner.session.is_none(),
         context: inner.session.as_ref().map(|session| {
             let scope = context_scope(&session.cloud.user_id, &session.cloud.cloud_profile_id, session.cloud.active_org_id.as_deref().unwrap_or_default());
-            let account = format!("{:x}", Sha256::digest(serde_json::to_vec(&(&session.cloud.user_id, &session.cloud.cloud_profile_id)).expect("serialize account")));
+            let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
         organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
@@ -1346,6 +1352,11 @@ fn cloud_scope(session: &DesktopSession) -> CloudScope {
         multi_org: multi_org(session),
         members,
     }
+}
+
+/// The account the page knows (`context.account`): the user and cloud profile, without the Organization.
+fn account_key(user: &str, profile: &str) -> String {
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&(user, profile)).expect("serialize account")))
 }
 
 fn context_scope(user: &str, profile: &str, organization: &str) -> String {
