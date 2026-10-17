@@ -62,6 +62,11 @@ const extra = (width) => `(() => {
 
 const rect = (box) => (box ? { left: box.x, right: box.x + box.width, top: box.y, bottom: box.y + box.height } : null);
 const inside = (inner, outer) => !!inner && !!outer && inner.left >= outer.left - SLACK && inner.right <= outer.right + SLACK;
+// A menu opens with a short slide (`animate-fade-in`): it is measured where it settles, never mid-way.
+const settledBox = async (locator) => {
+  await locator.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
+  return rect(await locator.boundingBox());
+};
 const inWindow = (box, size) => !!box && box.left >= -SLACK && box.top >= -SLACK && box.right <= size.width + SLACK && box.bottom <= size.height + SLACK;
 
 for (const width of [200, 268, 420]) {
@@ -159,7 +164,7 @@ for (const width of [200, 268, 420]) {
     await page.getByRole("menuitem", { name: "api-perf-investigation" }).hover();
     await page.getByRole("menuitem", { name: "Resume" }).waitFor();
     const menus = await page.getByRole("menu").all();
-    const menuBoxes = await Promise.all(menus.map(async (menu) => rect(await menu.boundingBox())));
+    const menuBoxes = await Promise.all(menus.map(settledBox));
     failed += report(`project menu (${name})`, {
       "the stopped workspace says so, inside its row": (await state.textContent()) === "Stopped" && inside(rect(await state.boundingBox()), rect(await stopped.boundingBox())),
       "the project's menu and its workspace's submenu are inside the window": menuBoxes.length === 2 && menuBoxes.every((menu) => inWindow(menu, size)),
@@ -174,7 +179,7 @@ for (const width of [200, 268, 420]) {
     await acctwo.getByRole("button", { name: "Project menu for acctwo" }).click();
     await page.getByRole("menuitem", { name: "Move to section" }).hover();
     await page.getByRole("menuitemradio", { name: "Active" }).waitFor();
-    const submenu = rect(await page.getByRole("menu").last().boundingBox());
+    const submenu = await settledBox(page.getByRole("menu").last());
     failed += report(`move to section (${name})`, { "the submenu is inside the window": inWindow(submenu, size) });
     await shot("move-to-section");
     await page.keyboard.press("Escape");
@@ -196,7 +201,7 @@ for (const width of [200, 268, 420]) {
 
     // The View menu: Needs you leaves nothing here, and says so with the way back.
     await page.getByRole("button", { name: "View", exact: true }).click();
-    const viewMenu = rect(await page.getByRole("menu").boundingBox());
+    const viewMenu = await settledBox(page.getByRole("menu"));
     await shot("view-menu");
     await page.getByRole("menuitemradio", { name: "Needs you" }).click();
     await page.getByTestId("sidebar-filter-empty").waitFor();

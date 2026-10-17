@@ -9,15 +9,22 @@ export const DropdownMenuGroup = Prim.Group;
 export const DropdownMenuSub = Prim.Sub;
 export const DropdownMenuRadioGroup = Prim.RadioGroup;
 
+/**
+ * How far a menu keeps from the window's edges when it has to move to fit
+ * (Radix flips or shifts it): it never sits flush, so its opening slide
+ * (`animate-fade-in`) never pokes past the window either.
+ */
+const COLLISION_PADDING = 8;
+
 const contentClass =
   "z-(--z-menu) min-w-[10rem] overflow-hidden rounded-lg bg-popover glass p-1 text-popover-foreground shadow-surface hairline animate-fade-in";
 
 export const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof Prim.Content>,
   React.ComponentPropsWithoutRef<typeof Prim.Content>
->(({ className, sideOffset = 4, ...props }, ref) => (
+>(({ className, sideOffset = 4, collisionPadding = COLLISION_PADDING, ...props }, ref) => (
   <Prim.Portal>
-    <Prim.Content ref={ref} sideOffset={sideOffset} className={cn(contentClass, className)} {...props} />
+    <Prim.Content ref={ref} sideOffset={sideOffset} collisionPadding={collisionPadding} className={cn(contentClass, className)} {...props} />
   </Prim.Portal>
 ));
 DropdownMenuContent.displayName = "DropdownMenuContent";
@@ -25,9 +32,10 @@ DropdownMenuContent.displayName = "DropdownMenuContent";
 export const DropdownMenuSubContent = React.forwardRef<
   React.ComponentRef<typeof Prim.SubContent>,
   React.ComponentPropsWithoutRef<typeof Prim.SubContent>
->(({ className, ...props }, ref) => (
+>(({ className, collisionPadding = COLLISION_PADDING, ...props }, ref) => (
   <Prim.Portal>
-    <Prim.SubContent ref={ref} className={cn(contentClass, className)} {...props} />
+    {/* Beside its row, flipped to the other side or shifted up when the window has no room there. */}
+    <Prim.SubContent ref={ref} collisionPadding={collisionPadding} avoidCollisions className={cn(contentClass, className)} {...props} />
   </Prim.Portal>
 ));
 DropdownMenuSubContent.displayName = "DropdownMenuSubContent";
