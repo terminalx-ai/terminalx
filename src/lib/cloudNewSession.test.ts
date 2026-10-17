@@ -43,6 +43,7 @@ vi.mock("@/lib/account", () => ({
 }));
 
 const flow = await import("./cloudNewSession");
+const { workspaceOpenable } = await import("@/components/layout/cloud/CloudProjectRows");
 const catalog = await import("./cloudCatalog");
 const connections = await import("./cloudConnections");
 const cloudSessions = await import("./cloudSessions");
@@ -217,14 +218,23 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
-  it("reuses a running workspace whose first prompt failed, as a local project reuses its checkout (PRO-23 Q3)", async () => {
-    // The machine is Ready and its runtime online; only the launch intent's prompt failed (e.g. no working agent login then).
-    const failedLaunch = { launch: { phase: "failed", state: "failed", sessionId: "first", tabId: "first-tab", agent: "claude" }, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } };
-    await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch })]);
-    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:alpha` } });
-    // A machine that never came up, or that needs attention, is still never a home for a new session.
-    await place([item("alpha", { repositories: [api], state: "provisioning", lastActivityAt: 50, ...failedLaunch })]);
+  it("reuses a workspace whose first prompt failed once an agent has run there, as Open workspace does (PRO-23 Q3, #499)", async () => {
+    // A failed launch starts no session; the machine is Ready.
+    const failedLaunch = { launch: { phase: "failed", state: "failed", agent: "claude" } };
+    const quiet = { runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } };
+    await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch, ...quiet })]);
+    // Nothing has run since: the failure stands, and the workspace is neither reused nor openable.
     expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    expect(workspaceOpenable(project("github.com/acme/api").workspaces[0].item)).toBe(false);
+    // An agent ran there since (its session is known here): the failure is history, for "+" and Open workspace alike.
+    catalog.cacheCloudSessions(ORG, "alpha", [{ id: "s1", projectPath: "/w", cwd: "/w", title: "Echo", created: "2026-10-17T10:00:00.000Z", modified: "2026-10-17T10:00:00.000Z", archived: false, pinned: false, tabs: [{ id: "t1", harness: "claude", title: null, model: "opus", permissionMode: "default", status: "idle", created: "2026-10-17T10:00:00.000Z", modified: "2026-10-17T10:00:00.000Z" }] }] as never, ["session/1"]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:alpha` } });
+    expect(workspaceOpenable(project("github.com/acme/api").workspaces[0].item)).toBe(true);
+    // Or its runtime reports a turn now, with nothing known here.
+    catalog.resetCloudCatalog();
+    await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 1, pendingApprovals: 0 } })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse" });
+    // A workspace that needs attention is never a home for a new session.
     await place([item("alpha", { repositories: [api], state: "attention-required", lastActivityAt: 50 })]);
     expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
   });

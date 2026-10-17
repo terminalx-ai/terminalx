@@ -19,7 +19,8 @@ import {
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
-import { bootCloudSessions, refreshCloudSessions } from "@/lib/cloudSessions";
+import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
+import { launchFailureStands } from "@/lib/cloudRowState";
 import { providerLabel } from "@/lib/organizationCompute";
 import { getSessionStore, selectCloudSession } from "@/lib/sessions";
 import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/types/target";
@@ -53,9 +54,10 @@ function usable(node: CloudWorkspaceNode): boolean {
   const { item } = node;
   // A preparation workspace (PRO-20) does one job and is stopped for good after an hour: never a home for another session.
   if (item.workspace.preparation) return false;
-  // A failed launch on a machine that is Ready failed its first prompt, not the machine: like a local checkout, it takes the next session.
-  // TODO(#505): once `launchFailureStands` (cloudRowState) is on main, decide this and `workspaceOpenable` with it, so "+" and Open workspace agree.
-  return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && (phaseOf(item) !== "failed" || item.workspace.state === "ready");
+  // A failed first prompt stops being in the way once an agent has run there (#499): like a local checkout, the
+  // workspace then takes the next session. The same rule decides whether it can be opened (`workspaceOpenable`).
+  const launchFailed = phaseOf(item) === "failed" && (!item.workspace.launch || launchFailureStands(item, { agentRan: cloudAgentRan(item) }));
+  return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && !launchFailed;
 }
 
 /**

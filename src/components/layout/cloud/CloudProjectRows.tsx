@@ -31,6 +31,7 @@ import { cloudSessionMark, useCloudDashboard } from "@/lib/cloudDashboard";
 import { archiving, checkpointText, deletion, lifecycleErrorMessage, operationFailureText } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity, type CloudActivity, type RowTone } from "@/lib/cloudRowState";
 import {
+  cloudAgentRan,
   cloudSessionStatus,
   deleteCloudSession,
   NEEDS_SECOND_CONFIRMATION,
@@ -361,13 +362,16 @@ function MoveToSectionItems({ project }: { project: CloudProject }) {
 
 /**
  * Whether a workspace's own view (its terminals, files, Git and ports) can be
- * opened: it is running or stopped, and not mid-change or failed. Opening it
- * may connect to a running machine; it never wakes a stopped one.
+ * opened: it is running or stopped, and not mid-change or failed. A failed
+ * first prompt counts only while `launchFailureStands` (no agent has run
+ * there since), the rule "+" reuses a workspace by (`planCloudStart`).
+ * Opening it may connect to a running machine; it never wakes a stopped one.
+ * `tone`: the row's own state, when it already judged the workspace's tabs.
  */
-// TODO(#505): decide a failed launch with `launchFailureStands` once it is on main, as `planCloudStart`'s reuse will.
-export function workspaceOpenable(item: CloudWorkspaceListItem, tone: RowTone = deriveCloudActivity(item).tone): boolean {
+export function workspaceOpenable(item: CloudWorkspaceListItem, tone?: RowTone): boolean {
   const { state } = item.workspace;
-  return (state === "ready" || state === "suspended") && tone !== "changing" && tone !== "attention";
+  const judged = tone ?? deriveCloudActivity(item, { agentRan: cloudAgentRan(item) }).tone;
+  return (state === "ready" || state === "suspended") && judged !== "changing" && judged !== "attention";
 }
 
 /** "Open workspace" in a menu: the workspace's view, the one way to its terminals, files, Git and ports. */
