@@ -12,6 +12,8 @@ import { useTheme } from "@mobile/ui/theme";
 /**
  * The account's cloud workspaces, by organization. This screen only reads the
  * list: opening it, pulling to refresh and coming back to it start nothing.
+ * While it is on the screen the list is read again now and then, so a
+ * workspace someone started or stopped elsewhere shows as such (#500).
  */
 export default function CloudScreen() {
   const app = useApp();
@@ -20,7 +22,10 @@ export default function CloudScreen() {
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
 
-  useFocusEffect(useCallback(() => { void catalog?.refresh(); }, [catalog]));
+  useFocusEffect(useCallback(() => {
+    void catalog?.refresh();
+    return catalog?.watch();
+  }, [catalog]));
 
   const sections = useMemo(() => snapshot.organizations.map((entry) => ({ key: entry.organization.orgId, title: entry.organization.name, error: entry.error, loaded: entry.loaded, data: entry.workspaces })), [snapshot.organizations]);
 

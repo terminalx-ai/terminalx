@@ -22,7 +22,9 @@ import { CloudWorkspaceSession } from "./workspace";
  *
  * While an open workspace is changing state (starting, stopping, or asked to
  * start by a message) the list is read every few seconds until it settles,
- * so the screen goes live by itself. Reading the list starts nothing.
+ * so the screen goes live by itself. While a workspace or the list is on the
+ * screen and settled, the list is still read now and then: someone else may
+ * start or stop it from elsewhere (#500). Reading the list starts nothing.
  */
 
 export interface CatalogOrganization {
@@ -63,6 +65,8 @@ const HELD = "terminalx.cloud.held.v1";
 /** How often the list is read while an open workspace is changing, and for how long at most. */
 export const CHANGING_POLL_MS = 3_000;
 export const CHANGING_POLL_LIMIT_MS = 10 * 60_000;
+/** How often the list is read while a workspace or the list is on the screen and nothing is changing. */
+export const WATCH_POLL_MS = 15_000;
 /** Why a workspace that was open is not available any more. */
 export type CloudAccess = "ok" | "not-shared" | "deleted" | "gone" | "unknown";
 const sessionKey = (orgId: string, workspaceId: string) => `${orgId}\0${workspaceId}`;
@@ -83,7 +87,11 @@ export class CloudCatalog {
   private paused = false;
   private readonly deleted = new Set<string>();
   private changingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the pending read is due: a sooner one replaces it, a later one waits for it. */
+  private changingDue = 0;
   private changingSince: number | null = null;
+  /** Screens showing the list itself (`watch`). */
+  private watchers = 0;
   /** One change to the held list at a time. */
   private heldChain: Promise<unknown> = Promise.resolve();
 
@@ -181,6 +189,23 @@ export class CloudCatalog {
     return session;
   }
 
+  /**
+   * A screen shows the list: it is read again now and then until the
+   * returned function is called, so a workspace started or stopped from
+   * elsewhere shows as such.
+   */
+  watch(): () => void {
+    this.watchers += 1;
+    this.followChanges();
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.watchers -= 1;
+      this.followChanges();
+    };
+  }
+
   /** The session of a workspace some screen is showing; null when none is. */
   opened(orgId: string, workspaceId: string): CloudWorkspaceSession | null {
     return this.sessions.get(sessionKey(orgId, workspaceId)) ?? null;
@@ -195,6 +220,7 @@ export class CloudCatalog {
     this.retained.set(key, (this.retained.get(key) ?? 0) + 1);
     this.session(orgId, workspaceId);
     this.publish();
+    this.followChanges();
     let done = false;
     return () => {
       if (done) return;
@@ -204,6 +230,7 @@ export class CloudCatalog {
       this.retained.delete(key);
       this.release(orgId, workspaceId);
       this.publish();
+      this.followChanges();
     };
   }
 
@@ -297,23 +324,35 @@ export class CloudCatalog {
     this.followChanges();
   }
 
-  /** Read the list again shortly while an open workspace is changing; stop when all have settled, or after the limit. */
+  /**
+   * Read the list again shortly while an open workspace is changing (until
+   * all have settled, or for the limit at most), and now and then while a
+   * workspace or the list is on the screen.
+   */
   private followChanges(): void {
-    if (this.closed || this.paused) return;
-    const changing = [...this.sessions.values()].some((session) => session.changing);
-    if (!changing) {
-      this.changingSince = null;
-      if (this.changingTimer) clearTimeout(this.changingTimer);
-      this.changingTimer = null;
-      return;
-    }
+    if (this.closed || this.paused) return this.unfollow();
     const now = (this.options.now ?? Date.now)();
-    this.changingSince ??= now;
-    if (this.changingTimer || now - this.changingSince > CHANGING_POLL_LIMIT_MS) return;
+    const changing = [...this.sessions.values()].some((session) => session.changing);
+    if (changing) this.changingSince ??= now;
+    else this.changingSince = null;
+    const fast = changing && now - (this.changingSince ?? now) <= CHANGING_POLL_LIMIT_MS;
+    const watched = this.retained.size > 0 || this.watchers > 0;
+    if (!fast && !watched) return this.unfollow();
+    const delay = fast ? CHANGING_POLL_MS : WATCH_POLL_MS;
+    if (this.changingTimer) {
+      if (this.changingDue <= now + delay) return;
+      clearTimeout(this.changingTimer);
+    }
+    this.changingDue = now + delay;
     this.changingTimer = setTimeout(() => {
       this.changingTimer = null;
       void this.refresh();
-    }, CHANGING_POLL_MS);
+    }, delay);
+  }
+
+  private unfollow(): void {
+    if (this.changingTimer) clearTimeout(this.changingTimer);
+    this.changingTimer = null;
   }
 
   private async held(): Promise<[string, string][]> {
