@@ -6,10 +6,9 @@
 // with a Tauri bridge stub, in the project view (signed in) and in the flat
 // chat list (signed out).
 //
-// Not checked since the chat-first sidebar (#484): the organization header
-// (PRO-59: name, role chip, running-slots chip and its tooltip) and the tree's
-// End key, since the sidebar lists conversations, not a tree of organizations
-// and projects, and has no tree keyboard navigation.
+// The organization header (name, running-slots chip, + and menu) is checked
+// in cloud-sections.mjs. Not checked since the chat-first sidebar (#484): the
+// tree's End key, since the sidebar has no tree keyboard navigation.
 //
 //   pnpm build && npx playwright install webkit && pnpm test:webkit-layout
 import { launch, open, report, serve, sidebar } from "./harness.mjs";

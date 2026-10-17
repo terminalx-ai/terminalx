@@ -122,15 +122,15 @@ describe("cloud organizations in the sidebar", () => {
     expect(within(acme).getAllByRole("group").map((group) => group.getAttribute("aria-label"))).toEqual(["acme/api", "image-only"]);
     const api = within(acme).getByRole("group", { name: "acme/api" });
     expect(within(api).getAllByTestId("cloud-workspace-group").map((row) => row.getAttribute("data-workspace"))).toEqual(["ws-1", "ws-2"]);
-    const fix = within(api).getByRole("button", { name: /Fix login redirect/ });
+    const fix = within(api).getByRole("button", { name: /^Fix login redirect/ });
     // A row ends in its branch; a working one shows the working sign there instead.
     expect(fix.textContent).toContain("terminalx/fix-login");
-    const adding = within(api).getByRole("button", { name: /Add tests/ });
+    const adding = within(api).getByRole("button", { name: /^Add tests/ });
     expect(adding.querySelector('[data-testid="status-working"], [aria-label="Working"]') || adding.textContent === "Add tests").toBeTruthy();
     // Beta's one workspace lists its sessions directly under the project.
     const beta = orgSection(OTHER);
     expect(within(beta).queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
-    expect(within(within(beta).getByRole("group", { name: "beta/site" })).getByRole("button", { name: /Landing page copy/ })).toBeTruthy();
+    expect(within(within(beta).getByRole("group", { name: "beta/site" })).getByRole("button", { name: /^Landing page copy/ })).toBeTruthy();
     // Nothing was woken or connected to draw this.
     expect(mocks.resume).not.toHaveBeenCalled();
     expect(mocks.workspaceConnection).not.toHaveBeenCalled();
@@ -144,9 +144,9 @@ describe("cloud organizations in the sidebar", () => {
   it("opens a session on click, starts one from a project's + for an admin only, and folds a project", async () => {
     mount();
     const api = within(orgSection(ORG)).getByRole("group", { name: "acme/api" });
-    await act(async () => { fireEvent.click(within(api).getByRole("button", { name: /Fix login redirect/ })); });
+    await act(async () => { fireEvent.click(within(api).getByRole("button", { name: /^Fix login redirect/ })); });
     expect(store.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:s1`);
-    expect(within(api).getByRole("button", { name: /Fix login redirect/ }).getAttribute("aria-current")).toBe("true");
+    expect(within(api).getByRole("button", { name: /^Fix login redirect/ }).getAttribute("aria-current")).toBe("true");
     // + on a project: the new-session form in that project. A member's project has no +.
     await act(async () => { fireEvent.click(within(api).getByRole("button", { name: "New session in acme/api" })); });
     expect(store.getSessionStore().cloudSessionPreset?.projectKey).toBe(`cloud:${ORG}:github.com/acme/api`);
@@ -155,6 +155,33 @@ describe("cloud organizations in the sidebar", () => {
     await act(async () => { fireEvent.click(within(api).getByRole("button", { name: "Collapse acme/api" })); });
     expect(within(api).getByTestId("cloud-project-sessions").getAttribute("aria-hidden")).toBe("true");
     expect(prefs.getPrefs().sidebarSections[`cloud-project:cloud:${ORG}:github.com/acme/api`]).toBe("collapsed");
+    expect(mocks.resume).not.toHaveBeenCalled();
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("narrows local and cloud alike from the View menu's Unread / Needs you, and leads back to everything", async () => {
+    const { setSidebarFilter } = await import("@/lib/sidebarFilter");
+    mount();
+    expect(screen.getByRole("button", { name: "main, Talk here" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitemradio", { name: "Needs you" }));
+      await Promise.resolve();
+    });
+    try {
+      // Nothing local waits on a person, and nothing in either organization does.
+      expect(screen.queryByRole("button", { name: "main, Talk here" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Local" })).toBeNull();
+      expect(within(orgSection(ORG)).getByTestId("cloud-org-filtered-empty").textContent).toBe("Nothing needs you.");
+      expect(screen.getByRole("button", { name: "View: showing Needs you" }).getAttribute("data-filter")).toBe("needs");
+      const empty = screen.getByTestId("sidebar-filter-empty");
+      expect(empty.textContent).toContain("Nothing needs you.");
+      await act(async () => { fireEvent.click(within(empty).getByRole("button", { name: "Show all sessions" })); });
+      expect(screen.getByRole("button", { name: "main, Talk here" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "View" })).toBeTruthy();
+    } finally {
+      act(() => setSidebarFilter("all"));
+    }
     expect(mocks.resume).not.toHaveBeenCalled();
     expect(mocks.workspaceConnection).not.toHaveBeenCalled();
   });

@@ -70,7 +70,8 @@ describe("the chat list", () => {
     expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "Talk work"]);
     // No project level: the project view is one click away.
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Group by project" }).getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    expect(screen.getByRole("menuitemradio", { name: "One list of chats" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("names the project and branch under each chat, says what a chat in no project last said, and marks the unread and waiting ones", async () => {
@@ -100,14 +101,16 @@ describe("the chat list", () => {
     expect(within(quiet!).queryByRole("img")).toBeNull();
   });
 
-  it("opens a chat on click, and switches back to the project view from the footer", async () => {
+  it("opens a chat on click, and switches back to the project view from the View menu", async () => {
     await boot([session("one", chatsPath, at(1))]);
     mount();
     fireEvent.click(within(rows()[0]!).getByRole("button", { name: "Talk one" }));
     expect(store.getSessionStore().selectedSessionId).toBe("one");
-    fireEvent.click(screen.getByRole("button", { name: "Group by project" }));
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Group by project" }));
     expect(prefs.getPrefs().sidebarLayout).toBe("simple");
-    expect(screen.getByRole("button", { name: "Group by project" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    expect(screen.getByRole("menuitemradio", { name: "Group by project" }).getAttribute("aria-checked")).toBe("true");
   });
 });
 

@@ -22,7 +22,9 @@ import { sessionStatus, type SessionEntry } from "@/types/session";
 import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
 import { PROJECT_COLORS, colorCss } from "./PixelMascot";
 import { BotFace } from "./BotFace";
-import { conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { FilteredEmpty, conversationAgent, conversationLink, conversationTitle, mixesAgents, orderConversations } from "./SessionSidebar";
+import { useSidebarFilter } from "@/lib/sidebarFilter";
+import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations } from "./CloudOrganizations";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
@@ -56,7 +58,12 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
-  const conversations = useMemo(() => orderConversations(store.sessions, store.selectedSessionId), [store.sessions, store.selectedSessionId]);
+  const filter = useSidebarFilter();
+  // Unread or Needs you: only the conversations that pass, and the open one.
+  const conversations = useMemo(
+    () => orderConversations(filter.active ? store.sessions.filter((session) => filter.shows(session.id)) : store.sessions, store.selectedSessionId),
+    [filter, store.sessions, store.selectedSessionId],
+  );
   const showAgents = useMemo(() => mixesAgents(conversations), [conversations]);
   const summaries = useSessionSummaries(conversations, true);
 
@@ -80,7 +87,10 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
-        {conversations.length === 0 ? (
+        {conversations.length === 0 && filter.active ? (
+          // Nothing local passed; the organizations below may still hold something that did.
+          filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
+        ) : conversations.length === 0 ? (
           <button
             type="button"
             onClick={newChat}
@@ -103,7 +113,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             ))}
           </ul>
         )}
-        <CloudOrganizations />
+        <CloudOrganizations onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />
+        <DevelopmentSection />
       </nav>
 
       <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">

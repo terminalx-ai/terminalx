@@ -296,20 +296,6 @@ export function selectCloudWorkspace(key: string | null) {
   set({ selectedCloudWorkspace: key, selectedSessionId: null, view: "new", newSessionPreset: null, selectedAutomationId: null });
 }
 
-/**
- * Click on a cloud project row, as a click on a local one does: it becomes the
- * focused project, and when no session is open the new-session form shows it.
- */
-export function selectCloudProjectInSidebar(projectKey: string) {
-  // The form takes the project only for someone who may start a session in it.
-  const drafting = !state.selectedSessionId && state.view === "new" && mayStartCloudSessions(getAccount().status, cloudKeyOrgId(projectKey)) === true;
-  set({
-    selectedCloudProject: projectKey,
-    navigationVersion: state.navigationVersion + 1,
-    ...(drafting ? { newSessionPreset: null, cloudSessionPreset: { projectKey } } : {}),
-  });
-}
-
 /** Open the new-session form for a cloud project, as the project row's `+` does. */
 export function startCloudSessionIn(projectKey: string) {
   // Every way into the cloud new-session form passes here. A member (or an

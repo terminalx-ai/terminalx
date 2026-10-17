@@ -13,7 +13,7 @@ import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { useAutomationStore } from "@/lib/automations";
-import { useCloudSections } from "./cloud/CloudSections";
+import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
 import { SessionSidebar } from "./SessionSidebar";
@@ -51,7 +51,7 @@ export function AppDestinations({
   const automationStore = useAutomationStore();
   // The dashboard's totals count cloud sessions too (PRO-23 CS-19), like the dashboard itself.
   const cloudSessions = useCloudDashboard();
-  const cloud = useCloudSections();
+  const cloud = useOrganizationVisibility();
   const dashboardBuckets = useMemo(() => bucketSessions([...store.sessions, ...visibleDashboardSessions(cloudSessions, cloud.visibleIds)]), [store.sessions, cloudSessions, cloud.visibleIds]);
   const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
   const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;

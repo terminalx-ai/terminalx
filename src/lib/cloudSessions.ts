@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type { RuntimeSession, RuntimeSessionPatch, WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import type { CloudWorkspaceListItem } from "@/lib/api";
-import { applyLiveTabs, closeCloudAgentTab, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
+import { applyLiveTabs, loadCloudAgents, useCloudAgents, watchLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import { cacheCloudSessions, dropCachedCloudSessions, useCloudCatalog, type CachedWorkspaceSessions } from "@/lib/cloudCatalog";
 import { onWorkspaceAccess } from "@/lib/cloudCollab";
 import { cloudTabTitle } from "@/lib/cloudRowState";
 import { onCloudConnected, retainCloudConnection, waitCloudConnected, type CloudTarget } from "@/lib/cloudConnections";
-import { closeCloudTerminal, cloudTerminalsOf, dropCloudTerminals } from "@/lib/cloudTerminals";
+import { dropCloudTerminals } from "@/lib/cloudTerminals";
 import { clearSessionTabsUnder } from "@/lib/terminal";
 import { cloudSessionKey, cloudWorkspaceKey, parseCloudWorkspaceKey, type CloudKey, type CloudWorkspaceNode } from "@/types/target";
 import type { TabStatus } from "@/types/session";
@@ -464,23 +464,3 @@ export async function refreshCloudSessions(target: CloudTarget, client: Workspac
   takeLive(target, await client.listSessions(), capabilitiesOf(client), managesOf(client));
 }
 
-/**
- * Close one terminal of a workspace: its shell ends on the VM. One that is
- * already gone (closed elsewhere, or its runtime restarted) is only dropped
- * from this window. A stopped workspace is refused, never resumed.
- */
-export function closeCloudWorkspaceTerminal(target: CloudTarget, terminalId: string): Promise<void> {
-  const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
-  const terminal = cloudTerminalsOf(key).terminals.find((candidate) => candidate.id === terminalId);
-  if (!terminal) return Promise.resolve();
-  if (terminal.gone) return closeCloudTerminal(key, null, terminalId);
-  return onRuntime({ orgId: target.orgId, workspaceId: target.workspaceId }, (client) => closeCloudTerminal(key, client, terminalId));
-}
-
-/** Close one agent tab of a session on the VM (its process stops); a stopped workspace is refused, never resumed. */
-export function closeCloudSessionTab(row: CloudSessionRow, tabId: string): Promise<void> {
-  return onRuntime(row, async (client) => {
-    await closeCloudAgentTab({ organizationId: row.orgId, workspaceId: row.workspaceId }, tabId, client);
-    if (hasLiveCloudSessions(row.orgId, row.workspaceId)) await refreshCloudSessions({ orgId: row.orgId, workspaceId: row.workspaceId }, client).catch(() => undefined);
-  });
-}

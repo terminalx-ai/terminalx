@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { TreeGroup, TreeRow, TreeToggle } from "@/components/layout/SidebarRows";
-import { useSectionCollapsed } from "@/components/layout/cloud/CloudSections";
+import { useFold } from "@/components/layout/useFold";
 import { ExecutionLocation, WorkspaceView, describe } from "./CloudWorkspaceView";
 import { workspaceTargetKey } from "@/lib/api";
 import { DEV_RUNTIME_KEY, attachDevRuntime, detachDevRuntime, devRuntimeAvailable, useDevRuntime } from "@/lib/devRuntime";
@@ -21,7 +21,8 @@ const NAME = "Development runtime";
 export function DevelopmentSection() {
   const store = useSessionStore();
   const connection = useDevRuntime();
-  const [collapsed, toggle] = useSectionCollapsed("development", true);
+  const [open, toggle] = useFold("development", false);
+  const collapsed = !open;
   const [pairingCode, setPairingCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

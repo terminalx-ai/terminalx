@@ -6,7 +6,7 @@ import type { TerminalInstance } from "@/lib/terminal";
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined) }));
 
-const { TERMINAL_POLL_MS, cloudTerminalsOf, createCloudTerminal, followCloudTerminals, resetCloudTerminals, sessionTerminals, syncCloudTerminals, workspaceTerminals } = await import("./cloudTerminals");
+const { TERMINAL_POLL_MS, cloudTerminalsOf, createCloudTerminal, followCloudTerminals, resetCloudTerminals, sessionTerminals, syncCloudTerminals } = await import("./cloudTerminals");
 
 const WS = "cloud:org-a:w1";
 
@@ -167,21 +167,18 @@ describe("a connected workspace's terminals", () => {
 });
 
 describe("where a terminal is listed", () => {
-  it("is under its session when the runtime names one (pty/2), else with the workspace's own", async () => {
+  it("is under its session when the runtime names one (pty/2)", async () => {
     const { client } = runtime([pty("p1", 1, "s1"), pty("p2", 2), pty("p3", 3, "s2"), pty("p4", 4, "deleted-session")]);
     await syncCloudTerminals(WS, client, xterm);
     const all = cloudTerminalsOf(WS).terminals;
     expect(sessionTerminals(all, "s1").map((terminal) => terminal.ptyId)).toEqual(["p1"]);
     expect(sessionTerminals(all, "s2").map((terminal) => terminal.ptyId)).toEqual(["p3"]);
-    // No session, or one the workspace no longer lists.
-    expect(workspaceTerminals(all, ["s1", "s2"]).map((terminal) => terminal.ptyId)).toEqual(["p2", "p4"]);
   });
 
-  it("is all with the workspace on a runtime older than pty/2", async () => {
+  it("is under no session on a runtime older than pty/2", async () => {
     const { client } = runtime([pty("p1", 1), pty("p2", 2)]);
     await syncCloudTerminals(WS, client, xterm);
     const all = cloudTerminalsOf(WS).terminals;
     expect(sessionTerminals(all, "s1")).toEqual([]);
-    expect(workspaceTerminals(all, ["s1"]).map((terminal) => terminal.title)).toEqual(["Terminal 1", "Terminal 2"]);
   });
 });
