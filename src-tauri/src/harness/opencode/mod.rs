@@ -695,6 +695,10 @@ mod tests {
             let _ = stream.read(&mut request);
             let body = r#"{"id":"ses_1"}"#;
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
+            // The request's body may land after the read above. Closed with it
+            // unread, the socket resets, and the reset can beat the answer.
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
         });
         let line: Value = serde_json::from_str(&perform("session_new", "POST", &format!("http://127.0.0.1:{port}/session"), Some(json!({})))).unwrap();
         server.join().unwrap();
