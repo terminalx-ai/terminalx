@@ -185,7 +185,6 @@ impl DeviceLogin {
         }
         if let Some(mut child) = inner.child.take() {
             kill_group(&mut child);
-            let _ = child.wait();
         }
         inner.lifeline = None;
         if let Some(home) = inner.home.take() {
@@ -413,20 +412,38 @@ pub fn sweep_stale(parent: &Path) {
     }
 }
 
+/// How long a killed group may take to be gone: SIGKILL is not refused, so
+/// this is only the time to be scheduled and reaped.
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// Kill the watchdog's whole group and return once none of it is left.
+/// Reaping the watchdog is not enough: the CLI is its child, not ours, and
+/// a SIGKILL is delivered when its target next runs. Until it has, the CLI
+/// can still be writing into the home about to be wiped.
 #[cfg(unix)]
 fn kill_group(child: &mut Child) {
     // The npm `codex` is a node script that starts the real binary: the whole group goes.
-    if let Ok(pid) = i32::try_from(child.id()) {
+    let group = i32::try_from(child.id()).ok();
+    if let Some(group) = group {
         unsafe {
-            libc::killpg(pid, libc::SIGKILL);
+            libc::killpg(group, libc::SIGKILL);
         }
     }
     let _ = child.kill();
+    let _ = child.wait();
+    let Some(group) = group else { return };
+    // The group lasts while any member does, dead or not yet reaped by launchd.
+    let deadline = Instant::now() + GROUP_EXIT_WAIT;
+    let left = || unsafe { libc::killpg(group, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    while group > 0 && left() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[cfg(not(unix))]
 fn kill_group(child: &mut Child) {
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Start `program login --device-auth` in a new throwaway home under
@@ -517,7 +534,6 @@ pub fn start(program: &Path, extra_args: &[String], path_env: &str, parent: &Pat
                 let Some(child) = inner.child.as_mut() else { break None };
                 if late {
                     kill_group(child);
-                    let _ = child.wait();
                     inner.child = None;
                     inner.lifeline = None;
                     if inner.phase == Phase::Waiting {
