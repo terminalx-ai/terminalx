@@ -236,6 +236,9 @@ export const ACCESS_GRACE_MS = 15_000;
  */
 export type AccessLoss = "removed" | "not-shared" | "checking" | "pending";
 
+/** Why a cloud session shows a pane instead of its tabs: lost access, or a workspace that was deleted (#502). */
+export type SessionLock = AccessLoss | "deleted";
+
 export function accessLoss(input: {
   state: WorkspaceConnectionState;
   /** The live role while connected, else the list's or the last one seen. */

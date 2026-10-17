@@ -1,9 +1,9 @@
 import { useEffect, useReducer, useState } from "react";
-import { Keyboard, Loader2, Lock, StickyNote, Users, X } from "@/icons";
+import { Keyboard, Loader2, Lock, StickyNote, Trash2, Users, X } from "@/icons";
 import type { WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
 import { leaseHeldBy, leaseLive, type TabLease } from "@terminalx/portable/workspaceCollab";
 import { Button } from "@/components/ui/button";
-import { ACCESS_REMOVED_TITLE, type AccessLoss, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
+import { ACCESS_REMOVED_TITLE, type SessionLock, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
 import { LinkedText } from "@/components/chat/LinkedText";
@@ -163,7 +163,7 @@ export function ShareBadge({ you, sharedWith, className }: { you?: { role: Works
   );
 }
 
-const LOCK_COPY: Record<AccessLoss, { title: string; body: string }> = {
+const LOCK_COPY: Record<SessionLock, { title: string; body: string }> = {
   removed: {
     title: ACCESS_REMOVED_TITLE,
     body: "It is no longer shared with you, or it was made private or deleted. Ask an organization admin or its creator if you still need it.",
@@ -180,25 +180,38 @@ const LOCK_COPY: Record<AccessLoss, { title: string; body: string }> = {
     title: "This workspace has not been shared with you yet",
     body: "The workspace list says it is shared with you, but the workspace itself has not confirmed it. It opens here as soon as it does; if it does not, ask an organization admin to share it again.",
   },
+  deleted: {
+    title: "This cloud workspace was deleted",
+    body: "Its machine, files and saved conversations are gone, and any previews that were open ended with it.",
+  },
+};
+
+const TEST_IDS: Record<SessionLock, string> = {
+  removed: "cloud-access-removed",
+  "not-shared": "cloud-not-shared",
+  checking: "cloud-access-checking",
+  pending: "cloud-access-checking",
+  deleted: "cloud-workspace-deleted",
 };
 
 /**
  * The lock pane: what someone sees instead of a workspace's content when it
  * is not shared with them (`not-shared`), when their access ended
  * (`removed`), or while the list and the runtime disagree about a new share
- * (`checking`, then `pending`). With `onBack` it replaces a whole session, so
- * it offers the way out.
+ * (`checking`, then `pending`), and in place of a session whose workspace was
+ * deleted (`deleted`). With `onBack` it replaces a whole session, so it
+ * offers the way out.
  */
-export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { kind?: AccessLoss; onBack?: () => void; onRecheck?: () => void } = {}) {
+export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { kind?: SessionLock; onBack?: () => void; onRecheck?: () => void } = {}) {
   const copy = LOCK_COPY[kind];
   return (
     <div
       className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center text-xs text-muted-foreground"
-      data-testid={kind === "removed" ? "cloud-access-removed" : kind === "not-shared" ? "cloud-not-shared" : "cloud-access-checking"}
+      data-testid={TEST_IDS[kind]}
       data-kind={kind}
       role="status"
     >
-      {kind === "checking" ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
+      {kind === "checking" ? <Loader2 className="size-4 animate-spin" /> : kind === "deleted" ? <Trash2 className="size-4" /> : <Lock className="size-4" />}
       <p className="text-sm text-foreground">{copy.title}</p>
       <p className="max-w-md">{copy.body}</p>
       {(onBack || onRecheck) && (
@@ -208,7 +221,7 @@ export function NotSharedNotice({ kind = "not-shared", onBack, onRecheck }: { ki
               Back
             </Button>
           )}
-          {onRecheck && kind !== "checking" && (
+          {onRecheck && kind !== "checking" && kind !== "deleted" && (
             <Button size="sm" variant="ghost" onClick={onRecheck}>
               Check again
             </Button>

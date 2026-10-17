@@ -8,7 +8,7 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { applyCloudSnapshot, refreshCloudCatalog, resumeCloudWorkspace, unarchiveCloudWorkspace } from "@/lib/cloudCatalog";
 import { LIFECYCLE_ADMIN_REASON, VISIBILITY_ADMIN_REASON, workspaceAuthority } from "@/lib/cloudCollab";
 import { closeCloudConnection } from "@/lib/cloudConnections";
-import { lifecycleErrorMessage } from "@/lib/cloudLifecycle";
+import { lifecycleErrorMessage, noteCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { useSchedulesOffer } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
@@ -150,7 +150,8 @@ export function WorkspaceLifecycleDialog({ request, onClose }: { request: Lifecy
         onClose();
         // The action performed, not the one the dialog was opened for: the person may have switched.
         if (done.action === "delete") {
-          // Deleted: nothing is left to connect to.
+          // Deleted: nothing is left to connect to, and a session still open on it says so.
+          noteCloudWorkspaceDeleted(request.item.workspace.orgId, request.item.workspace.id);
           closeCloudConnection({ orgId: request.item.workspace.orgId, workspaceId: request.item.workspace.id });
         } else if (snapshot?.workspace) {
           // Stopping or archiving: the row and the header say so at once. An open

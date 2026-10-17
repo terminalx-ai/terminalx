@@ -1224,8 +1224,8 @@ describe("a workspace no longer in this person's list", () => {
     // Made private again: the next list no longer has them.
     await ingestCloudList({ workspaces: [] }, ORG, 20, 20);
     expect(getCloudCatalog().orgs[ORG].workspaces).toEqual([]);
-    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api" });
-    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo" });
+    expect(lastKnownWorkspace("w-repo")).toEqual({ name: "api work", project: "acme/api", provider: "box" });
+    expect(lastKnownWorkspace("w-blank")).toEqual({ name: "share-demo", project: "share-demo", provider: "box" });
     // Nothing of it is saved for the next launch.
     expect(JSON.stringify(serializeCatalog(getCloudCatalog()))).not.toContain("share-demo");
   });
