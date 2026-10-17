@@ -33,18 +33,20 @@ export function rememberPeople(people: { userId: string; name?: string | null; d
  * must not offer someone removed since (#501).
  */
 export function loadRoster(options: { fresh?: boolean } = {}): Promise<OrganizationMember[]> {
-  if (options.fresh) roster = null;
-  roster ??= Promise.resolve()
+  if (roster && !options.fresh) return roster;
+  const pending: Promise<OrganizationMember[]> = Promise.resolve()
     .then(() => organizationMembers.list())
     .then((listed) => {
       rememberPeople(listed?.members ?? []);
       return listed?.members ?? [];
     })
     .catch(() => {
-      roster = null;
+      // Only this read is forgotten: a newer one that started meanwhile stays.
+      if (roster === pending) roster = null;
       return [];
     });
-  return roster;
+  roster = pending;
+  return pending;
 }
 
 /** Rosters of organizations other than the default one, per organization, for this session. */

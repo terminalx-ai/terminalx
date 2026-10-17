@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Loader2, Lock, UserPlus, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -156,10 +156,17 @@ export function CloudShareDialog({
   }, [workspaceId, orgId]);
 
   // Read again on every open, not once per session: someone removed from the organization since is not offered (#501).
+  // Only the newest read is shown: an older answer that arrives late never replaces it.
+  const membersRead = useRef(0);
   const loadMembers = useCallback(() => {
+    const read = ++membersRead.current;
+    const latest = () => read === membersRead.current;
     setRosterError(null);
-    if (defaultOrg) return void loadRoster({ fresh: true }).then(setMembers);
-    void loadRosterIn(orgId!, { fresh: true }).then(setMembers, (e: unknown) => setRosterError(codeOf(e)));
+    if (defaultOrg) return void loadRoster({ fresh: true }).then((next) => latest() && setMembers(next));
+    void loadRosterIn(orgId!, { fresh: true }).then(
+      (next) => latest() && setMembers(next),
+      (e: unknown) => latest() && setRosterError(codeOf(e)),
+    );
   }, [defaultOrg, orgId]);
 
   /** A refusal that says the person left the organization: what is shown of them is out of date, so both lists are read again. */
