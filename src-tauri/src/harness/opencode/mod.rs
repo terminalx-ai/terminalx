@@ -678,8 +678,14 @@ mod tests {
     #[test]
     fn a_request_waits_for_a_server_that_is_still_starting() {
         use std::io::{Read, Write};
-        // A port nothing listens on yet.
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // A port nothing listens on yet. Below every system's ephemeral range,
+        // so while it is free no other test's port-0 bind or outgoing
+        // connection is handed it before the server below takes it.
+        let start = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as usize;
+        let port = (0..12_000)
+            .map(|i| 20_000 + ((start + i) % 12_000) as u16)
+            .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+            .unwrap();
         let server = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();

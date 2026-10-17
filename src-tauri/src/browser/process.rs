@@ -1,6 +1,6 @@
 //! Running one agent-browser client invocation to completion under a bound.
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -31,19 +31,12 @@ pub struct RunOutput {
 pub fn run(binary: &Path, args: &[&str], env: &ProcessEnvironment, options: RunOptions<'_>) -> std::io::Result<RunOutput> {
     const MAX_OUTPUT: usize = 64 * 1024 * 1024;
     let mut command = Command::new(binary);
-    command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.args(args).stdin(stdin_from(options.stdin)?).stdout(Stdio::piped()).stderr(Stdio::piped());
     command.env("PATH", crate::binpath::login_path());
     for (k, v) in &env.vars {
         command.env(k, v);
     }
     let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Some(text) = options.stdin {
-            // A client that exits early closes its end; that is not our error.
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        drop(stdin);
-    }
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
     let out_buf = Arc::new(Mutex::new(Vec::new()));
@@ -80,6 +73,20 @@ pub fn run(binary: &Path, args: &[&str], env: &ProcessEnvironment, options: RunO
     let stdout = String::from_utf8_lossy(&out_buf.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
     let stderr = String::from_utf8_lossy(&err_buf.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
     Ok(RunOutput { stdout, stderr, status: status.and_then(|s| s.code()), timed_out })
+}
+
+/// What the client reads on stdin, from a file rather than a pipe. On macOS
+/// a pipe is made close-on-exec only after it is created, so a process
+/// another thread spawns in between inherits its write end, and a client
+/// reading to the end waits for that process to exit, past the bound (as
+/// `collects_output_and_feeds_stdin` did in CI). An unlinked file is opened
+/// close-on-exec at once and ends where the text does.
+fn stdin_from(text: Option<&str>) -> std::io::Result<Stdio> {
+    let Some(text) = text else { return Ok(Stdio::null()) };
+    let mut file = tempfile::tempfile()?;
+    file.write_all(text.as_bytes())?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(file.into())
 }
 
 fn read_capped(mut reader: impl Read, cap: usize, into: &Mutex<Vec<u8>>) {

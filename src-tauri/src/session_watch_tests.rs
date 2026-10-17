@@ -35,7 +35,16 @@ struct Observer {
 impl SessionObserver for Observer {
     fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
-        let rt = rt.try_lock().expect("completion must release the tab lock before calling the observer");
+        // Another thread may hold the lock for a moment, as the input thread a
+        // typed `/effort` starts does. Only the caller holding it never lets go.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let rt = loop {
+            match rt.try_lock() {
+                Ok(rt) => break rt,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(MOMENT),
+                Err(_) => panic!("completion must release the tab lock before calling the observer"),
+            }
+        };
         if let Engine::Cli(p) = &rt.engine {
             assert!(p.answered.is_empty(), "the turn's tool answers must be forgotten before notifying the observer");
         }
