@@ -217,6 +217,18 @@ describe("new session in a cloud project", () => {
     expect(mocks.api.cloudWorkspaceCreate).not.toHaveBeenCalled();
   });
 
+  it("reuses a running workspace whose first prompt failed, as a local project reuses its checkout (PRO-23 Q3)", async () => {
+    // The machine is Ready and its runtime online; only the launch intent's prompt failed (e.g. no working agent login then).
+    const failedLaunch = { launch: { phase: "failed", state: "failed", sessionId: "first", tabId: "first-tab", agent: "claude" }, runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 } };
+    await place([item("alpha", { repositories: [api], lastActivityAt: 50, ...failedLaunch })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toMatchObject({ kind: "reuse", node: { key: `cloud:${ORG}:alpha` } });
+    // A machine that never came up, or that needs attention, is still never a home for a new session.
+    await place([item("alpha", { repositories: [api], state: "provisioning", lastActivityAt: 50, ...failedLaunch })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+    await place([item("alpha", { repositories: [api], state: "attention-required", lastActivityAt: 50 })]);
+    expect(flow.planCloudStart(project("github.com/acme/api"))).toEqual({ kind: "create" });
+  });
+
   it("follows the local worktree preference when it is off", async () => {
     await place([item("recent", { repositories: [api] })]);
     await flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, { ...request, useWorktree: false });

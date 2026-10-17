@@ -398,7 +398,8 @@ export function useCloudWorkspaceSessions(node: CloudWorkspaceNode, options: { l
     sessions,
     capabilities: liveList?.capabilities ?? cached?.capabilities ?? null,
     manage: liveList ? liveList.manage : node.item.workspace.you ? node.item.workspace.you.role === "manager" : true,
-    known: !!liveList || !!cached || agents.tabs.length > 0 || !!node.item.workspace.launch?.sessionId,
+    // A tab known only from a checkpoint names no session yet (an admin can list them where a member cannot): it is not knowing the sessions.
+    known: !!liveList || !!cached || agents.tabs.some((tab) => !tab.placeholder && !!tab.info.sessionId) || !!node.item.workspace.launch?.sessionId,
   };
 }
 

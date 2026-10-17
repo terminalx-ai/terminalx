@@ -47,6 +47,7 @@ import { RightPanel } from "@/components/layout/RightPanel";
 import { CommandPalette } from "@/components/command/CommandPalette";
 import { bootAccount } from "@/lib/account";
 import { bootCloudCatalog } from "@/lib/cloudCatalog";
+import { bootCloudSelection } from "@/lib/cloudSelection";
 import { bootPairing } from "@/lib/pairing";
 import { bootTerminalPerf } from "@/lib/terminalPerf";
 import { bootCloudControl } from "@/lib/cloudControl";
@@ -98,6 +99,7 @@ export function AppShell() {
     void bootStatus();
     void bootAccount();
     bootCloudCatalog();
+    bootCloudSelection();
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();

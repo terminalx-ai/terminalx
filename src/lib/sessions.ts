@@ -123,6 +123,12 @@ export function getSessionStore() {
   return state;
 }
 
+/** Told after every change, outside React. */
+export function subscribeSessionStore(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 let booted = false;
 const workspaceRefreshVersions = new Map<string, number>();
 export async function bootSessions() {

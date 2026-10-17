@@ -34,6 +34,7 @@ import {
   POLL_MAX_MS,
 } from "./cloudAgents";
 import { getTabLog } from "./agentEvents";
+import { getDraft, setDraft } from "./drafts";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -491,6 +492,38 @@ describe("cloud agent tabs store", () => {
     expect(configuresLive(fakeClient(true, { authority: "participate" }))).toBe(false);
     // No member list yet: the attachment decides, as before sharing existed.
     expect(configuresLive(fakeClient(true, { you: { userId: "u-a", role: "none", canApprove: false, listed: false } }))).toBe(true);
+  });
+
+  it("keeps an unsent composer draft across a restart, and sending clears it (PRO-23)", async () => {
+    vi.useFakeTimers();
+    applyLiveTabs(scope, [tabInfo()]);
+    setDraft("t-1", "half a thought");
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 1);
+    expect(backend.cache["t-1"]!.draft).toBe("half a thought");
+
+    // The app restarts: nothing is in memory, and the cache brings the draft back.
+    resetCloudAgents();
+    setDraft("t-1", "");
+    await loadCloudAgents(scope);
+    expect(getDraft("t-1")).toBe("half a thought");
+
+    // Sent (the composer empties it): the cache forgets it.
+    setDraft("t-1", "");
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 1);
+    expect(backend.cache["t-1"]!.draft).toBeUndefined();
+  });
+
+  it("a draft from the cache never replaces what is typed in the tab already, and a tab the runtime lists while the cache is read still gets it back", async () => {
+    backend.cache["t-1"] = { tab: tabInfo(), events: [], cursor: null, checkpoint: null, unread: false, completed: false, draft: "from before", updatedAt: 1 };
+    backend.cache["t-2"] = { tab: tabInfo({ tabId: "t-2" }), events: [], cursor: null, checkpoint: null, unread: false, completed: false, draft: "older", updatedAt: 1 };
+    const loading = loadCloudAgents(scope);
+    applyLiveTabs(scope, [tabInfo()]);
+    setDraft("t-2", "typed since");
+    await loading;
+    expect(getDraft("t-1")).toBe("from before");
+    expect(getDraft("t-2")).toBe("typed since");
+    setDraft("t-1", "");
+    setDraft("t-2", "");
   });
 
   it("keeps an offline setting across a restart, and a change made while a send is queued goes with the next one", async () => {

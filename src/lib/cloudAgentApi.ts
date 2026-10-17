@@ -113,6 +113,8 @@ export interface CachedTab {
   completed: boolean;
   /** Model, effort or mode chosen offline, still to go with the next send. */
   pendingConfig?: { model?: string; effort?: string | null; mode?: string } | null;
+  /** Unsent composer text. */
+  draft?: string;
   updatedAt: number;
 }
 

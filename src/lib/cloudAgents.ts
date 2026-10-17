@@ -18,6 +18,7 @@ import {
 } from "@/lib/cloudAgentApi";
 import type { AgentEvent } from "@/types/events";
 import { DEFAULT_PERMISSION_MODE } from "@/lib/models";
+import { getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
 
 /**
  * Agent tabs of cloud workspaces (PRO-22), per organization and workspace.
@@ -57,6 +58,8 @@ export interface CloudAgentTab {
    * for that reason. Shown until the next change or message; not saved.
    */
   settingsIgnored?: boolean;
+  /** Unsent composer text, kept with the cache so a relaunch brings it back. */
+  draft?: string;
 }
 
 export interface CloudAgentsSnapshot {
@@ -303,6 +306,7 @@ async function saveNow(s: Store, tabId: string) {
     unread: tab.unread,
     completed: tab.completed,
     pendingConfig: tab.pendingConfig,
+    draft: tab.draft || undefined,
     updatedAt: Date.now(),
   };
   try {
@@ -310,6 +314,29 @@ async function saveNow(s: Store, tabId: string) {
   } catch {
     // The cache is only a head start; the checkpoint and the runtime hold the truth.
   }
+}
+
+/**
+ * What is typed in a cloud tab's composer and not sent (`@/lib/drafts`, by
+ * tab id) is saved with the tab's cache, this account's and dropped with the
+ * workspace, so a relaunch brings it back. Nothing is published: the
+ * composer holds the text it shows.
+ */
+function keepDraft(tabId: string, text: string) {
+  for (const s of stores.values()) {
+    const tab = s.tabs.get(tabId);
+    if (!tab || (tab.draft ?? "") === text) continue;
+    tab.draft = text;
+    scheduleSave(s, tabId);
+  }
+}
+subscribeDrafts(keepDraft);
+
+/** A draft read back from the cache, unless something is typed in the tab already. */
+function restoreDraft(tab: CloudAgentTab, draft: string | undefined) {
+  if (!draft || getDraft(tab.tabId)) return;
+  tab.draft = draft;
+  setDraft(tab.tabId, draft);
 }
 
 /** Write pending cache entries now (e.g. before leaving the page). */
@@ -340,7 +367,10 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
     try {
       const cached = await cloudAgentApi.cacheLoad(scope);
       for (const [tabId, entry] of Object.entries(cached?.tabs ?? {})) {
-        if (!entry?.tab || s.tabs.has(tabId)) continue;
+        const known = s.tabs.get(tabId);
+        // A tab the live runtime listed first still gets back what was being typed in it.
+        if (known) restoreDraft(known, entry?.draft);
+        if (!entry?.tab || known) continue;
         const tab = newTab(entry.tab, "cache");
         tab.cursor = entry.cursor ?? null;
         tab.checkpoint = entry.checkpoint ?? null;
@@ -349,6 +379,7 @@ export function loadCloudAgents(scope: CloudAgentScope): Promise<void> {
         tab.pendingConfig = entry.pendingConfig ?? null;
         if (entry.events?.length) tab.historyRead = true;
         s.tabs.set(tabId, tab);
+        restoreDraft(tab, entry.draft);
         if (entry.tab.sessionId && entry.events?.length) mergeTabEvents(entry.tab.sessionId, tabId, entry.events);
       }
     } catch (error) {

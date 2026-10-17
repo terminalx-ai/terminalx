@@ -53,7 +53,8 @@ function usable(node: CloudWorkspaceNode): boolean {
   const { item } = node;
   // A preparation workspace (PRO-20) does one job and is stopped for good after an hour: never a home for another session.
   if (item.workspace.preparation) return false;
-  return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && phaseOf(item) !== "failed";
+  // A failed launch on a machine that is Ready failed its first prompt, not the machine: like a local checkout, it takes the next session.
+  return !deletion(item) && !archiving(item) && item.workspace.state !== "attention-required" && (phaseOf(item) !== "failed" || item.workspace.state === "ready");
 }
 
 /**

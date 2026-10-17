@@ -13,6 +13,7 @@ import { AGENT_LOGIN_PLACE } from "@/lib/cloudCreate";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { managesOrganization } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
+import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
 import { buildTranscript } from "@/lib/transcript";
 import { usePickerModels } from "@/lib/cloudModels";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
@@ -518,7 +519,9 @@ function CloudAgentPane({
   const collabLive = connected && collab.available && !!you;
   const noteCount = collab.notes[tab.tabId]?.notes.length ?? 0;
   const log = useTabLog(info.sessionId, tab.tabId);
-  const [draft, setDraft] = useState("");
+  // The tab's draft, the session view's too; kept with the tab's cache across a relaunch.
+  const draft = useDraft(tab.tabId);
+  const setDraft = (text: string) => setTabDraft(tab.tabId, text);
   const [error, setError] = useState<string | null>(null);
   const [loadingCheckpoint, setLoadingCheckpoint] = useState(false);
   const exited = info.process === "exited";
