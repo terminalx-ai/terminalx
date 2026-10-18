@@ -47,7 +47,7 @@ import { assertLocal } from "@/types/target";
 const LOCAL_PATH_ARGS = ["cwd", "path", "root", "projectPath", "sessionId", "from", "to", "dir", "file"] as const;
 
 /** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
-function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
+export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
   if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
     const record = args as Record<string, unknown>;
     try {
@@ -1937,6 +1937,8 @@ export const fs = {
 
 // ---- issues (GitHub through gh, Linear through its API)
 export interface IssueLabel {
+  /** What `issueOps.setLabels` takes: the id on Linear, the name on GitHub. Lists leave it out. */
+  id?: string | null;
   name: string;
   color: string;
 }

@@ -1,0 +1,26 @@
+{
+  "github": [
+    { "kind": "not_signed_in", "printed": "To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token." },
+    { "kind": "not_signed_in", "printed": "gh: Bad credentials (HTTP 401)\n{\"message\":\"Bad credentials\",\"documentation_url\":\"https://docs.github.com/rest\",\"status\":\"401\"}" },
+    { "kind": "missing_scope", "printed": "gh: Resource not accessible by personal access token (HTTP 403)\n{\"message\":\"Resource not accessible by personal access token\",\"status\":\"403\"}" },
+    { "kind": "missing_scope", "printed": "gh: This API operation needs the \"repo\" scope. To request it, run:  gh auth refresh -h github.com -s repo" },
+    { "kind": "forbidden", "printed": "gh: Must have admin rights to Repository. (HTTP 403)\n{\"message\":\"Must have admin rights to Repository.\",\"status\":\"403\"}" },
+    { "kind": "not_found", "printed": "gh: Not Found (HTTP 404)\n{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest/issues/issues#get-an-issue\",\"status\":\"404\"}" },
+    { "kind": "conflict", "printed": "gh: Conflict (HTTP 409)\n{\"message\":\"Conflict\",\"status\":\"409\"}" },
+    { "kind": "rate_limited", "printed": "gh: API rate limit exceeded for user ID 12. (HTTP 403)\n{\"message\":\"API rate limit exceeded for user ID 12.\",\"status\":\"403\"}" },
+    { "kind": "rate_limited", "printed": "gh: You have exceeded a secondary rate limit. (HTTP 403)" },
+    { "kind": "network", "printed": "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com" },
+    { "kind": "invalid", "printed": "gh: Validation Failed (HTTP 422)\n{\"message\":\"Validation Failed\",\"errors\":[{\"resource\":\"Issue\",\"code\":\"invalid\",\"field\":\"assignees\"}],\"status\":\"422\"}" }
+  ],
+  "linear": [
+    { "kind": "not_signed_in", "status": 400, "body": { "errors": [{ "message": "Authentication required, not authenticated", "extensions": { "code": "AUTHENTICATION_ERROR", "type": "authentication error", "userPresentableMessage": "You need to authenticate to access this operation." } }] } },
+    { "kind": "not_signed_in", "status": 401, "body": null },
+    { "kind": "missing_scope", "status": 400, "body": { "errors": [{ "message": "Invalid scope: `write` required", "extensions": { "code": "FORBIDDEN", "type": "forbidden", "userPresentableMessage": "This API key is read-only." } }] } },
+    { "kind": "forbidden", "status": 400, "body": { "errors": [{ "message": "Forbidden", "extensions": { "code": "FORBIDDEN", "type": "forbidden", "userPresentableMessage": "You don't have permission to edit issues in this team." } }] } },
+    { "kind": "not_found", "status": 200, "body": { "data": null, "errors": [{ "message": "Entity not found: Issue", "extensions": { "code": "INVALID_INPUT", "type": "invalid input", "userPresentableMessage": "Could not find referenced Issue." } }] } },
+    { "kind": "conflict", "status": 409, "body": { "errors": [{ "message": "Conflict", "extensions": { "code": "CONFLICT" } }] } },
+    { "kind": "rate_limited", "status": 400, "body": { "errors": [{ "message": "Rate limit exceeded", "extensions": { "code": "RATELIMITED", "type": "ratelimited" } }] } },
+    { "kind": "rate_limited", "status": 429, "body": null },
+    { "kind": "network", "status": 503, "body": null }
+  ]
+}

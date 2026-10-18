@@ -1,0 +1,30 @@
+{
+  "url": "https://api.github.com/repos/acme/widgets/issues/41",
+  "html_url": "https://github.com/acme/widgets/issues/41",
+  "id": 1000041,
+  "node_id": "I_kwDOExample41",
+  "number": 41,
+  "title": "Repair the login timeout",
+  "user": { "login": "kim", "id": 11, "node_id": "U_kim", "avatar_url": "https://avatars.githubusercontent.com/u/11?v=4", "type": "User" },
+  "labels": [
+    { "id": 1, "node_id": "LA_bug", "name": "bug", "color": "d73a4a", "default": true, "description": "Something isn't working" },
+    { "id": 2, "node_id": "LA_raccoon", "name": "raccoon", "color": "1D76DB", "default": false, "description": null }
+  ],
+  "state": "closed",
+  "locked": false,
+  "assignee": { "login": "sam", "id": 12, "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4", "type": "User" },
+  "assignees": [
+    { "login": "sam", "id": 12, "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4", "type": "User" },
+    { "login": "alex", "id": 13, "avatar_url": "https://avatars.githubusercontent.com/u/13?v=4", "type": "User" },
+    { "login": "robin", "id": 14, "avatar_url": "https://avatars.githubusercontent.com/u/14?v=4", "type": "User" }
+  ],
+  "milestone": null,
+  "comments": 2,
+  "created_at": "2026-09-01T09:00:00Z",
+  "updated_at": "2026-09-02T10:00:00Z",
+  "closed_at": "2026-09-02T10:00:00Z",
+  "author_association": "MEMBER",
+  "body": "The session expires while a command is running.",
+  "closed_by": { "login": "kim", "id": 11, "avatar_url": "https://avatars.githubusercontent.com/u/11?v=4", "type": "User" },
+  "state_reason": "not_planned"
+}
