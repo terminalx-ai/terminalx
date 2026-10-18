@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setPrefs } from "@/lib/prefs";
 import type { Issue } from "@/lib/api";
 import type { IssueCreate, IssueProvider } from "@/lib/issueOps";
-import { clearIssueDraft, emptyIssueDraft, getIssueDraft, setIssueDraft } from "@/lib/issueDrafts";
+import { clearIssueDraft, emptyIssueDraft, getIssueDraft, setIssueDraft } from "@/lib/newIssueDrafts";
 import { createIssueOpsMock, githubOptionsFixture, issueOpError, issueTemplatesFixture, type IssueOpsMock } from "@/test/issueOpsMock";
 import type { Project } from "@/types/session";
 

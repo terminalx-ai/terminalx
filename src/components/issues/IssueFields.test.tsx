@@ -27,6 +27,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/chat/Dictation", () => ({
+  DictationStatus: () => null,
+  MicButton: () => null,
+  useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
+}));
 vi.mock("@/components/session/SessionAgentControls", () => ({ SessionAgentControls: () => null }));
 vi.mock("@/lib/useSessionAgent", () => ({ useSessionAgent: () => ({ harness: sessionStore.harnesses[0], modelId: null, effort: null }) }));
 vi.mock("@/lib/issuePipeline", async (original) => ({

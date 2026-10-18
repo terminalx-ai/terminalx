@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Ellipsis, Loader2, Pencil, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -170,7 +170,7 @@ export interface IssueThreadControls {
  * cursor pages from the oldest), the most recent `THREAD_WINDOW` are shown,
  * and "Show earlier comments" uncovers older ones a window at a time.
  * `refreshKey` reads it again, keeping what is on screen until the answer
- * comes. `footer` is rendered under the comments once they are read, and
+ * comes. `footer` is rendered under the comments, read or not, and
  * `onComments` hears the thread whenever it changes (for the agent's prompt).
  * Render one per issue (`key` it by provider and id), so nothing in flight
  * for one issue lands on another.
@@ -222,7 +222,11 @@ export function IssueCommentThread({
 
   const replace = (next: IssueComment) => setComments((all) => all?.map((each) => (each.id === next.id ? next : each)) ?? all);
   const remove = (id: string) => setComments((all) => all?.filter((each) => each.id !== id) ?? all);
+  const read = useRef(comments);
+  read.current = comments;
   const append = useCallback((comment: IssueComment) => {
+    // A thread that couldn't be read is read again rather than shown as this one comment.
+    if (!read.current) return setReloads((count) => count + 1);
     setComments((all) => [...(all ?? []).filter((each) => each.id !== comment.id), comment]);
     setShown((count) => count + 1);
   }, []);
@@ -278,7 +282,8 @@ export function IssueCommentThread({
           </ol>
         </>
       )}
-      {comments && footer?.({ append, reload })}
+      {/* Always there, so a reload never takes the box (and its focus) away, and a thread that couldn't be read still takes a comment. */}
+      {footer?.({ append, reload })}
     </section>
   );
 }

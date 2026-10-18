@@ -25,6 +25,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/chat/Dictation", () => ({
+  DictationStatus: () => null,
+  MicButton: () => null,
+  useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationShortcuts: vi.fn(),
+}));
 vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
@@ -191,6 +197,23 @@ describe("the GitHub status picker", () => {
     expect((await screen.findByRole("alert")).textContent).toMatch(/Couldn't find that issue/);
     await screen.findByRole("button", { name: "Status: Open" });
     expect(within(rowOf("Repair the login timeout")).getByText("Open")).toBeTruthy();
+  });
+});
+
+describe("Close with comment", () => {
+  it("posts the comment, then closes the GitHub issue: the header and the row show it, the status waiting on it", async () => {
+    const trigger = await openIssue("github", "Repair the login timeout", "Open");
+    const box = (await screen.findByRole("textbox", { name: "Comment" })) as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "Shipped in 1.4" } });
+    const release = holdNext("issue_set_state");
+    fireEvent.click(screen.getByRole("button", { name: "Close with comment" }));
+    await waitFor(() => expect(trigger.hasAttribute("disabled")).toBe(true));
+    release();
+    await screen.findByRole("button", { name: "Status: Closed as completed" });
+    expect(within(rowOf("Repair the login timeout")).getByText("Closed")).toBeTruthy();
+    expect(stateCalls()).toEqual([{ kind: "close", reason: "completed" }]);
+    expect(tracker.issues.get("github:41")?.comments.at(-1)?.body).toBe("Shipped in 1.4");
+    expect(screen.queryByRole("button", { name: "Close with comment" })).toBeNull();
   });
 });
 

@@ -19,8 +19,9 @@ import { AvatarStack, PeoplePicker, PeoplePickerAction } from "@/components/issu
 import { LabelChooser, LabelDot, PRIORITY_NAMES, PriorityIcon, useEscapeCancels } from "@/components/issues/IssueFields";
 import { groupWorkflowStates } from "@/components/issues/IssueStatusPicker";
 import { errorMessage, issues, type IssueTeam } from "@/lib/api";
-import { clearIssueDraft, draftHasContent, emptyIssueDraft, getIssueDraft, issueDraftRevision, setIssueDraft, type IssueDraft } from "@/lib/issueDrafts";
+import { clearIssueDraft, draftHasContent, emptyIssueDraft, getIssueDraft, issueDraftRevision, setIssueDraft, type IssueDraft } from "@/lib/newIssueDrafts";
 import { isIssueOpError, issueOps, type IssueCreate, type IssueDetails, type IssueOptions, type IssueProvider, type IssueTemplate, type IssueUser } from "@/lib/issueOps";
+import { issueViewer } from "@/lib/issueViewer";
 import { bindingText } from "@/lib/shortcuts";
 
 /**
@@ -30,7 +31,7 @@ import { bindingText } from "@/lib/shortcuts";
  * people and labels the detail pane's pickers offer. A GitHub repository's
  * Markdown templates fill the description.
  *
- * What is typed is the project's and provider's draft (`issueDrafts`): it
+ * What is typed is the project's and provider's draft (`newIssueDrafts`): it
  * outlives the form, and is cleared only once the issue is created. A failed
  * create keeps it all and says why.
  *
@@ -82,7 +83,7 @@ const CLOCK_SLACK_MS = 2 * 60_000;
  * Linear's is the team's, most recently updated first.
  */
 export async function findJustCreated(projectPath: string, provider: IssueProvider, input: IssueCreate, viewer: IssueUser | null | undefined, since: number): Promise<IssueDetails | null> {
-  const me = viewer ?? (await issueOps.viewer(projectPath, provider).catch(() => null));
+  const me = viewer ?? (await issueViewer(projectPath, provider).catch(() => null));
   if (!me) return null;
   const rows = await issues.list(projectPath, provider, { teamId: provider === "linear" ? input.teamId : null });
   for (const row of rows.filter((each) => each.title.trim() === input.title).slice(0, 3)) {

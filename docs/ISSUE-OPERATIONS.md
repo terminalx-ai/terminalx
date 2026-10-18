@@ -12,7 +12,7 @@ interface. The UI never branches on the provider's name; it reads
 | `src-tauri/src/commands.rs` | The `issue_*` Tauri commands |
 | `src/lib/issueOps.ts` | The TypeScript types and one wrapper per command |
 | `src/test/issueOpsMock.ts` | A fake backend with fixture issues for component tests |
-| `src/components/issues/NewIssueForm.tsx` | The new-issue form; its draft is kept per project and provider by `src/lib/issueDrafts.ts` |
+| `src/components/issues/NewIssueForm.tsx` | The new-issue form; its draft is kept per project and provider by `src/lib/newIssueDrafts.ts` |
 
 ## Commands
 
