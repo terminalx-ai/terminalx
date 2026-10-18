@@ -86,6 +86,8 @@ mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
 mod issue_pipeline;
+#[cfg(feature = "desktop")]
+mod issue_ops;
 mod issues;
 #[cfg(feature = "desktop")]
 mod installation;
@@ -657,6 +659,18 @@ pub fn run() {
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_act,
             commands::issue_details,
+            commands::issue_comments,
+            commands::issue_options,
+            commands::issue_comment_add,
+            commands::issue_comment_edit,
+            commands::issue_comment_delete,
+            commands::issue_set_state,
+            commands::issue_set_assignees,
+            commands::issue_set_labels,
+            commands::issue_set_priority,
+            commands::issue_set_title,
+            commands::issue_set_description,
+            commands::issue_create,
             commands::linear_status,
             commands::linear_set_api_key,
             commands::linear_teams,

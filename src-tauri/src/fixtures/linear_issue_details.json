@@ -1,0 +1,21 @@
+{
+  "data": {
+    "issue": {
+      "id": "8a1c2e9e-0000-4000-8000-000000000042",
+      "identifier": "ENG-42",
+      "number": 42,
+      "title": "Fix login timeout",
+      "description": "Users get logged out.",
+      "url": "https://linear.app/acme/issue/ENG-42/fix-login-timeout",
+      "createdAt": "2026-09-01T09:00:00.000Z",
+      "updatedAt": "2026-09-02T10:00:00.000Z",
+      "priority": 2,
+      "state": { "id": "state-started", "name": "In Progress", "type": "started", "color": "#f2c94c" },
+      "labels": { "nodes": [{ "id": "label-bug", "name": "Bug", "color": "#eb5757" }] },
+      "assignee": { "id": "user-sam", "name": "sam", "displayName": "Sam", "avatarUrl": "https://example.com/sam.png" },
+      "creator": { "id": "user-kim", "name": "kim", "displayName": "Kim", "avatarUrl": null },
+      "team": { "id": "team-eng", "key": "ENG", "name": "Engineering" },
+      "comments": { "nodes": [{ "body": "Seen it on staging too.", "createdAt": "2026-09-01T12:00:00.000Z", "user": { "displayName": "Alex", "name": "alex" } }] }
+    }
+  }
+}

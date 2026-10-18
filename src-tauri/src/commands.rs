@@ -3170,15 +3170,90 @@ pub async fn issues_list(project_path: String, provider: String, filter: crate::
     .map_err(err)?
 }
 
+// Managing one issue: the contract is `crate::issue_ops` (mirrored in
+// src/lib/issueOps.ts). A failure is an `IssueOpError` with a kind and a fixed
+// message, and every write answers with the issue as re-read from the provider.
+
+type IssueOpResult<T> = Result<T, crate::issue_ops::IssueOpError>;
+
+async fn issue_op<T: Send + 'static>(
+    project_path: String,
+    provider: crate::issue_ops::Provider,
+    op: impl FnOnce(&crate::issue_ops::Target) -> IssueOpResult<T> + Send + 'static,
+) -> IssueOpResult<T> {
+    tauri::async_runtime::spawn_blocking(move || op(&crate::issue_ops::Target::resolve(Path::new(&project_path), provider)?))
+        .await
+        .map_err(|_| crate::issue_ops::IssueOpError::new(crate::issue_ops::IssueOpErrorKind::Other, provider))?
+}
+
 #[tauri::command]
-pub async fn issue_details(project_path: String, provider: String, id: String) -> CmdResult<crate::issues::Issue> {
-    tauri::async_runtime::spawn_blocking(move || match provider.as_str() {
-        "github" => crate::issues::github_details(Path::new(&project_path), &id).map_err(err),
-        "linear" => crate::issues::linear_details(&linear_key()?, &id).map_err(err),
-        other => Err(format!("unknown issue provider {other}")),
-    })
-    .await
-    .map_err(err)?
+pub async fn issue_details(project_path: String, provider: crate::issue_ops::Provider, id: String) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::details(target, &id)).await
+}
+
+#[tauri::command]
+pub async fn issue_comments(project_path: String, provider: crate::issue_ops::Provider, id: String, cursor: Option<String>) -> IssueOpResult<crate::issue_ops::CommentsPage> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::comments(target, &id, cursor.as_deref())).await
+}
+
+/// What the pickers offer: for an issue's repository or team (`id`), or for
+/// a new Linear issue in `team_id`. Cached per repository or team; `refresh`
+/// reads them again.
+#[tauri::command]
+pub async fn issue_options(project_path: String, provider: crate::issue_ops::Provider, id: Option<String>, team_id: Option<String>, refresh: Option<bool>) -> IssueOpResult<crate::issue_ops::IssueOptions> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::options(target, id.as_deref(), team_id.as_deref(), refresh.unwrap_or(false))).await
+}
+
+#[tauri::command]
+pub async fn issue_comment_add(project_path: String, provider: crate::issue_ops::Provider, id: String, body: String) -> IssueOpResult<crate::issue_ops::IssueComment> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::comment_add(target, &id, &body)).await
+}
+
+#[tauri::command]
+pub async fn issue_comment_edit(project_path: String, provider: crate::issue_ops::Provider, id: String, comment_id: String, body: String) -> IssueOpResult<crate::issue_ops::IssueComment> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::comment_edit(target, &id, &comment_id, &body)).await
+}
+
+#[tauri::command]
+pub async fn issue_comment_delete(project_path: String, provider: crate::issue_ops::Provider, id: String, comment_id: String) -> IssueOpResult<()> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::comment_delete(target, &id, &comment_id)).await
+}
+
+#[tauri::command]
+pub async fn issue_set_state(project_path: String, provider: crate::issue_ops::Provider, id: String, change: crate::issue_ops::StateChange) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_state(target, &id, &change)).await
+}
+
+/// The whole set: Linear user ids (one or none), GitHub logins (up to 10).
+#[tauri::command]
+pub async fn issue_set_assignees(project_path: String, provider: crate::issue_ops::Provider, id: String, assignees: Vec<String>) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_assignees(target, &id, &assignees)).await
+}
+
+/// The whole set: Linear label ids, GitHub label names.
+#[tauri::command]
+pub async fn issue_set_labels(project_path: String, provider: crate::issue_ops::Provider, id: String, labels: Vec<String>) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_labels(target, &id, &labels)).await
+}
+
+#[tauri::command]
+pub async fn issue_set_priority(project_path: String, provider: crate::issue_ops::Provider, id: String, priority: u8) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_priority(target, &id, priority)).await
+}
+
+#[tauri::command]
+pub async fn issue_set_title(project_path: String, provider: crate::issue_ops::Provider, id: String, title: String) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_title(target, &id, &title)).await
+}
+
+#[tauri::command]
+pub async fn issue_set_description(project_path: String, provider: crate::issue_ops::Provider, id: String, edit: crate::issue_ops::DescriptionEdit) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::set_description(target, &id, &edit)).await
+}
+
+#[tauri::command]
+pub async fn issue_create(project_path: String, provider: crate::issue_ops::Provider, input: crate::issue_ops::IssueCreate) -> IssueOpResult<crate::issue_ops::IssueDetails> {
+    issue_op(project_path, provider, move |target| crate::issue_ops::create(target, &input)).await
 }
 
 #[tauri::command]

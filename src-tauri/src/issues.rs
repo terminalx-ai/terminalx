@@ -20,6 +20,10 @@ const LIMIT: usize = 60;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueLabel {
+    /// What `issue_set_labels` takes: the label's id on Linear, its name on
+    /// GitHub. Lists leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     /// Hex without the hash, or empty when the provider gives none.
     pub color: String,
@@ -169,7 +173,7 @@ pub fn parse_github_issue(v: &Value) -> Issue {
             a.iter()
                 .filter_map(|l| {
                     let name = l["name"].as_str()?;
-                    Some(IssueLabel { name: name.into(), color: l["color"].as_str().unwrap_or("").trim_start_matches('#').into() })
+                    Some(IssueLabel { id: None, name: name.into(), color: l["color"].as_str().unwrap_or("").trim_start_matches('#').into() })
                 })
                 .collect()
         })
@@ -312,13 +316,13 @@ pub fn parse_linear_teams(data: &Value) -> Vec<IssueTeam> {
 
 const ISSUE_FIELDS: &str = "id identifier number title description url updatedAt priority state { name type color } labels { nodes { name color } } assignee { name displayName avatarUrl } team { id key name }";
 
-fn parse_linear_issue(n: &Value) -> Option<Issue> {
+pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
     let id = n["id"].as_str()?;
     let labels = n["labels"]["nodes"]
         .as_array()
         .map(|a| {
             a.iter()
-                .filter_map(|l| Some(IssueLabel { name: l["name"].as_str()?.into(), color: l["color"].as_str().unwrap_or("").trim_start_matches('#').into() }))
+                .filter_map(|l| Some(IssueLabel { id: l["id"].as_str().map(String::from), name: l["name"].as_str()?.into(), color: l["color"].as_str().unwrap_or("").trim_start_matches('#').into() }))
                 .collect()
         })
         .unwrap_or_default();
@@ -382,8 +386,13 @@ pub fn linear_details(key: &str, id: &str) -> Result<Issue> {
     let query = format!("query($id: String!) {{ issue(id: $id) {{ {ISSUE_FIELDS} comments(first: 20) {{ nodes {{ body createdAt user {{ displayName name }} }} }} }} }}");
     let data = graphql(key, &query, json!({"id": id}))?;
     let mut issue = parse_linear_issue(&data["issue"]).ok_or_else(|| anyhow!("Linear did not return that issue."))?;
-    // Comments ride along under the description so the agent sees the discussion too.
-    if let Some(comments) = data["issue"]["comments"]["nodes"].as_array().filter(|c| !c.is_empty()) {
+    append_linear_comments(&mut issue, &data["issue"]);
+    Ok(issue)
+}
+
+/// Comments ride along under the description so the agent sees the discussion too.
+pub(crate) fn append_linear_comments(issue: &mut Issue, node: &Value) {
+    if let Some(comments) = node["comments"]["nodes"].as_array().filter(|c| !c.is_empty()) {
         let mut body = issue.body.clone().unwrap_or_default();
         body.push_str("\n\n---\n\n## Comments\n");
         for c in comments {
@@ -392,7 +401,6 @@ pub fn linear_details(key: &str, id: &str) -> Result<Issue> {
         }
         issue.body = Some(body);
     }
-    Ok(issue)
 }
 
 /// A Linear state type that means the issue is finished with, one way or another.
