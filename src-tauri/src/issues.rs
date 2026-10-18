@@ -411,9 +411,18 @@ pub fn linear_discussion(node: &Value) -> Option<String> {
     for comment in newest_first {
         let who = comment["user"]["displayName"].as_str().or_else(|| comment["user"]["name"].as_str()).or_else(|| comment["botActor"]["name"].as_str()).unwrap_or("someone");
         let when = comment["createdAt"].as_str().and_then(|at| at.get(..10)).map(|day| format!(" ({day})")).unwrap_or_default();
-        let entry = format!("**{who}**{when}: {}", comment["body"].as_str().unwrap_or("").trim());
+        let mut entry = format!("**{who}**{when}: {}", comment["body"].as_str().unwrap_or("").trim());
         if !kept.is_empty() && size + entry.len() > DISCUSSION_CHARS {
             break;
+        }
+        // Even the newest comment is cut to the cap.
+        if entry.len() > DISCUSSION_CHARS {
+            let mut end = DISCUSSION_CHARS;
+            while !entry.is_char_boundary(end) {
+                end -= 1;
+            }
+            entry.truncate(end);
+            entry.push_str(&format!("\n\n…the rest of this comment is cut; read it at {}", node["url"].as_str().unwrap_or("the issue")));
         }
         size += entry.len();
         kept.push(entry);
@@ -592,6 +601,12 @@ mod tests {
         let text = linear_discussion(&crowded).unwrap();
         assert!(text.contains("…2 earlier comments omitted; read them at https://linear.app/acme/issue/ENG-1"), "{text}");
         assert!(text.contains("**Alex**") && !text.contains("**Kim**") && !text.contains("first"));
+
+        // A single huge comment is cut too.
+        let huge = json!({"url": "https://linear.app/acme/issue/ENG-1", "comments": {"nodes": [comment("Alex", &"é".repeat(DISCUSSION_CHARS), "2026-09-03T10:00:00.000Z")], "pageInfo": {"hasNextPage": false}}});
+        let text = linear_discussion(&huge).unwrap();
+        assert!(text.len() < DISCUSSION_CHARS + 200, "{}", text.len());
+        assert!(text.ends_with("…the rest of this comment is cut; read it at https://linear.app/acme/issue/ENG-1\n"));
 
         let more = json!({"url": "u", "comments": {"nodes": [comment("Alex", "latest", "2026-09-03T10:00:00.000Z")], "pageInfo": {"hasNextPage": true}}});
         assert!(linear_discussion(&more).unwrap().contains("…earlier comments omitted; read them at u"));

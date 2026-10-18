@@ -178,6 +178,9 @@ pub struct LabelOption {
     /// The Linear label group this one sits in, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// That group's id: groups can share a name, and an issue takes one label per group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     /// A Linear label group itself, which issues are not given.
     #[serde(default)]
     pub is_group: bool,

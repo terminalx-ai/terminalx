@@ -105,6 +105,8 @@ export interface LabelOption {
   description?: string | null;
   /** The Linear label group this one sits in, by name. */
   group?: string | null;
+  /** That group's id: groups can share a name, and an issue takes one label per group. */
+  groupId?: string | null;
   /** A Linear label group itself, which issues are not given. */
   isGroup: boolean;
 }

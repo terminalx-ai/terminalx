@@ -140,22 +140,40 @@ pub fn parse_comment(node: &Value, viewer_id: Option<&str>) -> Option<IssueComme
     })
 }
 
-/// A page as the `comments` query answers it. Linear hands `last:` back
-/// oldest first; they are sorted anyway, and one more than a page was asked
-/// for so a full page knows whether another follows.
-pub fn parse_comments_page(data: &Value) -> CommentsPage {
+/// A comments cursor: the creation time and id of the last comment shown.
+/// Comments are ordered by both, so two made in the same millisecond are
+/// neither skipped nor shown twice.
+fn cursor_of(comment: &IssueComment) -> String {
+    format!("{}|{}", comment.created_at, comment.id)
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Option<(&str, &str)> {
+    let cursor = cursor.map(str::trim).filter(|cursor| !cursor.is_empty())?;
+    Some(cursor.split_once('|').unwrap_or((cursor, "")))
+}
+
+/// A page as the `comments` query answers it, for the page after `cursor`.
+/// Linear hands `last:` back oldest first; they are sorted anyway. The query
+/// takes comments from the cursor's own millisecond on, so the ones already
+/// shown are dropped here. A full answer means more may follow.
+pub fn parse_comments_page(data: &Value, cursor: Option<&str>) -> CommentsPage {
     let viewer = data["viewer"]["id"].as_str();
-    let mut comments: Vec<IssueComment> = data["issue"]["comments"]["nodes"].as_array().into_iter().flatten().filter_map(|node| parse_comment(node, viewer)).collect();
-    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    let more = comments.len() > COMMENTS_PAGE;
+    let nodes = data["issue"]["comments"]["nodes"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut comments: Vec<IssueComment> = nodes.iter().filter_map(|node| parse_comment(node, viewer)).collect();
+    comments.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+    if let Some((at, id)) = parse_cursor(cursor) {
+        comments.retain(|comment| (comment.created_at.as_str(), comment.id.as_str()) > (at, id));
+    }
+    let full = nodes.len() > COMMENTS_PAGE;
+    let more = comments.len() > COMMENTS_PAGE || (full && comments.len() == COMMENTS_PAGE);
     comments.truncate(COMMENTS_PAGE);
-    let next_cursor = if more { comments.last().map(|comment| comment.created_at.clone()) } else { None };
+    let next_cursor = if more { comments.last().map(cursor_of) } else { None };
     CommentsPage { comments, next_cursor }
 }
 
 /// Oldest first. Linear lists comments newest first and its `before:`
 /// cursors walk that order, so a page is the oldest `COMMENTS_PAGE` created
-/// after the cursor, which is the creation time of the last comment shown.
+/// from the last comment shown on.
 pub fn comments(key: &str, id: &str, cursor: Option<&str>) -> OpResult<CommentsPage> {
     let query = format!(
         "query($id: String!, $last: Int!, $filter: CommentFilter) {{ viewer {{ id }} issue(id: $id) {{ comments(last: $last, filter: $filter) {{ nodes {{ {COMMENT_FIELDS} }} }} }} }}"
@@ -164,12 +182,13 @@ pub fn comments(key: &str, id: &str, cursor: Option<&str>) -> OpResult<CommentsP
     if data["issue"].is_null() {
         return Err(IssueOpError::new(IssueOpErrorKind::NotFound, LINEAR));
     }
-    Ok(parse_comments_page(&data))
+    Ok(parse_comments_page(&data, cursor))
 }
 
 pub fn comments_variables(id: &str, cursor: Option<&str>) -> Value {
-    let filter = cursor.filter(|cursor| !cursor.is_empty()).map(|after| json!({"createdAt": {"gt": after}}));
-    json!({"id": id, "last": COMMENTS_PAGE + 1, "filter": filter})
+    let filter = parse_cursor(cursor).map(|(at, _)| json!({"createdAt": {"gte": at}}));
+    // One more than a page, plus room for a comment that shares the cursor's millisecond.
+    json!({"id": id, "last": COMMENTS_PAGE + 2, "filter": filter})
 }
 
 /// The comment a `commentCreate` or `commentUpdate` answers with. Only its
@@ -247,13 +266,22 @@ fn options_key(key: &str, team_id: &str) -> (u64, String) {
     (hasher.finish(), team_id.to_string())
 }
 
-const OPTIONS_QUERY: &str = "query($teamId: String!, $team: ID) { \
-    team(id: $teamId) { id states(first: 100) { nodes { id name type color position } } members(first: 250) { nodes { id name displayName avatarUrl active } } } \
-    issueLabels(first: 250, filter: { or: [{ team: { id: { eq: $team } } }, { team: { null: true } }] }) { nodes { id name color description isGroup parent { id name } } } }";
+const TEAM_QUERY: &str = "query($teamId: String!) { \
+    team(id: $teamId) { id ancestors { id } states(first: 100) { nodes { id name type color position } } members(first: 250) { nodes { id name displayName avatarUrl active } } } }";
 
-/// What `OPTIONS_QUERY` answers: the team's states in its order, its active
-/// members by name, and the labels its issues can take (its own and the
-/// workspace's), each group before the labels in it.
+/// The labels a team's issues can take: its own, its parent teams' and the workspace's.
+const LABELS_QUERY: &str = "query($teams: [ID!]) { \
+    issueLabels(first: 250, filter: { or: [{ team: { id: { in: $teams } } }, { team: { null: true } }] }) { nodes { id name color description isGroup parent { id name } } } }";
+
+/// The teams whose labels `team` (as `TEAM_QUERY` answers it) inherits, itself first.
+pub fn label_teams(team: &Value) -> Vec<String> {
+    let ancestors = team["ancestors"].as_array().into_iter().flatten().filter_map(|ancestor| ancestor["id"].as_str());
+    team["id"].as_str().into_iter().chain(ancestors).map(String::from).collect()
+}
+
+/// What `TEAM_QUERY` (`team`) and `LABELS_QUERY` (`issueLabels`) answer: the
+/// team's states in its order, its active members by name, and the labels
+/// its issues can take, each group before the labels in it.
 pub fn parse_options(data: &Value) -> IssueOptions {
     let mut states: Vec<WorkflowState> = data["team"]["states"]["nodes"]
         .as_array()
@@ -283,11 +311,16 @@ pub fn parse_options(data: &Value) -> IssueOptions {
                 color: label["color"].as_str().unwrap_or("").trim_start_matches('#').into(),
                 description: label["description"].as_str().filter(|text| !text.is_empty()).map(String::from),
                 group: label["parent"]["name"].as_str().map(String::from),
+                group_id: label["parent"]["id"].as_str().map(String::from),
                 is_group: label["isGroup"].as_bool().unwrap_or(false),
             })
         })
         .collect();
-    labels.sort_by_key(|label| (label.group.clone().unwrap_or_else(|| label.name.clone()).to_lowercase(), !label.is_group, label.name.to_lowercase()));
+    // A group and its labels sort together under the group's name; groups that share a name stay apart by id.
+    labels.sort_by_key(|label| {
+        let (group, group_id) = if label.is_group { (&label.name, Some(&label.id)) } else { (label.group.as_ref().unwrap_or(&label.name), label.group_id.as_ref()) };
+        (group.to_lowercase(), group_id.cloned(), !label.is_group, label.name.to_lowercase())
+    });
     IssueOptions { provider: LINEAR, states, close_reasons: vec![], members, labels, priorities: linear_priorities(), capabilities: IssueCapabilities::of(LINEAR) }
 }
 
@@ -307,11 +340,12 @@ pub fn options(key: &str, id: Option<&str>, team_id: Option<&str>, refresh: bool
             return Ok(cached.clone());
         }
     }
-    let data = request(key, OPTIONS_QUERY, json!({"teamId": team_id, "team": team_id}))?;
-    if data["team"].is_null() {
+    let team = request(key, TEAM_QUERY, json!({"teamId": team_id}))?;
+    if team["team"].is_null() {
         return Err(IssueOpError::new(IssueOpErrorKind::NotFound, LINEAR));
     }
-    let options = parse_options(&data);
+    let labels = request(key, LABELS_QUERY, json!({"teams": label_teams(&team["team"])}))?;
+    let options = parse_options(&json!({"team": team["team"], "issueLabels": labels["issueLabels"]}));
     OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(cache_key, options.clone());
     Ok(options)
 }
@@ -374,7 +408,7 @@ pub fn set_title(key: &str, id: &str, title: &str) -> OpResult<IssueDetails> {
 /// so this reads first; the window between the read and the write is one
 /// round trip.
 pub fn set_description(key: &str, id: &str, edit: &DescriptionEdit) -> OpResult<IssueDetails> {
-    if edit.expected_description.is_some() || edit.expected_updated_at.is_some() {
+    if edit.expected_description.is_some() || edit.expected_updated_at.as_deref().is_some_and(|at| !at.trim().is_empty()) {
         let data = request(key, "query($id: String!) { issue(id: $id) { updatedAt description } }", json!({"id": id}))?;
         if data["issue"].is_null() {
             return Err(IssueOpError::new(IssueOpErrorKind::NotFound, LINEAR));
@@ -393,8 +427,8 @@ pub fn conflicts(current: &Value, edit: &DescriptionEdit) -> bool {
     let normal = |text: &str| text.replace("\r\n", "\n").trim_end().to_string();
     match (edit.expected_description.as_deref(), edit.expected_updated_at.as_deref()) {
         (Some(expected), _) => normal(current["description"].as_str().unwrap_or("")) != normal(expected),
-        (None, Some(expected)) => changed_since(current["updatedAt"].as_str().unwrap_or(""), expected),
-        (None, None) => false,
+        (None, Some(expected)) if !expected.trim().is_empty() => changed_since(current["updatedAt"].as_str().unwrap_or(""), expected),
+        (None, _) => false,
     }
 }
 

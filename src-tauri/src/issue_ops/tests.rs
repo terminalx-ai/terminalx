@@ -87,8 +87,8 @@ fn the_contract_types_round_trip_in_camel_case() {
         close_reasons: vec![],
         members: vec![user],
         labels: vec![
-            LabelOption { id: "g1".into(), name: "Area".into(), color: "".into(), description: None, group: None, is_group: true },
-            LabelOption { id: "l1".into(), name: "Frontend".into(), color: "5e6ad2".into(), description: Some("UI".into()), group: Some("Area".into()), is_group: false },
+            LabelOption { id: "g1".into(), name: "Area".into(), color: "".into(), description: None, group: None, group_id: None, is_group: true },
+            LabelOption { id: "l1".into(), name: "Frontend".into(), color: "5e6ad2".into(), description: Some("UI".into()), group: Some("Area".into()), group_id: Some("g1".into()), is_group: false },
         ],
         priorities: linear_priorities(),
         capabilities: IssueCapabilities::of(Provider::Linear),
@@ -96,6 +96,7 @@ fn the_contract_types_round_trip_in_camel_case() {
     assert_eq!(options["provider"], "linear");
     assert_eq!(options["states"][0]["type"], "unstarted");
     assert_eq!(options["labels"][0]["isGroup"], true);
+    assert_eq!(options["labels"][1]["groupId"], "g1");
     assert_eq!(options["priorities"][1], json!({"value": 1, "label": "Urgent"}));
     let github = round_trip(&IssueOptions {
         provider: Provider::Github,

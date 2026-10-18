@@ -28,7 +28,7 @@ fn details_read_the_description_alone() {
 
 #[test]
 fn a_comments_page_is_oldest_first_and_only_the_viewers_own_are_editable() {
-    let page = parse_comments_page(&fixture(include_str!("../fixtures/linear_issue_comments.json"))["data"]);
+    let page = parse_comments_page(&fixture(include_str!("../fixtures/linear_issue_comments.json"))["data"], None);
     assert_eq!(page.next_cursor, None);
     let bodies: Vec<_> = page.comments.iter().map(|comment| comment.body.as_str()).collect();
     assert_eq!(bodies, ["Seen it on staging too.", "I can take this.", "Linked pull request opened."]);
@@ -44,19 +44,48 @@ fn a_comments_page_is_oldest_first_and_only_the_viewers_own_are_editable() {
     assert_eq!(mine.url.as_deref(), Some("https://linear.app/acme/issue/ENG-5/fix-login-timeout#comment-0fd9dc42"));
 }
 
+fn comment_node(id: &str, at: &str) -> Value {
+    json!({"id": id, "body": id, "createdAt": at, "user": {"id": VIEWER, "displayName": "sam"}})
+}
+
+fn answered(nodes: Vec<Value>) -> Value {
+    json!({"viewer": {"id": VIEWER}, "issue": {"comments": {"nodes": nodes}}})
+}
+
 #[test]
 fn comments_page_forward_from_the_last_one_shown() {
-    let node = |n: usize| json!({"id": format!("c{n}"), "body": format!("comment {n}"), "createdAt": format!("2026-09-01T10:{:02}:00.000Z", n), "user": {"id": VIEWER, "displayName": "sam"}});
-    // Linear answers `last:` oldest first; one more than a page says another follows.
-    let full = json!({"viewer": {"id": VIEWER}, "issue": {"comments": {"nodes": (0..=COMMENTS_PAGE).rev().map(node).collect::<Vec<_>>()}}});
-    let page = parse_comments_page(&full);
+    let node = |n: usize| comment_node(&format!("c{n:02}"), &format!("2026-09-01T10:{n:02}:00.000Z"));
+    // Linear answers `last:` oldest first; more than a page says another follows.
+    let page = parse_comments_page(&answered((0..=COMMENTS_PAGE + 1).rev().map(node).collect()), None);
     assert_eq!(page.comments.len(), COMMENTS_PAGE);
-    assert_eq!(page.comments[0].id, "c0");
+    assert_eq!(page.comments[0].id, "c00");
     assert_eq!(page.comments.last().unwrap().id, "c49");
-    assert_eq!(page.next_cursor.as_deref(), Some("2026-09-01T10:49:00.000Z"));
+    assert_eq!(page.next_cursor.as_deref(), Some("2026-09-01T10:49:00.000Z|c49"));
     let next = comments_variables("ENG-5", page.next_cursor.as_deref());
-    assert_eq!(next, json!({"id": "ENG-5", "last": COMMENTS_PAGE + 1, "filter": {"createdAt": {"gt": "2026-09-01T10:49:00.000Z"}}}));
+    assert_eq!(next, json!({"id": "ENG-5", "last": COMMENTS_PAGE + 2, "filter": {"createdAt": {"gte": "2026-09-01T10:49:00.000Z"}}}));
     assert_eq!(comments_variables("ENG-5", None)["filter"], Value::Null);
+    // The next answer starts with the cursor's own comment, which is not shown again.
+    let last = parse_comments_page(&answered(vec![node(49), node(50), node(51)]), page.next_cursor.as_deref());
+    assert_eq!(last.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(), ["c50", "c51"]);
+    assert_eq!(last.next_cursor, None);
+}
+
+#[test]
+fn comments_made_in_the_same_millisecond_are_neither_skipped_nor_repeated() {
+    let at = "2026-09-01T10:00:00.000Z";
+    // A page that ends between two comments of one millisecond.
+    let mut nodes: Vec<Value> = (0..COMMENTS_PAGE - 1).map(|n| comment_node(&format!("a{n:02}"), &format!("2026-09-01T09:{n:02}:00.000Z"))).collect();
+    nodes.extend([comment_node("tie-1", at), comment_node("tie-2", at), comment_node("tie-3", at)]);
+    let first = parse_comments_page(&answered(nodes.iter().take(COMMENTS_PAGE + 2).cloned().collect()), None);
+    assert_eq!(first.comments.last().unwrap().id, "tie-1");
+    let cursor = first.next_cursor.unwrap();
+    assert_eq!(cursor, format!("{at}|tie-1"));
+    // `gte` brings back the whole millisecond; only the ones not yet shown are kept.
+    let second = parse_comments_page(&answered(nodes[COMMENTS_PAGE - 1..].to_vec()), Some(&cursor));
+    assert_eq!(second.comments.iter().map(|comment| comment.id.as_str()).collect::<Vec<_>>(), ["tie-2", "tie-3"]);
+    assert_eq!(second.next_cursor, None);
+    // A cursor of only a time (as before) still works.
+    assert_eq!(parse_comments_page(&answered(vec![comment_node("later", "2026-09-02T00:00:00.000Z")]), Some(at)).comments.len(), 1);
 }
 
 #[test]
@@ -70,13 +99,35 @@ fn options_list_states_in_order_active_members_and_grouped_labels() {
     assert_eq!(options.states[0].color, "bec2c8");
     assert_eq!(options.states[6].position, 1002.0);
     assert_eq!(options.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(), ["robin", "sam"]);
-    let labels: Vec<_> = options.labels.iter().map(|label| (label.name.as_str(), label.group.as_deref(), label.is_group)).collect();
-    assert_eq!(labels, [("Area", None, true), ("Frontend", Some("Area"), false), ("Bug", None, false), ("Feature", None, false), ("Improvement", None, false)]);
+    let labels: Vec<_> = options.labels.iter().map(|label| (label.name.as_str(), label.group.as_deref(), label.group_id.as_deref(), label.is_group)).collect();
+    assert_eq!(
+        labels,
+        [("Area", None, None, true), ("Frontend", Some("Area"), Some("label-group-area"), false), ("Bug", None, None, false), ("Feature", None, None, false), ("Improvement", None, None, false)]
+    );
     assert_eq!(options.labels[1].description.as_deref(), Some("UI work"));
     assert_eq!(options.labels[2].color, "EB5757");
     assert_eq!(options.priorities.iter().map(|priority| priority.value).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
     assert!(options.close_reasons.is_empty());
     assert_eq!(options.capabilities, IssueCapabilities::of(Provider::Linear));
+}
+
+#[test]
+fn groups_that_share_a_name_keep_their_labels_apart() {
+    let label = |id: &str, name: &str, group: Option<(&str, &str)>, is_group: bool| json!({"id": id, "name": name, "color": "#000000", "isGroup": is_group, "parent": group.map(|(id, name)| json!({"id": id, "name": name}))});
+    let data = json!({"team": {}, "issueLabels": {"nodes": [
+        label("x2", "Web", Some(("g2", "Area")), false),
+        label("g1", "Area", None, true),
+        label("x1", "Web", Some(("g1", "Area")), false),
+        label("g2", "Area", None, true),
+    ]}});
+    let order: Vec<_> = parse_options(&data).labels.into_iter().map(|label| (label.id, label.group_id)).collect();
+    assert_eq!(order, [("g1".into(), None), ("x1".into(), Some("g1".into())), ("g2".into(), None), ("x2".into(), Some("g2".into()))]);
+}
+
+#[test]
+fn a_sub_team_takes_its_parent_teams_labels() {
+    assert_eq!(label_teams(&json!({"id": "team-web", "ancestors": [{"id": "team-eng"}, {"id": "team-all"}]})), ["team-web", "team-eng", "team-all"]);
+    assert_eq!(label_teams(&json!({"id": "team-eng", "ancestors": []})), ["team-eng"]);
 }
 
 #[test]
@@ -157,6 +208,8 @@ fn only_a_changed_description_conflicts_when_the_editor_says_what_it_started_fro
     assert!(conflicts(&current, &started(None)));
     assert!(!conflicts(&json!({"updatedAt": "2026-10-18T07:04:57.658Z"}), &started(None)));
     assert!(!conflicts(&current, &DescriptionEdit::default()));
+    // A blank `expectedUpdatedAt` is no expectation, not a mismatch.
+    assert!(!conflicts(&current, &DescriptionEdit { expected_updated_at: Some("  ".into()), ..DescriptionEdit::default() }));
     assert!(!conflicts(&json!({"description": null}), &DescriptionEdit { expected_description: Some("".into()), ..DescriptionEdit::default() }));
 }
 
