@@ -109,7 +109,7 @@ export const linearOptionsFixture = (): IssueOptions => ({
   labels: [
     { id: "label-bug", name: "Bug", color: "eb5757", isGroup: false },
     { id: "label-area", name: "Area", color: "", isGroup: true },
-    { id: "label-frontend", name: "Frontend", color: "5e6ad2", group: "Area", isGroup: false },
+    { id: "label-frontend", name: "Frontend", color: "5e6ad2", group: "Area", groupId: "label-area", isGroup: false },
   ],
   priorities: [
     { value: 0, label: "No priority" },

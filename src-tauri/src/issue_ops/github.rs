@@ -236,6 +236,7 @@ fn label_option(v: &Value) -> Option<LabelOption> {
         color: v["color"].as_str().unwrap_or("").trim_start_matches('#').into(),
         description: v["description"].as_str().filter(|text| !text.is_empty()).map(String::from),
         group: None,
+        group_id: None,
         is_group: false,
     })
 }

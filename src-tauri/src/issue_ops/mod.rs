@@ -90,10 +90,8 @@ impl IssueCapabilities {
 /// An issue read whole. It carries every field of the list's [`Issue`] (so
 /// callers of the older `issue_details` keep working) plus the rest.
 ///
-/// `body` keeps its older meaning for now: on Linear it still has the first
-/// comments pasted under the description so a session started from it sees
-/// the discussion. `description` is the description alone; the comments
-/// ticket moves the discussion out of `body`.
+/// `description` is the description alone. On Linear neither it nor `body`
+/// carries comments; they are read through `issue_comments`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueDetails {
@@ -179,6 +177,9 @@ pub struct LabelOption {
     /// The Linear label group this one sits in, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// That group's id: groups can share a name, and an issue takes one label per group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     /// A Linear label group itself, which issues are not given.
     #[serde(default)]
     pub is_group: bool,
@@ -211,7 +212,6 @@ pub struct IssueOptions {
 }
 
 /// Linear's priorities, in its own order and words.
-#[allow(dead_code)] // Read by `linear::options` once it lands.
 pub fn linear_priorities() -> Vec<PriorityOption> {
     ["No priority", "Urgent", "High", "Medium", "Low"].iter().enumerate().map(|(value, label)| PriorityOption { value: value as u8, label: (*label).into() }).collect()
 }
@@ -236,7 +236,7 @@ pub enum StateChange {
 /// A comment or any other change also moves `updatedAt`, so with
 /// `expected_description` only a changed description is a conflict;
 /// without it, any change since `expected_updated_at` is.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DescriptionEdit {
     pub description: String,
@@ -312,10 +312,6 @@ impl IssueOpError {
     /// A kind with a sentence of its own. `&'static` so no reply or secret can reach it.
     pub fn with_message(kind: IssueOpErrorKind, message: &'static str) -> Self {
         IssueOpError { kind, message: message.into() }
-    }
-
-    pub fn not_implemented(provider: Provider) -> Self {
-        Self::new(IssueOpErrorKind::NotImplemented, provider)
     }
 }
 

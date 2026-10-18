@@ -197,6 +197,50 @@ terminalx issues list --project <project> [--provider github|linear] \
 GitHub uses the reader's authenticated `gh` CLI. Linear uses the key configured in TerminalX →
 Settings → Integrations. The default provider is GitHub.
 
+Read and update one issue through the same credentials:
+
+```text
+terminalx issues view <issue> [--comments] [--provider github|linear] [--project <project>] --json
+terminalx issues comment <issue> --body <text>|--body-file <path> [--project <project>] --json
+terminalx issues status <issue> --to <state> [--reason completed|not_planned] [--project <project>] --json
+terminalx issues assign <issue> (--to <user>... | --me | --none) [--project <project>] --json
+terminalx issues label <issue> [--add <label>...] [--remove <label>...] [--project <project>] --json
+terminalx issues create --project <project> [--provider github|linear] --title <text> \
+  [--body <text>|--body-file <path>] [--team <team>] [--assignee <user>...] [--label <label>...] \
+  [--state <state>] [--priority none|urgent|high|medium|low] --json
+```
+
+`<issue>` is what `sessions create --issue` takes: `'#433'` or `433`, `ENG-42`, or the issue's
+GitHub or Linear URL. Without `--project` a GitHub number belongs to the project of the session
+the command runs in (or of the working directory). `--body-file -` reads standard input; prefer
+it, or a file, for a comment with quotes, backticks or several lines. `--to`, `--assignee`,
+`--add`, `--remove` and `--label` may be repeated; `--to` and `--assignee` also take
+`alice,bob`. A label is never split at a comma.
+
+- `status --to` names one of the issue's states exactly, ignoring case: a Linear team's
+  workflow state (`"In Review"`), or `open` / `closed` on GitHub, where `--reason` says why it
+  closed (default `completed`). A name that matches no state, or more than one, is an error
+  listing the valid states. Pick from that list; never guess a near match.
+- GitHub takes up to 10 assignees and has no priority or workflow states; Linear takes one
+  assignee.
+- `--json` results use the app's own issue types: `view` answers `{"issue": …}` with
+  `"comments"` added under `--comments`; `comment` answers `{"comment": …}`; every other write
+  answers `{"issue": …}`, re-read from GitHub or Linear after the change.
+
+Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
+other people see it and may notify them, so TerminalX asks the person in a native dialog that
+names the issue, the action and the whole text, whoever runs the command. A refusal answers
+`declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
+what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
+lines is refused before anyone is asked; link to the details instead. A project can let comments and
+status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
+the project menu); assigning, labels, new issues and Linear issues always ask.
+
+When to use them: read the issue you were started on (`view --comments`) before working on it,
+and when you are done, comment the pull-request link or a short summary on the issue. Move its
+status or reassign it only when the person or the issue's brief asks for that. Never create
+issues, or change other issues, on your own initiative.
+
 ### Sessions from an issue, and their pipelines
 
 ```text
@@ -486,6 +530,10 @@ JSON failures have this shape:
 - `cloud_control_disabled`: the person has not allowed cloud commands from the command line. Tell
   them the setting named in `recovery`; do not retry.
 - `declined`: the person refused the request in the app window. Do not retry.
+- `expired`, `busy`, `backoff`: an issue write was not answered in time, another question was
+  already on screen, or the person refused one a moment ago. Nothing was changed.
+- `confirmation_unavailable`: an issue write needs the person's answer and this runtime has no
+  window to ask in. Nothing was changed; ask the person.
 - `account_signed_out`: sign in to TerminalX in the app.
 - `cloud_unavailable`: the app's window did not answer. Check the session with `read` before
   repeating a `send`.

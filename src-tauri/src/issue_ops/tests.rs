@@ -32,7 +32,7 @@ fn a_github_issue_keeps_every_assignee_and_its_close_reason() {
 }
 
 #[test]
-fn a_linear_issue_carries_its_state_priority_and_author_and_keeps_the_agent_discussion() {
+fn a_linear_issue_carries_its_state_priority_and_author_without_its_comments() {
     let data = fixture(include_str!("../fixtures/linear_issue_details.json"));
     let details = linear::parse_issue(&data["data"]["issue"]).unwrap();
     assert_eq!(details.state_id.as_deref(), Some("state-started"));
@@ -42,9 +42,8 @@ fn a_linear_issue_carries_its_state_priority_and_author_and_keeps_the_agent_disc
     assert_eq!(details.author.as_ref().unwrap().name, "Kim");
     assert_eq!(details.issue.labels[0].id.as_deref(), Some("label-bug"));
     assert_eq!(details.description, "Users get logged out.");
-    // Until the comments ticket, a session started from `body` still sees the discussion.
-    assert!(details.issue.body.as_deref().unwrap().contains("**Alex**: Seen it on staging too."));
-    assert!(!details.description.contains("Seen it on staging"));
+    // The discussion is read through `issue_comments`; neither text carries it.
+    assert_eq!(details.issue.body.as_deref(), Some("Users get logged out."));
     assert_eq!(details.capabilities.max_assignees, 1);
 }
 
@@ -88,8 +87,8 @@ fn the_contract_types_round_trip_in_camel_case() {
         close_reasons: vec![],
         members: vec![user],
         labels: vec![
-            LabelOption { id: "g1".into(), name: "Area".into(), color: "".into(), description: None, group: None, is_group: true },
-            LabelOption { id: "l1".into(), name: "Frontend".into(), color: "5e6ad2".into(), description: Some("UI".into()), group: Some("Area".into()), is_group: false },
+            LabelOption { id: "g1".into(), name: "Area".into(), color: "".into(), description: None, group: None, group_id: None, is_group: true },
+            LabelOption { id: "l1".into(), name: "Frontend".into(), color: "5e6ad2".into(), description: Some("UI".into()), group: Some("Area".into()), group_id: Some("g1".into()), is_group: false },
         ],
         priorities: linear_priorities(),
         capabilities: IssueCapabilities::of(Provider::Linear),
@@ -97,6 +96,7 @@ fn the_contract_types_round_trip_in_camel_case() {
     assert_eq!(options["provider"], "linear");
     assert_eq!(options["states"][0]["type"], "unstarted");
     assert_eq!(options["labels"][0]["isGroup"], true);
+    assert_eq!(options["labels"][1]["groupId"], "g1");
     assert_eq!(options["priorities"][1], json!({"value": 1, "label": "Urgent"}));
     let github = round_trip(&IssueOptions {
         provider: Provider::Github,
@@ -116,6 +116,7 @@ fn the_contract_types_round_trip_in_camel_case() {
         round_trip(&DescriptionEdit { description: "New".into(), expected_updated_at: Some("2026-09-02T10:00:00Z".into()), expected_description: Some("Old".into()) }),
         json!({"description": "New", "expectedUpdatedAt": "2026-09-02T10:00:00Z", "expectedDescription": "Old"})
     );
+    assert_eq!(serde_json::from_value::<DescriptionEdit>(json!({"description": "New"})).unwrap(), DescriptionEdit { description: "New".into(), ..DescriptionEdit::default() });
     let create = round_trip(&IssueCreate { team_id: Some("team-eng".into()), title: "T".into(), description: "D".into(), assignees: vec!["u1".into()], labels: vec![], state_id: None, priority: Some(3) });
     assert_eq!(create["teamId"], "team-eng");
     assert_eq!(create["priority"], 3);

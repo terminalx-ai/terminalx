@@ -78,10 +78,38 @@ Every command goes through `gh api` REST (`issue_ops/github.rs`).
 * Recorded replies: `src-tauri/src/fixtures/github_issue_ops.json`, replayed
   by `issue_ops/github_tests.rs`.
 
-## Not built yet
+## Status
 
-The contract is final; the follow-up tickets fill it in. Today GitHub
-answers every command; on Linear `issue_details` works and every other
-command answers `not_implemented`. On Linear `body` still carries the first 20 comments
-pasted under the description, for the agent prompt; `description` is the
-description alone.
+The contract is final; the follow-up tickets fill it in. Today both
+providers answer every command.
+
+## Linear
+
+* **Comments** page oldest first, 50 at a time. Linear lists comments newest
+  first and its cursors walk that order, so a page is the oldest comments
+  from the last one shown on; `nextCursor` is that comment's creation time
+  and id, so comments made in the same millisecond are neither skipped nor
+  repeated. The viewer may edit and delete their own comments only.
+* **Options** are the team's workflow states in its order, its active
+  members, the labels its issues can take (the team's, its parent teams'
+  and the workspace's; a group comes before the labels in it, and each
+  label names its group by `groupId` as well as by name) and the five
+  priorities. They are
+  cached per key and team until `refresh`.
+* **Descriptions** are read again before they are written: the edit is a
+  `conflict` when the description is no longer `expectedDescription`, or,
+  without it, when `updatedAt` is no longer a non-blank `expectedUpdatedAt` (a new
+  comment moves Linear's `updatedAt`; editing one doesn't).
+* **Comments** are edited and deleted only on the issue they belong to;
+  another issue's comment is `not_found`.
+* **Errors**: a stale state, label or assignee id is `invalid`; an issue,
+  team or comment that is gone is `not_found`.
+* **The agent's discussion.** Neither `body` nor `description` carries
+  comments any more. A session started from the CLI or the issue pipeline
+  reads the issue through `issues::linear_details`, which puts
+  `issues::linear_discussion` under the description: the newest 50
+  comments, oldest first, cut at about 12,000 characters (a single longer
+  comment included) with a note and a link to the rest.
+* `LINEAR_LIVE_ISSUE=<sandbox id> cargo test live_ -- --ignored --nocapture`
+  runs every operation against the real Linear on a sandbox issue (its
+  title must start with "[TerminalX test]") and puts it back afterwards.
