@@ -86,7 +86,6 @@ mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
 mod issue_control;
-#[cfg(feature = "desktop")]
 mod issue_pipeline;
 #[cfg(feature = "desktop")]
 mod issue_ops;
@@ -664,6 +663,7 @@ pub fn run() {
             commands::issue_pipeline_start,
             commands::issue_pipeline_set_auto_merge,
             commands::issue_pipeline_act,
+            commands::issue_pipeline_merge_cloud,
             commands::issue_details,
             commands::issue_comments,
             commands::issue_options,

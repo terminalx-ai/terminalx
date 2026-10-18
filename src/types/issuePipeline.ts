@@ -56,8 +56,12 @@ export interface IssuePipeline {
   author: PipelineSessionRef;
   /** Never the author's session. */
   reviewer?: PipelineSessionRef | null;
-  /** "Merge automatically when the review is addressed", for this issue. */
+  /** "Merge automatically when the review is addressed", for this issue. Never on in a cloud workspace. */
   autoMerge: boolean;
+  /** Carried by a cloud workspace's runtime, which stops at Ready to merge: the merge is made here, with the reader's own `gh`. */
+  cloud?: boolean;
+  /** Where a cloud workspace's pipeline is, as this desktop placed it; absent for one on this computer. */
+  place?: CloudPipelinePlace | null;
   stopped: boolean;
   stage: PipelineStage;
   state: PipelineState;
@@ -75,6 +79,31 @@ export interface IssuePipeline {
   created: string;
   modified: string;
 }
+
+/**
+ * A cloud workspace's pipeline as this desktop shows it: under the cloud
+ * project its workspace belongs to (`projectPath` is that project's key, and
+ * the sessions it names are cloud session keys).
+ */
+export interface CloudPipelinePlace {
+  orgId: string;
+  workspaceId: string;
+  /** The cloud project's key, `cloud:<orgId>:<identity>`. */
+  projectKey: string;
+  /** The project's repository, `owner/name`: a pull request anywhere else is never merged. Null for a project without one. */
+  repository: string | null;
+  /** When the runtime last said this, in ms. */
+  readAt: number;
+}
+
+/** How merging a cloud workspace's pull request from this computer ended. */
+export type CloudMerge =
+  | { outcome: "merged"; commit: string }
+  /** GitHub took it into a merge queue. */
+  | { outcome: "accepted"; commit: string }
+  /** Someone merged it already. */
+  | { outcome: "alreadyMerged"; commit: string }
+  | { outcome: "notMerged"; reason: string };
 
 /** What a person can do to a pipeline from the issue page. */
 export type PipelineAction = "stop" | "resume" | "advance" | "review" | "merge" | "refresh";

@@ -47,11 +47,16 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   its session, never by a path;
  * - `workspace/2`: the removal that follows a merged pull request. The
  *   runtime looks at its own worktrees, removes the ones that are safe and
- *   due, and records them; this client only says that it is on.
+ *   due, and records them; this client only says that it is on;
+ * - `pipeline/1` (#433): the issue pipelines the runtime carries.
+ *   `pipeline.list` and the `pipeline.changed` notification; `pipeline.act`
+ *   and `pipeline.noteMerge` for a manager. A runtime never merges: the
+ *   desktop does, with its reader's own `gh`, and says so with
+ *   `pipeline.noteMerge`. `session.create` takes an issue only where it is granted.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 
 /**
@@ -108,6 +113,8 @@ export const MUTATING_METHODS = new Set([
   "workspace.sweepMerged",
   "workspace.holdMerged",
   "workspace.restoreRemoved",
+  "pipeline.act",
+  "pipeline.noteMerge",
   "pty.create",
   "fs.write",
   "fs.writePart",
@@ -216,6 +223,26 @@ export interface RuntimeWorkspaceRemoved {
   deleted: string[];
   keptBranch?: string | null;
   rescuedBranch?: string | null;
+}
+
+/** An issue a session is started from, as the runtime keeps it with the session. */
+export interface RuntimeIssueRef {
+  provider: "github" | "linear";
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * An issue's pipeline as the runtime reports it (`issue_pipeline::Pipeline`,
+ * camelCase). The desktop reads it with its own type; here it is only
+ * carried.
+ */
+export interface RuntimeIssuePipeline {
+  id: string;
+  cloud?: boolean;
+  [field: string]: unknown;
 }
 
 /** A pull request that merged, with the commit that was merged: its head. */
@@ -392,6 +419,8 @@ export interface RuntimeSession {
   pinned: boolean;
   tabs: RuntimeSessionTab[];
   activeTab?: string | null;
+  /** The issue it was started from (`pipeline/1` runtimes). */
+  issue?: RuntimeIssueRef | null;
 }
 
 /** `session.update`: `undefined` leaves a field as it is. Archiving only hides the session. */
@@ -939,6 +968,10 @@ export class WorkspaceRpcClient {
    * A new agent tab: one session with one agent process. `useWorktree` gives
    * the session its own worktree on the VM; `prompt` is sent as its first
    * message (both from `session/1`, read by the runtime's `session_ops`).
+   * With `pipeline/1` it may be started from an issue: the worktree is named
+   * after it (`worktreeName`), and unless `pipeline` is false the runtime
+   * carries it on to a pull request and a review, adding its brief to the
+   * prompt. `issueBody` is the issue as read here, for the reviewer.
    */
   createAgentTab(params: {
     agent: string;
@@ -948,7 +981,12 @@ export class WorkspaceRpcClient {
     title?: string;
     prompt?: string;
     useWorktree?: boolean;
-  }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession }> {
+    issue?: RuntimeIssueRef;
+    issueBody?: string | null;
+    pipeline?: boolean;
+    pipelineSettings?: Record<string, unknown>;
+    worktreeName?: string | null;
+  }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null }> {
     const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
     return this.mutate("session.create", defined);
   }
@@ -1114,6 +1152,33 @@ export class WorkspaceRpcClient {
   async listRuntimeAgents(): Promise<RuntimeAgent[]> {
     const result = await this.call<{ agents?: RuntimeAgent[] }>("runtime.agents");
     return result.agents ?? [];
+  }
+
+  /** `pipeline/1`: the issue pipelines the runtime carries, newest last. */
+  async listPipelines(): Promise<RuntimeIssuePipeline[]> {
+    const result = await this.call<{ pipelines?: RuntimeIssuePipeline[] }>("pipeline.list");
+    return result.pipelines ?? [];
+  }
+
+  /** `pipeline/1`: stop, resume, carry on, review again or look again. Never a merge: a runtime makes none. */
+  async actOnPipeline(pipeline: string, action: "stop" | "resume" | "advance" | "review" | "refresh"): Promise<RuntimeIssuePipeline> {
+    const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.act", { pipeline, action });
+    return result.pipeline;
+  }
+
+  /** `pipeline/1`: this desktop merged the pipeline's pull request, pinned to `commit`; the runtime reads it back and records it. */
+  async noteMerge(pipeline: string, commit: string): Promise<RuntimeIssuePipeline> {
+    const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.noteMerge", { pipeline, commit });
+    return result.pipeline;
+  }
+
+  /** `pipeline.changed`: one pipeline, whenever the runtime writes it (`pipeline/1`). */
+  onPipeline(listener: (pipeline: RuntimeIssuePipeline) => void): () => void {
+    return this.onNotification((notification) => {
+      if (notification.event !== "pipeline.changed") return;
+      const pipeline = notification.params.pipeline;
+      if (pipeline && typeof pipeline === "object" && typeof (pipeline as { id?: unknown }).id === "string") listener(pipeline as RuntimeIssuePipeline);
+    });
   }
 
   /** `session.sessions`: the whole visible session list, after any create, update or delete (`session/2`). */

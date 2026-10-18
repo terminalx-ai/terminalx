@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { RuntimeSession } from "@terminalx/portable/workspace";
+import type { RuntimeIssuePipeline, RuntimeSession } from "@terminalx/portable/workspace";
 import { normalizeRepositoryIdentity } from "@terminalx/portable/repositoryIdentity";
 import {
   api,
@@ -67,6 +67,14 @@ export interface OrgCatalog {
   error: string | null;
   /** Per workspace id, the sessions last read from its runtime (CS-8), so a stopped workspace still lists them. */
   sessions: Record<string, CachedWorkspaceSessions>;
+  /** Per workspace id, the issue pipelines last read from its runtime (#433), so a stopped workspace's issues still show them. */
+  pipelines?: Record<string, CachedWorkspacePipelines>;
+}
+
+/** A workspace's issue pipelines as its runtime last reported them (`pipeline/1`). */
+export interface CachedWorkspacePipelines {
+  pipelines: RuntimeIssuePipeline[];
+  at: number;
 }
 
 /** A workspace's session list as its runtime last reported it. Paths in it are VM paths. */
@@ -288,7 +296,7 @@ export function placeCloudProjects(
 // ---- Merging lists ---------------------------------------------------------
 
 function emptyOrg(orgId: string): OrgCatalog {
-  return { orgId, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: null, source: "cache", error: null, sessions: {} };
+  return { orgId, workspaces: [], repositories: null, repositoriesAt: null, quota: null, fetchedAt: null, source: "cache", error: null, sessions: {}, pipelines: {} };
 }
 
 /** Names seen in earlier lists, so a tombstone's notice can say which workspace went. */
@@ -430,6 +438,23 @@ export function cacheCloudSessions(orgId: string, workspaceId: string, sessions:
   const previous = current.sessions[workspaceId];
   if (previous && JSON.stringify(previous.sessions) === JSON.stringify(sessions) && JSON.stringify(previous.capabilities) === JSON.stringify(capabilities)) return;
   set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, sessions: { ...current.sessions, [workspaceId]: { sessions, capabilities, at: now } } } } });
+}
+
+/** Keep a workspace's issue pipelines with the catalog (#433), so its issues show them while it sleeps. */
+export function cacheCloudPipelines(orgId: string, workspaceId: string, pipelines: RuntimeIssuePipeline[], now = Date.now()) {
+  const current = state.orgs[orgId];
+  if (!current) return;
+  if (JSON.stringify(current.pipelines?.[workspaceId]?.pipelines) === JSON.stringify(pipelines)) return;
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, pipelines: { ...current.pipelines, [workspaceId]: { pipelines, at: now } } } } });
+}
+
+/** Forget a workspace's saved pipelines: this person lost access to it. */
+export function dropCachedCloudPipelines(orgId: string, workspaceId: string) {
+  const current = state.orgs[orgId];
+  if (!current?.pipelines?.[workspaceId]) return;
+  const pipelines = { ...current.pipelines };
+  delete pipelines[workspaceId];
+  set({ ...state, orgs: { ...state.orgs, [orgId]: { ...current, pipelines } } });
 }
 
 /** Forget a workspace's saved session list: this person lost access to it. */
@@ -960,7 +985,7 @@ function scheduleSave() {
 export function serializeCatalog(catalog: CloudCatalogState): unknown {
   const orgs: Record<string, unknown> = {};
   for (const [orgId, org] of Object.entries(catalog.orgs)) {
-    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions };
+    orgs[orgId] = { workspaces: org.workspaces, repositories: org.repositories, repositoriesAt: org.repositoriesAt, quota: org.quota, fetchedAt: org.fetchedAt, sessions: org.sessions, pipelines: org.pipelines };
   }
   return { version: CATALOG_VERSION, orgs, createMemory: catalog.createMemory };
 }
@@ -994,6 +1019,18 @@ function parseSessions(value: unknown, workspaces: ReadonlySet<string>): Record<
   return out;
 }
 
+/** Saved pipelines, for workspaces the saved catalog still lists. */
+function parsePipelines(value: unknown, workspaces: ReadonlySet<string>): Record<string, CachedWorkspacePipelines> {
+  const out: Record<string, CachedWorkspacePipelines> = {};
+  if (!isObject(value)) return out;
+  for (const [workspaceId, raw] of Object.entries(value)) {
+    if (!workspaces.has(workspaceId) || !isObject(raw) || !Array.isArray(raw.pipelines)) continue;
+    const pipelines = raw.pipelines.filter((pipeline): pipeline is RuntimeIssuePipeline => isObject(pipeline) && typeof pipeline.id === "string" && isObject(pipeline.issue));
+    out[workspaceId] = { pipelines, at: typeof raw.at === "number" ? raw.at : 0 };
+  }
+  return out;
+}
+
 /** A saved catalog, or null for anything this version cannot read. */
 export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "createMemory"> | null {
   if (!isObject(value) || value.version !== CATALOG_VERSION || !isObject(value.orgs)) return null;
@@ -1009,6 +1046,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
       quota: isObject(raw.quota) && typeof raw.quota.used === "number" && typeof raw.quota.limit === "number" ? { used: raw.quota.used, limit: raw.quota.limit } : null,
       fetchedAt: typeof raw.fetchedAt === "number" ? raw.fetchedAt : null,
       sessions: parseSessions(raw.sessions, new Set(workspaces.map((item) => item.workspace.id))),
+      pipelines: parsePipelines(raw.pipelines, new Set(workspaces.map((item) => item.workspace.id))),
     };
   }
   const createMemory: Record<string, CreateMemoryEntry> = {};

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { WorkspaceRpcError, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents } from "@/lib/agentEvents";
 import type { ImageInput } from "@/lib/api";
 import { CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages } from "@/lib/cloudComposer";
@@ -712,11 +712,18 @@ export async function markCloudAgentRead(scope: CloudAgentScope, tabId: string, 
   }
 }
 
-export async function createCloudAgentTab(
-  scope: CloudAgentScope,
-  client: WorkspaceRpcClient,
-  params: { agent: string; model?: string; effort?: string | null; mode?: string; title?: string; prompt?: string; useWorktree?: boolean },
-): Promise<string> {
+export async function createCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<string> {
+  return (await newCloudAgentTab(scope, client, params)).tabId;
+}
+
+type NewCloudAgentTab = Parameters<WorkspaceRpcClient["createAgentTab"]>[0];
+
+/**
+ * `createCloudAgentTab`, with what the runtime said of the issue's pipeline
+ * when the tab was started from an issue (`pipeline/1`): the pipeline, or why
+ * there is none.
+ */
+export async function newCloudAgentTab(scope: CloudAgentScope, client: WorkspaceRpcClient, params: NewCloudAgentTab): Promise<{ tabId: string; pipeline: RuntimeIssuePipeline | null; pipelineNote: string | null }> {
   const created = await client.createAgentTab(params);
   const s = store(scope);
   const now = new Date().toISOString();
@@ -734,7 +741,7 @@ export async function createCloudAgentTab(
   if (!s.tabs.has(created.tabId)) s.tabs.set(created.tabId, newTab(info, "live"));
   publish(s);
   scheduleSave(s, created.tabId);
-  return created.tabId;
+  return { tabId: created.tabId, pipeline: created.pipeline ?? null, pipelineNote: created.pipelineNote ?? null };
 }
 
 /** Stop the tab's process and drop it and its checkpoints from the workspace. */

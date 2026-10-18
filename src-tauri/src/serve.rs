@@ -9,7 +9,9 @@
 //! activity to the API so an unused workspace can be suspended
 //! (`cloud_activity`), fetches the agent credentials its agents run with
 //! (`cloud_grants`), and installs the GitHub credential helper and `gh` shim
-//! (`cloud_github`).
+//! (`cloud_github`). Once its agent tabs are served it also carries sessions
+//! started from an issue on to a pull request and a review, with no desktop
+//! attached (`issue_pipeline::runtime`, #433).
 //!
 //! Not here yet:
 //! - TODO(PRO-13): register with the relay as a host (outbound only) and serve
@@ -28,7 +30,8 @@ use serde_json::json;
 
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::sink::{BroadcastSink, EventSink, NoObserver};
+use crate::issue_pipeline::runtime::RuntimeObserver;
+use crate::sink::{BroadcastSink, EventSink};
 
 const USAGE: &str = "\
 terminalx-serve — the headless TerminalX runtime
@@ -185,6 +188,9 @@ struct Runtime {
     /// Agent tabs of the project that were mid-turn when the previous
     /// runtime process ended (PRO-22), before they are reset to idle.
     interrupted: Vec<(String, String)>,
+    /// What moves an issue's pipeline when a turn ends (#433); idle until
+    /// the agent tabs are served.
+    pipelines: Arc<RuntimeObserver>,
 }
 
 fn run(options: Options) -> Result<()> {
@@ -352,7 +358,9 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
     let manager = runtime.manager.clone();
     let counts = move || {
         let (active_turns, pending_approvals) = manager.turn_counts();
-        Counts { active_turns, pending_approvals }
+        // An issue's pipeline pushing, opening a pull request or waiting for
+        // its checks is work too, with no agent turn to show for it.
+        Counts { active_turns: active_turns + crate::issue_pipeline::engine::holding(), pending_approvals }
     };
     let api = crate::cloud_bootstrap::HttpApi::new(origin);
     spawn_reporter(counts, move |report| {
@@ -389,9 +397,10 @@ fn start(options: &Options) -> Result<Runtime> {
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
     let control_endpoint = crate::hooks::prepare_control()?;
+    let pipelines = Arc::new(RuntimeObserver::default());
     let manager = crate::session::SessionManager::new(
         sink.clone(),
-        Arc::new(NoObserver),
+        pipelines.clone(),
         host.clone(),
         terminals.clone(),
         Arc::new(crate::harness::codex::models::Cache::default()),
@@ -411,7 +420,7 @@ fn start(options: &Options) -> Result<Runtime> {
     log::info!("hook socket at {}", socket.display());
     let interrupted = project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default();
     crate::session::idle_orphaned_tabs();
-    Ok(Runtime { sink, host, terminals, manager, socket, project_root, interrupted })
+    Ok(Runtime { sink, host, terminals, manager, socket, project_root, interrupted, pipelines })
 }
 
 /// Serve the workspace through the relay in the background, and report
@@ -452,6 +461,7 @@ fn start_cloud_agents(
     let agents = CloudAgents::open(&CloudAgents::state_dir(data_dir), ops, Some(runtime.sink.clone()), api, generation)?;
     agents.mark_interrupted_turns(&runtime.interrupted);
     agents.start();
+    start_issue_pipelines(runtime, &agents);
     if let Some((cloud, _)) = cloud {
         watch_access(agents.clone(), cloud.clone());
     }
@@ -460,6 +470,23 @@ fn start_cloud_agents(
         start_scheduled_runs(runtime, root, data_dir, http, &agents);
     }
     Ok(agents)
+}
+
+/// Carry a session started from an issue on to a pull request and a review
+/// (#433) here in the workspace, with or without a desktop attached
+/// (`issue_pipeline::runtime`). A session the pipeline opens is announced to
+/// the agent tabs, so desktops list it like any other.
+fn start_issue_pipelines(runtime: &Runtime, agents: &Arc<crate::cloud_agents::CloudAgents>) {
+    use crate::issue_pipeline::host::{LocalHost, TabAdded};
+    let weak = Arc::downgrade(agents);
+    let tab_added: TabAdded = Arc::new(move |tab_id| {
+        if let Some(agents) = weak.upgrade() {
+            agents.changed(Some(tab_id), true);
+        }
+    });
+    let host = Arc::new(LocalHost::cloud_workspace(runtime.sink.clone(), runtime.manager.clone(), tab_added));
+    runtime.pipelines.attach(host.clone());
+    crate::issue_pipeline::runtime::start(host, runtime.interrupted.clone());
 }
 
 /// Consume the workspace's launch intent (PRO-21): its repositories, work

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -37,6 +38,12 @@ pub const HEAD_SETTLE_SECONDS: i64 = 90;
 /// from before a push.
 const HEAD_CATCH_UP_TRIES: u32 = 5;
 
+/// How often the pull requests pipelines wait on are looked at.
+pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The longest issue text kept with a pipeline for its reviewer.
+const ISSUE_BODY_LIMIT: usize = 16 * 1024;
+
 /// A checkout as the pipeline needs to know it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
@@ -58,6 +65,12 @@ pub struct Diff {
 /// Everything the pipeline does to the world, and everything it reads from it.
 pub trait Host: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
+    /// A cloud workspace's runtime: it carries a pipeline to *Ready to merge*
+    /// and no further, since its GitHub token is the workspace's and not the
+    /// reader's own.
+    fn cloud(&self) -> bool {
+        false
+    }
     fn session(&self, session_id: &str) -> Result<SessionEntry>;
     /// The project's settings. An error when they cannot be read: defaults
     /// must not stand in for a project that keeps the merge for a person.
@@ -109,6 +122,35 @@ fn list(items: &[String]) -> String {
     }
 }
 
+/// Steps running now, anywhere in this process.
+static STEPS: AtomicUsize = AtomicUsize::new(0);
+
+struct Running;
+
+impl Running {
+    fn start() -> Self {
+        STEPS.fetch_add(1, Ordering::Relaxed);
+        Running
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        STEPS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Pipelines that are doing something with nobody's turn to show for it: a
+/// stage's step in flight (a push, a pull request being opened, a review
+/// being started), or a pull request whose checks are being waited for. A
+/// cloud workspace counts them as running turns, so it is not put to sleep
+/// halfway (`cloud_activity`). A look at a pipeline parked on a person is not
+/// counted: it would keep an idle workspace awake. The wait is bounded: after
+/// [`CHECKS_WAIT_MINUTES`] the pipeline stops for a person.
+pub fn holding() -> usize {
+    STEPS.load(Ordering::Relaxed) + store::waiting()
+}
+
 fn step_lock(id: &str) -> Arc<Mutex<()>> {
     static LOCKS: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
     LOCKS.lock().unwrap_or_else(|error| error.into_inner()).entry(id.to_string()).or_default().clone()
@@ -148,6 +190,8 @@ struct Step<'a> {
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
 /// person's own action asks for one.
 fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
+    // A stage's work, not a look at GitHub (`OnError::Report`), which the poller takes every few minutes.
+    let _running = (on_error == OnError::NeedsYou).then(Running::start);
     let lock = step_lock(id);
     let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     let pipeline = store::get(id)?;
@@ -536,7 +580,7 @@ impl Step<'_> {
             }
         };
         let previous = self.p.review_commit.clone().filter(|_| !first);
-        let issue_body = if first { self.host.issue_body(&self.p.project_path, &self.p.issue) } else { None };
+        let issue_body = if first { self.p.issue_body.clone().or_else(|| self.host.issue_body(&self.p.project_path, &self.p.issue)) } else { None };
         let request = prompts::ReviewRequest { issue: &self.p.issue, issue_body: issue_body.as_deref(), pr_number: pr.number, pr_url: &pr.url, commit: &pr.head_sha, base: &base, security_areas: &self.p.security_areas };
         let prompt = if first { prompts::review(&request) } else { prompts::review_again(&request, previous.as_deref()) };
 
@@ -630,6 +674,7 @@ impl Step<'_> {
         let decision = gate::decide(&Facts {
             auto_merge: by_person || auto_merge,
             require_person: !by_person && self.settings.require_person,
+            cloud: !by_person && self.p.cloud,
             verdict: verdict.as_ref(),
             pr: &pr,
             security_areas: &self.p.security_areas,
@@ -840,7 +885,9 @@ fn verdict_line(verdict: &Verdict, max_rounds: u32) -> String {
 
 /// Start a pipeline for a session that was started from an issue.
 /// `auto_merge` is the issue's own switch; `None` takes the project's default.
-pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>) -> Result<Pipeline> {
+/// `issue_body` is the issue's text as the session was started with it, kept
+/// for the reviewer where the tracker cannot be read again (a cloud workspace).
+pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
     let issue = session.issue.clone().ok_or_else(|| anyhow!("This session was not started from an issue."))?;
     if session.tab(tab_id).is_none() {
@@ -861,7 +908,16 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         bail!("This session runs on {branch} itself, so there is no branch to open a pull request from. Start the issue in a worktree to have it carried to a pull request.");
     }
     let now = stamp(host.now());
-    let auto_merge = auto_merge.unwrap_or(settings.auto_merge);
+    let cloud = host.cloud();
+    // A cloud workspace's pipeline has no switch to turn on: it never merges.
+    let auto_merge = !cloud && auto_merge.unwrap_or(settings.auto_merge);
+    let issue_body = issue_body.map(str::trim).filter(|body| !body.is_empty()).map(|body| {
+        let mut end = body.len().min(ISSUE_BODY_LIMIT);
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < body.len() { format!("{}\n\n[…]", &body[..end]) } else { body.to_string() }
+    });
     let mut pipeline = Pipeline {
         id: uuid::Uuid::now_v7().to_string(),
         project_path: session.project_path.clone(),
@@ -870,6 +926,8 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         author: SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() },
         reviewer: None,
         auto_merge,
+        cloud,
+        issue_body,
         stopped: false,
         stage: Stage::Work,
         state: State::Working,
@@ -897,6 +955,9 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
     if auto_merge {
         pipeline.record(&now, "autoMerge", "Automatic merge is on for this issue.");
     }
+    if cloud {
+        pipeline.record(&now, "note", "In a cloud workspace the pipeline stops at Ready to merge. The merge is yours, from the issue page in TerminalX or on GitHub.");
+    }
     store::insert(&pipeline)?;
     host.changed(&pipeline);
     Ok(pipeline)
@@ -915,6 +976,15 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
     });
     if let Err(error) = result {
         log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+    }
+}
+
+/// What a turn that ended without finishing is said to have done.
+pub fn turn_failure(interrupted: bool) -> &'static str {
+    if interrupted {
+        "Its turn was interrupted."
+    } else {
+        "Its agent ended before the turn finished."
     }
 }
 
@@ -948,7 +1018,11 @@ fn taking_part(session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
 /// Off takes effect at once, even against a step that is about to merge. On
 /// merges a pull request that was only waiting for the switch.
 pub fn set_auto_merge(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline> {
-    let was = store::get(id)?.auto_merge;
+    let stored = store::get(id)?;
+    if value && (stored.cloud || host.cloud()) {
+        bail!("{} is in a cloud workspace, which never merges by itself. Merge it from the issue page once it is ready.", stored.issue.identifier);
+    }
+    let was = stored.auto_merge;
     let switched = store::set_switches(id, |pipeline| pipeline.auto_merge = value)?;
     if was == value {
         return Ok(switched);
@@ -998,6 +1072,8 @@ pub enum Action {
 fn refuse(pipeline: &Pipeline, action: Action) -> Result<()> {
     let reviewing = pipeline.stage == Stage::Review && pipeline.state == State::Working;
     match action {
+        // Made on the reader's computer, with their own `gh` (`note_merge`).
+        Action::Merge if pipeline.cloud => bail!("{} is in a cloud workspace: it is merged from the issue page in TerminalX on your computer, with your own GitHub sign-in.", pipeline.issue.identifier),
         Action::Merge if pipeline.state != State::ReadyToMerge => bail!("{} is not at Ready to merge.", pipeline.issue.identifier),
         Action::Review if pipeline.pr.is_none() => bail!("{} has no pull request to review yet.", pipeline.issue.identifier),
         Action::Review | Action::Advance if reviewing => bail!("A review of {} is already under way.", pipeline.issue.identifier),
@@ -1049,6 +1125,26 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
         Action::Merge => run(host, id, false, OnError::NeedsYou, |step| if still(step) { step.evaluate(Merger::Person) } else { Ok(()) }),
         Action::Refresh => run(host, id, false, OnError::Report, |step| if step.p.stage == Stage::Merge && step.p.pr.is_some() { step.evaluate(Merger::Pipeline) } else { Ok(()) }),
     }
+}
+
+/// A person merged a cloud workspace's pull request from their computer, with
+/// their own `gh`, pinned to `commit`. The runtime reads the pull request
+/// itself to settle it: merged, taken into a merge queue, or not merged after
+/// all. A pull request it cannot read yet keeps the merge noted, and the
+/// next look settles it.
+pub fn note_merge(host: &dyn Host, id: &str, commit: &str) -> Result<Pipeline> {
+    run(host, id, true, OnError::Report, |step| {
+        if step.p.state == State::Merged {
+            return Ok(());
+        }
+        step.p.pr.as_ref().context("There is no pull request to merge.")?;
+        step.p.merge_requested = Some(MergeRequest { commit: commit.to_string(), by: MergedBy::Person, at: step.stamp() });
+        step.p.merge_refused = None;
+        if let Err(error) = step.evaluate(Merger::Pipeline) {
+            step.record("note", format!("Merged from the issue page at {}; the pull request could not be read back yet: {error:#}", short(commit)));
+        }
+        Ok(())
+    })
 }
 
 /// How often a pipeline that is parked on a person is looked at again, for a
@@ -1113,6 +1209,37 @@ pub fn recover(host: &dyn Host) {
             Ok(())
         });
         if let Err(error) = result {
+            log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+        }
+    }
+}
+
+/// After a cloud workspace's runtime starts. A workspace is put to sleep and
+/// woken as a matter of course, so unlike [`recover`] a pipeline picks up
+/// where it was: one waiting for a session's report keeps waiting, and one at
+/// the merge stage is looked at by the poller. Only what the restart did end
+/// is said: a turn that was running in the author's or the reviewer's tab
+/// (`interrupted`), and a pull request that was being opened.
+pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
+    let Ok(pipelines) = store::list() else {
+        return;
+    };
+    let ended = |session: &SessionRef| interrupted.iter().any(|(session_id, tab_id)| *session_id == session.session_id && *tab_id == session.tab_id);
+    let restarted = "The workspace's runtime restarted during its turn.";
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working) {
+        let reason = match pipeline.stage {
+            Stage::Work | Stage::Address if ended(&pipeline.author) => StopReason::SessionStopped { role: Role::Author.label().into(), detail: restarted.into() },
+            Stage::Review if pipeline.reviewer.as_ref().is_some_and(ended) => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: restarted.into() },
+            Stage::PullRequest => StopReason::Failed { step: "Opening the pull request".into(), message: "The workspace's runtime restarted before it finished.".into() },
+            _ => continue,
+        };
+        if let Err(error) = run(host, &pipeline.id, false, OnError::NeedsYou, |step| {
+            // Settled by something else since the list was read.
+            if step.p.state == State::Working && step.p.stage == pipeline.stage {
+                step.needs_you(reason);
+            }
+            Ok(())
+        }) {
             log::warn!("issue pipeline {}: {error:#}", pipeline.id);
         }
     }

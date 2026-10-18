@@ -316,6 +316,8 @@ terminalx send <cloud-session> <text> [--tab <tab>] [--idempotency-key <key>] --
 terminalx sessions create --project <cloud-project> --prompt <text> [--agent <agent>] \
   [--model <model>] [--effort <effort>] [--mode <mode>] [--on-main] \
   [--wake] [--confirm-spend] [--idempotency-key <key>] --json
+terminalx sessions create --project <cloud-project> --issue <issue> [--provider github|linear] \
+  [--prompt <text>] [--no-pipeline] [--agent <agent>] [--model <model>] [--wake] --json
 terminalx cloud stop <cloud-workspace> --yes --json
 terminalx cloud resume <cloud-workspace> --json
 ```
@@ -378,6 +380,13 @@ end-to-end encrypted: a workspace this computer has never opened appears under
   new machine and returns its `workspace` key and `operationId`; the first session appears in
   `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
   retrying a create.
+- `sessions create --issue` starts a session from one of the cloud project's GitHub or Linear
+  issues, read first with the person's own `gh` or Linear key, in a worktree of the project's
+  workspace (with `--wake` for a stopped one; never a new machine: it answers
+  `cloud_workspace_required`). The workspace's runtime carries it on to a pull request and a
+  review as described above, and stops at Ready to merge: a cloud workspace never merges by
+  itself, so `--auto-merge` is refused, and the merge is the person's, from the issue page.
+  The response carries `pipeline`, or `null` with the reason in `pipelineNote`.
 
 `wait` returns `reason`: `permission` (the agent asks for a decision), `stop` (the turn ended),
 `stopped` (nothing is running) or `timeout`. Interrupting it leaves nothing running in the app. Answering a permission request, archiving and

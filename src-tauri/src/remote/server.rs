@@ -471,6 +471,15 @@ impl WorkspaceRpc {
         );
         let weak = Arc::downgrade(&rpc);
         sink.listen(
+            crate::issue_pipeline::host::CHANGED,
+            Box::new(move |payload| {
+                if let (Some(rpc), Ok(pipeline)) = (weak.upgrade(), serde_json::from_str::<Value>(payload)) {
+                    rpc.broadcast_pipeline(pipeline);
+                }
+            }),
+        );
+        let weak = Arc::downgrade(&rpc);
+        sink.listen(
             "agent_event",
             Box::new(move |payload| {
                 if let (Some(rpc), Ok(event)) = (weak.upgrade(), serde_json::from_str::<AgentEvent>(payload)) {
@@ -576,6 +585,16 @@ impl WorkspaceRpc {
             // Workspace-wide, as `visible_sessions`.
             let visible: Vec<&SessionEntry> = if self.access(&peer).can_view() { sessions.iter().collect() } else { Vec::new() };
             peer.notify("session.sessions", json!({ "sessions": visible }));
+        }
+    }
+
+    /// `pipeline.changed`: an issue's pipeline was written. Whoever may see
+    /// the workspace's sessions may see the pipeline that names them.
+    fn broadcast_pipeline(&self, pipeline: Value) {
+        for peer in self.live_peers() {
+            if peer.granted("pipeline/1") && self.access(&peer).can_view() {
+                peer.notify("pipeline.changed", json!({ "pipeline": pipeline }));
+            }
         }
     }
 
@@ -1019,6 +1038,9 @@ impl WorkspaceRpc {
             "workspace.holdMerged" => self.workspace_hold_merged(params),
             "workspace.removedRecords" => self.workspace_removed_records(),
             "workspace.restoreRemoved" => self.workspace_restore_removed(params),
+            "pipeline.list" => self.pipeline_list(),
+            "pipeline.act" => self.pipeline_act(params),
+            "pipeline.noteMerge" => self.pipeline_note_merge(params),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -2292,12 +2314,39 @@ impl WorkspaceRpc {
             use_worktree: bool,
             #[serde(default)]
             title: Option<String>,
+            /// `pipeline/1`: the issue the session works on. Its worktree is
+            /// named after it, and unless `pipeline` is false it is carried on
+            /// to a pull request and a review (`issue_pipeline`).
+            #[serde(default)]
+            issue: Option<index::IssueRef>,
+            /// The issue's text as the desktop read it, for the reviewer:
+            /// this workspace cannot read the tracker itself.
+            #[serde(default)]
+            issue_body: Option<String>,
+            #[serde(default)]
+            pipeline: Option<bool>,
+            /// The project's pipeline settings as the desktop keeps them for
+            /// this cloud project; stored here, where each decision reads them.
+            #[serde(default)]
+            pipeline_settings: Option<crate::store::projects::IssuePipelineSettings>,
+            #[serde(default)]
+            worktree_name: Option<String>,
         }
         let mut p: Params = parse(params)?;
         // A blank mode is no mode: the tab takes the default launch mode.
         p.mode = index::requested_mode(p.mode.take());
         let manager = self.manager()?;
         self.check_new_tab(&p.agent, &p.model, p.mode.as_deref())?;
+        if let Some(issue) = &p.issue {
+            check_issue(issue)?;
+        }
+        let root = self.root.to_string_lossy().into_owned();
+        if let (Some(_), Some(settings)) = (&p.issue, p.pipeline_settings.take()) {
+            let patch = crate::store::projects::ProjectPatch { issue_pipeline: Some(settings), ..Default::default() };
+            if let Err(error) = crate::store::projects::update(&root, patch) {
+                log::warn!("store the issue pipeline settings: {error:#}");
+            }
+        }
         if p.use_worktree {
             // A blank project made before its folder was set up with Git: set it up now, so a worktree can be cut.
             if let Err(error) = crate::cloud_agents::launch::init_blank_repository(&self.root, "main") {
@@ -2307,13 +2356,13 @@ impl WorkspaceRpc {
         let entry = crate::session_ops::create_session_blocking(
             &*self.sink,
             crate::session_ops::NewSession {
-                project_path: self.root.to_string_lossy().into_owned(),
+                project_path: root,
                 title: p.title,
                 use_worktree: p.use_worktree,
                 on_main: !p.use_worktree,
                 base_ref: None,
-                worktree_name: None,
-                issue: None,
+                worktree_name: p.worktree_name.filter(|_| p.use_worktree),
+                issue: p.issue.clone(),
                 automation: None,
                 cwd: None,
                 tab: Some(crate::session_ops::NewTab {
@@ -2326,7 +2375,26 @@ impl WorkspaceRpc {
         )
         .map_err(RpcError::internal)?;
         let tab = entry.tabs.first().cloned().ok_or_else(|| RpcError::internal("the new session has no tab"))?;
-        let outcome = match p.prompt.filter(|prompt| !prompt.trim().is_empty()) {
+        // Started before the first prompt goes, which carries its brief: the
+        // turn it starts must find its pipeline.
+        let mut prompt = p.prompt.filter(|prompt| !prompt.trim().is_empty());
+        let (mut pipeline, mut pipeline_note) = (Value::Null, Value::Null);
+        if p.issue.is_some() && p.pipeline != Some(false) {
+            let started = self.pipeline_host().map_err(|error| anyhow::anyhow!(error.message)).and_then(|host| crate::issue_pipeline::engine::start(&host, &entry.id, &tab.id, None, p.issue_body.as_deref()));
+            match started {
+                Ok(started) => {
+                    let brief = crate::issue_pipeline::prompts::author_brief();
+                    prompt = Some(match prompt {
+                        Some(prompt) => format!("{prompt}\n\n{brief}"),
+                        None => brief,
+                    });
+                    pipeline = json!(started);
+                }
+                // The session still starts; it just ends at the code, and says why.
+                Err(error) => pipeline_note = json!(format!("{error:#}")),
+            }
+        }
+        let outcome = match prompt {
             Some(prompt) => Some(manager.send(&entry.id, &tab.id, prompt, Vec::new()).map_err(RpcError::internal)?),
             None => None,
         };
@@ -2334,7 +2402,62 @@ impl WorkspaceRpc {
             agents.changed(Some(&tab.id), true);
             agents.tab(&tab.id)
         });
-        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info }))
+        Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info, "pipeline": pipeline, "pipelineNote": pipeline_note }))
+    }
+
+    // ---- an issue's pipeline (#433) ----------------------------------------------
+
+    /// The pipeline's hands here: this runtime's sessions, git and `gh`. A
+    /// session it opens is announced to the agent tabs like any other.
+    fn pipeline_host(&self) -> Result<crate::issue_pipeline::host::LocalHost, RpcError> {
+        let manager = self.manager()?.clone();
+        let agents = self.agents.get().map(Arc::downgrade);
+        let tab_added: crate::issue_pipeline::host::TabAdded = Arc::new(move |tab_id| {
+            if let Some(agents) = agents.as_ref().and_then(Weak::upgrade) {
+                agents.changed(Some(tab_id), true);
+            }
+        });
+        Ok(crate::issue_pipeline::host::LocalHost::cloud_workspace(self.sink.clone(), manager, tab_added))
+    }
+
+    /// One of this workspace's pipelines, by its id.
+    fn own_pipeline(&self, params: &Value) -> Result<crate::issue_pipeline::Pipeline, RpcError> {
+        let id = required_str(params, "pipeline")?;
+        let root = self.root.to_string_lossy();
+        crate::issue_pipeline::store::get(id).ok().filter(|pipeline| pipeline.project_path == root).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
+    }
+
+    /// `pipeline/1`: every pipeline of this workspace, newest last.
+    fn pipeline_list(&self) -> Result<Value, RpcError> {
+        let root = self.root.to_string_lossy();
+        let pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| pipeline.project_path == root).collect();
+        Ok(json!({ "pipelines": pipelines }))
+    }
+
+    /// `pipeline/1`: what a person can do from the issue page, less the
+    /// merge, which a runtime never makes. A pipeline not in a position to
+    /// do it is refused and left as it was.
+    fn pipeline_act(&self, params: Value) -> Result<Value, RpcError> {
+        use crate::issue_pipeline::engine::{self, Action};
+        let pipeline = self.own_pipeline(&params)?;
+        let action: Action = serde_json::from_value(params.get("action").cloned().unwrap_or(Value::Null)).map_err(|_| RpcError::invalid("action must be stop, resume, advance, review or refresh"))?;
+        let host = self.pipeline_host()?;
+        let acted = engine::act(&host, &pipeline.id, action).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        Ok(json!({ "pipeline": acted }))
+    }
+
+    /// `pipeline/1`: the desktop merged the pull request with its reader's
+    /// own `gh`, pinned to `commit`. The runtime reads the pull request itself
+    /// and records the merge as theirs.
+    fn pipeline_note_merge(&self, params: Value) -> Result<Value, RpcError> {
+        let pipeline = self.own_pipeline(&params)?;
+        let commit = required_str(&params, "commit")?;
+        if !(7..=40).contains(&commit.len()) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(RpcError::invalid("commit must be a commit id"));
+        }
+        let host = self.pipeline_host()?;
+        let noted = crate::issue_pipeline::engine::note_merge(&host, &pipeline.id, commit).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        Ok(json!({ "pipeline": noted }))
     }
 
     /// The agents a new tab may run: offered and installed here.
@@ -3144,6 +3267,22 @@ fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> 
     params.get(name).and_then(Value::as_str).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
 }
 
+/// An issue a session is started from. It names the session, its worktree and
+/// the pull request that closes it, so it is held to what a tracker gives.
+fn check_issue(issue: &index::IssueRef) -> Result<(), RpcError> {
+    if !matches!(issue.provider.as_str(), "github" | "linear") {
+        return Err(RpcError::invalid("issue.provider must be github or linear"));
+    }
+    let fits = |value: &str, limit: usize| !value.trim().is_empty() && value.chars().count() <= limit && !value.chars().any(char::is_control);
+    if !fits(&issue.id, 128) || !fits(&issue.identifier, 64) || !fits(&issue.title, 512) {
+        return Err(RpcError::invalid("issue needs an id, an identifier and a title"));
+    }
+    if !(issue.url.starts_with("https://") && fits(&issue.url, 2048)) {
+        return Err(RpcError::invalid("issue.url must be an https link"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
@@ -3151,3 +3290,7 @@ mod tests;
 #[cfg(test)]
 #[path = "cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;

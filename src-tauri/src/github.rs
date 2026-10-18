@@ -260,6 +260,11 @@ pub struct PrSnapshot {
     /// branch requires none, and then every reported check counts.
     #[serde(default)]
     pub required_checks: Option<Vec<String>>,
+    /// GitHub would not let this token read the commit's checks: a cloud
+    /// workspace's token may lack the permission. `checks` is then empty and
+    /// says nothing; no merge is concluded from it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checks_unread: bool,
 }
 
 const SNAPSHOT_FIELDS: &str = "number,title,url,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,body,author";
@@ -281,6 +286,7 @@ pub(crate) fn parse_snapshot(v: &Value) -> PrSnapshot {
         review_decision: pr.review_decision,
         checks: pr.checks,
         required_checks: None,
+        checks_unread: false,
     }
 }
 
@@ -325,23 +331,61 @@ pub fn pr_snapshot(cwd: &Path, number: u64) -> Result<PrSnapshot> {
     pr_snapshot_with(cwd, number, run, run_output)
 }
 
+/// The fields of a snapshot without the checks: what a token that may not
+/// read them can still be told.
+fn without_checks(fields: &str) -> String {
+    fields.split(',').filter(|field| *field != "statusCheckRollup").collect::<Vec<_>>().join(",")
+}
+
+/// GitHub's refusal of something this token's permissions do not cover. An
+/// installation token (a cloud workspace's) is refused a commit's checks
+/// unless its App was granted them.
+pub(crate) fn not_permitted(message: &str) -> bool {
+    message.contains("Resource not accessible by integration")
+}
+
 fn pr_snapshot_with(
     cwd: &Path,
     number: u64,
-    run: impl FnOnce(&Path, &[&str]) -> Result<String>,
+    mut run: impl FnMut(&Path, &[&str]) -> Result<String>,
     run_output: impl FnOnce(&Path, &[&str]) -> Result<GhOutput>,
 ) -> Result<PrSnapshot> {
     let n = number.to_string();
-    let out = run(cwd, &["pr", "view", &n, "--json", SNAPSHOT_FIELDS])?;
+    let (out, checks_unread) = match run(cwd, &["pr", "view", &n, "--json", SNAPSHOT_FIELDS]) {
+        Ok(out) => (out, false),
+        // Everything but the checks, which are then said to be unread.
+        Err(error) if not_permitted(&format!("{error:#}")) => (run(cwd, &["pr", "view", &n, "--json", &without_checks(SNAPSHOT_FIELDS)]).map_err(|_| error)?, true),
+        Err(error) => return Err(error),
+    };
     let mut snapshot = parse_snapshot(&serde_json::from_str(&out)?);
+    snapshot.checks_unread = checks_unread;
     if snapshot.head_sha.is_empty() {
         bail!("GitHub did not say which commit pull request #{number} is at.");
     }
     // Only an open pull request has checks left to wait for.
-    if snapshot.state == "OPEN" {
-        snapshot.required_checks = parse_required_checks(&run_output(cwd, &["pr", "checks", &n, "--required", "--json", "name"])?)?;
+    if snapshot.state == "OPEN" && !snapshot.checks_unread {
+        let required = run_output(cwd, &["pr", "checks", &n, "--required", "--json", "name"])?;
+        if not_permitted(&required.stderr) {
+            snapshot.checks_unread = true;
+            snapshot.checks.clear();
+        } else {
+            snapshot.required_checks = parse_required_checks(&required)?;
+        }
     }
     Ok(snapshot)
+}
+
+/// The open pull request whose head is `branch` in this repository (not a
+/// fork's branch of the same name), by number. Asks for nothing but that, so
+/// a token that may not read checks is answered too.
+pub fn open_pr_for_branch(cwd: &Path, branch: &str) -> Result<Option<u64>> {
+    open_pr_for_branch_with(cwd, branch, run)
+}
+
+fn open_pr_for_branch_with(cwd: &Path, branch: &str, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<Option<u64>> {
+    let out = run(cwd, &["pr", "list", "--head", branch, "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"])?;
+    let listed: Value = serde_json::from_str(&out)?;
+    Ok(listed.as_array().into_iter().flatten().filter(|pr| pr["isCrossRepository"] != Value::Bool(true)).filter_map(|pr| pr["number"].as_u64()).max())
 }
 
 /// Leave a comment on a pull request; the comment's URL.
@@ -401,6 +445,49 @@ fn merge_pr_at_with(
         (false, Ok(pr)) if !pr.head_sha.eq_ignore_ascii_case(commit) => Ok(PinnedMerge::HeadMoved { head: pr.head_sha }),
         (false, _) => Ok(PinnedMerge::Refused(if merged.stderr.is_empty() { "GitHub refused the merge.".into() } else { merged.stderr })),
     }
+}
+
+// ---- a pull request named by its repository, with no checkout ---------------
+//
+// A cloud workspace's pull request is merged from the desktop, with the
+// reader's own `gh` (#433). The desktop need not have a checkout of it, so
+// these name the repository instead of running in one.
+
+/// The repository (`owner/name`) and number of a pull request on github.com.
+pub fn pr_url_parts(url: &str) -> Option<(String, u64)> {
+    let rest = url.trim().strip_prefix("https://github.com/")?;
+    let mut parts = rest.trim_end_matches('/').split('/');
+    let (owner, name, pull, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let valid = |part: &str| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if pull != "pull" || parts.next().is_some() || !valid(owner) || !valid(name) {
+        return None;
+    }
+    Some((format!("{owner}/{name}"), number.parse().ok()?))
+}
+
+/// `args` with `--repo <repo>` after them.
+fn in_repo<'a>(args: &[&'a str], repo: &'a str) -> Vec<&'a str> {
+    let mut named = args.to_vec();
+    named.extend(["--repo", repo]);
+    named
+}
+
+/// Where a `gh` call that names its repository runs: anywhere but a checkout
+/// of some other repository, whose `origin` it might otherwise read.
+fn outside_checkouts() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// [`pr_snapshot`] of a pull request in `repo` (`owner/name`).
+pub fn pr_snapshot_in(repo: &str, number: u64) -> Result<PrSnapshot> {
+    let cwd = outside_checkouts();
+    pr_snapshot_with(&cwd, number, |cwd, args| run(cwd, &in_repo(args, repo)), |cwd, args| run_output(cwd, &in_repo(args, repo)))
+}
+
+/// [`merge_pr_at`] of a pull request in `repo` (`owner/name`).
+pub fn merge_pr_at_in(repo: &str, number: u64, method: &str, commit: &str) -> Result<PinnedMerge> {
+    let cwd = outside_checkouts();
+    merge_pr_at_with(&cwd, number, method, commit, |cwd, args| run_output(cwd, &in_repo(args, repo)), |_, number| pr_snapshot_in(repo, number))
 }
 
 pub fn merge_pr(cwd: &Path, number: u64, method: &str) -> Result<()> {
@@ -741,6 +828,42 @@ mod tests {
     }
 
     #[test]
+    fn a_token_that_may_not_read_the_checks_still_reads_the_pull_request_and_says_its_checks_are_unread() {
+        let cwd = Path::new("/repo");
+        let refused = "GraphQL: Resource not accessible by integration (repository.pullRequest.statusCheckRollup)";
+        let mut asked = Vec::new();
+        let snapshot = pr_snapshot_with(
+            cwd,
+            7,
+            |_, args| {
+                asked.push(args[4].to_string());
+                if args[4].contains("statusCheckRollup") { bail!("{refused}") } else { Ok(OPEN_PR.into()) }
+            },
+            |_, _| panic!("checks that cannot be read are not asked about again"),
+        )
+        .unwrap();
+        assert!(snapshot.checks_unread);
+        assert!(!asked[1].contains("statusCheckRollup") && asked[1].contains("headRefOid") && asked[1].contains("mergeStateStatus"));
+        assert_eq!((snapshot.head_sha.as_str(), snapshot.mergeable.as_str(), snapshot.required_checks.clone()), ("1111111111111111111111111111111111111111", "MERGEABLE", None));
+        // The required checks alone refused: the checks read are not taken for the whole story.
+        let partly = pr_snapshot_with(cwd, 7, |_, _| Ok(OPEN_PR.into()), |_, _| Ok(output(false, "", refused))).unwrap();
+        assert!(partly.checks_unread && partly.checks.is_empty());
+        // Any other failure is a failure.
+        assert!(pr_snapshot_with(cwd, 7, |_, _| bail!("HTTP 502: Bad Gateway"), |_, _| Ok(output(true, "[]", ""))).is_err());
+        assert!(!pr_snapshot_with(cwd, 7, |_, _| Ok(OPEN_PR.into()), |_, _| Ok(output(true, "[]", ""))).unwrap().checks_unread);
+    }
+
+    #[test]
+    fn the_open_pull_request_of_a_branch_is_this_repositorys_and_asks_for_no_checks() {
+        let found = open_pr_for_branch_with(Path::new("/repo"), "raccoon/x", |_, args| {
+            assert_eq!(args, ["pr", "list", "--head", "raccoon/x", "--state", "open", "--json", "number,isCrossRepository", "--limit", "100"]);
+            Ok(r#"[{"number":9,"isCrossRepository":true},{"number":7,"isCrossRepository":false}]"#.into())
+        });
+        assert_eq!(found.unwrap(), Some(7));
+        assert_eq!(open_pr_for_branch_with(Path::new("/repo"), "b", |_, _| Ok("[]".into())).unwrap(), None);
+    }
+
+    #[test]
     fn a_pinned_merge_passes_the_commit_and_reads_the_result_from_the_pull_request() {
         let cwd = Path::new("/repo");
         let head = "1111111111111111111111111111111111111111";
@@ -775,6 +898,18 @@ mod tests {
         assert_eq!(merge_pr_at_with(cwd, 7, "merge", head, |_, _| Ok(output(false, "", "timeout")), |_, _| at("MERGED", head)).unwrap(), PinnedMerge::Merged);
         // A merge queue takes the request and merges later.
         assert_eq!(merge_pr_at_with(cwd, 7, "merge", head, |_, _| Ok(output(true, "", "")), |_, _| at("OPEN", head)).unwrap(), PinnedMerge::Accepted);
+    }
+
+    #[test]
+    fn a_pull_request_named_by_its_link_is_asked_for_in_its_own_repository() {
+        assert_eq!(pr_url_parts("https://github.com/acme/widgets/pull/433"), Some(("acme/widgets".into(), 433)));
+        assert_eq!(pr_url_parts("https://github.com/acme/my.repo_2/pull/7/\n"), Some(("acme/my.repo_2".into(), 7)));
+        for not_one in ["https://github.com/acme/widgets/issues/433", "https://github.com/acme/widgets/pull/433/files", "https://gitlab.com/acme/widgets/pull/1", "https://github.com/acme/widgets/pull/x", "https://github.com/acme/wid gets/pull/1", ""] {
+            assert_eq!(pr_url_parts(not_one), None, "{not_one:?}");
+        }
+        // The repository goes after the arguments, so every call names it.
+        assert_eq!(in_repo(&["pr", "merge", "7", "--merge", "--match-head-commit", "abc1234"], "acme/widgets"), ["pr", "merge", "7", "--merge", "--match-head-commit", "abc1234", "--repo", "acme/widgets"]);
+        assert_eq!(in_repo(&["pr", "checks", "7", "--required", "--json", "name"], "acme/widgets"), ["pr", "checks", "7", "--required", "--json", "name", "--repo", "acme/widgets"]);
     }
 
     #[test]

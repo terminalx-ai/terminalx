@@ -33,7 +33,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
-import type { IssuePipeline, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
+import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
 import type { IssueUser } from "@/lib/issueOps";
@@ -47,6 +47,37 @@ import { assertLocal } from "@/types/target";
  */
 const LOCAL_PATH_ARGS = ["cwd", "path", "root", "projectPath", "sessionId", "from", "to", "dir", "file"] as const;
 
+/**
+ * The calls on a project's issues (#433). A cloud project's issues are its
+ * GitHub repository's, so these also take a cloud project's key as their
+ * `projectPath`: the native side reads the repository from it and runs `gh`
+ * outside any checkout (`issues::cloud_project_repo`). Never a cloud
+ * workspace or session key, nor a path on a VM.
+ */
+const ISSUE_COMMANDS = new Set([
+  "github_repo",
+  "issues_list",
+  "issue_details",
+  "issue_comments",
+  "issue_options",
+  "issue_viewer",
+  "issue_comment_add",
+  "issue_comment_edit",
+  "issue_comment_delete",
+  "issue_set_state",
+  "issue_set_assignees",
+  "issue_set_labels",
+  "issue_set_priority",
+  "issue_set_title",
+  "issue_set_description",
+  "issue_create",
+]);
+
+/** `cloud:<orgId>:github.com/<owner>/<name>`: a cloud project with a GitHub repository. */
+export function isCloudRepositoryKey(value: string): boolean {
+  return /^cloud:[^:/]+:github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(value);
+}
+
 /** Every Tauri call made here goes through this: local paths pass unchanged, cloud ones throw. */
 export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
   if (args && typeof args === "object" && !Array.isArray(args) && !(args instanceof ArrayBuffer) && !(args instanceof Uint8Array)) {
@@ -54,7 +85,9 @@ export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
     try {
       for (const key of LOCAL_PATH_ARGS) {
         const value = record[key];
-        if (typeof value === "string") assertLocal(value, `${command}.${key}`);
+        if (typeof value !== "string") continue;
+        if (key === "projectPath" && ISSUE_COMMANDS.has(command) && isCloudRepositoryKey(value)) continue;
+        assertLocal(value, `${command}.${key}`);
       }
     } catch (error) {
       return Promise.reject(error);
@@ -2005,6 +2038,8 @@ export const issuePipelines = {
   start: (sessionId: string, tabId: string, autoMerge: boolean | null) => invoke<StartedIssuePipeline>("issue_pipeline_start", { sessionId, tabId, autoMerge }),
   setAutoMerge: (id: string, value: boolean) => invoke<IssuePipeline>("issue_pipeline_set_auto_merge", { id, value }),
   act: (id: string, action: PipelineAction) => invoke<IssuePipeline>("issue_pipeline_act", { id, action }),
+  /** Merge a cloud workspace's pull request with the reader's own `gh`, pinned to the reviewed commit; `repository` is the cloud project's own. */
+  mergeCloud: (pipeline: IssuePipeline, repository: string, settings: IssuePipelineSettings) => invoke<CloudMerge>("issue_pipeline_merge_cloud", { pipeline, repository, settings }),
 };
 
 // ---- transcription models and dictation input

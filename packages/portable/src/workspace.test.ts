@@ -214,6 +214,23 @@ class FakeRuntime implements WorkspaceTransport {
       }
       case "workspace.holdMerged":
         return ok({});
+      case "pipeline.list":
+        return ok({ pipelines: [{ id: "p1", cloud: true, state: "working" }] });
+      case "pipeline.act": {
+        const result = { pipeline: { id: params.pipeline, cloud: true, state: params.action === "stop" ? "stopped" : "working" } };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "pipeline.noteMerge": {
+        const result = { pipeline: { id: params.pipeline, cloud: true, state: "merged", merged: { commit: params.commit, by: "person" } } };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
+      case "session.create": {
+        const result = { sessionId: "s9", tabId: "t9", pipeline: params.issue ? { id: "p9", cloud: true } : null, pipelineNote: null };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
       case "workspace.removedRecords":
         return ok({ records: [{ id: "r1", path: "/w/.raccoon/worktrees/a", blocked: null }] });
       case "workspace.restoreRemoved": {
@@ -675,6 +692,47 @@ describe("workspace RPC client", () => {
       await expect(before.removedWorkspaceRecords()).rejects.toMatchObject({ code: "capability_not_granted" });
       await expect(before.restoreRemovedWorkspace("r1")).rejects.toMatchObject({ code: "capability_not_granted" });
       expect(old.sent.some((frame) => ["workspace.sweepMerged", "workspace.holdMerged", "workspace.removedRecords", "workspace.restoreRemoved"].includes(frame.method))).toBe(false);
+      before.close();
+    });
+
+    it("pipeline/1: the runtime's pipelines are read and steered, a merge is only ever noted, and an older runtime is never asked", async () => {
+      const runtime = new FakeRuntime();
+      const client = new WorkspaceRpcClient(runtime, ids);
+      runtime.connect([...WORKSPACE_CAPABILITIES]);
+      expect(await client.listPipelines()).toEqual([{ id: "p1", cloud: true, state: "working" }]);
+      expect(await client.actOnPipeline("p1", "stop")).toMatchObject({ id: "p1", state: "stopped" });
+      expect(await client.noteMerge("p1", "1111111")).toMatchObject({ state: "merged", merged: { commit: "1111111", by: "person" } });
+      const sent = (method: string) => runtime.sent.find((frame) => frame.method === method)!.params as Record<string, unknown>;
+      expect(sent("pipeline.act")).toMatchObject({ pipeline: "p1", action: "stop" });
+      expect(sent("pipeline.noteMerge")).toMatchObject({ pipeline: "p1", commit: "1111111" });
+      for (const method of ["pipeline.act", "pipeline.noteMerge"]) {
+        expect(typeof sent(method).clientRequestId, method).toBe("string");
+        expect(MUTATING_METHODS.has(method), method).toBe(true);
+      }
+      // A session started from an issue says so, and hears back what its pipeline is.
+      const issue = { provider: "github" as const, id: "433", identifier: "#433", title: "Pipeline", url: "https://github.com/acme/widgets/issues/433" };
+      const created = await client.createAgentTab({ agent: "claude", prompt: "Work on it", useWorktree: true, issue, issueBody: "Body", pipeline: true, worktreeName: "433-pipeline" });
+      expect(created.pipeline).toMatchObject({ id: "p9" });
+      expect(sent("session.create")).toMatchObject({ issue, issueBody: "Body", pipeline: true, worktreeName: "433-pipeline" });
+      // Each write is announced on its own.
+      const heard: string[] = [];
+      const stop = client.onPipeline((pipeline) => heard.push(pipeline.id));
+      runtime.deliver({ event: "pipeline.changed", params: { pipeline: { id: "p2" } } });
+      runtime.deliver({ event: "pipeline.changed", params: { pipeline: "not one" } });
+      runtime.deliver({ event: "session.sessions", params: { sessions: [] } });
+      stop();
+      runtime.deliver({ event: "pipeline.changed", params: { pipeline: { id: "p3" } } });
+      expect(heard).toEqual(["p2"]);
+      client.close();
+
+      const old = new FakeRuntime();
+      const before = new WorkspaceRpcClient(old, ids);
+      old.connect(WORKSPACE_CAPABILITIES.filter((capability) => capability !== "pipeline/1"));
+      expect(before.hasCapability("pipeline/1")).toBe(false);
+      await expect(before.listPipelines()).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.actOnPipeline("p1", "review")).rejects.toMatchObject({ code: "capability_not_granted" });
+      await expect(before.noteMerge("p1", "1111111")).rejects.toMatchObject({ code: "capability_not_granted" });
+      expect(old.sent.some((frame) => frame.method.startsWith("pipeline."))).toBe(false);
       before.close();
     });
 

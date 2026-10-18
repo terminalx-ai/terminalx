@@ -60,9 +60,10 @@ impl<'a> dyn EventSink + 'a {
     }
 }
 
-/// What the desktop does on the side when a session moves: the GitHub star
-/// reminder and scheduled automation runs. Neither exists headless, where
-/// every method is a no-op.
+/// What happens on the side when a session moves. On the desktop: the GitHub
+/// star reminder, scheduled automation runs and issue pipelines. Headless,
+/// only a turn ending does anything, and only for an issue's pipeline
+/// (`issue_pipeline::runtime`); every other method is a no-op.
 pub trait SessionObserver: Send + Sync {
     fn agent_event(&self, _event: &AgentEvent) {}
     fn work_started(&self, _total_work_starts: u64) {}
@@ -73,8 +74,10 @@ pub trait SessionObserver: Send + Sync {
     fn automation_failed(&self, _session_id: &str, _tab_id: &str, _message: &str) {}
 }
 
+#[cfg(test)]
 pub struct NoObserver;
 
+#[cfg(test)]
 impl SessionObserver for NoObserver {}
 
 #[cfg(feature = "desktop")]

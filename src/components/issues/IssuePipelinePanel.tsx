@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Check, ChevronRight, CircleAlert, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "@/icons";
+import { Check, ChevronRight, CircleAlert, Cloud, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, setPipelineAutoMerge, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
+import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
+import { openCloudSession } from "@/lib/cloudDashboard";
+import { lookAtCloudPipeline } from "@/lib/cloudPipelines";
+import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, setPipelineAutoMerge, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { FindingSeverity, IssuePipeline, PipelineAction, PipelineFinding } from "@/types/issuePipeline";
@@ -58,6 +61,13 @@ export function PipelineStatus({
   );
 }
 
+/** When something was read, as a sentence says it: "a moment ago", "5m ago", "on Oct 12". */
+function readWhen(at: number): string {
+  const when = relativeTime(new Date(at).toISOString());
+  if (when === "now") return "a moment ago";
+  return /^\d+[mhd]$/.test(when) ? `${when} ago` : `on ${when}`;
+}
+
 function StepGlyph({ status }: { status: PipelineStep["status"] }) {
   if (status === "done") return <Check className="size-3 text-add" aria-label="done" />;
   if (status === "current") return <Loader2 className="size-3 animate-spin text-info" aria-label="in progress" />;
@@ -97,21 +107,28 @@ function Finding({ finding }: { finding: PipelineFinding }) {
  * One issue's pipeline on the issue page: the stage it is at and why, the
  * switch that lets it merge by itself, the reviewer's open findings, and the
  * record of everything that happened, with links to the sessions and the
- * pull request.
+ * pull request. A cloud workspace's pipeline has no switch: it stops at
+ * Ready to merge, and Merge here uses the reader's own GitHub sign-in.
  */
 export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const store = useSessionStore();
+  const catalog = useCloudCatalog();
   const [busy, setBusy] = useState<PipelineAction | "autoMerge" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
 
+  const place = pipeline.place ?? null;
   const project = store.projects.find((value) => value.path === pipeline.projectPath) ?? null;
   const settings = pipelineSettings(project);
   const steps = pipelineSteps(pipeline);
   const { primary, secondary } = pipelineActions(pipeline);
-  const authorHere = store.sessions.some((session) => session.id === pipeline.author.sessionId);
-  const reviewerHere = pipeline.reviewer != null && store.sessions.some((session) => session.id === pipeline.reviewer?.sessionId);
-  const hasSession = (id: string | null | undefined) => id != null && store.sessions.some((session) => session.id === id);
+  // A cloud workspace's sessions are its runtime's: they open from their keys, listed here or not.
+  const hasSession = (id: string | null | undefined) => id != null && (place != null || store.sessions.some((session) => session.id === id));
+  const openSession = (id: string, tabId?: string) => (place ? openCloudSession(id, tabId) : selectSession(id));
+  const authorHere = hasSession(pipeline.author.sessionId);
+  const reviewerHere = pipeline.reviewer != null && hasSession(pipeline.reviewer.sessionId);
+  const workspace = place ? findCloudWorkspace(catalog, place.orgId, place.workspaceId)?.workspace ?? null : null;
+  const asleep = workspace != null && workspace.state !== "ready";
   const findings = [...(pipeline.verdict?.findings ?? [])].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
   const done = pipeline.state === "merged";
 
@@ -135,8 +152,8 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const { id, stage, state } = pipeline;
   const watchesPullRequest = stage === "merge" && state !== "merged" && state !== "stopped";
   useEffect(() => {
-    // Once per issue opened, not once per change to it.
-    if (watchesPullRequest) void actOnPipeline(id, "refresh").catch(() => {});
+    // Once per issue opened, not once per change to it. A cloud workspace is asked only while it runs.
+    if (watchesPullRequest) void (place ? lookAtCloudPipeline(pipeline) : actOnPipeline(id, "refresh")).catch(() => {});
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -151,16 +168,25 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
           </button>
         )}
         {authorHere && (
-          <button type="button" onClick={() => selectSession(pipeline.author.sessionId)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={() => openSession(pipeline.author.sessionId, pipeline.author.tabId)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
             <MessageSquare className="size-3" /> Author session
           </button>
         )}
         {reviewerHere && (
-          <button type="button" onClick={() => selectSession(pipeline.reviewer!.sessionId)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
+          <button type="button" onClick={() => openSession(pipeline.reviewer!.sessionId, pipeline.reviewer!.tabId)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground">
             <MessageSquare className="size-3" /> Reviewer session
           </button>
         )}
       </div>
+
+      {place && asleep && !done && (
+        <p className="flex items-start gap-1.5 text-[11px] text-faint" data-testid="pipeline-asleep">
+          <Cloud className="mt-px size-3 shrink-0" />
+          <span>
+            Its cloud workspace is asleep. This is where it stood when it was last read, {readWhen(place.readAt)}; it goes on when the workspace wakes, and Stop, Resume or a review wakes it now.
+          </span>
+        </p>
+      )}
 
       {pipeline.note && (
         <p role="status" className={cn("text-xs leading-relaxed", pipeline.state === "needsYou" ? "text-foreground" : "text-muted-foreground")}>
@@ -184,7 +210,14 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         ))}
       </ol>
 
-      {!done && (
+      {!done && place && (
+        <p className="rounded-lg bg-well px-3 py-2 text-xs text-muted-foreground" data-testid="pipeline-cloud-merge">
+          <span className="block font-medium text-foreground">A person merges this one</span>
+          A cloud workspace stops at Ready to merge. Merge here uses your own GitHub sign-in, only at the reviewed commit, with its checks passed and no finding of medium severity or higher open.
+        </p>
+      )}
+
+      {!done && !place && (
         <label className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2 text-xs">
           <span className="min-w-0">
             <span className="block font-medium">Merge automatically when the review is addressed</span>
@@ -212,14 +245,14 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
               variant={primary.action === "merge" ? "default" : "secondary"}
               className={cn(primary.action === "merge" && "bg-merge text-merge-foreground hover:opacity-90")}
               disabled={busy != null}
-              onClick={() => void run(primary.action, () => actOnPipeline(pipeline.id, primary.action))}
+              onClick={() => void run(primary.action, () => actOnAnyPipeline(pipeline, primary.action))}
             >
               {busy === primary.action ? <Loader2 className="animate-spin" /> : primary.action === "merge" ? <GitMerge /> : null}
               {primary.label}
             </Button>
           )}
           {secondary.map((button) => (
-            <Button key={button.action} size="sm" variant="ghost" className="text-xs" disabled={busy != null} onClick={() => void run(button.action, () => actOnPipeline(pipeline.id, button.action))}>
+            <Button key={button.action} size="sm" variant="ghost" className="text-xs" disabled={busy != null} onClick={() => void run(button.action, () => actOnAnyPipeline(pipeline, button.action))}>
               {busy === button.action ? <Loader2 className="animate-spin" /> : null}
               {button.label}
             </Button>
@@ -262,7 +295,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
                     </button>
                   )}
                   {hasSession(event.sessionId) && (
-                    <button type="button" aria-label="Open the session" onClick={() => selectSession(event.sessionId!)} className="ml-1.5 inline-flex translate-y-0.5 text-faint hover:text-foreground">
+                    <button type="button" aria-label="Open the session" onClick={() => openSession(event.sessionId!)} className="ml-1.5 inline-flex translate-y-0.5 text-faint hover:text-foreground">
                       <MessageSquare className="size-3" />
                     </button>
                   )}

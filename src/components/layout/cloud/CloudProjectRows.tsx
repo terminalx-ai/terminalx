@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
+import { AppWindow, Archive, BookOpen, Check, ChevronDown, Cloud, Ellipsis, Folder, FolderGit2, FolderInput, FolderPlus, GitBranch, GitPullRequest, Pencil, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "@/icons";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -22,6 +22,7 @@ import { archivingText, describeWorkspace } from "@/components/cloud/CloudWorksp
 import { ShareBadge } from "@/components/cloud/CloudCollab";
 import { WorkspaceActionItems, type LifecycleRequest } from "@/components/cloud/WorkspaceActions";
 import { CloudDiagnosticsDialog, CloudDiagnosticsMenuItem, offersCloudDiagnostics } from "@/components/cloud/CloudDiagnosticsDialog";
+import { CloudIssuePipelineSettingsDialog } from "@/components/issues/IssuePipelineSettingsDialog";
 import { errorMessage, type CloudWorkspaceListItem } from "@/lib/api";
 import { useAccount } from "@/lib/account";
 import { refreshCloudWorkspaces } from "@/lib/cloudCatalog";
@@ -161,6 +162,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
   const menu = useRowMenu();
   const [error, run] = useRowError();
   const [diagnostics, setDiagnostics] = useState(false);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
   const foldKey = `cloud-project:${project.key}`;
   const [expanded, toggle] = useFold(foldKey, true);
   // A filter shows what it found: the project is open while it is on.
@@ -258,6 +260,12 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
               <DropdownMenuItem onSelect={() => void refreshCloudWorkspaces(project.orgId)}>
                 <RefreshCw /> Refresh
               </DropdownMenuItem>
+              {/* Issues are a GitHub repository's: a blank project has none. */}
+              {!project.blank && project.identity.startsWith("github.com/") && (
+                <DropdownMenuItem onSelect={() => setPipelineOpen(true)}>
+                  <GitPullRequest /> Issue pipeline…
+                </DropdownMenuItem>
+              )}
               {/* The organization's report, for its owners and admins; one workspace is marked when the project has just one. */}
               {offersCloudDiagnostics(status, project.orgId) && <CloudDiagnosticsMenuItem onSelect={() => setDiagnostics(true)} />}
               {only && (
@@ -305,6 +313,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
       </div>
       {error && <p className="ml-8 text-[10px] text-destructive">{error}</p>}
       {diagnostics && <CloudDiagnosticsDialog request={{ orgId: project.orgId, workspaceId: only?.item.workspace.id ?? null }} onClose={() => setDiagnostics(false)} />}
+      {pipelineOpen && <CloudIssuePipelineSettingsDialog project={project} open onOpenChange={setPipelineOpen} />}
       <div
         className={cn("grid", animations && "transition-[grid-template-rows,opacity] duration-200 ease-out", open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")}
         aria-hidden={!open}

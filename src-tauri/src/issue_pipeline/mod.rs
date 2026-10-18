@@ -21,15 +21,24 @@
 //! to that commit.
 //!
 //! [`engine`] is the state machine. It reaches the world through
-//! [`engine::Host`], so the same code runs in the app and under test.
+//! [`engine::Host`], so the same code runs in the app, in a cloud
+//! workspace's runtime, and under test. Where it runs is where the
+//! workspace is: the desktop backend for a project on this computer
+//! ([`desktop`]), the workspace's runtime for a cloud one ([`runtime`]). A
+//! cloud workspace never merges by itself: it stops at *Ready to merge*, and
+//! a person merges from the issue page with their own `gh`, pinned the same way.
 
 pub mod categories;
+pub mod cloud_merge;
+#[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod engine;
 #[cfg(test)]
 mod engine_tests;
 pub mod gate;
+pub mod host;
 pub mod prompts;
+pub mod runtime;
 pub mod store;
 pub mod verdict;
 
@@ -144,8 +153,18 @@ pub struct Pipeline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<SessionRef>,
     /// "Merge automatically when the review is addressed", for this issue.
+    /// Never on in a cloud workspace.
     #[serde(default)]
     pub auto_merge: bool,
+    /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
+    /// the merge is a person's, made from their computer with their own `gh`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cloud: bool,
+    /// The issue's text as the session was started with it, for the
+    /// reviewer, where the tracker cannot be read again (a cloud workspace
+    /// has no Linear key, and its GitHub token no access to issues).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_body: Option<String>,
     #[serde(default)]
     pub stopped: bool,
     pub stage: Stage,

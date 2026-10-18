@@ -67,6 +67,9 @@ Usage:
   terminalx sessions create --project CLOUD_PROJECT --prompt TEXT [--agent AGENT]
       [--model MODEL] [--effort EFFORT] [--mode MODE] [--on-main]
       [--wake] [--confirm-spend] [--idempotency-key KEY] [--json]
+  terminalx sessions create --project CLOUD_PROJECT --issue ISSUE
+      [--provider github|linear] [--prompt TEXT] [--no-pipeline] [--agent AGENT]
+      [--model MODEL] [--effort EFFORT] [--mode MODE] [--wake] [--json]
   terminalx send CLOUD_SESSION TEXT [--tab TAB] [--idempotency-key KEY] [--json]
   terminalx read CLOUD_SESSION [--tab TAB] [--since SEQ] [--tail COUNT] [--json]
   terminalx wait CLOUD_SESSION [--tab TAB] [--timeout SECONDS] [--json]
@@ -610,7 +613,19 @@ fn cloud_rpc(action: &str, params: Value, tokens: &mut Tokens) -> Result<Action,
 /// (`--confirm-spend`) cost money, so each must be asked for by name.
 fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlError> {
     let project = tokens.required_option("--project")?;
-    let prompt = tokens.required_option("--prompt")?;
+    // An issue is its own prompt; anything given with it is added after. Its
+    // workspace carries it on to a pull request and a review, and stops at
+    // Ready to merge: a cloud workspace never merges by itself.
+    let issue = tokens.option("--issue")?;
+    let prompt = if issue.is_some() { tokens.option("--prompt")?.unwrap_or_default() } else { tokens.required_option("--prompt")? };
+    let provider = tokens.option("--provider")?;
+    let no_pipeline = tokens.flag("--no-pipeline")?;
+    if tokens.flag("--auto-merge")? || tokens.flag("--no-auto-merge")? {
+        return Err(invalid("A cloud workspace never merges by itself: its pipeline stops at Ready to merge, and you merge from the issue page."));
+    }
+    if issue.is_none() && (provider.is_some() || no_pipeline) {
+        return Err(invalid("--provider and --no-pipeline apply to a session started with --issue."));
+    }
     let agent = tokens.option("--agent")?;
     let model = tokens.option("--model")?;
     let effort = tokens.option("--effort")?;
@@ -623,25 +638,28 @@ fn parse_cloud_session_create(tokens: &mut Tokens) -> Result<Action, ControlErro
     if worktree && on_main {
         return Err(invalid("--worktree and --on-main are mutually exclusive."));
     }
-    if prompt.trim().is_empty() {
+    if issue.is_none() && prompt.trim().is_empty() {
         return Err(invalid("--prompt cannot be empty."));
     }
-    cloud_rpc(
-        "sessions.create",
-        json!({
-            "project": project,
-            "prompt": prompt,
-            "agent": agent,
-            "model": model,
-            "effort": effort,
-            "mode": mode,
-            "useWorktree": !on_main,
-            "wake": wake,
-            "confirmSpend": confirm_spend,
-            "idempotencyKey": idempotency_key,
-        }),
-        tokens,
-    )
+    let mut params = json!({
+        "project": project,
+        "prompt": prompt,
+        "agent": agent,
+        "model": model,
+        "effort": effort,
+        "mode": mode,
+        "useWorktree": !on_main,
+        "wake": wake,
+        "confirmSpend": confirm_spend,
+        "idempotencyKey": idempotency_key,
+    });
+    // Only an issue start carries these, so every other request is word for word what it was.
+    if let Some(issue) = issue {
+        params["issue"] = json!(issue);
+        params["provider"] = json!(provider);
+        params["noPipeline"] = json!(no_pipeline);
+    }
+    cloud_rpc("sessions.create", params, tokens)
 }
 
 fn parse_cloud(tokens: &mut Tokens) -> Result<Action, ControlError> {
@@ -1368,6 +1386,26 @@ mod tests {
         // A local project still needs its agent named, and takes no cloud flag.
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--prompt", "go"])).is_err());
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--wake"])).is_err());
+    }
+
+    #[test]
+    fn a_cloud_session_can_start_from_an_issue_and_is_never_asked_to_merge() {
+        let project = "cloud:org-a:github.com/acme/api";
+        // The issue is its own prompt.
+        let (command, params, _) = rpc_of(&["sessions", "create", "--project", project, "--issue", "#433"]);
+        assert_eq!(command, "cloud.sessions.create");
+        assert_eq!((&params["issue"], &params["prompt"], &params["provider"], &params["noPipeline"], &params["useWorktree"]), (&json!("#433"), &json!(""), &json!(null), &json!(false), &json!(true)));
+        let (_, params, _) = rpc_of(&["sessions", "create", "--project", project, "--issue", "ENG-42", "--provider", "linear", "--prompt", "Keep it small", "--no-pipeline", "--wake"]);
+        assert_eq!((&params["issue"], &params["provider"], &params["prompt"], &params["noPipeline"], &params["wake"]), (&json!("ENG-42"), &json!("linear"), &json!("Keep it small"), &json!(true), &json!(true)));
+        // A cloud workspace has no switch to merge by itself.
+        for flag in ["--auto-merge", "--no-auto-merge"] {
+            let refused = parse(&args(&["sessions", "create", "--project", project, "--issue", "#433", flag])).unwrap_err();
+            assert!(refused.message.contains("never merges by itself"), "{flag}: {}", refused.message);
+        }
+        // The issue's own options need an issue; a plain session still needs its prompt.
+        assert!(parse(&args(&["sessions", "create", "--project", project, "--prompt", "go", "--no-pipeline"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", project, "--provider", "github", "--prompt", "go"])).is_err());
+        assert!(parse(&args(&["sessions", "create", "--project", project])).is_err());
     }
 
     #[test]

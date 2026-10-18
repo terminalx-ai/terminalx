@@ -1,7 +1,8 @@
 import { api, type CloudWorkspaceProviderId, type CloudWorkspaceQuote, type CloudWorkspaceSetup, type CloudWorkspaceSnapshot } from "@/lib/api";
 import { getAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
-import { createCloudAgentTab, getCloudAgents } from "@/lib/cloudAgents";
+import { getCloudAgents, newCloudAgentTab } from "@/lib/cloudAgents";
+import { takeStartedPipeline } from "@/lib/cloudPipelines";
 import { cloudOrgArg, defaultOrgId, findCloudWorkspace, getCloudCatalog, isChanging, rememberCreatedWorkspace, subscribeCloudCatalog } from "@/lib/cloudCatalog";
 import {
   CreateRefused,
@@ -16,7 +17,8 @@ import {
   type PendingCreate,
 } from "@/lib/cloudCreate";
 import { creatableProviders, machine0Offered } from "@/lib/hiddenProviders";
-import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { RuntimeIssuePipeline, RuntimeIssueRef, WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import { retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { archiving, deletion, isOpen } from "@/lib/cloudLifecycle";
 import { bootCloudSessions, cloudAgentRan, refreshCloudSessions } from "@/lib/cloudSessions";
@@ -46,6 +48,29 @@ export interface CloudSessionRequest {
   mode: string;
   prompt: string;
   useWorktree: boolean;
+  /** The session's title; the prompt's first line otherwise. */
+  title?: string;
+  /** Started from an issue (#433): named after it, and carried on to a pull request unless `pipeline` is false. */
+  issue?: CloudIssueStart;
+}
+
+/** What starting a cloud session from an issue adds, sent only to a runtime that granted `pipeline/1`. */
+export interface CloudIssueStart {
+  ref: RuntimeIssueRef;
+  /** The issue as read here, for the reviewer: the workspace cannot read the tracker. */
+  body: string | null;
+  worktreeName: string;
+  pipeline: boolean;
+  settings: IssuePipelineSettings;
+}
+
+/** What became of an issue's pipeline when its session started in a workspace. */
+export interface CloudIssueOutcome {
+  /** The runtime carries issues on (`pipeline/1`); an older one started a plain session. */
+  supported: boolean;
+  pipeline: RuntimeIssuePipeline | null;
+  /** Why the runtime started no pipeline. */
+  note: string | null;
 }
 
 export type CloudStartPlan = { kind: "reuse" | "wake"; node: CloudWorkspaceNode } | { kind: "create" };
@@ -116,7 +141,7 @@ export async function startInWorkspace(
    * that was not told to wake passes false, or a question to ask first, and
    * gets `cloud_workspace_stopped` instead.
    */
-  options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>) } = {},
+  options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>); onIssue?: (outcome: CloudIssueOutcome) => void } = {},
 ): Promise<string> {
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
@@ -137,23 +162,31 @@ export async function startInWorkspace(
       client = await waitCloudConnected(lease, WAKE_WITHIN_MS);
     }
     const scope = { organizationId: orgId, workspaceId };
+    // An issue goes only to a runtime that knows what to do with one: an older one would start a plain session silently.
+    const issue = request.issue && client.hasCapability("pipeline/1") ? request.issue : null;
     const params = {
       agent: request.agent,
       model: request.model || undefined,
       effort: request.effort,
       mode: request.mode || undefined,
-      title: titleOf(request.prompt) || undefined,
+      title: request.title || titleOf(request.prompt) || undefined,
       prompt: request.prompt.trim() ? request.prompt : undefined,
       useWorktree: request.useWorktree,
+      ...(issue
+        ? { issue: issue.ref, issueBody: issue.body, worktreeName: issue.worktreeName, pipeline: issue.pipeline, pipelineSettings: issue.settings as unknown as Record<string, unknown> }
+        : {}),
     };
-    let tabId: string;
+    let created: Awaited<ReturnType<typeof newCloudAgentTab>>;
     try {
-      tabId = await createCloudAgentTab(scope, client, params);
+      created = await newCloudAgentTab(scope, client, params);
     } catch (error) {
       // A workspace whose folder has no Git repository cannot cut a worktree; the session works in the folder.
       if (!request.useWorktree || !worktreeRefused(error)) throw error;
-      tabId = await createCloudAgentTab(scope, client, { ...params, useWorktree: false });
+      created = await newCloudAgentTab(scope, client, { ...params, useWorktree: false });
     }
+    const tabId = created.tabId;
+    if (created.pipeline) takeStartedPipeline(target, created.pipeline);
+    if (request.issue) options.onIssue?.({ supported: issue != null, pipeline: created.pipeline, note: created.pipelineNote });
     const sessionId = getCloudAgents(scope).tabs.find((tab) => tab.tabId === tabId)?.info.sessionId;
     if (!sessionId) throw new Error("cloud_session_not_created");
     // The list follows `session.sessions` on session/2 runtimes; read it now either way so the row is there.

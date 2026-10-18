@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Issues
+
+- A session started from an issue in a cloud workspace is now carried on
+  like one on this computer: a pull request that closes the issue, a review
+  by a second session, the findings back to the author, more reviews up to
+  the project's limit. The workspace's runtime does this itself, with no
+  desktop attached, and is kept awake while it pushes or waits for checks
+  (at most an hour for checks). It stops at *Ready to merge*: a cloud
+  workspace never merges by itself. **Merge** on the issue page merges from
+  this computer with your own `gh`, pinned to the reviewed commit, after
+  reading GitHub again, and only a pull request in the project's own
+  repository. The Issues view lists a cloud project's GitHub issues beside
+  this computer's projects, the issue page shows the pipeline and its record,
+  and shows the last one read while the workspace sleeps. A Linear issue
+  works too, except that the workspace cannot move it to In Review, and says
+  so in the record. The settings are under **Issue pipeline…** in the cloud
+  project's menu; `terminalx sessions create --project cloud:… --issue`
+  starts one from the command line. A runtime that predates this starts a
+  plain session, and the page says so. (#433, #461)
+
 ### Workspaces
 
 - Deleting a workspace once its pull request merges now works for a workspace

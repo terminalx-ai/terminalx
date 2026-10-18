@@ -115,7 +115,7 @@ pub(crate) fn gh() -> Result<Command> {
 }
 
 fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = gh()?.current_dir(cwd).args(args).output().with_context(|| format!("gh {}", args.join(" ")))?;
+    let out = gh()?.current_dir(gh_dir(cwd)).args(args).output().with_context(|| format!("gh {}", args.join(" ")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         bail!("{}", if err.is_empty() { format!("gh {} failed", args.join(" ")) } else { err });
@@ -176,7 +176,34 @@ pub fn github_issue_url_repo(reference: &str) -> Option<String> {
 }
 
 pub fn github_repo(cwd: &Path) -> Option<String> {
+    if let Some(repo) = cloud_project_repo(cwd) {
+        return Some(repo);
+    }
     crate::git::remote_url(cwd).and_then(|u| github_repo_from_url(&u))
+}
+
+/// The repository (`owner/name`) of a cloud project, as the window names one:
+/// `cloud:<orgId>:github.com/<owner>/<name>`. A cloud project has no checkout
+/// on this computer, so its issues are its repository's, read and written
+/// with the reader's own `gh`. `None` for anything else, a blank cloud
+/// project (no repository) included.
+pub fn cloud_project_repo(project: &Path) -> Option<String> {
+    let (_, identity) = project.to_str()?.strip_prefix("cloud:")?.rsplit_once(':')?;
+    let mut parts = identity.strip_prefix("github.com/")?.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let valid = |part: &str| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) && part != "." && part != "..";
+    (parts.next().is_none() && valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
+}
+
+/// Where `gh` runs for a project: in its checkout, which tells `gh` the
+/// host; for a cloud project, outside any checkout, with the repository
+/// named in the call.
+pub fn gh_dir(project: &Path) -> std::path::PathBuf {
+    if cloud_project_repo(project).is_some() {
+        std::env::temp_dir()
+    } else {
+        project.to_path_buf()
+    }
 }
 
 const GH_LIST_FIELDS: &str = "number,title,state,labels,assignees,updatedAt,url,author";
@@ -553,6 +580,19 @@ pub fn linear_move_to_review(key: &str, id: &str) -> Result<LinearReviewMove> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cloud_projects_issues_are_its_repositorys_read_from_outside_any_checkout() {
+        let project = Path::new("cloud:org_01H:github.com/acme/widgets.js");
+        assert_eq!(cloud_project_repo(project).as_deref(), Some("acme/widgets.js"));
+        assert_eq!(github_repo(project).as_deref(), Some("acme/widgets.js"));
+        assert_eq!(gh_dir(project), std::env::temp_dir());
+        // A blank project has no repository, and a local path is a checkout.
+        for not_one in ["cloud:org_01H:blank/scratch", "cloud:org_01H:gitlab.com/acme/widgets", "cloud:org_01H:github.com/acme", "cloud:org_01H:github.com/acme/widgets/extra", "cloud:org_01H:github.com/../widgets", "/Users/me/widgets", "cloud:org_01H"] {
+            assert_eq!(cloud_project_repo(Path::new(not_one)), None, "{not_one}");
+        }
+        assert_eq!(gh_dir(Path::new("/Users/me/widgets")), Path::new("/Users/me/widgets"));
+    }
 
     #[test]
     fn the_review_state_is_in_review_or_the_nearest_thing_to_it() {

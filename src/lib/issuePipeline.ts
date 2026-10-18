@@ -1,13 +1,17 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { issuePipelines as pipelinesApi } from "@/lib/api";
+import { actOnCloudPipeline, getCloudPipelines, mergeCloudPipeline, subscribeCloudPipelines } from "@/lib/cloudPipelines";
 import { notePipelineState } from "@/lib/notify";
+import { getPrefs } from "@/lib/prefs";
 import type { IssuePipeline, IssuePipelineSettings, PipelineAction, PipelineStage, StartedIssuePipeline } from "@/types/issuePipeline";
 
 /**
  * Issue pipelines as the Rust side reports them. The pipeline itself runs
  * there: it moves when a session's turn ends or a check finishes, whether or
  * not a window is showing it. This is only what the window knows of it.
+ * A cloud workspace's pipelines run in its runtime (`@/lib/cloudPipelines`),
+ * and are listed here beside this computer's, under their cloud project.
  */
 interface State {
   loaded: boolean;
@@ -48,19 +52,34 @@ export async function bootIssuePipelines() {
   }
 }
 
+let combined: { local: IssuePipeline[]; cloud: IssuePipeline[]; all: IssuePipeline[] } | null = null;
+
+/** This computer's pipelines, then the cloud workspaces'. The same array until either changes. */
+function allPipelines(): IssuePipeline[] {
+  const cloud = getCloudPipelines();
+  if (combined?.local !== state.pipelines || combined.cloud !== cloud) {
+    combined = { local: state.pipelines, cloud, all: cloud.length ? [...state.pipelines, ...cloud] : state.pipelines };
+  }
+  return combined.all;
+}
+
 export function useIssuePipelines(): IssuePipeline[] {
   return useSyncExternalStore(
     (listener) => {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      const stopCloud = subscribeCloudPipelines(listener);
+      return () => {
+        listeners.delete(listener);
+        stopCloud();
+      };
     },
-    () => state.pipelines,
-    () => state.pipelines,
+    allPipelines,
+    allPipelines,
   );
 }
 
 export function getIssuePipelines(): IssuePipeline[] {
-  return state.pipelines;
+  return allPipelines();
 }
 
 /** Start the pipeline for a session that was just created from an issue. */
@@ -80,6 +99,22 @@ export async function actOnPipeline(id: string, action: PipelineAction): Promise
   const pipeline = await pipelinesApi.act(id, action);
   upsertPipeline(pipeline);
   return pipeline;
+}
+
+/**
+ * What a button on the issue page does, wherever the pipeline runs: on this
+ * computer, or in its cloud workspace's runtime. A cloud workspace's merge is
+ * made here, with the reader's own `gh`; when nothing is merged, the reason
+ * is the error.
+ */
+export async function actOnAnyPipeline(pipeline: IssuePipeline, action: PipelineAction): Promise<void> {
+  if (!pipeline.place) {
+    await actOnPipeline(pipeline.id, action);
+    return;
+  }
+  if (action !== "merge") return actOnCloudPipeline(pipeline, action);
+  const refused = await mergeCloudPipeline(pipeline, cloudPipelineSettings(pipeline.place.projectKey));
+  if (refused) throw new Error(refused);
 }
 
 // ---- reading a pipeline
@@ -262,6 +297,16 @@ export const DEFAULT_PIPELINE_SETTINGS: IssuePipelineSettings = {
 export function pipelineSettings(project: { issuePipeline?: IssuePipelineSettings | null } | null | undefined): IssuePipelineSettings {
   const stored = project?.issuePipeline;
   return stored ? { ...DEFAULT_PIPELINE_SETTINGS, ...stored, protected: { ...DEFAULT_PIPELINE_SETTINGS.protected, ...stored.protected } } : DEFAULT_PIPELINE_SETTINGS;
+}
+
+/**
+ * A cloud project's pipeline settings (`cloud:<orgId>:<identity>`). They are
+ * kept on this computer and given to the workspace with each issue session
+ * started from here, where its runtime reads them at each decision. A cloud
+ * workspace never merges by itself, so the switches that decide that do not apply.
+ */
+export function cloudPipelineSettings(projectKey: string, prefs = getPrefs()): IssuePipelineSettings {
+  return { ...pipelineSettings({ issuePipeline: prefs.cloudIssuePipelines[projectKey] }), autoMerge: false, requirePerson: false };
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

@@ -364,6 +364,7 @@ impl ControlService {
             if action != "status" && !crate::cloud_control::enabled() {
                 return Err(crate::cloud_control::disabled_error());
             }
+            let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
         }
         if command.starts_with("computer.") || command.starts_with("browser.") {
@@ -694,15 +695,15 @@ impl ControlService {
     }
 
     #[cfg(feature = "desktop")]
-    fn pipeline_host(&self) -> crate::issue_pipeline::desktop::LocalHost {
-        crate::issue_pipeline::desktop::LocalHost::new(self.sink.clone(), self.manager.clone())
+    fn pipeline_host(&self) -> crate::issue_pipeline::host::LocalHost {
+        crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.manager.clone())
     }
 
     /// Start the issue pipeline for a new session: the pipeline and what the
     /// author's first prompt must carry for it, or why there is none.
     #[cfg(feature = "desktop")]
     fn start_pipeline(&self, session_id: &str, tab_id: &str, auto_merge: Option<bool>) -> Result<(Value, String), String> {
-        let pipeline = crate::issue_pipeline::engine::start(&self.pipeline_host(), session_id, tab_id, auto_merge).map_err(|error| format!("{error:#}"))?;
+        let pipeline = crate::issue_pipeline::engine::start(&self.pipeline_host(), session_id, tab_id, auto_merge, None).map_err(|error| format!("{error:#}"))?;
         Ok((json!(pipeline), crate::issue_pipeline::prompts::author_brief()))
     }
 
@@ -1048,6 +1049,35 @@ fn computer_error(error: crate::computer::ComputerError) -> ControlError {
 struct IssueStart {
     reference: crate::store::index::IssueRef,
     prompt: String,
+    /// The issue's own text, for a cloud workspace's reviewer.
+    body: Option<String>,
+}
+
+/// `terminalx sessions create --project cloud:… --issue …`: the issue is read
+/// here, with the reader's own `gh` or Linear key, before the window hears of
+/// the command. The window gets the issue, its text and the prompt, and
+/// starts the session in one of the project's workspaces, where the runtime
+/// carries it on. A request without `--issue` goes on word for word.
+#[cfg(feature = "desktop")]
+fn cloud_issue_start(mut params: Value) -> Result<Value, ControlError> {
+    let Some(reference) = optional_string(&params, "issue") else { return Ok(params) };
+    let project = required_string(&params, "project")?;
+    if crate::issues::cloud_project_repo(Path::new(&project)).is_none() {
+        return Err(ControlError::invalid("Only a cloud project with a GitHub repository has issues to start from."));
+    }
+    let issue = issue_for_session(&project, &reference, optional_string(&params, "provider").as_deref())?;
+    // From an issue the prompt is the issue itself, with anything the caller added after it.
+    let extra = optional_string(&params, "prompt").unwrap_or_default();
+    let prompt = if extra.trim().is_empty() { issue.prompt } else { format!("{}\n\n{}", issue.prompt, extra.trim()) };
+    params["prompt"] = json!(prompt);
+    params["issue"] = json!(issue.reference);
+    params["issueBody"] = json!(issue.body);
+    Ok(params)
+}
+
+#[cfg(not(feature = "desktop"))]
+fn cloud_issue_start(params: Value) -> Result<Value, ControlError> {
+    Ok(params)
 }
 
 #[cfg(feature = "desktop")]
@@ -1076,6 +1106,7 @@ fn issue_for_session(project_path: &str, reference: &str, provider: Option<&str>
     .map_err(|error| ControlError::not_found(format!("{reference} could not be read: {error:#}")))?;
     Ok(IssueStart {
         prompt: crate::issue_pipeline::prompts::issue_prompt(&issue),
+        body: issue.body.clone(),
         reference: crate::store::index::IssueRef { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
     })
 }

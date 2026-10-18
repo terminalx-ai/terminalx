@@ -18,8 +18,9 @@ some code". It now goes on through five stages, each shown on the issue's page:
 5. **Merge.** By default the pipeline stops at *Ready to merge*. With the
    issue's switch on, TerminalX merges if every condition below holds.
 
-It applies to workspaces on this computer. Cloud workspaces are not covered
-yet; see the end of this page.
+It applies to workspaces on this computer and to cloud workspaces. A cloud
+workspace carries the pipeline itself and stops at *Ready to merge*; see the
+end of this page.
 
 ## What the sessions are told, and what they answer
 
@@ -172,6 +173,9 @@ closed without merging.
 terminalx sessions create --project <project> --agent <agent> --issue <issue> \
   [--provider github|linear] [--prompt <text>] \
   [--auto-merge|--no-auto-merge] [--no-pipeline] --json
+terminalx sessions create --project cloud:<org>:github.com/<owner>/<name> \
+  --issue <issue> [--provider github|linear] [--prompt <text>] \
+  [--no-pipeline] [--agent <agent>] [--wake] --json
 terminalx pipelines list [--project <project>] --json
 terminalx pipelines show <pipeline> [--project <project>] --json
 terminalx pipelines auto-merge <pipeline> on|off [--project <project>] --json
@@ -184,6 +188,12 @@ is for, or the session working on it; when two projects each have a pipeline
 for the same issue number, `--project` says which. Merging by hand is done on
 the issue page, not here.
 
+A cloud project's issue starts in one of its workspaces (a stopped one only
+with `--wake`), never in a new one: a new machine starts with a plain prompt
+and no pipeline. `--auto-merge` is refused there, since a cloud workspace
+never merges by itself. The `pipelines` commands read this computer's
+pipelines; a cloud workspace's are on its issue page.
+
 ## In the code
 
 - `src-tauri/src/issue_pipeline/gate.rs`: the merge decision, a pure function
@@ -193,19 +203,71 @@ the issue page, not here.
   a host that answers as they would.
 - `verdict.rs`, `prompts.rs`, `categories.rs`: the two blocks, what the
   sessions are told, and what a diff touches.
-- `desktop.rs`: the real host, the poller, and the hooks a turn ending calls.
+- `host.rs`: the real host, on this computer or in a cloud workspace's
+  runtime. `desktop.rs` and `runtime.rs`: the poller, and the hooks a turn
+  ending calls, in each.
 - `src/lib/issuePipeline.ts`, `src/components/issues/IssuePipelinePanel.tsx`:
   the issue page.
 
 ## Cloud workspaces
 
-Not covered. The engine has no dependency on the desktop window, but a cloud
-workspace is missing what it would stand on:
+A session started from an issue in a cloud workspace (from the Issues view
+with a cloud project chosen, or with `terminalx sessions create --project
+cloud:… --issue`) goes through the same stages, run by the workspace's
+runtime (`terminalx-serve`) and not by this computer. It needs no desktop
+attached after the start: the runtime hears each turn end as the desktop
+does, pushes and opens the pull request with the workspace's own GitHub
+token, starts the reviewer session in the author's checkout, and watches the
+pull request's checks. While it pushes, opens a pull request or waits for
+checks it counts as running work, so the workspace is not suspended halfway;
+checks that have not finished after an hour are left to a person, as on this
+computer.
 
-- A cloud session cannot carry an issue reference, and the Issues view only
-  starts sessions on this computer.
-- The workspace protocol has no call for a pull request's head commit, for a
-  comment on a pull request, or for a merge pinned to a commit, and its git
-  calls cannot see a session's worktree.
-- Pull requests there are opened with the workspace's GitHub App token, not
-  the reader's own credentials, which the merge rule above assumes.
+What is different:
+
+- **It never merges by itself.** The workspace's token is the workspace's,
+  not yours, so the pipeline stops at *Ready to merge* whatever the project's
+  settings say, and the issue has no switch. **Merge** on the issue page is
+  made from this computer with your own `gh`, as `gh pr merge --repo
+  <owner>/<name> --match-head-commit <sha>`, after the pull request is read
+  again from GitHub and the same gate is applied as for a person pressing
+  Merge here (verdict on that exact commit, no open finding of medium or
+  higher, checks passed, mergeable). Only a pull request in the cloud
+  project's own repository, opened from the pipeline's branch, is merged,
+  whatever the workspace reports. The runtime is told of the merge
+  (`pipeline.noteMerge`) and reads the pull request itself before recording
+  it; if the workspace is asleep, it is told when it next connects.
+- **Checks the workspace may not read.** The workspace's token is a GitHub
+  App's, which may not have been granted a repository's checks. The runtime
+  then reads the pull request without them, never takes them for passed, and
+  stops at *Ready to merge* saying so; **Merge** reads them with your own
+  sign-in before anything is merged.
+- **The issue goes with the session.** The workspace cannot read the
+  tracker (its GitHub token has no access to issues, and the Linear key stays
+  on this computer), so the issue's text is sent with the session for the
+  reviewer, and a Linear issue is not moved to In Review: the record says so.
+- **Settings are this computer's.** **Issue pipeline…** in a cloud project's
+  menu sets whether issue sessions are carried on, the review rounds, the
+  merge method used by **Merge**, and the checks that never hold a merge.
+  They are kept on this computer and sent to the workspace with each issue
+  session started from here, where the runtime reads them at each decision.
+- **A restart picks up where it was.** A workspace is put to sleep and woken
+  as a matter of course. On waking, a pipeline waiting for a session's report
+  keeps waiting, and one at the merge stage is looked at again. Only a turn
+  the restart ended is reported, as *Needs you*.
+- **What the page shows.** A desktop reads a workspace's pipelines whenever
+  it connects to it (`pipeline.list`), follows them while connected
+  (`pipeline.changed`), and keeps the last ones read with the cloud catalog,
+  so the issue page shows them while the workspace sleeps, and says so.
+  Stop, Resume and the other buttons are asked of the runtime and wake the
+  workspace; the look the page takes when it opens never wakes it.
+
+The pipeline record lives in the runtime's data folder, beside its sessions,
+and lasts as they do. A workspace whose runtime predates `pipeline/1` starts
+an issue session as a plain session, and the issue page says no pull request
+will be opened for it.
+
+In the code: `issue_pipeline/runtime.rs` (the runtime's observer and poller),
+`host.rs` (the host for both places), `cloud_merge.rs` (the merge from this
+computer), the `pipeline/1` methods in `remote/server.rs`, and
+`src/lib/cloudPipelines.ts` on the desktop.

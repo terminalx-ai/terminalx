@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
-import { pipelineSettings } from "@/lib/issuePipeline";
+import { cloudPipelineSettings, pipelineSettings } from "@/lib/issuePipeline";
+import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { updateProject } from "@/lib/sessions";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project } from "@/types/session";
+import type { CloudProject } from "@/types/target";
 
 const ROUNDS = ["1", "2", "3", "4", "5"] as const;
 
@@ -212,6 +214,106 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
         </div>
 
         {error && <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * A cloud project's issue pipeline (#433). Its workspaces carry an issue
+ * session to a pull request and a review, and stop at Ready to merge: a cloud
+ * workspace never merges by itself, so there is no switch for that and no
+ * category to keep for a person. What is set here is kept on this computer,
+ * and taken to the workspace with each issue session started from here.
+ */
+export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }: { project: CloudProject; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const prefs = usePrefs();
+  const settings = cloudPipelineSettings(project.key, prefs);
+  const [ignored, setIgnored] = useState(settings.ignoredChecks.join("\n"));
+  useEffect(() => {
+    if (open) setIgnored(cloudPipelineSettings(project.key).ignoredChecks.join("\n"));
+  }, [open, project.key]);
+  const save = (patch: Partial<IssuePipelineSettings>) => {
+    const current = getPrefs().cloudIssuePipelines;
+    setPrefs({ cloudIssuePipelines: { ...current, [project.key]: { ...cloudPipelineSettings(project.key), ...patch } } });
+  };
+  const saveIgnored = () => {
+    const next = lines(ignored, true);
+    const current = cloudPipelineSettings(project.key).ignoredChecks;
+    if (next.length !== current.length || next.some((value, index) => value !== current[index])) save({ ignoredChecks: next });
+  };
+  const off = !settings.enabled;
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) saveIgnored();
+        onOpenChange(next);
+      }}
+    >
+      <DialogContent width="max-w-[36rem]">
+        <DialogHeader>
+          <DialogTitle className="text-[15px] font-semibold">Issue pipeline · {project.fullName}</DialogTitle>
+          <DialogDescription className="text-xs text-muted-foreground">
+            A session started from an issue in this project's cloud workspaces is carried on to a pull request and a review by a second session there, and stops at Ready to merge. You merge it from the issue page, with your own GitHub sign-in. These settings are kept on this computer and go to the workspace with each issue session started from here.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col divide-y divide-hairline">
+          <SettingRow
+            label="Open a pull request and review it"
+            description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
+            control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
+          />
+          <SettingRow
+            disabled={off}
+            label="Review rounds"
+            description="How many reviews a pull request gets before the open findings are left to you."
+            control={
+              <Segmented
+                aria-label="Review rounds"
+                disabled={off}
+                value={ROUNDS.includes(String(settings.maxRounds) as (typeof ROUNDS)[number]) ? String(settings.maxRounds) : "3"}
+                onChange={(rounds) => save({ maxRounds: Number(rounds) })}
+                options={ROUNDS.map((value) => ({ value, label: value }))}
+              />
+            }
+          />
+          <SettingRow
+            disabled={off}
+            label="Merge method"
+            description="How Merge on the issue page merges. The repository must allow it; branch protection is never bypassed."
+            control={
+              <Segmented<IssuePipelineSettings["mergeMethod"]>
+                aria-label="Merge method"
+                disabled={off}
+                value={settings.mergeMethod}
+                onChange={(mergeMethod) => save({ mergeMethod })}
+                options={[
+                  { value: "merge", label: "Merge commit" },
+                  { value: "squash", label: "Squash" },
+                  { value: "rebase", label: "Rebase" },
+                ]}
+              />
+            }
+          />
+          <label className="flex flex-col gap-1 py-2 text-xs">
+            <span className="text-[13px] font-medium">Checks that never hold a merge</span>
+            <span className="leading-relaxed text-muted-foreground">
+              A part of the check’s name, one per line. Only for checks branch protection does not require; a required check always has to pass.
+            </span>
+            <textarea
+              aria-label="Checks that never hold a merge"
+              rows={2}
+              disabled={off}
+              value={ignored}
+              spellCheck={false}
+              placeholder="windows-latest"
+              onChange={(event) => setIgnored(event.target.value)}
+              onBlur={saveIgnored}
+              className="resize-y rounded-md bg-well px-2 py-1.5 font-mono text-xs outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
+            />
+          </label>
+        </div>
       </DialogContent>
     </Dialog>
   );

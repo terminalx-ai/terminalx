@@ -459,6 +459,43 @@ describe("creating a session", () => {
     expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
   });
 
+  it("starts an issue's session with the issue the native side read, and says what became of its pipeline", async () => {
+    const issue = { provider: "github", id: "433", identifier: "#433", title: "Carry issue sessions on", url: "https://github.com/acme/api/issues/433" };
+    vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
+      options?.onIssue?.({ supported: true, pipeline: { id: "p1", cloud: true }, note: null });
+      return `${plan.node.key}:new-session`;
+    });
+    const created = await handleCloudControl("sessions.create", { project: PROJECT, prompt: "Work on GitHub issue #433", issue, issueBody: "Sessions stop at code.", useWorktree: true });
+    expect(created).toMatchObject({ created: "session", pipeline: { id: "p1" }, pipelineNote: null });
+    const [, request] = vi.mocked(newSession.startInWorkspace).mock.calls[0];
+    expect(request).toMatchObject({
+      prompt: "Work on GitHub issue #433",
+      title: "#433 Carry issue sessions on",
+      useWorktree: true,
+      issue: { ref: issue, body: "Sessions stop at code.", worktreeName: "433-carry-issue-sessions-on", pipeline: true, settings: { autoMerge: false, requirePerson: false } },
+    });
+    // --no-pipeline starts it plain; a runtime from before pipelines is said to be one.
+    vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {
+      options?.onIssue?.({ supported: false, pipeline: null, note: null });
+      return `${plan.node.key}:new-session`;
+    });
+    const older = await handleCloudControl("sessions.create", { project: PROJECT, prompt: "go", issue, noPipeline: true });
+    expect(older).toMatchObject({ pipeline: null, pipelineNote: expect.stringContaining("older TerminalX") });
+    expect(vi.mocked(newSession.startInWorkspace).mock.calls[1][1].issue).toMatchObject({ pipeline: false });
+    // An issue is never started in a new machine: that one would start without its pipeline.
+    await list(ORG, []);
+    const { setPrefs, getPrefs } = await import("@/lib/prefs");
+    setPrefs({ cloudProjects: { ...getPrefs().cloudProjects, [ORG]: ["github.com/acme/api"] } });
+    try {
+      const refused = await refusal("sessions.create", { project: PROJECT, prompt: "go", issue, confirmSpend: true });
+      expect(refused).toMatchObject({ code: "cloud_workspace_required", message: expect.stringContaining("#433") });
+      expect(newSession.prepareCloudCreate).not.toHaveBeenCalled();
+      expect(newSession.confirmCloudCreate).not.toHaveBeenCalled();
+    } finally {
+      setPrefs({ cloudProjects: {} });
+    }
+  });
+
   it("does not wake a workspace the list calls running but which has stopped, unless --wake was given", async () => {
     // The window's start flow asks before waking; the list still says ready.
     vi.mocked(newSession.startInWorkspace).mockImplementation(async (plan, _request, options) => {

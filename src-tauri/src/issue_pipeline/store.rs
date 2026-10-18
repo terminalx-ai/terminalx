@@ -7,6 +7,7 @@
 //! and a step about to merge reads them again first.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
@@ -17,6 +18,8 @@ use super::{Pipeline, State};
 /// Finished pipelines kept for the record; ones still in flight are never dropped.
 const RETENTION: usize = 200;
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// Pipelines waiting on GitHub, as of the last read or write.
+static WAITING: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +33,23 @@ fn file_path() -> Result<PathBuf> {
 }
 
 pub fn list() -> Result<Vec<Pipeline>> {
-    Ok(crate::store::read_json::<PipelineFile>(&file_path()?)?.unwrap_or_default().pipelines)
+    let pipelines = crate::store::read_json::<PipelineFile>(&file_path()?)?.unwrap_or_default().pipelines;
+    note_waiting(&pipelines);
+    Ok(pipelines)
+}
+
+fn note_waiting(pipelines: &[Pipeline]) {
+    WAITING.store(pipelines.iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Waiting).count(), Ordering::Relaxed);
+}
+
+/// How many pipelines are waiting on GitHub (checks, mergeability).
+pub fn waiting() -> usize {
+    WAITING.load(Ordering::Relaxed)
+}
+
+fn write(pipelines: Vec<Pipeline>) -> Result<()> {
+    crate::store::write_json(&file_path()?, &PipelineFile { pipelines })?;
+    Ok(())
 }
 
 pub fn get(id: &str) -> Result<Pipeline> {
@@ -41,7 +60,8 @@ fn update<R>(change: impl FnOnce(&mut Vec<Pipeline>) -> Result<R>) -> Result<R> 
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut pipelines = list()?;
     let out = change(&mut pipelines)?;
-    crate::store::write_json(&file_path()?, &PipelineFile { pipelines })?;
+    note_waiting(&pipelines);
+    write(pipelines)?;
     Ok(out)
 }
 
@@ -77,7 +97,8 @@ pub fn commit(working: &mut Pipeline) -> Result<bool> {
     }
     working.modified = crate::store::index::now();
     *stored = working.clone();
-    crate::store::write_json(&file_path()?, &PipelineFile { pipelines })?;
+    note_waiting(&pipelines);
+    write(pipelines)?;
     Ok(true)
 }
 
@@ -98,4 +119,10 @@ pub fn set_switches(id: &str, change: impl FnOnce(&mut Pipeline)) -> Result<Pipe
 /// The newest one, for a session whose earlier pipeline was replaced.
 pub fn for_session(session_id: &str) -> Result<Option<Pipeline>> {
     Ok(list()?.into_iter().rev().find(|pipeline| pipeline.author.session_id == session_id || pipeline.reviewer.as_ref().is_some_and(|reviewer| reviewer.session_id == session_id)))
+}
+
+/// Whether a tab is the author or the reviewer of some pipeline. Asked on
+/// every turn that ends anywhere, so it reads the store and nothing else.
+pub fn takes_part(session_id: &str, tab_id: &str) -> bool {
+    for_session(session_id).ok().flatten().is_some_and(|pipeline| pipeline.role_of(session_id, tab_id).is_some())
 }

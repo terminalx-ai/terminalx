@@ -20,7 +20,9 @@ import { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON, NOT_SHARED_REASON, ef
 import { cloudConnectionInfo, connectedCloudClient, retainCloudConnection, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
 import { archiving, deletion, isArchived, lifecycleErrorMessage, stopping } from "@/lib/cloudLifecycle";
-import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudSessionRequest } from "@/lib/cloudNewSession";
+import { confirmCloudCreate, planCloudStart, prepareCloudCreate, startInWorkspace, type CloudIssueOutcome, type CloudSessionRequest } from "@/lib/cloudNewSession";
+import { cloudPipelineSettings } from "@/lib/issuePipeline";
+import { issueWorktreeName } from "@/lib/issueSession";
 import { personName } from "@/lib/cloudPeople";
 import { deriveCloudActivity } from "@/lib/cloudRowState";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
@@ -28,7 +30,7 @@ import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
 import { cloudWorkspaceKey, isCloudKey, parseCloudWorkspaceKey, type CloudProject } from "@/types/target";
-import type { WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
+import type { RuntimeIssueRef, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 
 /**
  * Cloud workspaces for the `terminalx` CLI (PRO-40). The control socket
@@ -595,9 +597,21 @@ function resolveProject(selector: string): CloudProject {
   throw notFound(`No cloud project ${selector}.`, "List them with terminalx projects list --cloud.");
 }
 
+/** The issue a CLI start names, as the native side read it (`cloud_issue_start`); null for a session without one. */
+function issueOf(params: Params): RuntimeIssueRef | null {
+  const issue = params.issue;
+  if (!issue || typeof issue !== "object") return null;
+  const { provider, id, identifier, title, url } = issue as Record<string, unknown>;
+  if ((provider !== "github" && provider !== "linear") || typeof id !== "string" || typeof identifier !== "string" || typeof title !== "string" || typeof url !== "string") {
+    throw invalid("The issue could not be read.");
+  }
+  return { provider, id, identifier, title, url };
+}
+
 async function sessionsCreate(params: Params) {
   const project = resolveProject(required(params, "project"));
   const prompt = required(params, "prompt");
+  const issue = issueOf(params);
   // The same rule as the project's "+": creating, resuming and adding a session are an owner's or admin's.
   if (mayStartCloudSessions(getAccount().status, project.orgId) !== true) throw forbidden(NEW_SESSION_ADMIN_REASON);
   if (!project.selected) throw forbidden("This repository is no longer selected for cloud workspaces in its organization.");
@@ -611,6 +625,12 @@ async function sessionsCreate(params: Params) {
     prompt,
     useWorktree: params.useWorktree !== false,
   };
+  if (issue) {
+    const settings = cloudPipelineSettings(project.key, prefs);
+    request.title = `${issue.identifier} ${issue.title}`.slice(0, 80);
+    request.issue = { ref: issue, body: text(params, "issueBody"), worktreeName: issueWorktreeName(issue.identifier, issue.title), pipeline: params.noPipeline !== true && settings.enabled, settings };
+  }
+  let outcome: CloudIssueOutcome | null = null;
   const plan = planCloudStart(project);
   if (plan.kind === "reuse" || plan.kind === "wake") {
     const { workspace } = plan.node.item;
@@ -629,6 +649,9 @@ async function sessionsCreate(params: Params) {
       // stopped by itself: that too is only woken when the caller said --wake (and, under "confirm", the person agrees).
       key = await startInWorkspace(plan, request, {
         select: false,
+        onIssue: (said) => {
+          outcome = said;
+        },
         wakeIfStopped: async () => {
           if (params.wake !== true) return false;
           await confirmInWindow(`start a session in the cloud workspace ${workspace.name}, which has stopped. That resumes it, which starts billing its compute.`, "Resume and start");
@@ -642,7 +665,15 @@ async function sessionsCreate(params: Params) {
       }
       throw error;
     }
-    return { created: "session", session: key, workspace: plan.node.key, resumed: woke };
+    const issueOutcome = outcome as CloudIssueOutcome | null;
+    if (!issueOutcome) return { created: "session", session: key, workspace: plan.node.key, resumed: woke };
+    // What the issue page would show beside it: the pipeline, or why there is none.
+    const pipelineNote = !issueOutcome.supported ? "The workspace runs an older TerminalX, which does not carry issues on to a pull request." : issueOutcome.note;
+    return { created: "session", session: key, workspace: plan.node.key, resumed: woke, pipeline: issueOutcome.pipeline, pipelineNote };
+  }
+  // An issue starts in one of the project's workspaces, where its pipeline runs; a new machine starts with a plain prompt.
+  if (issue) {
+    throw new CloudControlError("cloud_workspace_required", `${project.fullName} has no workspace to start ${issue.identifier} in.`, "Start a workspace for the project first (terminalx sessions create with --confirm-spend), then start the issue in it.");
   }
   // No usable workspace: a new machine, which is always an explicit, priced step.
   const prepared = await prepareCloudCreate(project, request);

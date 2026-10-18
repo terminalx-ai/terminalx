@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
+import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
 /**
  * UI preferences that the frontend can read for itself live in localStorage.
@@ -30,6 +31,10 @@ export interface Prefs {
   lastEffort: Record<string, string>;
   lastMode: string;
   issueProvider: "github" | "linear";
+  /** The cloud project the Issues view shows (`cloud:<orgId>:<identity>`); null for `lastProject`, a project on this computer. */
+  issueCloudProject: string | null;
+  /** Issue pipeline settings of cloud projects, by project key. Kept here; each issue session started from here takes them to its workspace. */
+  cloudIssuePipelines: Record<string, IssuePipelineSettings>;
   useWorktree: boolean;
   /** The reader ticked "don't ask again" on the bypass warning. */
   bypassConfirmed: boolean;
@@ -111,6 +116,8 @@ const DEFAULTS: Prefs = {
   lastEffort: {},
   lastMode: "bypassPermissions",
   issueProvider: "github",
+  issueCloudProject: null,
+  cloudIssuePipelines: {},
   useWorktree: true,
   bypassConfirmed: false,
   sidebarSections: {},
@@ -167,6 +174,9 @@ function load(): Prefs {
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
+    prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
+    const pipelines = prefs.cloudIssuePipelines;
+    prefs.cloudIssuePipelines = pipelines && typeof pipelines === "object" && !Array.isArray(pipelines) ? Object.fromEntries(Object.entries(pipelines).filter(([, value]) => !!value && typeof value === "object" && !Array.isArray(value))) : {};
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

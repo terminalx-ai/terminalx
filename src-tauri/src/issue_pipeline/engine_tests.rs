@@ -13,7 +13,7 @@ use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{self, act, poll, recover, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
+use super::engine::{self, act, note_merge, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::{store, MergedBy, Pipeline, SessionRef, Stage, State};
@@ -58,6 +58,8 @@ struct World {
     settings_error: Option<String>,
     /// A merge that tells the test it has begun and waits to be let go.
     merge_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    /// A cloud workspace's runtime.
+    cloud: bool,
 }
 
 struct FakeHost(Mutex<World>);
@@ -114,6 +116,7 @@ impl FakeHost {
             pauses: 0,
             settings_error: None,
             merge_hold: None,
+            cloud: false,
         }))
     }
 
@@ -135,6 +138,10 @@ impl FakeHost {
 impl Host for FakeHost {
     fn now(&self) -> DateTime<Utc> {
         self.world().now
+    }
+
+    fn cloud(&self) -> bool {
+        self.world().cloud
     }
 
     fn session(&self, session_id: &str) -> Result<SessionEntry> {
@@ -230,6 +237,7 @@ impl Host for FakeHost {
             review_decision: None,
             checks: world.checks.clone(),
             required_checks: None,
+            checks_unread: false,
         });
         Ok(7)
     }
@@ -332,8 +340,13 @@ impl Run {
     }
 
     fn start_in(host: FakeHost, auto_merge: bool) -> Self {
+        Self::start_with(host, Some(auto_merge), None)
+    }
+
+    /// With the issue's text as the session was started with it.
+    fn start_with(host: FakeHost, auto_merge: Option<bool>, issue_body: Option<&str>) -> Self {
         let home = crate::store::temp_home();
-        let pipeline = start(&host, "author", "t1", Some(auto_merge)).unwrap();
+        let pipeline = start(&host, "author", "t1", auto_merge, issue_body).unwrap();
         Self { _home: home, host, id: pipeline.id }
     }
 
@@ -913,7 +926,7 @@ fn a_pull_request_the_session_opened_itself_is_used_and_linked_to_the_issue() {
         world.pr = Some(PrSnapshot {
             number: 12, url: "https://github.com/acme/widgets/pull/12".into(), title: "wip".into(), body: "Pads minutes.".into(), state: "OPEN".into(), is_draft: false,
             base: "main".into(), head: "raccoon/433-open-a-pull-request".into(), head_sha: C1.into(), mergeable: "MERGEABLE".into(), merge_state: "CLEAN".into(),
-            review_decision: None, checks, required_checks: None,
+            review_decision: None, checks, required_checks: None, checks_unread: false,
         });
     }
     let run = Run::start_in(host, false);
@@ -1265,25 +1278,25 @@ fn a_pipeline_starts_only_for_an_issue_session_on_a_branch_of_its_own() {
     // The project's default for the switch is what an issue starts at.
     host.world().settings.auto_merge = true;
     host.world().settings.max_rounds = 5;
-    let pipeline = start(&host, "author", "t1", None).unwrap();
+    let pipeline = start(&host, "author", "t1", None, None).unwrap();
     assert!(pipeline.auto_merge);
     assert_eq!(pipeline.max_rounds, 5);
     assert_eq!(pipeline.events.iter().map(|event| event.kind.as_str()).collect::<Vec<_>>(), ["started", "autoMerge"]);
     // Asked twice, it is the same pipeline.
-    assert_eq!(start(&host, "author", "t1", Some(false)).unwrap().id, pipeline.id);
+    assert_eq!(start(&host, "author", "t1", Some(false), None).unwrap().id, pipeline.id);
     assert_eq!(store::list().unwrap().len(), 1);
 
     host.world().sessions.insert("plain".into(), session("plain", None));
-    assert!(start(&host, "plain", "t1", None).unwrap_err().to_string().contains("not started from an issue"));
-    assert!(start(&host, "author", "nope", None).is_err());
+    assert!(start(&host, "plain", "t1", None, None).unwrap_err().to_string().contains("not started from an issue"));
+    assert!(start(&host, "author", "nope", None, None).is_err());
 
     host.world().sessions.insert("main".into(), session("main", Some(&github_issue())));
     host.world().workspace.branch = Some("main".into());
-    assert!(start(&host, "main", "t1", None).unwrap_err().to_string().contains("runs on main itself"));
+    assert!(start(&host, "main", "t1", None, None).unwrap_err().to_string().contains("runs on main itself"));
 
     host.world().workspace.branch = Some("raccoon/other".into());
     host.world().settings.enabled = false;
-    assert!(start(&host, "main", "t1", None).unwrap_err().to_string().contains("turned off for this project"));
+    assert!(start(&host, "main", "t1", None, None).unwrap_err().to_string().contains("turned off for this project"));
     assert_eq!(store::list().unwrap().len(), 1);
 }
 
@@ -1513,7 +1526,7 @@ fn settings_that_cannot_be_read_never_let_a_merge_through() {
     let other = FakeHost::new(&github_issue());
     other.world().settings_error = Some("unreadable".into());
     other.world().sessions.insert("second".into(), session("second", Some(&github_issue())));
-    assert!(start(&other, "second", "t1", None).unwrap_err().to_string().contains("settings could not be read"));
+    assert!(start(&other, "second", "t1", None, None).unwrap_err().to_string().contains("settings could not be read"));
 }
 
 #[test]
@@ -1528,4 +1541,192 @@ fn the_record_keeps_its_newest_lines() {
     assert_eq!(pipeline.events.len(), 200);
     assert_eq!(pipeline.events.last().unwrap().message, "line 299");
     let _ = engine::CHECKS_WAIT_MINUTES;
+}
+
+// ---- a cloud workspace ------------------------------------------------------------
+
+/// A cloud workspace's runtime: it cannot read the tracker, and never merges.
+fn cloud_host(issue: &IssueRef) -> FakeHost {
+    let host = FakeHost::new(issue);
+    host.world().cloud = true;
+    host.world().issue_body = None;
+    host
+}
+
+#[test]
+fn in_a_cloud_workspace_a_clean_pull_request_stops_at_ready_to_merge_whatever_the_switch_said() {
+    // Asked for on, as a desktop that knows no better might: it stays off.
+    let run = Run::start_in(cloud_host(&github_issue()), true);
+    let started = run.pipeline();
+    assert!(started.cloud && !started.auto_merge);
+    assert_eq!(run.kinds(), ["started", "note"]);
+    assert!(started.events[1].message.contains("stops at Ready to merge"));
+
+    let ready = run.to_gate();
+    assert_eq!((ready.stage, ready.state, ready.reason.clone()), (Stage::Merge, State::ReadyToMerge, Some(StopReason::CloudWorkspace)));
+    assert_eq!(run.host.world().comments.len(), 1, "the review is posted as on this computer");
+    assert!(run.merges().is_empty());
+    // Neither the switch nor Merge makes the runtime merge.
+    assert!(set_auto_merge(&run.host, &run.id, true).unwrap_err().to_string().contains("never merges by itself"));
+    assert!(act(&run.host, &run.id, Action::Merge).unwrap_err().to_string().contains("cloud workspace"));
+    assert_eq!(run.poll().state, State::ReadyToMerge);
+    assert!(run.merges().is_empty());
+    assert!(!run.pipeline().auto_merge);
+}
+
+#[test]
+fn a_cloud_pipeline_stops_for_the_same_reasons_as_one_on_this_computer() {
+    // A failing check on the reviewed commit.
+    let host = cloud_host(&github_issue());
+    host.world().checks = vec![check("build", "failure")];
+    let run = Run::start_in(host, false);
+    assert_eq!(run.to_gate().reason, Some(StopReason::ChecksFailed { names: vec!["build".into()] }));
+    // One run at a time: each holds the test home.
+    drop(run);
+    // A head pushed by hand after the review.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_gate();
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    assert_eq!(run.poll().reason, Some(StopReason::HeadMoved { reviewed: C1.into(), head: C2.into() }));
+    drop(run);
+    // Findings still open after the last round.
+    let host = cloud_host(&github_issue());
+    host.world().settings.max_rounds = 1;
+    let run = Run::start_in(host, false);
+    run.to_review();
+    let limited = run.reviewer(&reviewed(C1, "changes", HIGH));
+    assert!(matches!(limited.reason, Some(StopReason::RoundLimit { rounds: 1, count: 1, .. })), "{:?}", limited.reason);
+}
+
+#[test]
+fn a_cloud_workspace_that_may_not_read_the_checks_stops_at_ready_to_merge_saying_so() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    // GitHub refuses the workspace's token the commit's checks.
+    {
+        let mut world = run.host.world();
+        let pr = world.pr.as_mut().unwrap();
+        pr.checks.clear();
+        pr.checks_unread = true;
+    }
+    let ready = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((ready.state, ready.reason), (State::ReadyToMerge, Some(StopReason::ChecksUnreadable { workspace: true })));
+    assert!(ready.note.unwrap().contains("your own GitHub sign-in"));
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_cloud_reviewer_reads_the_issue_as_the_session_was_started_with_it() {
+    let run = Run::start_with(cloud_host(&linear_issue()), None, Some("  Login times out after 30s.\n  "));
+    assert_eq!(run.pipeline().issue_body.as_deref(), Some("Login times out after 30s."));
+    let reviewing = run.to_review();
+    let asked = run.host.prompts_to(&reviewing.reviewer.unwrap().session_id);
+    assert!(asked[0].contains("> Login times out after 30s."), "{}", asked[0]);
+    drop(run);
+
+    // A very long issue is kept to its start.
+    let long = "word ".repeat(10_000);
+    let run = Run::start_with(cloud_host(&github_issue()), None, Some(&long));
+    let kept = run.pipeline().issue_body.unwrap();
+    assert!(kept.len() < long.len() && kept.len() <= 16 * 1024 + 8 && kept.ends_with("[…]"));
+}
+
+#[test]
+fn a_merge_made_from_the_desktop_is_recorded_as_the_persons_once_the_runtime_reads_it() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_gate();
+    // The desktop merged it, pinned, with the reader's own gh.
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = note_merge(&run.host, &run.id, C1).unwrap();
+    assert_eq!(merged.state, State::Merged);
+    let record = merged.merged.clone().unwrap();
+    assert_eq!((record.commit.as_str(), record.by), (C1, MergedBy::Person));
+    assert_eq!(merged.events.last().unwrap().message, "Merged from the issue page: pull request #7 at 1111111111 into main.");
+    assert!(run.merges().is_empty(), "the runtime merged nothing itself");
+    // Said twice, it is still one merge.
+    assert_eq!(note_merge(&run.host, &run.id, C1).unwrap().events.len(), merged.events.len());
+}
+
+#[test]
+fn a_desktop_merge_github_has_only_queued_is_waited_for_and_stays_the_persons() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_gate();
+    // GitHub took it into a merge queue: the pull request is still open at the reviewed commit.
+    let queued = note_merge(&run.host, &run.id, C1).unwrap();
+    assert_eq!((queued.state, queued.merge_requested.as_ref().map(|request| request.by)), (State::Waiting, Some(MergedBy::Person)));
+    assert_eq!(store::waiting(), 1, "waiting on GitHub holds the workspace awake");
+    run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
+    let merged = run.poll();
+    assert_eq!((merged.state, merged.merged.unwrap().by), (State::Merged, MergedBy::Person));
+    assert_eq!(store::waiting(), 0);
+}
+
+#[test]
+fn a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish() {
+    let host = cloud_host(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    let waiting = run.to_gate();
+    assert_eq!(waiting.state, State::Waiting);
+    assert_eq!(engine::holding(), 1);
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success")];
+    assert_eq!(run.poll().state, State::ReadyToMerge);
+    assert_eq!(engine::holding(), 0);
+    drop(run);
+    // Not for ever: checks that never finish are left to a person, and the workspace may sleep.
+    let host = cloud_host(&github_issue());
+    host.world().checks = vec![check("build", "queued")];
+    let run = Run::start_in(host, false);
+    run.to_gate();
+    run.host.world().now += TimeDelta::minutes(i64::from(engine::CHECKS_WAIT_MINUTES));
+    assert!(matches!(run.poll().reason, Some(StopReason::ChecksStalled { .. })));
+    assert_eq!(engine::holding(), 0);
+}
+
+#[test]
+fn a_stages_work_holds_a_cloud_workspace_awake_and_a_look_at_a_parked_pipeline_does_not() {
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let watch = |seen: &std::sync::Arc<Mutex<Vec<usize>>>| -> Hook {
+        let seen = seen.clone();
+        Box::new(move || seen.lock().unwrap().push(engine::holding()))
+    };
+    // Opening the pull request and starting the review: the diff is read mid-step.
+    run.host.world().during_diff = Some(watch(&seen));
+    run.to_review();
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::ReadyToMerge);
+    // Parked on a person, the poller looks at it every few minutes for days: that is no reason to stay up.
+    run.host.world().during_diff = Some(watch(&seen));
+    assert_eq!(run.poll().state, State::ReadyToMerge);
+    assert_eq!(*seen.lock().unwrap(), [1, 0]);
+    assert_eq!(engine::holding(), 0);
+}
+
+#[test]
+fn a_cloud_workspace_that_wakes_picks_its_pipelines_up_where_they_were() {
+    // Waiting for the author to report: still waiting once the runtime is back.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    resume(&run.host, &[("someone".into(), "else".into())]);
+    assert_eq!((run.pipeline().stage, run.pipeline().state), (Stage::Work, State::Working));
+    // Unless the restart ended the author's turn: that is said.
+    resume(&run.host, &[("author".into(), "t1".into())]);
+    let stopped = run.pipeline();
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::SessionStopped { role, detail }) if role == "author" && detail.contains("restarted")), "{:?}", stopped.reason);
+    // Its next report carries it on, as after any stop for one of its own reasons.
+    assert_eq!(run.author(&done("Pads the minutes.")).stage, Stage::Review);
+
+    // The reviewer's turn, likewise.
+    let reviewer = run.pipeline().reviewer.unwrap();
+    resume(&run.host, &[]);
+    assert_eq!((run.pipeline().stage, run.pipeline().state), (Stage::Review, State::Working));
+    resume(&run.host, &[(reviewer.session_id.clone(), reviewer.tab_id.clone())]);
+    assert!(matches!(run.pipeline().reason, Some(StopReason::SessionStopped { ref role, .. }) if role == "reviewer"));
+    drop(run);
+
+    // At the merge stage nothing is said: the poller looks at it again.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_gate();
+    resume(&run.host, &[("author".into(), "t1".into())]);
+    assert_eq!(run.pipeline().state, State::ReadyToMerge);
 }

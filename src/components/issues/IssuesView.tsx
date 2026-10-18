@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "@/icons";
+import { ChevronDown, Cloud, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { AssigneePicker } from "@/components/issues/AssigneePicker";
@@ -16,10 +16,14 @@ import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
 import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
+import { cloudStartError, useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
-import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openAutomation, selectProject, selectSession, startCloudSessionIn, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openCloudSession } from "@/lib/cloudDashboard";
+import { useCloudModelClient } from "@/lib/cloudModels";
+import { planCloudStart, startInWorkspace, type CloudIssueOutcome } from "@/lib/cloudNewSession";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
@@ -28,11 +32,34 @@ import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/i
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
 import { useIssueViewer } from "@/lib/issueViewer";
-import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
+import { cloudPipelineSettings, pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
-import type { WorkStatus } from "@/types/session";
+import type { Project, WorkStatus } from "@/types/session";
+import type { CloudProject } from "@/types/target";
 
 type Provider = "github" | "linear";
+
+/**
+ * What the Issues view lists issues of and starts sessions in: a project on
+ * this computer, or a cloud project. A cloud project's issues are its
+ * repository's, read with the reader's own `gh`; its sessions start in one of
+ * its workspaces, where the runtime carries them on to a pull request.
+ */
+interface IssueTarget {
+  /** The project's path, or the cloud project's key: what every issue call is given. */
+  path: string;
+  name: string;
+  isGit: boolean;
+  local: Project | null;
+  cloud: { project: CloudProject; orgName: string; mayStart: boolean | null } | null;
+}
+
+/** Why an issue's cloud session will not be carried on to a pull request, when it will not be. */
+function cloudIssueNote(outcome: CloudIssueOutcome): string | null {
+  if (!outcome.supported) return "The session started. Its workspace runs an older TerminalX, so no pull request is opened for it.";
+  if (!outcome.pipeline && outcome.note) return `The session started. No pull request is opened for it: ${outcome.note}`;
+  return null;
+}
 
 /**
  * GitHub closes an issue a moment after the pull request that closes it is
@@ -117,53 +144,82 @@ export function IssuesView({
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
-  const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
-  const isGit = project?.kind !== "folder";
-  const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
+  const localProject = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
+  // Cloud projects with a GitHub repository: a blank one has no issues to list.
+  const cloudChoices = useCloudProjectChoices();
+  const cloudGroups = useMemo(
+    () => cloudChoices.map((choice) => ({ ...choice, projects: choice.projects.filter((p) => !p.blank && p.identity.startsWith("github.com/")) })).filter((choice) => choice.projects.length > 0),
+    [cloudChoices],
+  );
+  const cloudChoice = useMemo(() => {
+    for (const choice of cloudGroups) {
+      const found = choice.projects.find((p) => p.key === prefs.issueCloudProject);
+      if (found) return { project: found, orgName: choice.orgName, mayStart: choice.mayStart };
+    }
+    return null;
+  }, [cloudGroups, prefs.issueCloudProject]);
+  const project: IssueTarget | null = cloudChoice
+    ? { path: cloudChoice.project.key, name: cloudChoice.project.fullName, isGit: true, local: null, cloud: cloudChoice }
+    : localProject
+      ? { path: localProject.path, name: localProject.name, isGit: localProject.kind !== "folder", local: localProject, cloud: null }
+      : null;
+  // What the effects below follow: the target, not a copy of it that a catalog poll renews.
+  const projectPath = project?.path ?? null;
+  const cloud = project?.cloud ?? null;
+  const isGit = project?.isGit ?? true;
+  // A cloud issue always gets a worktree of its own: it is what its pull request is opened from.
+  const useWorktree = isGit && (cloud ? true : (controlledUseWorktree ?? localUseWorktree));
   const pipelines = useIssuePipelines();
-  const pipelineDefaults = pipelineSettings(project);
+  const pipelineDefaults = cloud ? cloudPipelineSettings(cloud.project.key, prefs) : pipelineSettings(project?.local);
   // The issue's own switch, before its session exists. It starts at the project's default.
   const [autoMerge, setAutoMerge] = useState(pipelineDefaults.autoMerge);
   // A pull request needs a branch of its own, so a session on the project's checkout ends at the code.
   const pipelineOffered = isGit && useWorktree && pipelineDefaults.enabled;
-  const pipeline = selected && project ? pipelineForIssue(pipelines, project.path, selected.url) : null;
+  const pipeline = selected && projectPath ? pipelineForIssue(pipelines, projectPath, selected.url) : null;
   // Once an issue has a pipeline its switch is the pipeline's, on the panel
   // below; a session started on it again keeps what was chosen there.
   const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
   // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
-  const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
-  const agentSelection = useSessionAgent(store.harnesses);
+  const viewer = useIssueViewer(projectPath ?? undefined, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
+  // A cloud session runs the agents and models installed in its workspace, not this computer's. They are
+  // read from a running workspace while an issue is open, where they are chosen: browsing the list keeps nothing up.
+  const cloudPlan = cloud?.mayStart ? planCloudStart(cloud.project) : null;
+  const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && selected ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
+  const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort } = agentSelection;
+  const [startNote, setStartNote] = useState<string | null>(null);
   const linkedIssueUrls = useMemo(
-    () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
-    [store.sessions],
+    () => new Set([...store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : []), ...pipelines.filter((value) => value.projectPath === projectPath).map((value) => value.issue.url)]),
+    [store.sessions, pipelines, projectPath],
   );
   // Issues with a pipeline here that the list does not hold: closed by their
   // merge, or outside the search. They stay below it, so the record of what
   // happened to them can still be read on their page.
   const unlisted = useMemo(() => {
-    if (!project || listOf !== `${project.path}\n${provider}`) return [];
+    if (!projectPath || listOf !== `${projectPath}\n${provider}`) return [];
     const words = search.trim().toLowerCase();
-    return unlistedPipelines(pipelines, project.path, provider, list.map((issue) => issue.url))
+    return unlistedPipelines(pipelines, projectPath, provider, list.map((issue) => issue.url))
       .filter((value) => !words || `${value.issue.identifier} ${value.issue.title}`.toLowerCase().includes(words))
       .map((value) => ({ issue: issueOfPipeline(value), pipeline: value }));
-  }, [pipelines, project, provider, list, listOf, search]);
+  }, [pipelines, projectPath, provider, list, listOf, search]);
   // A merge closes the issue on the tracker. The list and the open issue are
   // read again when a pipeline of this project gets there.
-  const mergedHere = pipelines.filter((value) => value.projectPath === project?.path && value.state === "merged").length;
-  const mergedSeen = useRef({ project: project?.path, count: mergedHere });
+  const mergedHere = pipelines.filter((value) => value.projectPath === projectPath && value.state === "merged").length;
+  const mergedSeen = useRef({ project: projectPath, count: mergedHere });
   useEffect(() => {
     const before = mergedSeen.current;
-    mergedSeen.current = { project: project?.path, count: mergedHere };
+    mergedSeen.current = { project: projectPath, count: mergedHere };
     // Another project's count is not a merge that happened in this one.
-    if (before.project !== project?.path || mergedHere <= before.count) return;
+    if (before.project !== projectPath || mergedHere <= before.count) return;
     const timer = window.setTimeout(() => setTick((t) => t + 1), AFTER_MERGE_MS);
     return () => window.clearTimeout(timer);
-  }, [mergedHere, project?.path]);
+  }, [mergedHere, projectPath]);
 
+  // The side panel shows a project on this computer; a cloud project has none here.
+  const localPath = project?.local?.path ?? null;
   useEffect(() => {
-    onTargetProjectChange?.(selected && project ? project.path : null);
-  }, [onTargetProjectChange, project?.path, selected?.provider, selected?.id]);
+    onTargetProjectChange?.(selected && localPath ? localPath : null);
+  }, [onTargetProjectChange, localPath, selected?.provider, selected?.id]);
   useEffect(() => () => onTargetProjectChange?.(null), [onTargetProjectChange]);
 
   useEffect(() => {
@@ -181,21 +237,22 @@ export function IssuesView({
   }, [tick]);
   useEffect(() => {
     let live = true;
-    if (!project || project.kind === "folder") return setRepo(null);
-    issuesApi.githubRepo(project.path).then((r) => live && setRepo(r)).catch(() => {});
+    if (!projectPath || !isGit) return setRepo(null);
+    issuesApi.githubRepo(projectPath).then((r) => live && setRepo(r)).catch(() => {});
     return () => {
       live = false;
     };
-  }, [project]);
+  }, [projectPath, isGit]);
   useEffect(() => {
     let live = true;
-    if (!project || project.kind === "folder") return setStatus(null);
+    // A cloud project's branches are its workspaces': nothing here to read.
+    if (!localPath || !isGit) return setStatus(null);
     setStatus(null);
-    api.workStatus(project.path).then((s) => live && setStatus(s)).catch(() => {});
+    api.workStatus(localPath).then((s) => live && setStatus(s)).catch(() => {});
     return () => {
       live = false;
     };
-  }, [project]);
+  }, [localPath, isGit]);
   useEffect(() => {
     if (provider !== "linear" || !linear?.connected) return;
     let live = true;
@@ -207,7 +264,7 @@ export function IssuesView({
 
   // The list itself. Search is debounced because GitHub runs it server-side.
   useEffect(() => {
-    if (!project) return;
+    if (!projectPath) return;
     if (provider === "linear" && !linear?.connected) {
       setList([]);
       return;
@@ -218,17 +275,17 @@ export function IssuesView({
       setError(null);
       const started = writes.readStarted();
       try {
-        const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
+        const r = await issuesApi.list(projectPath, provider, { assignedToMe, teamId, search });
         if (live) {
           // A row written to since the read started keeps the state the write gave it.
           setList((rows) => r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row)));
-          setListOf(`${project.path}\n${provider}`);
+          setListOf(`${projectPath}\n${provider}`);
           setAssignedHere(new Map());
         }
       } catch (e) {
         if (live) {
           setList([]);
-          setListOf(`${project.path}\n${provider}`);
+          setListOf(`${projectPath}\n${provider}`);
           setError(errorMessage(e));
         }
       } finally {
@@ -239,7 +296,7 @@ export function IssuesView({
       live = false;
       window.clearTimeout(t);
     };
-  }, [project, provider, assignedToMe, teamId, search, linear?.connected, tick]);
+  }, [projectPath, provider, assignedToMe, teamId, search, linear?.connected, tick]);
 
   // Body on demand: GitHub lists come without it. A refresh reads the open
   // issue again as well, since its state may have moved; what is on the page
@@ -247,14 +304,14 @@ export function IssuesView({
   const shown = useRef<string | null>(null);
   const selectedAtTick = useRef(tick);
   useEffect(() => {
-    const key = selected && project ? `${project.path}:${selected.provider}:${selected.id}` : null;
+    const key = selected && projectPath ? `${projectPath}:${selected.provider}:${selected.id}` : null;
     const again = key != null && shown.current === key;
     shown.current = key;
     if (!again) {
       setDetail(null);
       selectedAtTick.current = tick;
     }
-    if (!selected || !project) return;
+    if (!selected || !projectPath) return;
     // A Linear row carries its body, so it is shown while the issue is read
     // whole: what editing it needs comes only with that.
     const rowFirst = !again && selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick;
@@ -263,7 +320,7 @@ export function IssuesView({
     const started = writes.readStarted();
     if (!again && !rowFirst) setDetailLoading(true);
     issuesApi
-      .details(project.path, selected.provider, selected.id)
+      .details(projectPath, selected.provider, selected.id)
       // Not over a status change that began or ended since the read started.
       .then((d) => live && setDetail((now) => (now && writeKey(now) === writeKey(d) && writes.outdated(writeKey(d), started) ? now : newer(now, d))))
       .catch((e) => live && setError(errorMessage(e)))
@@ -271,27 +328,58 @@ export function IssuesView({
     return () => {
       live = false;
     };
-  }, [selected, project, tick]);
+  }, [selected, projectPath, tick]);
 
   // The open issue's thread as the pane last read it, for the agent's prompt; named by the issue it belongs to.
   const thread = useRef<{ key: string; thread: IssueThread } | null>(null);
-  const threadKey = selected && project ? `${project.path}\n${selected.provider}\n${selected.id}` : null;
+  const threadKey = selected && projectPath ? `${projectPath}\n${selected.provider}\n${selected.id}` : null;
   const onThread = useCallback((key: string, value: IssueThread) => {
     thread.current = { key, thread: value };
   }, []);
 
   const start = useCallback(async () => {
     const issue = detail ?? selected;
-    if (!issue || !project || !harness) return;
+    if (!issue || !projectPath || !harness) return;
     setStarting(true);
     setError(null);
+    setStartNote(null);
     try {
       // The discussion goes with the first prompt: the pane's thread when it was read, else read now, before the session exists.
-      const key = `${project.path}\n${issue.provider}\n${issue.id}`;
+      const key = `${projectPath}\n${issue.provider}\n${issue.id}`;
       const read = thread.current?.key === key ? thread.current.thread : null;
-      let prompt = read ? issuePrompt(issue, read) : await issuePromptWithComments(project.path, issue);
+      let prompt = read ? issuePrompt(issue, read) : await issuePromptWithComments(projectPath, issue);
+      if (cloud) {
+        // In one of the project's workspaces: the runtime starts the session and carries it on (its pipeline).
+        const plan = planCloudStart(cloud.project);
+        if (plan.kind === "create") {
+          setStartNote("This cloud project has no workspace to start in. Start one from the project's +, then start the issue here.");
+          return;
+        }
+        const body = (issue as Partial<IssueDetails>).description ?? issue.body ?? null;
+        await startInWorkspace(
+          plan,
+          {
+            agent: harness.id,
+            model: modelId,
+            effort,
+            mode: prefs.lastMode,
+            prompt,
+            useWorktree: true,
+            title: `${issue.identifier} ${issue.title}`.slice(0, 80),
+            issue: {
+              ref: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
+              body,
+              worktreeName: issueWorktreeName(issue.identifier, issue.title),
+              pipeline: pipelineDefaults.enabled,
+              settings: pipelineDefaults,
+            },
+          },
+          { onIssue: (outcome) => setStartNote(cloudIssueNote(outcome)) },
+        );
+        return;
+      }
       const s = await api.createSession({
-        projectPath: project.path,
+        projectPath,
         title: `${issue.identifier} ${issue.title}`.slice(0, 80),
         useWorktree,
         onMain: !useWorktree,
@@ -318,14 +406,14 @@ export function IssuesView({
       selectSession(s.id);
       onCreated?.(s.id, s.tabs[0].id, prompt);
     } catch (e) {
-      setError(errorMessage(e));
+      setError(cloud ? cloudStartError(e, cloud.project.orgId) : errorMessage(e));
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
+  }, [detail, selected, projectPath, cloud, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults]);
 
   const emptyReason = useMemo(() => {
-    if (!project) return "Add a project to see its issues.";
+    if (!projectPath) return "Add a project to see its issues.";
     if (provider === "github") {
       if (ghOk === false) return "Issues need the GitHub CLI. Install gh and run gh auth login.";
       if (repo === null) return "Add a GitHub remote named origin to see this project's issues.";
@@ -333,12 +421,13 @@ export function IssuesView({
       return "Linear is not connected. Add an API key in Settings → Integrations.";
     }
     return null;
-  }, [project, provider, ghOk, repo, linear]);
+  }, [projectPath, provider, ghOk, repo, linear]);
 
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
     setSelected(issue);
     setStatusOpen(false);
+    setStartNote(null);
     setUseWorktree(prefs.useWorktree);
     setAutoMerge(pipelineDefaults.autoMerge);
   };
@@ -372,13 +461,14 @@ export function IssuesView({
     setDetail((now) => (same(now) ? newer(now, next) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
   }, []);
-  const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  const edits = useIssueEdits(projectPath, editableIssue(current), changed);
   // The editors are the open issue's own: a switch starts them afresh.
-  const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
-  // The session working on the issue: the pipeline's author, never its reviewer.
+  const issueKey = selected ? `${projectPath}:${selected.provider}:${selected.id}` : "";
+  // The session working on the issue: the pipeline's author, never its reviewer. A cloud one is its workspace's.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
+  const openLinked = linkedSession ? () => selectSession(linkedSession.id) : pipeline?.place ? () => openCloudSession(pipeline.author.sessionId, pipeline.author.tabId) : null;
 
   if (automationPrefill) {
     return (
@@ -402,7 +492,7 @@ export function IssuesView({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="secondary" size="sm" className="gap-1.5">
-                <FolderGit2 />
+                {cloud ? <Cloud /> : <FolderGit2 />}
                 {project?.name ?? "Choose project"}
                 <ChevronDown className="text-faint" />
               </Button>
@@ -414,13 +504,30 @@ export function IssuesView({
                   key={p.path}
                   onSelect={() => {
                     setSelected(null);
-                    setPrefs({ lastProject: p.path });
+                    setPrefs({ lastProject: p.path, issueCloudProject: null });
                     void selectProject(p.path);
                   }}
                 >
-                  <FolderGit2 className={cn(p.path === project?.path && "text-foreground")} />
+                  <FolderGit2 className={cn(p.path === projectPath && "text-foreground")} />
                   <span className="truncate">{p.name}</span>
                 </DropdownMenuItem>
+              ))}
+              {cloudGroups.map((group) => (
+                <DropdownMenuGroup key={group.orgId} aria-label={`Cloud · ${group.orgName}`}>
+                  <DropdownMenuLabel>Cloud · {group.orgName}</DropdownMenuLabel>
+                  {group.projects.map((p) => (
+                    <DropdownMenuItem
+                      key={p.key}
+                      onSelect={() => {
+                        setSelected(null);
+                        setPrefs({ issueCloudProject: p.key });
+                      }}
+                    >
+                      <Cloud className={cn(p.key === projectPath && "text-foreground")} />
+                      <span className="truncate">{p.fullName}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
@@ -508,16 +615,18 @@ export function IssuesView({
                         selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
                         notMine={notMine(i)}
-                        pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
+                        pipeline={projectPath ? pipelineForIssue(pipelines, projectPath, i.url) : null}
                         onSelect={() => open(i)}
                       />
                     </ContextMenuTrigger>
                     <ContextMenuContent>
-                      {i.provider === "github" && i.labels.length > 0 ? i.labels.map((label) => (
+                      {cloud ? (
+                        <ContextMenuItem disabled>Automations run in projects on this computer</ContextMenuItem>
+                      ) : i.provider === "github" && i.labels.length > 0 ? i.labels.map((label) => (
                         <ContextMenuItem
                           key={label.name}
                           onSelect={() => setAutomationPrefill({
-                            projectPath: project?.path ?? "",
+                            projectPath: projectPath ?? "",
                             repo: repo ?? "",
                             query: `label:${label.name}`,
                             label: label.name,
@@ -570,10 +679,10 @@ export function IssuesView({
                 <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                {current && project && (
+                {current && projectPath && (
                   <IssueStatusPicker
                     key={`status:${writeKey(current)}`}
-                    projectPath={project.path}
+                    projectPath={projectPath}
                     issue={current}
                     pipeline={pipeline}
                     open={statusOpen}
@@ -588,8 +697,8 @@ export function IssuesView({
                   />
                 )}
                 {current?.team && <span>{current.team.name}</span>}
-                {project && current && (current.assignees || current.assignee || !detailLoading) && (
-                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />
+                {projectPath && current && (current.assignees || current.assignee || !detailLoading) && (
+                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={projectPath} issue={current} viewer={viewer} onChange={assigned} />
                 )}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
@@ -623,7 +732,12 @@ export function IssuesView({
               {/* Where it runs, and the buttons. The buttons take a line of their own
                   when the pane is too narrow for both, rather than sit on the words. */}
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5" data-testid="issue-start-row">
-                {!isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 flex-1 basis-56 items-center gap-2 text-[11px] text-faint">
+                {cloud ? (
+                  <span className="flex min-w-0 flex-1 basis-56 items-center gap-1 whitespace-nowrap text-[11px] text-faint">
+                    <Cloud className="size-3.5 shrink-0" />
+                    in new worktree <span className="truncate font-mono text-foreground">{issueWorktreeName(selected.identifier, selected.title)}</span> of a cloud workspace
+                  </span>
+                ) : !isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 flex-1 basis-56 items-center gap-2 text-[11px] text-faint">
                   <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
                   <span className={cn("flex min-w-0 items-center gap-1 whitespace-nowrap", !useWorktree && "text-warning")}>
                     <GitBranch className="size-3.5 shrink-0" />
@@ -640,18 +754,40 @@ export function IssuesView({
                   </span>
                 </label>}
                 <div className="ml-auto flex shrink-0 items-center gap-2">
-                  {linkedSession && (
-                    <Button variant="secondary" size="sm" onClick={() => selectSession(linkedSession.id)}>
+                  {openLinked && (
+                    <Button variant="secondary" size="sm" onClick={openLinked}>
                       Open session
                     </Button>
                   )}
-                  <Button size="sm" variant="accent" disabled={starting || !harness?.available || detailLoading} onClick={() => void start()}>
+                  <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start()}>
                     {starting ? <Loader2 className="animate-spin" /> : null}
                     Start session
                   </Button>
                 </div>
               </div>
-              {pipeline ? null : pipelineOffered ? (
+              {cloud && cloud.mayStart === false && (
+                <span className="text-[11px] text-faint">Starting a session in this organization's cloud workspaces needs an owner or admin.</span>
+              )}
+              {cloud && cloud.mayStart !== false && !cloud.project.selected && (
+                <span className="text-[11px] text-faint">This repository is no longer selected for cloud workspaces in its organization, so no session starts in them.</span>
+              )}
+              {startNote && (
+                <p role="status" className="flex items-start gap-1.5 text-[11px] text-muted-foreground" data-testid="issue-start-note">
+                  <span>{startNote}</span>
+                  {cloud && cloudPlan?.kind === "create" && (
+                    <button type="button" className="shrink-0 text-foreground underline-offset-2 hover:underline" onClick={() => startCloudSessionIn(cloud.project.key)}>
+                      New session…
+                    </button>
+                  )}
+                </p>
+              )}
+              {pipeline ? null : cloud ? (
+                pipelineDefaults.enabled && (
+                  <span className="text-[11px] text-faint" data-testid="issue-cloud-pipeline">
+                    A pull request is opened and reviewed in the workspace when the work is done. It stops at Ready to merge, and you merge it here.
+                  </span>
+                )
+              ) : pipelineOffered ? (
                 <label className="flex min-w-0 items-start gap-2 text-[11px] text-faint">
                   <Switch
                     aria-label="Merge automatically when the review is addressed"
@@ -685,11 +821,11 @@ export function IssuesView({
                   </IssueDescription>
                 )}
               </div>
-              {project && (
+              {projectPath && (
                 <div className="border-t border-hairline px-5 pb-5 pt-3">
                   <IssueCommentThread
                     key={threadKey}
-                    projectPath={project.path}
+                    projectPath={projectPath}
                     provider={selected.provider}
                     issueId={selected.id}
                     refreshKey={tick}

@@ -52,9 +52,17 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `workspace.removedRecords` and `workspace.restoreRemoved`. The runtime
 ///   reads, removes and records its own worktrees; a client only says that
 ///   it is on, and how long the grace period is.
-pub const CAPABILITIES: [&str; 20] = [
+/// - `pipeline/1` (#433): the issue pipelines this runtime carries
+///   (`issue_pipeline`). `pipeline.list` and the `pipeline.changed`
+///   notification for anyone who may see the workspace's sessions;
+///   `pipeline.act` (stop, resume, carry on, review again, look again) and
+///   `pipeline.noteMerge` for its manager. A runtime never merges: the
+///   desktop does, with its reader's own `gh`, and says so with
+///   `pipeline.noteMerge`. It also lets `session.create` take an issue, which
+///   an older runtime would ignore: a client sends one only once this is granted.
+pub const CAPABILITIES: [&str; 21] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1",
 ];
 
 /// The namespace that lets a connection address an agent tab's own terminal
@@ -202,6 +210,11 @@ pub const METHODS: &[Method] = &[
     method("workspace.holdMerged", "workspace/2", Manage, true),
     method("workspace.removedRecords", "workspace/2", Manage, false),
     method("workspace.restoreRemoved", "workspace/2", Manage, true),
+    // An issue's pipeline: reading it is reading the sessions it names;
+    // steering it is the manager's, as starting the sessions was.
+    method("pipeline.list", "pipeline/1", Participate, false),
+    method("pipeline.act", "pipeline/1", Manage, true),
+    method("pipeline.noteMerge", "pipeline/1", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
     method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
     // PRO-33: free memory and disk of the machine; read-only. A runtime
@@ -242,6 +255,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "mirror/1" => &["mirror."],
         "cleanup/1" => &["cleanup."],
         "workspace/1" | "workspace/2" => &["workspace."],
+        "pipeline/1" => &["pipeline."],
         // `composer/N` adds what an agent tab's composer asks of its session.
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
@@ -480,6 +494,13 @@ mod tests {
         for name in ["pty.create", "fs.write", "git.commit", "session.send", "session.create", "notes.post"] {
             assert!(find_method(name).unwrap().idempotent, "{name}");
         }
+        // A pipeline is read by whoever sees the sessions and steered by the manager.
+        assert_eq!(find_method("pipeline.list").map(|method| (method.capability, method.authority, method.idempotent)), Some(("pipeline/1", Participate, false)));
+        for name in ["pipeline.act", "pipeline.noteMerge"] {
+            let method = find_method(name).unwrap();
+            assert_eq!((method.capability, method.authority, method.idempotent), ("pipeline/1", Manage, true), "{name}");
+        }
+        assert!(find_method("pipeline.merge").is_none(), "a runtime never merges");
         // An interrupt is for the turn running now: never replayed from a cache.
         let interrupt = find_method("session.interrupt").unwrap();
         assert_eq!((interrupt.capability, interrupt.authority, interrupt.idempotent), ("session/3", Participate, false));

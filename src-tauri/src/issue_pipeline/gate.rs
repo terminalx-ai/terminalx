@@ -52,6 +52,9 @@ pub enum StopReason {
     AutoMergeOff,
     /// The project wants a person to press merge whatever the switch says.
     PersonRequired,
+    /// A cloud workspace never merges by itself: its GitHub token is the
+    /// workspace's, not the reader's own.
+    CloudWorkspace,
     ProtectedCategory { hits: Vec<ProtectedHit> },
     NoVerdict { detail: String },
     /// The reviewed commit is not the pull request's head any more.
@@ -63,6 +66,9 @@ pub enum StopReason {
     ChecksFailed { names: Vec<String> },
     /// Checks that did not finish within the wait limit.
     ChecksStalled { names: Vec<String>, minutes: u32 },
+    /// GitHub would not let this token read the commit's checks: a cloud
+    /// workspace's (`workspace`), or the reader's own.
+    ChecksUnreadable { workspace: bool },
     Conflicts,
     Draft,
     /// Branch protection wants an approving review TerminalX will not give itself.
@@ -130,6 +136,7 @@ impl StopReason {
         match self {
             Self::AutoMergeOff => "Reviewed, checks passed. Automatic merge is off for this issue.".into(),
             Self::PersonRequired => "Reviewed, checks passed. This project has a person do the merge.".into(),
+            Self::CloudWorkspace => "Reviewed, checks passed. A cloud workspace does not merge by itself: merge it from the issue page, with your own GitHub sign-in, or on GitHub.".into(),
             Self::ProtectedCategory { hits } => format!("Reviewed, checks passed. A person merges this one: it changes {}.", hits.iter().map(category_phrase).collect::<Vec<_>>().join("; ")),
             Self::NoVerdict { detail } => format!("There is no usable verdict from the reviewer. {detail}"),
             Self::HeadMoved { reviewed, head } => format!("The branch moved to {} after the review of {}. The new commit has not been reviewed.", short(head), short(reviewed)),
@@ -138,6 +145,8 @@ impl StopReason {
             Self::SecurityPassMissing { areas } => format!("The change touches {} and the reviewer reported no security pass.", some(areas)),
             Self::ChecksFailed { names } => format!("{} failed on the reviewed commit: {}.", if names.len() == 1 { "A check" } else { "Checks" }, some(names)),
             Self::ChecksStalled { names, minutes } => format!("Checks have not finished after {minutes} minutes: {}.", some(names)),
+            Self::ChecksUnreadable { workspace: true } => "Reviewed. GitHub does not let the workspace read this commit's checks, so they are read with your own GitHub sign-in when you press Merge.".into(),
+            Self::ChecksUnreadable { workspace: false } => "GitHub did not let your sign-in read the checks on this commit, so nothing is merged on them.".into(),
             Self::Conflicts => "The pull request conflicts with its base branch.".into(),
             Self::Draft => "The pull request is a draft.".into(),
             Self::ReviewRequired => "GitHub requires an approving review before this can merge. TerminalX does not approve its own pull requests.".into(),
@@ -184,6 +193,8 @@ pub enum Gate {
 pub struct Facts<'a> {
     pub auto_merge: bool,
     pub require_person: bool,
+    /// Decided in a cloud workspace's runtime, which never merges.
+    pub cloud: bool,
     pub verdict: Option<&'a Verdict>,
     pub pr: &'a PrSnapshot,
     /// The areas TerminalX saw the diff touch that call for a security pass.
@@ -276,7 +287,8 @@ pub fn decide(facts: &Facts<'_>) -> Gate {
     if pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY" {
         return Gate::NeedsYou(StopReason::Conflicts);
     }
-    let (failed, pending) = gating_checks(pr, facts.ignored_checks);
+    // Checks that could not be read are neither failing nor passing.
+    let (failed, pending) = if pr.checks_unread { (Vec::new(), Vec::new()) } else { gating_checks(pr, facts.ignored_checks) };
     if !failed.is_empty() {
         return Gate::NeedsYou(StopReason::ChecksFailed { names: failed });
     }
@@ -293,6 +305,16 @@ pub fn decide(facts: &Facts<'_>) -> Gate {
         "BEHIND" => return Gate::NeedsYou(StopReason::Behind),
         "BLOCKED" => return Gate::NeedsYou(StopReason::Blocked),
         _ => {}
+    }
+    // Nothing merges on checks nobody read. In a cloud workspace a person
+    // merges anyway, and their own sign-in reads them first.
+    if pr.checks_unread {
+        return if facts.cloud { Gate::ReadyToMerge(StopReason::ChecksUnreadable { workspace: true }) } else { Gate::NeedsYou(StopReason::ChecksUnreadable { workspace: false }) };
+    }
+    // Ahead of the project's own holds: in a cloud workspace none of them is
+    // what stands between this change and a merge.
+    if facts.cloud {
+        return Gate::ReadyToMerge(StopReason::CloudWorkspace);
     }
     if !facts.protected.is_empty() {
         return Gate::ReadyToMerge(StopReason::ProtectedCategory { hits: facts.protected.to_vec() });
@@ -343,6 +365,7 @@ pub(crate) mod tests {
             review_decision: None,
             checks: vec![check("build", "success"), check("lint", "skipped")],
             required_checks: None,
+            checks_unread: false,
         }
     }
 
@@ -357,6 +380,7 @@ pub(crate) mod tests {
     struct Case {
         auto_merge: bool,
         require_person: bool,
+        cloud: bool,
         verdict: Option<Verdict>,
         pr: PrSnapshot,
         security_areas: Vec<String>,
@@ -367,13 +391,14 @@ pub(crate) mod tests {
     impl Case {
         /// Everything in order and the switch on: the one case that merges.
         fn clean() -> Self {
-            Self { auto_merge: true, require_person: false, verdict: Some(merge_verdict(HEAD)), pr: clean_pr(), security_areas: Vec::new(), protected: Vec::new(), ignored_checks: Vec::new() }
+            Self { auto_merge: true, require_person: false, cloud: false, verdict: Some(merge_verdict(HEAD)), pr: clean_pr(), security_areas: Vec::new(), protected: Vec::new(), ignored_checks: Vec::new() }
         }
 
         fn decide(&self) -> Gate {
             decide(&Facts {
                 auto_merge: self.auto_merge,
                 require_person: self.require_person,
+                cloud: self.cloud,
                 verdict: self.verdict.as_ref(),
                 pr: &self.pr,
                 security_areas: &self.security_areas,
@@ -393,6 +418,44 @@ pub(crate) mod tests {
         // The default: reviewed, green, and left for a person.
         case.auto_merge = false;
         assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::AutoMergeOff));
+    }
+
+    #[test]
+    fn a_cloud_workspace_stops_a_clean_pull_request_at_ready_to_merge_whatever_the_switches_say() {
+        let mut case = Case { cloud: true, ..Case::clean() };
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::CloudWorkspace));
+        // It is the reason given even where the project's own holds apply too.
+        case.require_person = true;
+        case.protected = vec![ProtectedHit { category: "migrations".into(), evidence: vec!["db/migrations/0042.sql".into()] }];
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::CloudWorkspace));
+        // Everything that makes a merge wrong still comes first.
+        case.pr.head_sha = NEXT.into();
+        assert!(matches!(case.decide(), Gate::NeedsYou(StopReason::HeadMoved { .. })));
+        case.pr = clean_pr();
+        case.pr.checks = vec![check("build", "failure")];
+        assert!(matches!(case.decide(), Gate::NeedsYou(StopReason::ChecksFailed { .. })));
+        case.pr = clean_pr();
+        case.pr.state = "MERGED".into();
+        assert_eq!(case.decide(), Gate::Merged);
+    }
+
+    #[test]
+    fn checks_that_could_not_be_read_never_pass() {
+        let mut case = Case::clean();
+        case.pr.checks = Vec::new();
+        case.pr.checks_unread = true;
+        // On this computer nothing is merged on them.
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::ChecksUnreadable { workspace: false }));
+        case.auto_merge = false;
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::ChecksUnreadable { workspace: false }));
+        // In a cloud workspace a person merges, and their own sign-in reads the checks first.
+        case.cloud = true;
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::ChecksUnreadable { workspace: true }));
+        // What can be read still decides first.
+        case.pr.mergeable = "CONFLICTING".into();
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::Conflicts));
+        case.pr.mergeable = "UNKNOWN".into();
+        assert_eq!(case.decide(), Gate::Wait(Wait::Mergeability));
     }
 
     #[test]

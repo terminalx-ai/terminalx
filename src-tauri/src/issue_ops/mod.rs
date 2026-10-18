@@ -352,7 +352,7 @@ impl Target {
             Provider::Github => {
                 let repo = crate::issues::github_repo(project_path)
                     .ok_or_else(|| IssueOpError::with_message(IssueOpErrorKind::NotFound, "This project has no GitHub remote. Add one named origin to manage its issues."))?;
-                Ok(Target::Github { cwd: project_path.to_path_buf(), repo })
+                Ok(Target::Github { cwd: crate::issues::gh_dir(project_path), repo })
             }
             Provider::Linear => {
                 let key = crate::store::settings::load().linear_api_key.filter(|key| !key.trim().is_empty()).ok_or_else(|| IssueOpError::new(IssueOpErrorKind::NotSignedIn, Provider::Linear))?;

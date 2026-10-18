@@ -304,6 +304,97 @@ try {
       await page.close();
     }
   }
+
+  // A cloud project (#433): its issues in the same view, a start row that says
+  // where the session goes, and its pipeline as the workspace last reported it,
+  // asleep and at Ready to merge, with no switch and a Merge that is the reader's.
+  for (const mode of ["light", "dark"]) {
+    for (const width of [1100, 800]) {
+      const page = await browser.newPage({ viewport: { width, height: 700 } });
+      const setup = ({ mode }) => {
+        const PROJECT = "cloud:org-a:github.com/demo/api";
+        localStorage.setItem("raccoon.mode", mode);
+        localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, lastAgent: "claude", issueProvider: "github", issueCloudProject: PROJECT }));
+        const answers = window.__PW_STUB__.answers;
+        const now = Date.now();
+        const issue = {
+          provider: "github", id: "42", identifier: "#42", number: 42, title: "Add keyboard navigation to the demo list",
+          url: "https://github.com/demo/api/issues/42", state: "Open", stateType: "open", labels: [], updatedAt: "2026-10-01T00:00:00Z",
+          body: "Synthetic issue: support arrow keys in the demo list and preserve focus after selection.",
+        };
+        const commit = "1111111111111111111111111111111111111111";
+        const pipeline = {
+          id: "cloud-pipeline", projectPath: "/workspace", cloud: true,
+          issue: { provider: "github", id: "42", identifier: "#42", title: issue.title, url: issue.url },
+          branch: "raccoon/42-add-keyboard-navigation", author: { sessionId: "s-author", tabId: "t1" }, reviewer: { sessionId: "s-reviewer", tabId: "t2" },
+          autoMerge: false, stopped: false, stage: "merge", state: "readyToMerge", reason: { kind: "cloudWorkspace" },
+          note: "Reviewed, checks passed. A cloud workspace does not merge by itself: merge it from the issue page, with your own GitHub sign-in, or on GitHub.",
+          pr: { number: 7, url: "https://github.com/demo/api/pull/7", base: "main" }, round: 1, maxRounds: 3, reviewCommit: commit,
+          verdict: { commit, decision: "merge", securityPass: "notNeeded", round: 1, at: "2026-10-01T00:10:00Z", findings: [{ severity: "low", title: "The arrow keys could also wrap around at the ends of the list", security: false }] },
+          securityAreas: [], merged: null,
+          events: [{ at: "2026-10-01T00:00:00Z", stage: "work", kind: "started", message: "Session started on #42 Add keyboard navigation to the demo list.", sessionId: "s-author" }],
+          created: "2026-10-01T00:00:00Z", modified: "2026-10-01T00:10:00Z",
+        };
+        const workspace = { workspace: { id: "w-api", orgId: "org-a", name: "demo-api", provider: "box", state: "suspended", accessMode: "private", createdAt: 1, updatedAt: now, releaseDisposition: null, authority: "manage", you: { role: "manager", canApprove: true, canManageShares: true }, repositories: [{ identity: "github.com/demo/api", fullName: "demo/api", cloneUrl: "https://github.com/demo/api.git", primary: true }] }, latestOperation: null };
+        const org = answers.cloud_catalog_load.orgs["org-a"];
+        org.workspaces = [workspace];
+        org.pipelines = { "w-api": { pipelines: [pipeline], at: now - 2 * 3600 * 1000 } };
+        answers.cloud_workspaces = { workspaces: [workspace], quota: { used: 1, limit: 3 } };
+        Object.assign(answers, {
+          gh_available: true, github_repo: "demo/api", linear_status: { connected: false },
+          issues_list: [issue], issue_details: issue, issue_comments: { comments: [], nextCursor: null },
+          list_models: [{ harness: "claude", id: "opus", label: "Opus", efforts: ["high"], defaultEffort: "high", isDefault: true, acceptsImages: true, upgrade: null, description: null }],
+        });
+      };
+      await page.addInitScript(`window.__PW_FIXTURE__ = { cloud: true, localProjects: 1 };\n${stub}\n(${setup})(${JSON.stringify({ mode })});`);
+      await page.goto(server.url);
+      await page.getByRole("button", { name: /^Issues/ }).click();
+      // The cloud project is offered under its organization, beside this computer's.
+      await page.getByRole("button", { name: "demo/api", exact: true }).click();
+      const offered = await page.getByRole("group", { name: "Cloud · Demo" }).getByRole("menuitem", { name: "demo/api" }).count();
+      await page.keyboard.press("Escape");
+      await page.getByText("Add keyboard navigation to the demo list", { exact: true }).first().click();
+      await page.getByText(/^Synthetic issue:/).waitFor();
+      const panel = page.getByTestId("issue-pipeline");
+      await panel.waitFor();
+      const startRow = await page.getByTestId("issue-start-row").evaluate((row) => {
+        const bounds = row.getBoundingClientRect();
+        const where = row.querySelector("span").getBoundingClientRect();
+        const buttons = [...row.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
+        const crosses = (a, b) => a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
+        return {
+          text: row.textContent,
+          buttons: buttons.length,
+          overWhere: buttons.some((button) => crosses(button, where)),
+          inside: [where, ...buttons].every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
+          scrolls: row.scrollWidth > row.clientWidth,
+          worktreeSwitch: row.querySelector('[role="switch"]') != null,
+        };
+      });
+      const cloudLayout = await panel.evaluate((node) => {
+        const pane = node.parentElement;
+        const bounds = node.getBoundingClientRect();
+        const boxes = [...node.querySelectorAll("button, li, p")].map((child) => child.getBoundingClientRect());
+        const buttons = [...node.querySelectorAll("button")].map((child) => child.getBoundingClientRect());
+        return {
+          scrolls: pane.scrollWidth > pane.clientWidth || node.scrollWidth > node.clientWidth,
+          inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
+          overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
+          asleep: node.querySelector('[data-testid="pipeline-asleep"]')?.textContent ?? null,
+          personMerges: node.querySelector('[data-testid="pipeline-cloud-merge"]') != null,
+          switches: document.querySelectorAll('[role="switch"][aria-label="Merge automatically when the review is addressed"]').length,
+        };
+      });
+      if (shots) await page.screenshot({ path: join(shots, `issue-cloud-${mode}-${width}.png`) });
+      failed += report(`cloud, ${mode}, ${width}px`, {
+        "the cloud project is offered under its organization": offered === 1,
+        "the start row says the session goes to a new worktree of a cloud workspace, and its button sits beside that": /of a cloud workspace/.test(startRow.text) && !startRow.worktreeSwitch && startRow.buttons >= 1 && !startRow.overWhere && startRow.inside && !startRow.scrolls,
+        "the cloud pipeline fits the pane, says its workspace is asleep and that a person merges": !cloudLayout.scrolls && cloudLayout.inside && !cloudLayout.overlaps && /asleep/.test(cloudLayout.asleep ?? "") && cloudLayout.personMerges,
+        "there is no switch to merge by itself, and Merge is offered": cloudLayout.switches === 0 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 1,
+      }, { startRow, cloudLayout });
+      await page.close();
+    }
+  }
 } finally {
   await browser.close();
   server.close();
