@@ -757,7 +757,7 @@ mod tests {
     }
 
     fn label(id: &str, name: &str) -> crate::issue_ops::LabelOption {
-        crate::issue_ops::LabelOption { id: id.into(), name: name.into(), color: String::new(), description: None, group: None, is_group: false }
+        crate::issue_ops::LabelOption { id: id.into(), name: name.into(), color: String::new(), description: None, group: None, group_id: None, is_group: false }
     }
 
     fn state(id: &str, name: &str, position: f64) -> WorkflowState {
@@ -1050,7 +1050,7 @@ mod tests {
         assert_eq!(error.code, "missing_scope");
         assert_eq!(error.message, crate::issue_ops::message(IssueOpErrorKind::MissingScope, Provider::Github));
         assert_eq!(op_error(IssueOpError::new(IssueOpErrorKind::RateLimited, Provider::Linear)).code, "rate_limited");
-        assert_eq!(op_error(IssueOpError::not_implemented(Provider::Linear)).code, "not_implemented");
+        assert_eq!(op_error(IssueOpError::new(IssueOpErrorKind::NotImplemented, Provider::Linear)).code, "not_implemented");
     }
 
     /// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test -- --ignored live_sandbox`):
