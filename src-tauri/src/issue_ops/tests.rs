@@ -113,8 +113,8 @@ fn the_contract_types_round_trip_in_camel_case() {
     assert_eq!(round_trip(&StateChange::Close { reason: CloseReason::NotPlanned }), json!({"kind": "close", "reason": "not_planned"}));
     assert_eq!(round_trip(&StateChange::Reopen), json!({"kind": "reopen"}));
     assert_eq!(
-        round_trip(&DescriptionEdit { description: "New".into(), expected_updated_at: Some("2026-09-02T10:00:00Z".into()) }),
-        json!({"description": "New", "expectedUpdatedAt": "2026-09-02T10:00:00Z"})
+        round_trip(&DescriptionEdit { description: "New".into(), expected_updated_at: Some("2026-09-02T10:00:00Z".into()), expected_description: Some("Old".into()) }),
+        json!({"description": "New", "expectedUpdatedAt": "2026-09-02T10:00:00Z", "expectedDescription": "Old"})
     );
     let create = round_trip(&IssueCreate { team_id: Some("team-eng".into()), title: "T".into(), description: "D".into(), assignees: vec!["u1".into()], labels: vec![], state_id: None, priority: Some(3) });
     assert_eq!(create["teamId"], "team-eng");

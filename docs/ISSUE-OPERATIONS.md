@@ -30,10 +30,11 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 | `issue_set_labels(id, labels)` | `IssueDetails`. The whole set: Linear label ids, GitHub label names |
 | `issue_set_priority(id, priority)` | `IssueDetails`. Linear only, 0 (none) to 4 (low) |
 | `issue_set_title(id, title)` | `IssueDetails` |
-| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedUpdatedAt` turns a stale edit into a `conflict` |
+| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedDescription` (or, without it, `edit.expectedUpdatedAt`) turns a stale edit into a `conflict` |
 | `issue_create(input)` | `IssueDetails`. A GitHub issue in the project's repository, or a Linear one in `input.teamId` |
 
-Every write answers with the issue as re-read from the provider.
+Every write answers with the issue as re-read from the provider. After a
+failed write the UI reads the issue again: part of a write may have landed.
 
 ## Providers
 
@@ -65,10 +66,14 @@ Every command goes through `gh api` REST (`issue_ops/github.rs`).
   have is refused (`invalid`): GitHub would quietly create it.
 * Assignees are set by removing the logins no longer wanted, then adding
   the new ones. GitHub quietly skips a login that can't be assigned; the
-  answer shows who is.
-* A description edit compares `expectedUpdatedAt` with a fresh read just
-  before writing, since GitHub has no conditional write.
-* Every write reads the issue first and refuses a pull request's number.
+  answer shows who is. When adding fails after the removal, the removed
+  logins are put back before the error is returned.
+* A description edit compares `expectedDescription` (or, without it,
+  `expectedUpdatedAt`) with a fresh read just before writing, since GitHub
+  has no conditional write. A comment moves `updated_at`, so only
+  `expectedDescription` lets an edit through after someone commented.
+* Every write, and the comment list, reads the issue first and refuses a
+  pull request's number.
 * Recorded replies: `src-tauri/src/fixtures/github_issue_ops.json`, replayed
   by `issue_ops/github_tests.rs`.
 

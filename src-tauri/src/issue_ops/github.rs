@@ -261,6 +261,11 @@ fn same_time(a: &str, b: &str) -> bool {
     }
 }
 
+/// Two descriptions with the same text, whatever their line endings.
+fn same_text(a: &str, b: &str) -> bool {
+    a.replace("\r\n", "\n").trim_end() == b.replace("\r\n", "\n").trim_end()
+}
+
 fn issue_number(id: &str) -> OpResult<&str> {
     let id = id.trim().trim_start_matches('#');
     if id.is_empty() || !id.chars().all(|ch| ch.is_ascii_digit()) {
@@ -353,6 +358,7 @@ pub(crate) fn comments_with(api: &mut Api, session: &Mutex<Session>, repo: &str,
         None => 1,
         Some(cursor) => cursor.parse::<u32>().ok().filter(|page| *page >= 1).ok_or_else(|| IssueOpError::with_message(IssueOpErrorKind::Invalid, "That isn't a page of this issue's comments."))?,
     };
+    fetch_issue(api, repo, number)?;
     let access = access(api, session, repo)?;
     let reply = api("GET", &format!("repos/{repo}/issues/{number}/comments?per_page={COMMENTS_PAGE_SIZE}&page={page}"), None)?;
     let items = reply.as_array().ok_or_else(|| IssueOpError::new(IssueOpErrorKind::Other, GITHUB))?;
@@ -436,12 +442,16 @@ pub(crate) fn comment_add_with(api: &mut Api, repo: &str, id: &str, body: &str) 
 pub(crate) fn comment_edit_with(api: &mut Api, repo: &str, id: &str, comment_id: &str, body: &str) -> OpResult<IssueComment> {
     let number = issue_number(id)?;
     let body = comment_body(body)?;
+    comment_number(comment_id)?;
+    fetch_issue(api, repo, number)?;
     let path = comment_path(api, repo, number, comment_id)?;
     written_comment(&api("PATCH", &path, Some(&body))?)
 }
 
 pub(crate) fn comment_delete_with(api: &mut Api, repo: &str, id: &str, comment_id: &str) -> OpResult<()> {
     let number = issue_number(id)?;
+    comment_number(comment_id)?;
+    fetch_issue(api, repo, number)?;
     let path = comment_path(api, repo, number, comment_id)?;
     api("DELETE", &path, None)?;
     Ok(())
@@ -483,7 +493,16 @@ pub(crate) fn set_assignees_with(api: &mut Api, repo: &str, id: &str, assignees:
         issue = api("DELETE", &path, Some(&json!({ "assignees": remove })))?;
     }
     if !add.is_empty() {
-        issue = api("POST", &path, Some(&json!({ "assignees": add })))?;
+        issue = match api("POST", &path, Some(&json!({ "assignees": add }))) {
+            Ok(issue) => issue,
+            Err(error) => {
+                // Don't leave the issue with fewer assignees than it started with.
+                if !remove.is_empty() {
+                    let _ = api("POST", &path, Some(&json!({ "assignees": remove })));
+                }
+                return Err(error);
+            }
+        };
     }
     issue_from(&issue, repo)
 }
@@ -506,10 +525,14 @@ pub(crate) fn set_title_with(api: &mut Api, repo: &str, id: &str, title: &str) -
 pub(crate) fn set_description_with(api: &mut Api, repo: &str, id: &str, edit: &DescriptionEdit) -> OpResult<IssueDetails> {
     let number = issue_number(id)?;
     let issue = fetch_issue(api, repo, number)?;
-    if let Some(expected) = edit.expected_updated_at.as_deref().filter(|expected| !expected.trim().is_empty()) {
-        if !same_time(expected, issue["updated_at"].as_str().unwrap_or("")) {
-            return Err(IssueOpError::new(IssueOpErrorKind::Conflict, GITHUB));
-        }
+    let stale = match (edit.expected_description.as_deref(), edit.expected_updated_at.as_deref().filter(|expected| !expected.trim().is_empty())) {
+        // Comments move `updated_at` too: only the description itself counts.
+        (Some(expected), _) => !same_text(expected, issue["body"].as_str().unwrap_or("")),
+        (None, Some(expected)) => !same_time(expected, issue["updated_at"].as_str().unwrap_or("")),
+        (None, None) => false,
+    };
+    if stale {
+        return Err(IssueOpError::new(IssueOpErrorKind::Conflict, GITHUB));
     }
     patch_issue(api, repo, number, json!({ "body": edit.description }))
 }

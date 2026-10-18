@@ -22,6 +22,13 @@ impl Replay {
         Replay { calls: recording()["steps"][name].as_array().unwrap_or_else(|| panic!("no step {name}")).iter().cloned().collect() }
     }
 
+    /// A recorded step, after the issue read each comment call now starts with.
+    fn step_after_read(name: &str, number: i64) -> Replay {
+        let mut replay = Replay::step(name);
+        replay.calls.push_front(issue_read(number));
+        replay
+    }
+
     fn of(calls: Vec<Value>) -> Replay {
         Replay { calls: calls.into() }
     }
@@ -49,6 +56,13 @@ fn call(method: &str, path: &str, body: Option<Value>, reply: Value) -> Value {
         call["body"] = body;
     }
     call
+}
+
+/// The recorded issue read, as issue `number`.
+fn issue_read(number: i64) -> Value {
+    let mut issue = reply("details", 0);
+    issue["number"] = json!(number);
+    call("GET", &format!("repos/acme/widgets/issues/{number}"), None, issue)
 }
 
 fn session() -> Mutex<Session> {
@@ -123,7 +137,7 @@ fn pages_are_followed_while_they_are_full() {
 #[test]
 fn comments_come_a_page_at_a_time_with_what_the_viewer_may_do() {
     let session = session();
-    let mut replay = Replay::step("comments");
+    let mut replay = Replay::step_after_read("comments", 527);
     let page = comments_with(&mut replay.api(), &session, REPO, SANDBOX, None).unwrap();
     replay.done();
     assert_eq!(page.next_cursor, None);
@@ -137,12 +151,12 @@ fn comments_come_a_page_at_a_time_with_what_the_viewer_may_do() {
     assert!(comment.viewer_can_edit && comment.viewer_can_delete);
 
     // The viewer and their access are kept; the next page is the comments alone.
-    let mut later = Replay::of(vec![call("GET", "repos/acme/widgets/issues/527/comments?per_page=50&page=2", None, json!([]))]);
+    let mut later = Replay::of(vec![issue_read(527), call("GET", "repos/acme/widgets/issues/527/comments?per_page=50&page=2", None, json!([]))]);
     assert_eq!(comments_with(&mut later.api(), &session, REPO, SANDBOX, Some("2")).unwrap(), CommentsPage { comments: vec![], next_cursor: None });
     later.done();
 
     let full: Vec<Value> = (0..50).map(|_| reply("comments", 2)[0].clone()).collect();
-    let mut full_page = Replay::of(vec![call("GET", "repos/acme/widgets/issues/527/comments?per_page=50&page=3", None, json!(full))]);
+    let mut full_page = Replay::of(vec![issue_read(527), call("GET", "repos/acme/widgets/issues/527/comments?per_page=50&page=3", None, json!(full))]);
     assert_eq!(comments_with(&mut full_page.api(), &session, REPO, SANDBOX, Some("3")).unwrap().next_cursor.as_deref(), Some("4"));
 
     for bad in ["0", "next", "-1"] {
@@ -170,23 +184,31 @@ fn comments_are_added_edited_and_deleted_on_this_issue_only() {
     assert_eq!(added.id, "6246849811");
     assert!(added.viewer_can_edit && added.viewer_can_delete);
 
-    let mut replay = Replay::step("comment_edit");
+    let mut replay = Replay::step_after_read("comment_edit", 527);
     let edited = comment_edit_with(&mut replay.api(), REPO, SANDBOX, "6246849811", "[TerminalX test] IM-1 live check comment (edited) — will be deleted").unwrap();
     replay.done();
     assert!(edited.body.contains("(edited)"));
     assert_eq!(edited.edited_at.as_deref(), Some("2026-10-18T06:58:56Z"));
 
     // A comment on another issue is not touched.
-    let mut replay = Replay::step("comment_edit_wrong_issue");
+    let mut replay = Replay::step_after_read("comment_edit_wrong_issue", 1);
     let error = comment_edit_with(&mut replay.api(), REPO, "1", "6246849811", "x").unwrap_err();
     replay.done();
     assert_eq!((error.kind, error.message.as_str()), (IssueOpErrorKind::NotFound, "That comment isn't on this issue."));
 
-    let mut replay = Replay::step("comment_delete");
+    let mut replay = Replay::step_after_read("comment_delete", 527);
     comment_delete_with(&mut replay.api(), REPO, SANDBOX, "6246849811").unwrap();
     replay.done();
-    let mut replay = Replay::step("comment_delete_again");
+    let mut replay = Replay::step_after_read("comment_delete_again", 527);
     assert_eq!(comment_delete_with(&mut replay.api(), REPO, SANDBOX, "6246849811").unwrap_err().kind, IssueOpErrorKind::NotFound);
+
+    // A pull request's comments are neither listed nor changed.
+    let pr = || Replay::of(vec![call("GET", "repos/acme/widgets/issues/526", None, reply("details_pr", 0))]);
+    let refused = |result: OpResult<()>| assert_eq!(result.unwrap_err().message, "That number is a pull request, not an issue.");
+    refused(comments_with(&mut pr().api(), &session(), REPO, "526", None).map(drop));
+    refused(comment_add_with(&mut pr().api(), REPO, "526", "x").map(drop));
+    refused(comment_edit_with(&mut pr().api(), REPO, "526", "6246849811", "x").map(drop));
+    refused(comment_delete_with(&mut pr().api(), REPO, "526", "6246849811"));
 
     let none = || Replay::of(vec![]);
     assert_eq!(comment_add_with(&mut none().api(), REPO, SANDBOX, "  \n").unwrap_err().kind, IssueOpErrorKind::Invalid);
@@ -230,6 +252,15 @@ fn assignees_are_set_as_a_whole() {
     let details = set_assignees_with(&mut replay.api(), REPO, SANDBOX, &["Alex".into(), "robin".into(), "robin".into()]).unwrap();
     replay.done();
     assert_eq!(details.assignees.len(), 2);
+    // When adding fails, the removed logins are put back and the error stands.
+    let mut replay = Replay::of(vec![
+        call("GET", "repos/acme/widgets/issues/527", None, issue.clone()),
+        call("DELETE", "repos/acme/widgets/issues/527/assignees", Some(json!({"assignees": ["sam"]})), issue.clone()),
+        json!({"method": "POST", "path": "repos/acme/widgets/issues/527/assignees", "body": {"assignees": ["robin"]}, "error": "network"}),
+        call("POST", "repos/acme/widgets/issues/527/assignees", Some(json!({"assignees": ["sam"]})), issue.clone()),
+    ]);
+    assert_eq!(set_assignees_with(&mut replay.api(), REPO, SANDBOX, &["alex".into(), "robin".into()]).unwrap_err().kind, IssueOpErrorKind::Network);
+    replay.done();
     // Nothing to change: the read is the answer.
     let mut replay = Replay::of(vec![call("GET", "repos/acme/widgets/issues/527", None, issue)]);
     set_assignees_with(&mut replay.api(), REPO, SANDBOX, &["alex".into(), "sam".into()]).unwrap();
@@ -268,23 +299,35 @@ fn title_and_description_are_written_and_a_stale_description_is_a_conflict() {
 
     let original = reply("details", 0)["body"].as_str().unwrap().to_string();
     let mut replay = Replay::step("description_stale");
-    let stale = DescriptionEdit { description: "should not land".into(), expected_updated_at: Some("2026-10-18T06:31:10Z".into()) };
+    let stale = DescriptionEdit { description: "should not land".into(), expected_updated_at: Some("2026-10-18T06:31:10Z".into()), expected_description: None };
     assert_eq!(set_description_with(&mut replay.api(), REPO, SANDBOX, &stale).unwrap_err().kind, IssueOpErrorKind::Conflict);
     replay.done();
 
     let read = reply("description_set", 0)["updated_at"].as_str().unwrap().to_string();
     let mut replay = Replay::step("description_set");
     // The same instant spelled another way is no conflict.
-    let edit = DescriptionEdit { description: format!("{original}\n\n(description edit check)"), expected_updated_at: Some(read.replace('Z', "+00:00")) };
+    let edit = DescriptionEdit { description: format!("{original}\n\n(description edit check)"), expected_updated_at: Some(read.replace('Z', "+00:00")), expected_description: None };
     let details = set_description_with(&mut replay.api(), REPO, SANDBOX, &edit).unwrap();
     replay.done();
     assert!(details.description.ends_with("(description edit check)"));
     assert_eq!(details.issue.body.as_deref(), Some(details.description.as_str()));
 
     let mut replay = Replay::step("description_restore");
-    let restored = set_description_with(&mut replay.api(), REPO, SANDBOX, &DescriptionEdit { description: original.clone(), expected_updated_at: Some(details.issue.updated_at.clone()) }).unwrap();
+    let restored = set_description_with(&mut replay.api(), REPO, SANDBOX, &DescriptionEdit { description: original.clone(), expected_updated_at: Some(details.issue.updated_at.clone()), expected_description: None }).unwrap();
     replay.done();
     assert_eq!(restored.description, original);
+
+    // A comment since moves `updated_at` but not the description: with the
+    // description the editor started from, that is no conflict.
+    let commented_since = DescriptionEdit { description: "new".into(), expected_updated_at: Some("2026-10-18T06:31:10Z".into()), expected_description: Some(format!("{}\r\n", original.replace('\n', "\r\n"))) };
+    let mut replay = Replay::of(vec![issue_read(527), call("PATCH", "repos/acme/widgets/issues/527", Some(json!({"body": "new"})), reply("description_set", 1))]);
+    set_description_with(&mut replay.api(), REPO, SANDBOX, &commented_since).unwrap();
+    replay.done();
+    // Someone else's description edit is, whatever the time says.
+    let rewritten = DescriptionEdit { description: "new".into(), expected_updated_at: Some(reply("details", 0)["updated_at"].as_str().unwrap().into()), expected_description: Some("What it said before".into()) };
+    let mut replay = Replay::of(vec![issue_read(527)]);
+    assert_eq!(set_description_with(&mut replay.api(), REPO, SANDBOX, &rewritten).unwrap_err().kind, IssueOpErrorKind::Conflict);
+    replay.done();
 }
 
 #[test]
