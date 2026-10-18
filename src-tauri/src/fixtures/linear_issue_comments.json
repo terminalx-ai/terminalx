@@ -1,0 +1,54 @@
+{
+  "data": {
+    "viewer": {
+      "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e"
+    },
+    "issue": {
+      "comments": {
+        "nodes": [
+          {
+            "id": "0fd9dc42-3f0b-4a15-8842-4a8d87beb3d1",
+            "body": "Seen it on staging too.",
+            "createdAt": "2026-09-12T11:25:43.611Z",
+            "editedAt": null,
+            "url": "https://linear.app/acme/issue/ENG-5/fix-login-timeout#comment-0fd9dc42",
+            "user": {
+              "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+              "name": "Sam Rivera",
+              "displayName": "sam",
+              "avatarUrl": null
+            },
+            "botActor": null
+          },
+          {
+            "id": "ce7de751-0c3c-4262-953a-a3d01e419e8d",
+            "body": "I can take this.",
+            "createdAt": "2026-09-12T11:48:08.483Z",
+            "editedAt": "2026-09-12T12:00:00.000Z",
+            "url": "https://linear.app/acme/issue/ENG-5/fix-login-timeout#comment-ce7de751",
+            "user": {
+              "id": "f67076e8-c94a-4fd5-9cf7-432123581ad7",
+              "name": "Robin Park",
+              "displayName": "robin",
+              "avatarUrl": "https://example.com/robin.png"
+            },
+            "botActor": null
+          },
+          {
+            "id": "16e57233-18a9-4914-b874-a4fd361c1eb1",
+            "body": "Linked pull request opened.",
+            "createdAt": "2026-09-29T10:25:31.627Z",
+            "editedAt": null,
+            "url": "https://linear.app/acme/issue/ENG-5/fix-login-timeout#comment-16e57233",
+            "user": null,
+            "botActor": {
+              "id": "bot-github",
+              "name": "GitHub",
+              "avatarUrl": "https://example.com/github.png"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

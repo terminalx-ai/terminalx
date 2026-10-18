@@ -30,10 +30,11 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 | `issue_set_labels(id, labels)` | `IssueDetails`. The whole set: Linear label ids, GitHub label names |
 | `issue_set_priority(id, priority)` | `IssueDetails`. Linear only, 0 (none) to 4 (low) |
 | `issue_set_title(id, title)` | `IssueDetails` |
-| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedUpdatedAt` turns a stale edit into a `conflict` |
+| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedDescription` (or, without it, `edit.expectedUpdatedAt`) turns a stale edit into a `conflict` |
 | `issue_create(input)` | `IssueDetails`. A GitHub issue in the project's repository, or a Linear one in `input.teamId` |
 
-Every write answers with the issue as re-read from the provider.
+Every write answers with the issue as re-read from the provider. After a
+failed write the UI reads the issue again: part of a write may have landed.
 
 ## Providers
 
@@ -53,10 +54,61 @@ A failure rejects with `{kind, message}`. `kind` is one of `not_signed_in`,
 never holds a token, a key or the provider's reply. `errorMessage` reads it
 like any other error.
 
-## Not built yet
+## GitHub
 
-The contract is final; the follow-up tickets fill it in. Today
-`issue_details` works for both providers and every other command answers
-`not_implemented`. On Linear `body` still carries the first 20 comments
-pasted under the description, for the agent prompt; `description` is the
-description alone.
+Every command goes through `gh api` REST (`issue_ops/github.rs`).
+
+* `issue_comments` pages 50 at a time; the cursor is the page number. A
+  comment can be changed by its author or anyone with write access.
+* Assignable users, labels and the reader's access are kept per repository
+  for the session; `issue_options(refresh)` reads them again.
+* Labels are named as the repository spells them, and a name it doesn't
+  have is refused (`invalid`): GitHub would quietly create it.
+* Assignees are set by removing the logins no longer wanted, then adding
+  the new ones. GitHub quietly skips a login that can't be assigned; the
+  answer shows who is. When adding fails after the removal, the removed
+  logins are put back before the error is returned.
+* A description edit compares `expectedDescription` (or, without it,
+  `expectedUpdatedAt`) with a fresh read just before writing, since GitHub
+  has no conditional write. A comment moves `updated_at`, so only
+  `expectedDescription` lets an edit through after someone commented.
+* Every write, and the comment list, reads the issue first and refuses a
+  pull request's number.
+* Recorded replies: `src-tauri/src/fixtures/github_issue_ops.json`, replayed
+  by `issue_ops/github_tests.rs`.
+
+## Status
+
+The contract is final; the follow-up tickets fill it in. Today both
+providers answer every command.
+
+## Linear
+
+* **Comments** page oldest first, 50 at a time. Linear lists comments newest
+  first and its cursors walk that order, so a page is the oldest comments
+  from the last one shown on; `nextCursor` is that comment's creation time
+  and id, so comments made in the same millisecond are neither skipped nor
+  repeated. The viewer may edit and delete their own comments only.
+* **Options** are the team's workflow states in its order, its active
+  members, the labels its issues can take (the team's, its parent teams'
+  and the workspace's; a group comes before the labels in it, and each
+  label names its group by `groupId` as well as by name) and the five
+  priorities. They are
+  cached per key and team until `refresh`.
+* **Descriptions** are read again before they are written: the edit is a
+  `conflict` when the description is no longer `expectedDescription`, or,
+  without it, when `updatedAt` is no longer a non-blank `expectedUpdatedAt` (a new
+  comment moves Linear's `updatedAt`; editing one doesn't).
+* **Comments** are edited and deleted only on the issue they belong to;
+  another issue's comment is `not_found`.
+* **Errors**: a stale state, label or assignee id is `invalid`; an issue,
+  team or comment that is gone is `not_found`.
+* **The agent's discussion.** Neither `body` nor `description` carries
+  comments any more. A session started from the CLI or the issue pipeline
+  reads the issue through `issues::linear_details`, which puts
+  `issues::linear_discussion` under the description: the newest 50
+  comments, oldest first, cut at about 12,000 characters (a single longer
+  comment included) with a note and a link to the rest.
+* `LINEAR_LIVE_ISSUE=<sandbox id> cargo test live_ -- --ignored --nocapture`
+  runs every operation against the real Linear on a sandbox issue (its
+  title must start with "[TerminalX test]") and puts it back afterwards.
