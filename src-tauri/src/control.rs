@@ -243,6 +243,7 @@ pub struct ControlService {
     runtime_kind: Option<String>,
     /// Asks the person before an agent's write to an issue. Only the desktop
     /// app has a window to ask in; without one such a write is refused.
+    #[cfg(feature = "desktop")]
     questions: Option<crate::issue_control::Ask>,
     /// Computer use and the built-in browser; the headless runtime has neither.
     #[cfg(feature = "desktop")]
@@ -271,6 +272,7 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: None,
+            #[cfg(feature = "desktop")]
             questions: None,
             desktop: Some(DesktopControl { computer, browser, pairing: None }),
         }
@@ -289,6 +291,7 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: Some(runtime_kind),
+            #[cfg(feature = "desktop")]
             questions: None,
             #[cfg(feature = "desktop")]
             desktop: None,
@@ -303,6 +306,7 @@ impl ControlService {
         }
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn with_questions(mut self, ask: crate::issue_control::Ask) -> Self {
         self.questions = Some(ask);
         self
@@ -478,7 +482,14 @@ impl ControlService {
             }
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
+            #[cfg(feature = "desktop")]
             "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => self.issue_op(command, params),
+            #[cfg(not(feature = "desktop"))]
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => Err(ControlError::new(
+                "unsupported",
+                format!("{command} needs the TerminalX desktop app; terminalx-serve lists issues only."),
+                None::<String>,
+            )),
             #[cfg(feature = "desktop")]
             "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
@@ -925,6 +936,7 @@ impl ControlService {
         Ok(json!({"project": project, "provider": provider, "issues": issues}))
     }
 
+    #[cfg(feature = "desktop")]
     /// `issues.view|comment|status|assign|label|create` (PRO-100): one issue,
     /// through the contract's operations, with an agent's writes put to the
     /// person first (see `issue_control`).
@@ -963,6 +975,7 @@ impl ControlService {
     }
 }
 
+#[cfg(feature = "desktop")]
 /// The project an issue command is for: the one named, else the one of the
 /// session it runs in, else the one holding its working directory. A new
 /// issue's project is always named.
@@ -996,6 +1009,7 @@ fn issue_project(params: &Value, caller: &crate::issue_control::Caller) -> Resul
     Err(ControlError::invalid("Could not tell which project the issue belongs to. Pass --project."))
 }
 
+#[cfg(feature = "desktop")]
 /// A GitHub URL names its repository; the issue is read from the project's
 /// own, so a URL into another one would act on this repository's issue of
 /// the same number.
@@ -1320,6 +1334,32 @@ mod tests {
             Arc::new(Default::default()), Arc::new(Default::default()), endpoint.clone(),
         );
         (ControlService::headless(sink.clone(), manager, endpoint, "test".into()), sink)
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn an_issue_command_finds_its_project_by_name_by_its_session_or_by_where_it_runs() {
+        use crate::issue_control::Caller;
+        let _home = crate::store::temp_home();
+        let (dir, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let project = projects::add(dir.path().to_str().unwrap()).unwrap();
+        let second = projects::add(other.path().to_str().unwrap()).unwrap();
+        let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
+            "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
+        })).unwrap()).unwrap();
+        let nobody = Caller { session: None, cwd: None, agent: false };
+        assert_eq!(issue_project(&json!({"project": second.name}), &nobody).unwrap().path, second.path);
+        let in_session = Caller { session: Some(session.id.clone()), cwd: Some(second.path.clone()), agent: true };
+        assert_eq!(issue_project(&json!({}), &in_session).unwrap().path, project.path, "the session wins over the directory");
+        let sub = dir.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let in_folder = Caller { session: None, cwd: Some(sub.to_string_lossy().into_owned()), agent: false };
+        assert_eq!(issue_project(&json!({}), &in_folder).unwrap().path, project.path);
+        let elsewhere = Caller { session: None, cwd: Some("/".into()), agent: false };
+        assert!(issue_project(&json!({}), &elsewhere).unwrap_err().message.contains("Pass --project"));
+        // A GitHub URL into another repository is refused rather than read as this one's number.
+        assert!(refuse_other_repository(&project.path, "https://github.com/acme/api/issues/12").unwrap_err().message.contains("That issue is in acme/api"));
+        refuse_other_repository(&project.path, "#12").unwrap();
     }
 
     #[test]

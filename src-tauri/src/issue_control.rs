@@ -926,4 +926,38 @@ mod tests {
         assert_eq!(op_error(IssueOpError::new(IssueOpErrorKind::RateLimited, Provider::Linear)).code, "rate_limited");
         assert_eq!(op_error(IssueOpError::not_implemented(Provider::Linear)).code, "not_implemented");
     }
+
+    /// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test -- --ignored live_sandbox`):
+    /// the real `gh` login and Linear key, and only the two sandbox issues the
+    /// owner set aside. As the person's own shell: nobody is asked.
+    #[test]
+    #[ignore]
+    fn live_sandbox() {
+        if std::env::var("TERMINALX_LIVE_ISSUE_SANDBOX").as_deref() != Ok("1") {
+            return;
+        }
+        let shell = Caller { session: None, cwd: None, agent: false };
+        let gate = |write: &Write, issue: &str| authorize(&shell, write, &Subject { issue, provider: "", project_name: "", project_allows_updates: false, session_title: None }, None);
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        for (provider, id) in [(Provider::Github, "527"), (Provider::Linear, "PRO-101")] {
+            let backend = Live(crate::issue_ops::Target::resolve(&repo, provider).unwrap());
+            let viewed = run("view", &json!({}), Some(id), &backend, &gate).unwrap();
+            println!("{provider:?} view: {} {:?} state={} assignees={}", viewed["issue"]["identifier"], viewed["issue"]["title"].as_str().unwrap_or_default(), viewed["issue"]["state"], viewed["issue"]["assignees"].as_array().map_or(0, Vec::len));
+            assert!(viewed["issue"]["title"].as_str().unwrap().starts_with("[TerminalX test]"), "only the sandbox issue");
+            for (command, params) in [("view", json!({"comments": true})), ("comment", json!({"body": "[TerminalX test] CLI live check"})), ("status", json!({"to": "Backlog"}))] {
+                match run(command, &params, Some(id), &backend, &gate) {
+                    Ok(answer) => {
+                        println!("{provider:?} {command}: ok {}", answer.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>().join(",")).unwrap_or_default());
+                        // The sandbox keeps no test comment.
+                        if let Some(comment) = answer["comment"]["id"].as_str() {
+                            let issue = viewed["issue"]["id"].as_str().unwrap();
+                            println!("{provider:?} cleanup: {:?}", crate::issue_ops::comment_delete(&backend.0, issue, comment).map_err(|error| error.kind));
+                        }
+                    }
+                    Err(error) => println!("{provider:?} {command}: {} — {}", error.code, error.message),
+                }
+            }
+        }
+    }
+
 }

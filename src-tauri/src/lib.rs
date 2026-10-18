@@ -86,6 +86,7 @@ mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
 mod issue_control;
+#[cfg(feature = "desktop")]
 mod issue_pipeline;
 #[cfg(feature = "desktop")]
 mod issue_ops;
