@@ -26,12 +26,24 @@ describe("readAllComments", () => {
     const all = Array.from({ length: 120 }, (_, index) => comment(index));
     const issues = createIssueOpsMock({ issues: [githubIssueFixture()], comments: { "github:41": all } });
     invoke.mockImplementation((command: string, args?: Record<string, unknown>) => issues.handle(command, args));
-    expect((await readAllComments("/repo", "github", "41")).map((each) => each.id)).toEqual(all.map((each) => each.id));
+    expect(await readAllComments("/repo", "github", "41")).toEqual({ comments: all, omitted: 0 });
+  });
+
+  it("past what it keeps, lets the oldest go and counts them, never the newest", async () => {
+    const all = Array.from({ length: 120 }, (_, index) => comment(index));
+    const issues = createIssueOpsMock({ issues: [githubIssueFixture()], comments: { "github:41": all } });
+    issues.pageSize = 7;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => issues.handle(command, args));
+    const thread = await readAllComments("/repo", "github", "41", 25);
+    expect(thread.comments.map((each) => each.id)).toEqual(all.slice(-25).map((each) => each.id));
+    expect(thread.omitted).toBe(95);
+    // And the prompt says so.
+    expect(issuePrompt(githubIssueFixture(), thread)).toContain("earlier comments omitted; read them at https://github.com/acme/widgets/issues/41");
   });
 
   it("stops at a cursor it has already followed", async () => {
     invoke.mockResolvedValue({ comments: [comment(1)], nextCursor: "again" });
-    expect(await readAllComments("/repo", "linear", "ENG-1")).toHaveLength(1);
+    expect((await readAllComments("/repo", "linear", "ENG-1")).comments).toHaveLength(1);
     expect(invoke).toHaveBeenCalledTimes(2);
   });
 });

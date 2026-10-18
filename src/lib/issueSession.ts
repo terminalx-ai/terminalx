@@ -1,5 +1,5 @@
 import type { Issue, PullRequest } from "@/lib/api";
-import { discussionForPrompt, readAllComments } from "@/lib/issueComments";
+import { discussionForPrompt, readAllComments, type IssueThread } from "@/lib/issueComments";
 import type { IssueComment } from "@/lib/issueOps";
 
 /** The worktree name a session gets from an issue or pull request. */
@@ -18,10 +18,11 @@ export function issueWorktreeName(identifier: string, title: string): string {
  * description is then taken alone, since a Linear `body` read whole carries
  * its first comments pasted under it.
  */
-export function issuePrompt(issue: Issue & { description?: string }, comments?: IssueComment[]): string {
-  const text = (comments && issue.description != null ? issue.description : issue.body)?.trim();
+export function issuePrompt(issue: Issue & { description?: string }, comments?: IssueComment[] | IssueThread): string {
+  const thread = Array.isArray(comments) ? { comments, omitted: 0 } : comments;
+  const text = (thread && issue.description != null ? issue.description : issue.body)?.trim();
   const body = text ? `\n\n${text}` : "";
-  const discussion = comments?.length ? `\n\n${discussionForPrompt(comments, issue.url)}` : "";
+  const discussion = thread?.comments.length ? `\n\n${discussionForPrompt(thread.comments, issue.url, undefined, thread.omitted)}` : "";
   const provider = issue.provider === "github" ? "GitHub" : "Linear";
   return `Work on ${provider} issue ${issue.identifier}: ${issue.title}${body}${discussion}\n\nIssue link: ${issue.url}\nWhen done, summarise what changed.`;
 }
@@ -30,7 +31,8 @@ export function issuePrompt(issue: Issue & { description?: string }, comments?: 
 export const PROMPT_COMMENTS_WAIT_MS = 15_000;
 
 /**
- * `issuePrompt` with the issue's comments read from its provider. A thread
+ * `issuePrompt` with the issue's comments read from its provider, for a
+ * session started where the thread has not been read already. A thread
  * that cannot be read, or not in `PROMPT_COMMENTS_WAIT_MS`, does not stop the
  * session: the prompt is then what it was before comments were read.
  */

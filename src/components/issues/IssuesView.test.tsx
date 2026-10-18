@@ -795,6 +795,8 @@ describe.each(["github", "linear"] as const)("the %s issue's discussion", (provi
     await startIssue();
     const issue = provider === "github" ? issues[0] : linearIssues[0];
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
+    // The thread the pane read is the one sent: it is not read again.
+    expect(invoke.mock.calls.filter(([command]) => command === "issue_comments")).toHaveLength(1);
     const prompt = onCreated.mock.calls[0][2] as string;
     expect(prompt.startsWith(issuePrompt(issue, comments))).toBe(true);
     expect(prompt).toContain("First issue body.\n\n## Comments\n\n**alex** (2026-09-01):\nSeen it on staging too.\n\n**sam** (2026-09-01):\nI'll take it.");
@@ -811,6 +813,23 @@ describe.each(["github", "linear"] as const)("the %s issue's discussion", (provi
     await startIssue();
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
     expect(onCreated.mock.calls[0][2]).toContain(issuePrompt(provider === "github" ? issues[0] : linearIssues[0]));
+    // With no thread on screen it is read once more, before the session is made.
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(commands.filter((command) => command === "issue_comments")).toHaveLength(2);
+    expect(commands.lastIndexOf("issue_comments")).toBeLessThan(commands.indexOf("create_session"));
     logged.mockRestore();
+  });
+
+  it("shows nothing of the last issue's thread while the next one's is read", async () => {
+    const backend = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command !== "issue_comments") return backend(command, args);
+      return args?.id === (provider === "github" ? "11" : "linear-1") ? { comments, nextCursor: null } : new Promise(() => undefined);
+    });
+    await openIssue(provider);
+    await screen.findByText("Seen it on staging too.");
+    fireEvent.click(screen.getByText("Repair session target"));
+    expect(screen.queryByText("Seen it on staging too.")).toBeNull();
+    expect(await screen.findByText("Loading comments…")).toBeTruthy();
   });
 });

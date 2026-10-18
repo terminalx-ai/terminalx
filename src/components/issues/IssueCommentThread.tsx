@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Ellipsis, Loader2, Pencil, Trash2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -6,7 +6,7 @@ import { Markdown } from "@/components/chat/Markdown";
 import { MarkdownEditor } from "@/components/issues/MarkdownEditor";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { readAllComments } from "@/lib/issueComments";
+import { readAllComments, type IssueThread } from "@/lib/issueComments";
 import { issueOps, type IssueComment, type IssueProvider, type IssueUser } from "@/lib/issueOps";
 import { relativeTime } from "@/lib/time";
 
@@ -170,7 +170,10 @@ export interface IssueThreadControls {
  * cursor pages from the oldest), the most recent `THREAD_WINDOW` are shown,
  * and "Show earlier comments" uncovers older ones a window at a time.
  * `refreshKey` reads it again, keeping what is on screen until the answer
- * comes. `footer` is rendered under the comments once they are read.
+ * comes. `footer` is rendered under the comments once they are read, and
+ * `onComments` hears the thread whenever it changes (for the agent's prompt).
+ * Render one per issue (`key` it by provider and id), so nothing in flight
+ * for one issue lands on another.
  */
 export function IssueCommentThread({
   projectPath,
@@ -178,39 +181,44 @@ export function IssueCommentThread({
   issueId,
   refreshKey = 0,
   footer,
+  onComments,
 }: {
   projectPath: string;
   provider: IssueProvider;
   issueId: string;
   refreshKey?: number;
   footer?: (controls: IssueThreadControls) => ReactNode;
+  onComments?: (thread: IssueThread) => void;
 }) {
   const [comments, setComments] = useState<IssueComment[] | null>(null);
+  // Older comments past what is kept, which only the website shows.
+  const [omitted, setOmitted] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [shown, setShown] = useState(THREAD_WINDOW);
   const [reloads, setReloads] = useState(0);
-  const issueKey = `${projectPath}\n${provider}\n${issueId}`;
-  const lastIssue = useRef(issueKey);
 
+  // A refresh keeps the comments on screen, and how far back they are open, until the answer comes.
   useEffect(() => {
-    // Another issue starts clean; a refresh of this one keeps its comments and how far back they are open.
-    if (lastIssue.current !== issueKey) {
-      lastIssue.current = issueKey;
-      setComments(null);
-      setShown(THREAD_WINDOW);
-    }
     let live = true;
     setLoading(true);
     setError(null);
     readAllComments(projectPath, provider, issueId)
-      .then((all) => live && setComments(all))
+      .then((thread) => {
+        if (!live) return;
+        setComments(thread.comments);
+        setOmitted(thread.omitted);
+      })
       .catch((e) => live && setError(errorMessage(e)))
       .finally(() => live && setLoading(false));
     return () => {
       live = false;
     };
-  }, [issueKey, projectPath, provider, issueId, refreshKey, reloads]);
+  }, [projectPath, provider, issueId, refreshKey, reloads]);
+
+  useEffect(() => {
+    if (comments) onComments?.({ comments, omitted });
+  }, [comments, omitted, onComments]);
 
   const replace = (next: IssueComment) => setComments((all) => all?.map((each) => (each.id === next.id ? next : each)) ?? all);
   const remove = (id: string) => setComments((all) => all?.filter((each) => each.id !== id) ?? all);
@@ -228,7 +236,7 @@ export function IssueCommentThread({
     <section aria-label="Comments" className="min-w-0">
       <h3 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
         Comments
-        {comments && total > 0 && <span className="font-normal normal-case tracking-normal">{total}</span>}
+        {comments && total > 0 && <span className="font-normal normal-case tracking-normal">{total + omitted}</span>}
         {loading && comments && <Loader2 className="size-3 animate-spin" aria-label="Refreshing comments" />}
       </h3>
       {error && (
@@ -245,6 +253,11 @@ export function IssueCommentThread({
         <div className="mt-2 text-sm text-faint">No comments yet.</div>
       ) : (
         <>
+          {omitted > 0 && (
+            <div className="mt-1.5 text-[11px] text-faint">
+              Showing the newest {total} comments. {omitted} older {omitted === 1 ? "one is" : "ones are"} only on the website; open the issue in your browser to read {omitted === 1 ? "it" : "them"}.
+            </div>
+          )}
           {hidden > 0 && (
             <Button variant="ghost" size="xs" className="mt-1.5" onClick={() => setShown((count) => count + THREAD_WINDOW)}>
               Show earlier comments ({hidden})

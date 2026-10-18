@@ -63,6 +63,17 @@ describe.each(["github", "linear"] as const)("the %s comment thread", (provider)
     expect(within(screen.getByRole("region", { name: "Comments" })).getByText("137")).toBeTruthy();
   });
 
+  it("says when the oldest comments of a very long thread are only on the website", async () => {
+    const all = manyComments(provider, 2_010);
+    backend({ issues: [fixtures[provider]], comments: { [key]: all } });
+    renderThread(provider);
+    await waitFor(() => expect(bodies()).toHaveLength(THREAD_WINDOW));
+    expect(bodies().at(-1)).toBe(all.at(-1)!.id);
+    expect(within(screen.getByRole("region", { name: "Comments" })).getByText("2010")).toBeTruthy();
+    expect(screen.getByText("Showing the newest 2000 comments. 10 older ones are only on the website; open the issue in your browser to read them.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Show earlier comments/ }).textContent).toContain(String(2_000 - THREAD_WINDOW));
+  });
+
   it("keeps a comment that turns up on two pages once", async () => {
     const all = manyComments(provider, 3);
     backend({ issues: [fixtures[provider]], comments: { [key]: all } });

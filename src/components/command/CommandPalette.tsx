@@ -554,6 +554,8 @@ export function CommandPalette({
     setError(null);
     try {
       const item = resolvedWorkItem ?? (await lookupWorkItem(smartInput, smartProject));
+      // An issue's discussion is read before its session exists, so the first prompt is ready when the tab is.
+      const issuePrompt = item.issue ? await issuePromptWithComments(item.project.path, item.issue) : null;
       const prefs = getPrefs();
       const identifier = `#${item.number}`;
       const session = await api.createSession({
@@ -575,7 +577,7 @@ export function CommandPalette({
       setOpen(false);
       const tab = session.tabs[0];
       if (tab) {
-        let prompt = item.issue ? await issuePromptWithComments(item.project.path, item.issue) : pullRequestPrompt(item.pullRequest!);
+        let prompt = issuePrompt ?? pullRequestPrompt(item.pullRequest!);
         // An issue is carried on to a pull request and a review, with the
         // project's default for the merge. A pull request already is one.
         if (item.issue && pipelineSettings(item.project).enabled) {
