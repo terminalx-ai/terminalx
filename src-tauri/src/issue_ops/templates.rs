@@ -165,4 +165,81 @@ mod tests {
         assert_eq!(templates[0].labels, vec!["bug"]);
         assert!(templates[0].body.starts_with("**What happened"));
     }
+
+    /// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test live_new_issue -- --ignored --nocapture`):
+    /// what the new-issue form sends, against the real `gh` login and Linear
+    /// key. One issue per provider, titled "[TerminalX test] …", with only the
+    /// reader assigned and labels that already exist; each is read back and
+    /// then closed as not planned (GitHub) or cancelled (Linear) at once.
+    #[test]
+    #[ignore]
+    fn live_new_issue_on_each_provider() {
+        use crate::issue_ops::{create, details, options, set_state, viewer::viewer, IssueCreate, Provider, StateChange, CloseReason, Target};
+        if std::env::var("TERMINALX_LIVE_ISSUE_SANDBOX").as_deref() != Ok("1") {
+            return;
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let bug = list(&repo).into_iter().find(|template| template.file == "bug_report.md").unwrap();
+        for provider in [Provider::Github, Provider::Linear] {
+            let target = Target::resolve(&repo, provider).unwrap();
+            let me = viewer(&target).unwrap();
+            let input = match provider {
+                Provider::Github => {
+                    let offered = options(&target, None, None, true).unwrap();
+                    assert!(bug.labels.iter().all(|name| offered.labels.iter().any(|label| &label.id == name)), "the template's labels exist");
+                    IssueCreate {
+                        title: "[TerminalX test] new issue from the bug template — ignore".into(),
+                        description: bug.body.clone(),
+                        assignees: vec![me.id.clone()],
+                        labels: bug.labels.clone(),
+                        ..Default::default()
+                    }
+                }
+                Provider::Linear => {
+                    // The sandbox's own team.
+                    let team = details(&target, "PRO-101").unwrap().issue.team.unwrap();
+                    let offered = options(&target, None, Some(&team.id), true).unwrap();
+                    let label = offered.labels.iter().find(|label| !label.is_group && label.group.is_none()).unwrap();
+                    let backlog = offered.states.iter().find(|state| state.state_type == "backlog").unwrap();
+                    IssueCreate {
+                        team_id: Some(team.id.clone()),
+                        title: "[TerminalX test] new issue with every field — ignore".into(),
+                        // Plain paragraphs: Linear rewrites list bullets ("- " becomes "* ").
+                        description: "Made by the new-issue form's live check.\n\nWith **bold** text.".into(),
+                        assignees: vec![me.id.clone()],
+                        labels: vec![label.id.clone()],
+                        state_id: Some(backlog.id.clone()),
+                        priority: Some(4),
+                    }
+                }
+            };
+            let made = create(&target, &input).unwrap();
+            let id = made.issue.id.clone();
+            // Read again separately from the create's own answer.
+            let read = details(&target, &id).unwrap();
+            println!("{provider:?} created {} {}", read.issue.identifier, read.issue.url);
+            // Closed before anything is checked, so a failed check leaves nothing open.
+            let change = match provider {
+                Provider::Github => StateChange::Close { reason: CloseReason::NotPlanned },
+                Provider::Linear => {
+                    let team = read.issue.team.as_ref().unwrap();
+                    let offered = options(&target, None, Some(&team.id), false).unwrap();
+                    StateChange::WorkflowState { state_id: offered.states.iter().find(|state| state.state_type == "canceled").unwrap().id.clone() }
+                }
+            };
+            let closed = set_state(&target, &id, &change).unwrap();
+            println!("{provider:?} {} closed: {}", closed.issue.identifier, closed.issue.state);
+            assert_eq!(read.issue.title, input.title);
+            assert_eq!(read.description.trim(), input.description.trim());
+            assert_eq!(read.issue.assignees.iter().map(|user| user.id.clone()).collect::<Vec<_>>(), input.assignees);
+            let mut labels: Vec<String> = read.issue.labels.iter().map(|label| label.id.clone().unwrap_or_else(|| label.name.clone())).collect();
+            labels.sort();
+            assert_eq!(labels, input.labels);
+            if provider == Provider::Linear {
+                assert_eq!(read.state_id, input.state_id);
+                assert_eq!(read.priority, Some(4));
+            }
+            println!("{provider:?} read back: title, description, assignee (reader), {} label(s){} as sent", labels.len(), if provider == Provider::Linear { ", state Backlog, priority Low" } else { "" });
+        }
+    }
 }
