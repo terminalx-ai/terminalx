@@ -297,7 +297,6 @@ export function IssuesView({
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
-  // The session working on the issue: the pipeline's author, never its reviewer.
   // A write answers with the issue as the provider has it now: the page and its row follow.
   const changed = useCallback((next: IssueDetails) => {
     const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
@@ -305,6 +304,7 @@ export function IssuesView({
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, updatedAt: next.updatedAt } : row)));
   }, []);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
