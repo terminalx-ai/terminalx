@@ -84,6 +84,8 @@ export function IssueStatusPicker({
   pipeline,
   open: controlledOpen,
   onOpenChange,
+  busy = false,
+  onWriting,
   onChange,
 }: {
   projectPath: string;
@@ -92,6 +94,10 @@ export function IssueStatusPicker({
   pipeline?: IssuePipeline | null;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** A change to this issue is on its way. Kept by the view, so it outlives this picker. */
+  busy?: boolean;
+  /** Told when a change starts and when it has been answered (or refused and read again). */
+  onWriting?: (on: boolean) => void;
   /** The issue as it now shows: the guess while a change is on its way, then the provider's answer. */
   onChange: (issue: Issue) => void;
 }) {
@@ -101,12 +107,12 @@ export function IssueStatusPicker({
   const [localOpen, setLocalOpen] = useState(false);
   const [options, setOptions] = useState<IssueOptions | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const open = controlledOpen ?? localOpen;
+  // Nothing opens while a change is on its way: what it would offer depends on the answer.
+  const open = (controlledOpen ?? localOpen) && !busy;
   // The picker is keyed by its issue, so it is gone once another one is open. A change still on
   // its way then lands only on its own issue's row (`onChange` names the issue), never on this
-  // picker's busy or message.
+  // picker's message.
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -135,6 +141,7 @@ export function IssueStatusPicker({
   }
 
   const setOpen = (value: boolean) => {
+    if (value && busy) return;
     setLocalOpen(value);
     onOpenChange?.(value);
   };
@@ -142,7 +149,7 @@ export function IssueStatusPicker({
   const choose = async (change: StateChange, state?: WorkflowState) => {
     const before = issue;
     setMessage(null);
-    setBusy(true);
+    onWriting?.(true);
     onChange(guessed(issue, change, state));
     try {
       onChange(await issueOps.setState(projectPath, issue.provider, issue.id, change));
@@ -155,7 +162,7 @@ export function IssueStatusPicker({
         onChange(before);
       }
     } finally {
-      if (mounted.current) setBusy(false);
+      onWriting?.(false);
     }
   };
 

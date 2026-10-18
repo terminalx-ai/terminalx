@@ -11,6 +11,7 @@ import { AutomationEditor, type AutomationEditorPrefill } from "@/components/aut
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
+import { issueKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -21,7 +22,7 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
-import { issueOps } from "@/lib/issueOps";
+import { issueOps, type IssueDetails } from "@/lib/issueOps";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -44,14 +45,15 @@ function issueOfPipeline(pipeline: IssuePipeline): Issue {
   return { provider: provider === "linear" ? "linear" : "github", id, identifier, number: Number(id) || 0, title, url, state: "", stateType: "completed", labels: [], updatedAt: pipeline.modified };
 }
 
-/**
- * The issue as read, unless the page already shows a later version of it: a
- * read that started before a status change must not put the old state back.
- */
-function newer(shown: Issue | null, read: Issue): Issue {
-  const same = shown && shown.provider === read.provider && shown.id === read.id;
-  return same && shown.updatedAt && read.updatedAt && shown.updatedAt > read.updatedAt ? shown : read;
+/** True when the target of a key is somewhere text is typed. */
+function typingIn(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || !!target.closest('[contenteditable]:not([contenteditable="false"])');
 }
+
+/** A row as read, with the state a later write gave it kept when the read is older than that write. */
+const keepState = (read: Issue, shown: Issue | undefined): Issue =>
+  shown ? { ...read, state: shown.state, stateType: shown.stateType, updatedAt: shown.updatedAt } : read;
 
 /**
  * Issues from the project's tracker, and a way to start a session on one.
@@ -95,6 +97,7 @@ export function IssuesView({
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
+  const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
@@ -194,10 +197,12 @@ export function IssuesView({
     const t = window.setTimeout(async () => {
       setLoading(true);
       setError(null);
+      const started = writes.readStarted();
       try {
         const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
         if (live) {
-          setList(r);
+          // A row written to since the read started keeps the state the write gave it.
+          setList((rows) => r.map((row) => (writes.outdated(issueKey(row), started) ? keepState(row, rows.find((each) => issueKey(each) === issueKey(row))) : row)));
           setListOf(`${project.path}\n${provider}`);
         }
       } catch (e) {
@@ -231,13 +236,16 @@ export function IssuesView({
     }
     if (!selected || !project) return;
     let live = true;
+    const started = writes.readStarted();
+    // The issue as read, unless a write to it began or ended since the read started.
+    const read = (d: Issue) => setDetail((shown) => (shown && writes.outdated(issueKey(d), started) && issueKey(shown) === issueKey(d) ? shown : d));
     // A Linear row carries its body, and is as fresh as the list it came with.
     // The whole issue still follows, for what the status picker needs.
     if (selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick) {
       setDetail(selected);
       issueOps
         .details(project.path, selected.provider, selected.id)
-        .then((d) => live && d && setDetail((shown) => newer(shown, d)))
+        .then((d) => live && d && read(d))
         .catch(() => {});
       return () => {
         live = false;
@@ -246,7 +254,7 @@ export function IssuesView({
     if (!again) setDetailLoading(true);
     issueOps
       .details(project.path, selected.provider, selected.id)
-      .then((d) => live && setDetail((shown) => newer(shown, d)))
+      .then((d) => live && read(d))
       .catch((e) => live && setError(errorMessage(e)))
       .finally(() => live && setDetailLoading(false));
     return () => {
@@ -309,6 +317,7 @@ export function IssuesView({
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
     setSelected(issue);
+    setStatusOpen(false);
     setUseWorktree(prefs.useWorktree);
     setAutoMerge(pipelineDefaults.autoMerge);
   };
@@ -497,7 +506,10 @@ export function IssuesView({
         tabIndex={-1}
         data-testid="issue-detail"
         onKeyDown={(e) => {
-          if (!selected || !matchesShortcut(e.nativeEvent, "issues.status")) return;
+          if (!current || typingIn(e.target) || !matchesShortcut(e.nativeEvent, "issues.status")) return;
+          // Only an issue read whole has a picker to open, and not while a change to it is on its way.
+          const capabilities = (current as Partial<IssueDetails>).capabilities;
+          if (!capabilities || !(capabilities.workflowStates || capabilities.closeReasons) || writes.writing.has(issueKey(current))) return;
           e.preventDefault();
           setStatusOpen(true);
         }}
@@ -520,6 +532,12 @@ export function IssuesView({
                     pipeline={pipeline}
                     open={statusOpen}
                     onOpenChange={setStatusOpen}
+                    busy={writes.writing.has(issueKey(current))}
+                    onWriting={(on) => {
+                      // The menu is closed by the choice; it never comes back on its own once the answer is in.
+                      if (on) setStatusOpen(false);
+                      (on ? writes.begin : writes.end)(issueKey(current));
+                    }}
                     onChange={changed}
                   />
                 )}

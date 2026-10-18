@@ -194,24 +194,28 @@ describe("the GitHub status picker", () => {
   });
 });
 
-describe("a status change still on its way", () => {
-  /** Holds back the next answer to `command`, as the tracker gave it when asked, until `release` is called. */
-  function holdNext(command: string) {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const handle = tracker.handle.bind(tracker);
-    let held = false;
-    tracker.handle = (name, args) => {
-      if (name !== command || held) return handle(name, args);
-      held = true;
-      const answer = handle(name, args)!;
-      // A refusal is held too; it is not unhandled while it waits.
-      answer.catch(() => {});
-      return gate.then(() => answer);
-    };
-    return () => release();
-  }
+/** Holds back the next answer to `command`, as it was when asked, until `release` is called. */
+function holdNext(command: string) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const inner = invoke.getMockImplementation()!;
+  let held = false;
+  invoke.mockImplementation((name: string, args?: Record<string, unknown>) => {
+    if (name !== command || held) return inner(name, args);
+    held = true;
+    const answer = Promise.resolve(inner(name, args));
+    // A refusal is held too; it is not unhandled while it waits.
+    answer.catch(() => {});
+    return gate.then(() => answer);
+  });
+  return () => release();
+}
 
+const shortcut = (target: HTMLElement) => fireEvent.keyDown(target, { key: "S", code: "KeyS", ctrlKey: true, shiftKey: true });
+/** Lets held answers and Radix's timers settle. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+describe("a status change still on its way", () => {
   it("lands on its own issue's row, not on the issue opened since", async () => {
     tracker = createIssueOpsMock({ issues: [githubIssueFixture(), { ...githubIssueFixture(), id: "42", number: 42, identifier: "#42", title: "Tidy the settings page", url: "https://github.com/acme/widgets/issues/42" }, linearIssueFixture()] });
     const trigger = await openIssue("github", "Repair the login timeout", "Open");
@@ -236,14 +240,91 @@ describe("a status change still on its way", () => {
     // A refresh reads the issue as it was; its answer comes after the change's.
     const release = holdNext("issue_details");
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(tracker.calls.filter((call) => call.command === "issue_details")).toHaveLength(2));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "issue_details")).toHaveLength(2));
     await openPicker(trigger);
     fireEvent.click(screen.getByRole("menuitem", { name: "Close as completed" }));
     await screen.findByRole("button", { name: "Status: Closed as completed" });
     await waitFor(() => expect(tracker.issue("github", "41").state).toBe("Closed"));
     release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle();
     expect(screen.getByRole("button", { name: "Status: Closed as completed" })).toBeTruthy();
+  });
+
+  it("is not undone on the list row by a list read that started before it", async () => {
+    const trigger = await openIssue("github", "Repair the login timeout", "Open");
+    const release = holdNext("issues_list");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "issues_list")).toHaveLength(2));
+    await openPicker(trigger);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Close as completed" }));
+    await waitFor(() => expect(tracker.issue("github", "41").state).toBe("Closed"));
+    await waitFor(() => expect(within(rowOf("Repair the login timeout")).getByText("Closed")).toBeTruthy());
+    // The list read as it was before the change answers last.
+    release();
+    await settle();
+    expect(within(rowOf("Repair the login timeout")).getByText("Closed")).toBeTruthy();
+    expect(within(rowOf("Repair the login timeout")).queryByText("Open")).toBeNull();
+  });
+
+  it("keeps the picker shut, and the issue busy, until the answer comes, even across a switch away and back", async () => {
+    tracker = createIssueOpsMock({ issues: [githubIssueFixture(), { ...githubIssueFixture(), id: "42", number: 42, identifier: "#42", title: "Tidy the settings page", url: "https://github.com/acme/widgets/issues/42" }, linearIssueFixture()] });
+    const trigger = await openIssue("github", "Repair the login timeout", "Open");
+    const release = holdNext("issue_set_state");
+    await openPicker(trigger);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Close as completed" }));
+    const busy = await screen.findByRole("button", { name: "Status: Closed as completed" });
+    expect(busy.hasAttribute("disabled")).toBe(true);
+    shortcut(screen.getByTestId("issue-detail"));
+    await settle();
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // A read while the change is on its way does not put the old state back either.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await settle();
+    expect(screen.getByRole("button", { name: "Status: Closed as completed" })).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Tidy the settings page"));
+    await screen.findByRole("button", { name: "Status: Open" });
+    fireEvent.click(screen.getAllByText("Repair the login timeout").find((node) => node.closest("li"))!);
+    expect((await screen.findByRole("button", { name: /^Status: / })).hasAttribute("disabled")).toBe(true);
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Status: Closed as completed" }).hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("the status shortcut", () => {
+  it("does nothing before the issue is read whole, and no menu opens on its own later", async () => {
+    setPrefs({ issueProvider: "github" });
+    render(<IssuesView />);
+    const release = holdNext("issue_details");
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    const pane = screen.getByTestId("issue-detail");
+    pane.focus();
+    shortcut(pane);
+    await settle();
+    expect(screen.queryByRole("menu")).toBeNull();
+    release();
+    await screen.findByRole("button", { name: "Status: Open" });
+    await settle();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("is never taken while typing in the pane", async () => {
+    await openIssue("github", "Repair the login timeout", "Open");
+    const pane = screen.getByTestId("issue-detail");
+    const field = document.createElement("textarea");
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    pane.append(field, editable);
+    for (const target of [field, editable]) {
+      target.focus();
+      shortcut(target);
+    }
+    await settle();
+    expect(screen.queryByRole("menu")).toBeNull();
+    shortcut(pane);
+    expect(await screen.findByRole("menu")).toBeTruthy();
   });
 });
 
