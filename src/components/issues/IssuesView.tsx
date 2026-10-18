@@ -477,12 +477,12 @@ export function IssuesView({
       e.preventDefault();
       setLabelsOpen(true);
     } else if (matchesShortcut(native, "issues.comment")) {
-      // The comment box is the thread's last text box, under the comments; without one, the thread is shown.
+      // The composer's box under the comments, else the thread's last text box; without one, the thread is shown.
       const thread = detailPane.current?.querySelector<HTMLElement>('section[aria-label="Comments"]');
       if (!thread) return;
       e.preventDefault();
       const boxes = thread.querySelectorAll<HTMLTextAreaElement>("textarea");
-      const box = boxes[boxes.length - 1];
+      const box = thread.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]') ?? boxes[boxes.length - 1];
       if (box) box.focus();
       else thread.scrollIntoView?.({ block: "nearest" });
     }

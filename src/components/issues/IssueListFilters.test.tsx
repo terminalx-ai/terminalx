@@ -24,7 +24,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
-vi.mock("@/lib/hotkeys", () => ({ hasEscapeOverlay: () => false, useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
+vi.mock("@/lib/hotkeys", () => ({ hasEscapeOverlay: () => false, useHeldShortcut: vi.fn(), useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
   refreshModels: vi.fn(),
@@ -380,10 +380,11 @@ describe("the issue list's keys", () => {
     fireEvent.keyDown(search, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("textbox", { name: "Search labels" })).toBeNull());
 
-    // The comment box is the thread's text box: here, a comment being edited.
+    // The comment box under the thread, also while a comment above it is being edited.
     fireEvent.keyDown(await screen.findByRole("button", { name: "Actions for comment by sam" }), { key: "Enter" });
     fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    const box = await screen.findByRole("textbox", { name: "Edit comment" });
+    await screen.findByRole("textbox", { name: "Edit comment" });
+    const box = screen.getByRole("textbox", { name: "Comment" });
     act(() => listedRow.focus());
     fireEvent.keyDown(listedRow, { key: "c", code: "KeyC" });
     expect(document.activeElement).toBe(box);
