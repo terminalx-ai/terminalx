@@ -135,10 +135,9 @@ export type StateChange =
   | { kind: "reopen" };
 
 /**
- * `expectedDescription` is the description the editor started from: the edit
- * is a `conflict` only when the description changed since. Without it,
- * `expectedUpdatedAt` (the `updatedAt` the editor started from) is checked,
- * which a new comment also moves.
+ * `expectedUpdatedAt` and `expectedDescription` are what the editor started from. With
+ * `expectedDescription`, only a changed description is a `conflict` (a new comment also moves
+ * `updatedAt`); without it, any newer issue is.
  */
 export interface DescriptionEdit {
   description: string;

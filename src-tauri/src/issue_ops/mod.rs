@@ -229,12 +229,14 @@ pub enum StateChange {
     Reopen,
 }
 
-/// A description edit, refused with [`IssueOpErrorKind::Conflict`] instead
-/// of overwriting someone else's edit. `expected_description` is the
-/// description the editor started from: the edit conflicts only when the
-/// description itself changed since. Without it, `expected_updated_at` (the
-/// `updatedAt` the editor started from) is checked, which a new comment also
-/// moves.
+/// A description edit. `expected_updated_at` is the `updatedAt` the editor
+/// started from, and `expected_description` the description it started
+/// from. When the description changed since, the write is refused with
+/// [`IssueOpErrorKind::Conflict`] instead of overwriting someone else's edit.
+///
+/// A comment or any other change also moves `updatedAt`, so with
+/// `expected_description` only a changed description is a conflict;
+/// without it, any change since `expected_updated_at` is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DescriptionEdit {
@@ -311,10 +313,6 @@ impl IssueOpError {
     /// A kind with a sentence of its own. `&'static` so no reply or secret can reach it.
     pub fn with_message(kind: IssueOpErrorKind, message: &'static str) -> Self {
         IssueOpError { kind, message: message.into() }
-    }
-
-    pub fn not_implemented(provider: Provider) -> Self {
-        Self::new(IssueOpErrorKind::NotImplemented, provider)
     }
 }
 

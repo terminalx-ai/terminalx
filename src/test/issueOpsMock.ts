@@ -304,9 +304,11 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
       case "issue_set_description": {
         const entry = stored(args);
         const edit = args.edit as { description: string; expectedUpdatedAt?: string | null; expectedDescription?: string | null };
-        if (edit.expectedDescription != null) {
-          if (edit.expectedDescription !== entry.issue.description) throw issueOpError("conflict");
-        } else if (edit.expectedUpdatedAt && edit.expectedUpdatedAt !== entry.issue.updatedAt) throw issueOpError("conflict");
+        const stale =
+          edit.expectedDescription != null
+            ? edit.expectedDescription !== entry.issue.description
+            : !!edit.expectedUpdatedAt && edit.expectedUpdatedAt !== entry.issue.updatedAt;
+        if (stale) throw issueOpError("conflict");
         entry.issue.description = edit.description;
         entry.issue.body = edit.description;
         return touched(entry);
