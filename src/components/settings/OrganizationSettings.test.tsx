@@ -173,6 +173,30 @@ describe("Settings → Organizations opens each organization's page (PRO-107)", 
     await waitFor(() => expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Acme"));
   });
 
+  it("drops a request for an organization with no page here, so a page opened later by hand is not scrolled", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    // An organization this account is not a member of (any more).
+    openAgentLogins("org-left");
+    render(<OrganizationsTab />);
+    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
+    expect(screen.queryByTestId("organization-settings")).toBeNull();
+    expect(takeAgentLoginsRequest("org-left")).toBe(false);
+    cleanup();
+
+    // No organization named and no default one: the request names no page, and no later page takes it.
+    mocks.status = { ...mocks.status, identity: { ...mocks.status.identity!, organization: null, organizationId: null } } as AccountStatus;
+    openAgentLogins(null);
+    render(<OrganizationsTab />);
+    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
+    expect(takeAgentLoginsRequest("b")).toBe(false);
+    openAgentLogins(null);
+    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
+    fireEvent.click(screen.getByRole("button", { name: "Settings for Beta" }));
+    await screen.findAllByTestId("agent-login");
+    expect(scrolled).not.toHaveBeenCalled();
+  });
+
   it("at the active organization when the message named none", async () => {
     openAgentLogins(null);
     render(<OrganizationsTab />);

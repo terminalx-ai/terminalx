@@ -66,7 +66,7 @@ import { useFold } from "./useFold";
  * Looking costs nothing: everything here is read from the catalog and this
  * desktop's caches; nothing connects or wakes a workspace.
  */
-export function CloudOrganizations({ onOpenAccount, onOpenOrganizations }: { onOpenAccount?: () => void; onOpenOrganizations?: () => void }) {
+export function CloudOrganizations({ onOpenOrganizations }: { onOpenOrganizations?: () => void }) {
   const cloud = useOrganizationVisibility();
   const catalog = useCloudCatalog();
   const [dialog, setDialog] = useState<LifecycleRequest | null>(null);
@@ -113,7 +113,7 @@ export function CloudOrganizations({ onOpenAccount, onOpenOrganizations }: { onO
         </button>
       )}
       {dialog && <WorkspaceLifecycleDialog request={dialog} onClose={() => setDialog(null)} />}
-      {adding?.kind === "repository" && <AddRepositoryDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} onOpenSettings={onOpenAccount} />}
+      {adding?.kind === "repository" && <AddRepositoryDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} />}
       {adding?.kind === "blank" && <NewBlankProjectDialog orgId={adding.orgId} orgName={adding.orgName} onClose={() => setAdding(null)} />}
     </>
   );

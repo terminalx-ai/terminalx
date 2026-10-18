@@ -12,16 +12,21 @@ let wantedOrganization: string | null | undefined;
 /** Whose Agent logins should come into view: an organization's id, or null for whichever page opens. */
 let wantedLogins: { organizationId: string | null } | null = null;
 
+function request(organizationId: string | null, logins: boolean): void {
+  wantedOrganization = organizationId;
+  // A request replaces whatever an earlier one asked for, the logins coming into view included.
+  wantedLogins = logins ? { organizationId } : null;
+  window.dispatchEvent(new Event(OPEN_ORGANIZATION_SETTINGS));
+}
+
 /** Open `organizationId`'s page in Settings (the active organization's when null). */
 export function openOrganizationSettings(organizationId: string | null): void {
-  wantedOrganization = organizationId;
-  window.dispatchEvent(new Event(OPEN_ORGANIZATION_SETTINGS));
+  request(organizationId, false);
 }
 
 /** Open `organizationId`'s page at its Agent logins: the organization a workspace or message belongs to. */
 export function openAgentLogins(organizationId: string | null): void {
-  wantedLogins = { organizationId };
-  openOrganizationSettings(organizationId);
+  request(organizationId, true);
 }
 
 export function onOpenOrganizationSettings(listener: () => void): () => void {
@@ -34,6 +39,15 @@ export function takeOrganizationRequest(): string | null | undefined {
   const was = wantedOrganization;
   wantedOrganization = undefined;
   return was;
+}
+
+/**
+ * Drop a request for the logins to come into view that no page will take
+ * (the organization it named has no page here), so it never scrolls a page
+ * opened later by hand.
+ */
+export function forgetAgentLoginsRequest(): void {
+  wantedLogins = null;
 }
 
 /** True once per request, and only for the organization it named (any, when it named none). */

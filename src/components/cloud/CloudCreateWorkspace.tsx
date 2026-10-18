@@ -254,7 +254,7 @@ export function CloudCreateWorkspace({
           </p>
         )}
         {selected?.length === 0 && (
-          <p className="text-muted-foreground">No repositories are selected for cloud workspaces. An admin chooses them in Settings → GitHub.</p>
+          <p className="text-muted-foreground">No repositories are selected for cloud workspaces. An admin chooses them on the organization's page in Settings → Organizations, under GitHub.</p>
         )}
         {form.repositories.map((repository, index) => (
           <div key={repository.cloneUrl} className="flex items-center gap-2" data-testid="cloud-create-repository">

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type AgentLogin } from "@/lib/api";
 import { takeAgentLoginsRequest, takeOrganizationRequest } from "@/lib/settingsLinks";
@@ -66,6 +66,11 @@ it("reconciles against the server when shown, and says what is missing", async (
   await waitFor(() => expect(record.step).toBe("repository"));
   shown.rerender(view());
   expect(screen.getByText(/choose at least one repository/)).toBeTruthy();
+  // GitHub is on the organization's page (PRO-107), not in the setup's own section.
+  const step = screen.getByTestId("organization-setup-repository");
+  expect(step.textContent).toContain("on Team's page in Settings → Organizations, under GitHub");
+  fireEvent.click(within(step).getByRole("button", { name: "Open Team's GitHub settings" }));
+  expect(takeOrganizationRequest()).toBe("org-1");
   expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 });
 
@@ -301,6 +306,21 @@ describe("the agent logins step", () => {
     fireEvent.click(within(missing).getByRole("button", { name: "Open Team's agent logins" }));
     expect(takeOrganizationRequest()).toBe("org-1");
     expect(takeAgentLoginsRequest("org-1")).toBe(true);
+  });
+
+  it("says nothing about other agents once setup went on with a login, or finished before the step", async () => {
+    for (const logins of ["connected", undefined] as const) {
+      record = { ...record, step: "done", completedAt: 5, logins, workspace: { pending: null, id: "ws-1" } };
+      stored = [{ provider: "claude", authKind: "api-key", fingerprint: "sha256:ab", version: 1, updatedAt: 1, state: "connected" }];
+      render(view());
+      await waitFor(() => expect(api.cloudAgentLogins).toHaveBeenCalled());
+      // The list has answered and been read.
+      await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(screen.getByTestId("organization-setup-done")).toBeTruthy();
+      expect(screen.queryByTestId("organization-setup-missing-logins")).toBeNull();
+      cleanup();
+      vi.mocked(api.cloudAgentLogins).mockClear();
+    }
   });
 
   it("names the agents still without a login at setup completion", async () => {

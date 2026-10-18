@@ -30,9 +30,11 @@ Agent logins are a setting of each organization, not of the account.
   logins** → Setup completion. Right after the cloud is chosen, the setup
   shows the same Agent logins section for the new organization. **Continue**
   needs at least one agent connected; connecting one does not leave the step
-  by itself, so several can be connected. **Set up later** skips it. Setup
-  completion (and the later steps, after a skip) then says which agents have
-  no login and links to the organization's page. A setup record from before
+  by itself, so several can be connected. **Set up later** skips it. After a skip,
+  the later steps and setup completion say which agents have no login and
+  link to the organization's page; a setup that went on with a login says
+  nothing more about them. The setup's repository step likewise links to the
+  organization's page, where GitHub is. A setup record from before
   the step goes back to it only when no agent has a login and its setup
   workspace was not chosen to run without an agent. The choice is
   kept in the setup record (`logins: "connected" | "later"`).

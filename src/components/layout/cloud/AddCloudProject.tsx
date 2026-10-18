@@ -11,6 +11,7 @@ import { startCloudSessionIn } from "@/lib/sessions";
 import { useAccount } from "@/lib/account";
 import { NEW_SESSION_ADMIN_REASON } from "@/lib/cloudCollab";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
+import { openOrganizationSettings } from "@/lib/settingsLinks";
 import { cloudProjectKey } from "@/types/target";
 
 /**
@@ -24,7 +25,7 @@ function identityOf(repository: { cloneUrl: string | null; fullName: string }): 
   return normalizeRepositoryIdentity(repository.cloneUrl) ?? normalizeRepositoryIdentity(`github.com/${repository.fullName}`);
 }
 
-export function AddRepositoryDialog({ orgId, orgName, onClose, onOpenSettings }: { orgId: string; orgName: string; onClose: () => void; onOpenSettings?: () => void }) {
+export function AddRepositoryDialog({ orgId, orgName, onClose }: { orgId: string; orgName: string; onClose: () => void }) {
   const [result, setResult] = useState<CloudSelectedRepositories | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -56,6 +57,22 @@ export function AddRepositoryDialog({ orgId, orgName, onClose, onOpenSettings }:
   const notConnected = error === "github_app_not_configured" || (result !== null && !result.configured);
   const repositories = (result?.repositories ?? []).filter((repository) => repository.fullName.toLowerCase().includes(filter.trim().toLowerCase()));
 
+  // GitHub is on the organization's own page in Settings (PRO-107).
+  const openGithubSettings = (
+    <div>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => {
+          onClose();
+          openOrganizationSettings(orgId);
+        }}
+      >
+        Open {orgName}'s settings
+      </Button>
+    </div>
+  );
+
   const add = (identity: string) => {
     const prefs = getPrefs();
     const current = prefs.cloudProjects[orgId] ?? [];
@@ -73,21 +90,8 @@ export function AddRepositoryDialog({ orgId, orgName, onClose, onOpenSettings }:
         {notConnected ? (
           <div className="flex flex-col gap-3 text-sm" data-testid="cloud-github-not-connected">
             <p>The GitHub App is not connected for {orgName}, so cloud workspaces cannot reach any repository yet.</p>
-            <p className="text-xs text-muted-foreground">An owner or admin installs it and chooses repositories in Settings → Account, under GitHub, or in the {orgName} console. You can still start a blank project with “New project…”.</p>
-            {onOpenSettings && (
-              <div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    onClose();
-                    onOpenSettings();
-                  }}
-                >
-                  Open Settings
-                </Button>
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground">An owner or admin installs it and chooses repositories on {orgName}'s page in Settings → Organizations, under GitHub, or in the {orgName} console. You can still start a blank project with “New project…”.</p>
+            {openGithubSettings}
           </div>
         ) : error ? (
           <p className="text-sm text-destructive">The repositories could not be read ({error}).</p>
@@ -96,7 +100,10 @@ export function AddRepositoryDialog({ orgId, orgName, onClose, onOpenSettings }:
             <Loader2 className="size-4 animate-spin" /> Reading repositories…
           </p>
         ) : result.repositories.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No repositories are selected for {orgName}. Choose them in Settings → Account, under GitHub.</p>
+          <div className="flex flex-col gap-3" data-testid="cloud-no-repositories">
+            <p className="text-sm text-muted-foreground">No repositories are selected for {orgName}. Choose them on {orgName}'s page in Settings → Organizations, under GitHub.</p>
+            {openGithubSettings}
+          </div>
         ) : (
           <div className="flex flex-col gap-2">
             <input

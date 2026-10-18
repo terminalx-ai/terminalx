@@ -6,7 +6,7 @@ import { createErrorMessage, createWorkspace, failureMessage, isClientError, lau
 import { creatableProviders } from "@/lib/hiddenProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
-import { openAgentLogins } from "@/lib/settingsLinks";
+import { openAgentLogins, openOrganizationSettings } from "@/lib/settingsLinks";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { agentLoginUsable, OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import {
@@ -237,9 +237,10 @@ export function OrganizationSetupSteps({
 
   const step = record.step;
   const reached = (name: SetupStep) => ORDER.indexOf(step) > ORDER.indexOf(name);
-  // Which agents have no login yet, once that is known: after the step was put off, and at completion.
+  // Which agents have no login yet, once that is known, when the person chose to set them up later: through the
+  // remaining steps and at completion. Not for a setup that went on with a login (or finished before the step).
   const missing = facts.logins ? LOGIN_AGENTS.filter((agent) => !facts.logins!.includes(agent.id)).map((agent) => agent.label) : [];
-  const missingLogins = missing.length > 0 && (step === "done" || (record.logins === "later" && reached("logins"))) && (
+  const missingLogins = missing.length > 0 && record.logins === "later" && (step === "done" || reached("logins")) && (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-missing-logins">
       <span>
         No agent login yet for {listed(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
@@ -282,7 +283,8 @@ export function OrganizationSetupSteps({
         ))}
       </ol>
 
-      {step === "compute" && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider below, then check again.</p>}
+      {/* The provider controls are drawn above these steps, in the same setup section. */}
+      {step === "compute" && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider above, then check again.</p>}
       {step === "logins" && (
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-logins">
           <p>
@@ -311,7 +313,15 @@ export function OrganizationSetupSteps({
         </div>
       )}
       {missingLogins}
-      {step === "repository" && <p className="mt-2 text-xs text-muted-foreground">Connect GitHub and choose at least one repository in the GitHub section below, then check again.</p>}
+      {/* GitHub is on the organization's own page (PRO-107), not in this section. */}
+      {step === "repository" && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-repository">
+          <span>Connect GitHub and choose at least one repository on {organizationName}'s page in Settings → Organizations, under GitHub, then check again.</span>
+          <Button size="xs" variant="outline" onClick={() => openOrganizationSettings(organizationId)}>
+            Open {organizationName}'s GitHub settings
+          </Button>
+        </div>
+      )}
 
       {step === "workspace" && unsent && (
         <div className="mt-2 text-xs text-muted-foreground">

@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { useAccount } from "@/lib/account";
 import { defaultOrgId, useCloudCatalog } from "@/lib/cloudCatalog";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { onOpenOrganizationSettings, takeOrganizationRequest } from "@/lib/settingsLinks";
+import { forgetAgentLoginsRequest, onOpenOrganizationSettings, takeOrganizationRequest } from "@/lib/settingsLinks";
 import { OrganizationSettings } from "./OrganizationSettings";
 
 export function OrganizationsTab() {
@@ -16,21 +16,32 @@ export function OrganizationsTab() {
   // The organization whose page is open (PRO-107), chosen here or asked for by a message elsewhere.
   const [page, setPage] = useState<string | null>(null);
   const activeId = defaultOrgId(status);
+  // Every organization the person belongs to has a page, cloud-enabled or not.
+  const memberships = status.state === "signed-in" ? (status.organizations ?? []) : [];
+  const members = useRef(memberships);
+  members.current = memberships;
   useEffect(() => {
     const open = () => {
       const wanted = takeOrganizationRequest();
-      if (wanted !== undefined) setPage(wanted ?? activeId);
+      if (wanted === undefined) return;
+      const target = wanted ?? activeId;
+      // No page for it here (not a member, or no default organization): its logins request is dropped with it.
+      if (!target || !members.current.some((org) => org.id === target)) forgetAgentLoginsRequest();
+      setPage(target);
     };
     open();
     return onOpenOrganizationSettings(open);
   }, [activeId]);
-  // Every organization the person belongs to has a page, cloud-enabled or not.
-  const memberships = status.state === "signed-in" ? (status.organizations ?? []) : [];
+  /** A page opened by hand: no earlier message's request scrolls it. */
+  const openPage = (organizationId: string) => {
+    forgetAgentLoginsRequest();
+    setPage(organizationId);
+  };
   const organization = page ? memberships.find((org) => org.id === page) : undefined;
   if (organization) return <OrganizationSettings key={organization.id} organization={organization} onBack={() => setPage(null)} />;
   const settingsButton = (org: (typeof memberships)[number]) => (
     // Its own page: agent logins and the organization's other settings (PRO-107).
-    <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => setPage(org.id)}>
+    <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => openPage(org.id)}>
       Settings
     </Button>
   );
