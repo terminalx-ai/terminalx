@@ -7,10 +7,10 @@
 //! and a step about to merge reads them again first.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{Pipeline, State};
@@ -18,8 +18,8 @@ use super::{Pipeline, State};
 /// Finished pipelines kept for the record; ones still in flight are never dropped.
 const RETENTION: usize = 200;
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-/// Pipelines waiting on GitHub, as of the last read or write.
-static WAITING: AtomicUsize = AtomicUsize::new(0);
+/// When each pipeline waiting on GitHub began to wait, as of the last read or write.
+static WAITING: Mutex<Vec<DateTime<Utc>>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,12 +39,26 @@ pub fn list() -> Result<Vec<Pipeline>> {
 }
 
 fn note_waiting(pipelines: &[Pipeline]) {
-    WAITING.store(pipelines.iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Waiting).count(), Ordering::Relaxed);
+    let since = pipelines.iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Waiting).filter_map(waiting_since).collect();
+    *WAITING.lock().unwrap_or_else(|error| error.into_inner()) = since;
 }
 
-/// How many pipelines are waiting on GitHub (checks, mergeability).
-pub fn waiting() -> usize {
-    WAITING.load(Ordering::Relaxed)
+/// When a pipeline began to wait on GitHub: for its checks, for a merge
+/// GitHub took into a queue, or for a new head's checks to be listed. What
+/// bounds the wait, whether or not GitHub can be read meanwhile.
+pub fn waiting_since(pipeline: &Pipeline) -> Option<DateTime<Utc>> {
+    let request = pipeline.merge_requested.as_ref().map(|request| request.at.as_str());
+    [pipeline.waiting_since.as_deref(), request, pipeline.review_requested_at.as_deref(), Some(pipeline.modified.as_str())]
+        .into_iter()
+        .flatten()
+        .find_map(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// When each pipeline waiting on GitHub (checks, mergeability, a merge
+/// queue) began to wait.
+pub fn waits() -> Vec<DateTime<Utc>> {
+    WAITING.lock().unwrap_or_else(|error| error.into_inner()).clone()
 }
 
 fn write(pipelines: Vec<Pipeline>) -> Result<()> {

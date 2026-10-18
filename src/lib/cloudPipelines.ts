@@ -136,6 +136,34 @@ function noAccess(client: WorkspaceRpcClient): boolean {
   return state.state === "connected" && state.authority !== "manage" && state.you?.role === "none" && state.you.listed !== false;
 }
 
+/** Pipelines whose Linear issue this desktop already tried to move to review, this run. */
+const movedToReview = new Set<string>();
+
+/** The connection manages the workspace: it may write a pipeline's record. */
+function manages(client: WorkspaceRpcClient): boolean {
+  const state = client.connection;
+  return state.state === "connected" && state.authority === "manage" && (!state.you || state.you.listed === false || state.you.role === "manager");
+}
+
+/**
+ * A Linear issue goes to its team's review state when its pull request opens.
+ * The runtime holds no Linear key, so a desktop that manages the workspace
+ * makes the move with its reader's key, once, and tells the runtime, which
+ * records it. One without a key leaves it to another.
+ */
+async function moveLinearToReview(target: CloudTarget, client: WorkspaceRpcClient, raw: RuntimeIssuePipeline) {
+  const pipeline = raw as unknown as IssuePipeline;
+  const due = pipeline.issue?.provider === "linear" && !!pipeline.pr && pipeline.state !== "merged" && !pipeline.stopped && !(pipeline.events ?? []).some((event) => event.kind === "tracker");
+  if (!due || !manages(client) || movedToReview.has(raw.id)) return;
+  movedToReview.add(raw.id);
+  try {
+    const message = await pipelinesApi.linearToReview(pipeline.issue.id, pipeline.issue.identifier);
+    takeOne(target, await client.noteTracker(raw.id, message));
+  } catch {
+    /* no Linear key here, or the workspace refused: the next desktop that can, does */
+  }
+}
+
 /** Tell a runtime of the merges made here while it could not be reached. One it refuses is not asked again. */
 async function noteUnnoted(target: CloudTarget, client: WorkspaceRpcClient) {
   const key = cloudWorkspaceKey(target.orgId, target.workspaceId);
@@ -160,9 +188,15 @@ function onConnected(target: CloudTarget, client: WorkspaceRpcClient) {
   void (async () => {
     await noteUnnoted(target, client);
     const listed = await client.listPipelines();
-    if (open) takeList(target, listed);
+    if (!open) return;
+    takeList(target, listed);
+    for (const pipeline of listed) void moveLinearToReview(target, client, pipeline);
   })().catch(() => undefined);
-  const stop = client.onPipeline((pipeline) => open && takeOne(target, pipeline));
+  const stop = client.onPipeline((pipeline) => {
+    if (!open) return;
+    takeOne(target, pipeline);
+    void moveLinearToReview(target, client, pipeline);
+  });
   return () => {
     open = false;
     stop();
@@ -190,6 +224,7 @@ export function resetCloudPipelines() {
   booted?.();
   booted = null;
   unnoted.clear();
+  movedToReview.clear();
   builtFrom = null;
   views = [];
   publish();

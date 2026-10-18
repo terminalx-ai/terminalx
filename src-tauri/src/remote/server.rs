@@ -474,7 +474,7 @@ impl WorkspaceRpc {
             crate::issue_pipeline::host::CHANGED,
             Box::new(move |payload| {
                 if let (Some(rpc), Ok(pipeline)) = (weak.upgrade(), serde_json::from_str::<Value>(payload)) {
-                    rpc.broadcast_pipeline(pipeline);
+                    rpc.broadcast_pipeline(pipeline_on_the_wire(pipeline));
                 }
             }),
         );
@@ -1041,6 +1041,7 @@ impl WorkspaceRpc {
             "pipeline.list" => self.pipeline_list(),
             "pipeline.act" => self.pipeline_act(params),
             "pipeline.noteMerge" => self.pipeline_note_merge(params),
+            "pipeline.noteTracker" => self.pipeline_note_tracker(params),
             git if git.starts_with("git.") => self
                 .git
                 .handle(git, &params)
@@ -2388,7 +2389,7 @@ impl WorkspaceRpc {
                         Some(prompt) => format!("{prompt}\n\n{brief}"),
                         None => brief,
                     });
-                    pipeline = json!(started);
+                    pipeline = pipeline_on_the_wire(json!(started));
                 }
                 // The session still starts; it just ends at the code, and says why.
                 Err(error) => pipeline_note = json!(format!("{error:#}")),
@@ -2403,6 +2404,19 @@ impl WorkspaceRpc {
             agents.tab(&tab.id)
         });
         Ok(json!({ "sessionId": entry.id, "tabId": tab.id, "session": entry, "outcome": outcome, "tab": info, "pipeline": pipeline, "pipelineNote": pipeline_note }))
+    }
+
+    /// `pipeline/1`: a desktop moved the pipeline's Linear issue to review
+    /// with its reader's own Linear key; `message` is what it did, for the record.
+    fn pipeline_note_tracker(&self, params: Value) -> Result<Value, RpcError> {
+        let pipeline = self.own_pipeline(&params)?;
+        let message = required_str(&params, "message")?.trim();
+        if message.is_empty() || message.chars().count() > 300 || message.chars().any(char::is_control) {
+            return Err(RpcError::invalid("message must be one line of at most 300 characters"));
+        }
+        let host = self.pipeline_host()?;
+        let noted = crate::issue_pipeline::engine::note_tracker(&host, &pipeline.id, message).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
+        Ok(json!({ "pipeline": pipeline_on_the_wire(json!(noted)) }))
     }
 
     // ---- an issue's pipeline (#433) ----------------------------------------------
@@ -2427,11 +2441,22 @@ impl WorkspaceRpc {
         crate::issue_pipeline::store::get(id).ok().filter(|pipeline| pipeline.project_path == root).ok_or_else(|| RpcError::not_found(format!("issue pipeline {id} not found")))
     }
 
-    /// `pipeline/1`: every pipeline of this workspace, newest last.
+    /// `pipeline/1`: this workspace's pipelines, newest first, as many as fit
+    /// [`PIPELINE_LIST_BYTES`]; `truncated` when older ones were left out.
     fn pipeline_list(&self) -> Result<Value, RpcError> {
         let root = self.root.to_string_lossy();
-        let pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| pipeline.project_path == root).collect();
-        Ok(json!({ "pipelines": pipelines }))
+        let mut pipelines: Vec<_> = crate::issue_pipeline::store::list().map_err(RpcError::internal)?.into_iter().filter(|pipeline| pipeline.project_path == root).collect();
+        pipelines.sort_by(|a, b| b.created.cmp(&a.created));
+        let (mut listed, mut bytes) = (Vec::new(), 0);
+        for pipeline in &pipelines {
+            let wire = pipeline_on_the_wire(json!(pipeline));
+            bytes += wire.to_string().len();
+            if listed.len() == PIPELINE_LIST_MAX || bytes > PIPELINE_LIST_BYTES {
+                break;
+            }
+            listed.push(wire);
+        }
+        Ok(json!({ "pipelines": listed, "truncated": listed.len() < pipelines.len() }))
     }
 
     /// `pipeline/1`: what a person can do from the issue page, less the
@@ -2443,7 +2468,7 @@ impl WorkspaceRpc {
         let action: Action = serde_json::from_value(params.get("action").cloned().unwrap_or(Value::Null)).map_err(|_| RpcError::invalid("action must be stop, resume, advance, review or refresh"))?;
         let host = self.pipeline_host()?;
         let acted = engine::act(&host, &pipeline.id, action).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
-        Ok(json!({ "pipeline": acted }))
+        Ok(json!({ "pipeline": pipeline_on_the_wire(json!(acted)) }))
     }
 
     /// `pipeline/1`: the desktop merged the pull request with its reader's
@@ -2457,7 +2482,7 @@ impl WorkspaceRpc {
         }
         let host = self.pipeline_host()?;
         let noted = crate::issue_pipeline::engine::note_merge(&host, &pipeline.id, commit).map_err(|error| RpcError::new("conflict", format!("{error:#}")))?;
-        Ok(json!({ "pipeline": noted }))
+        Ok(json!({ "pipeline": pipeline_on_the_wire(json!(noted)) }))
     }
 
     /// The agents a new tab may run: offered and installed here.
@@ -3265,6 +3290,20 @@ fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
 
 fn required_str<'a>(params: &'a Value, name: &str) -> Result<&'a str, RpcError> {
     params.get(name).and_then(Value::as_str).ok_or_else(|| RpcError::invalid(format!("{name} is required")))
+}
+
+/// The most pipelines `pipeline.list` sends, and the bytes they may take: well
+/// inside [`MAX_FRAME_BYTES`] with room for the envelope.
+const PIPELINE_LIST_MAX: usize = 50;
+const PIPELINE_LIST_BYTES: usize = 512 * 1024;
+
+/// A pipeline as a desktop is sent it: without the issue's text, which is the
+/// reviewer's and is never shown.
+fn pipeline_on_the_wire(mut pipeline: Value) -> Value {
+    if let Some(fields) = pipeline.as_object_mut() {
+        fields.remove("issueBody");
+    }
+    pipeline
 }
 
 /// An issue a session is started from. It names the session, its worktree and

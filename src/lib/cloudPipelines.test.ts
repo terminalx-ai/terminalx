@@ -117,7 +117,7 @@ function runtime(options: { capable?: boolean; role?: string } = {}): FakeRuntim
     listed: [raw()],
     announce: (pipeline) => announce(pipeline),
     client: {
-      connection: { state: "connected", authority: options.role === "none" ? "participate" : "manage", capabilities: [], runtimeGeneration: 1, you: options.role ? { userId: "u", role: options.role, canApprove: false, listed: true } : undefined },
+      connection: { state: "connected", authority: options.role === "none" || options.role === "viewer" ? "participate" : "manage", capabilities: [], runtimeGeneration: 1, you: options.role ? { userId: "u", role: options.role, canApprove: false, listed: true } : undefined },
       hasCapability: (capability: string) => capability === "pipeline/1" && options.capable !== false,
       listPipelines: async () => {
         calls.push("list");
@@ -136,6 +136,11 @@ function runtime(options: { capable?: boolean; role?: string } = {}): FakeRuntim
       noteMerge: async (id: string, commit: string) => {
         calls.push(`noteMerge:${commit}`);
         return raw({ id, state: "merged", merged: { commit, at: "2026-10-18T11:00:00Z", by: "person" } });
+      },
+      noteTracker: async (id: string, message: string) => {
+        calls.push(`noteTracker:${message}`);
+        const listed = fake.listed.find((pipeline) => pipeline.id === id) ?? raw({ id });
+        return { ...listed, events: [...((listed.events as unknown[]) ?? []), { at: "2026-10-18T10:30:00Z", stage: "pullRequest", kind: "tracker", message }] };
       },
     } as unknown as WorkspaceRpcClient,
   };
@@ -280,5 +285,43 @@ describe("merging a cloud workspace's pull request from this computer", () => {
     expect(fake.calls).toContain("act:refresh");
     expect(fake.calls.some((call) => call.startsWith("noteMerge"))).toBe(false);
     expect(shown()?.state).toBe("readyToMerge");
+  });
+});
+
+describe("a cloud workspace's Linear issue", () => {
+  const linear = (patch: Record<string, unknown> = {}) =>
+    raw({ issue: { provider: "linear", id: "uuid-42", identifier: "ENG-42", title: "Fix login timeout", url: "https://linear.app/acme/issue/ENG-42" }, stage: "review", state: "working", ...patch });
+
+  it("is moved to review by a desktop that manages the workspace, with its own Linear key, and the runtime records it once", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => (command === "issue_pipeline_linear_to_review" ? "Moved ENG-42 to In Review in Linear." : undefined));
+    const fake = runtime();
+    fake.listed = [linear()];
+    await connect(fake);
+    await settle();
+    const moves = mocks.invoke.mock.calls.filter(([command]) => command === "issue_pipeline_linear_to_review");
+    expect(moves).toEqual([["issue_pipeline_linear_to_review", { id: "uuid-42", identifier: "ENG-42" }]]);
+    expect(fake.calls).toContain("noteTracker:Moved ENG-42 to In Review in Linear.");
+    expect(shown()?.events.some((event) => event.kind === "tracker")).toBe(true);
+    // Announced again, or read again on the next connect: not moved twice.
+    fake.announce(linear({ note: "Review 1 of 3." }));
+    await connect(fake);
+    await settle();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "issue_pipeline_linear_to_review")).toHaveLength(1);
+  });
+
+  it("is left alone before its pull request, once recorded, and by a desktop that only views the workspace", async () => {
+    mocks.invoke.mockResolvedValue("Moved ENG-42 to In Review in Linear.");
+    const early = runtime();
+    early.listed = [linear({ id: "p-early", pr: null, stage: "work" })];
+    await connect(early);
+    const recorded = runtime();
+    recorded.listed = [linear({ id: "p-recorded", events: [{ at: "2026-10-18T10:00:00Z", stage: "pullRequest", kind: "tracker", message: "Moved ENG-42 to In Review in Linear." }] })];
+    await connect(recorded);
+    const viewer = runtime({ role: "viewer" });
+    viewer.listed = [linear({ id: "p-viewed" })];
+    await connect(viewer);
+    await settle();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "issue_pipeline_linear_to_review")).toEqual([]);
+    expect([...early.calls, ...recorded.calls, ...viewer.calls].some((call) => call.startsWith("noteTracker"))).toBe(false);
   });
 });

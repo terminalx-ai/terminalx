@@ -94,11 +94,16 @@ pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, setting
     let not_merged = |reason: StopReason| Ok(CloudMerge::NotMerged { reason: reason.describe() });
     match decision {
         Gate::Merged => Ok(CloudMerge::AlreadyMerged { commit: pr.head_sha }),
-        Gate::Merge { commit } => match github.merge(&named, number, &settings.merge_method, &commit)? {
-            PinnedMerge::Merged => Ok(CloudMerge::Merged { commit }),
-            PinnedMerge::Accepted => Ok(CloudMerge::Accepted { commit }),
-            PinnedMerge::HeadMoved { head } => not_merged(StopReason::HeadMoved { reviewed: commit, head }),
-            PinnedMerge::Refused(message) => not_merged(StopReason::MergeRefused { message }),
+        Gate::Merge { commit } => match github.merge(&named, number, &settings.merge_method, &commit) {
+            Ok(PinnedMerge::Merged) => Ok(CloudMerge::Merged { commit }),
+            Ok(PinnedMerge::Accepted) => Ok(CloudMerge::Accepted { commit }),
+            Ok(PinnedMerge::HeadMoved { head }) => not_merged(StopReason::HeadMoved { reviewed: commit, head }),
+            Ok(PinnedMerge::Refused(message)) => not_merged(StopReason::MergeRefused { message }),
+            // The request may have reached GitHub all the same: the pull request knows.
+            Err(error) => match github.pull_request(&named, number) {
+                Ok(now) if now.state == "MERGED" => Ok(CloudMerge::Merged { commit: now.head_sha }),
+                _ => Err(error),
+            },
         },
         Gate::Wait(Wait::Checks(names)) => Ok(CloudMerge::NotMerged { reason: format!("Checks are still running on {}: {}.", short(&pr.head_sha), names.join(", ")) }),
         Gate::Wait(Wait::Mergeability) => Ok(CloudMerge::NotMerged { reason: "GitHub has not worked out yet whether the branch merges. Try again in a moment.".into() }),
@@ -118,13 +123,16 @@ mod tests {
     struct FakeGithub {
         pr: Mutex<PrSnapshot>,
         answer: Mutex<Option<PinnedMerge>>,
+        /// The merge call fails with this, after GitHub moved the pull request to `then`.
+        fail: Mutex<Option<String>>,
+        then: Mutex<Option<String>>,
         asked: Mutex<Vec<String>>,
         merges: Mutex<Vec<(String, u64, String, String)>>,
     }
 
     impl FakeGithub {
         fn new(pr: PrSnapshot) -> Self {
-            Self { pr: Mutex::new(pr), answer: Mutex::new(None), asked: Mutex::new(Vec::new()), merges: Mutex::new(Vec::new()) }
+            Self { pr: Mutex::new(pr), answer: Mutex::new(None), fail: Mutex::new(None), then: Mutex::new(None), asked: Mutex::new(Vec::new()), merges: Mutex::new(Vec::new()) }
         }
     }
 
@@ -136,6 +144,13 @@ mod tests {
 
         fn merge(&self, repository: &str, number: u64, method: &str, commit: &str) -> Result<PinnedMerge> {
             self.merges.lock().unwrap().push((repository.into(), number, method.into(), commit.into()));
+            if let Some(error) = self.fail.lock().unwrap().take() {
+                // The answer is lost; what GitHub did is in the pull request.
+                if let Some(state) = self.then.lock().unwrap().take() {
+                    self.pr.lock().unwrap().state = state;
+                }
+                anyhow::bail!("{error}");
+            }
             Ok(self.answer.lock().unwrap().take().unwrap_or(PinnedMerge::Merged))
         }
     }
@@ -191,6 +206,19 @@ mod tests {
         let queued = FakeGithub::new(clean_pr());
         *queued.answer.lock().unwrap() = Some(PinnedMerge::Accepted);
         assert_eq!(merge(&queued, &ready(), "acme/widgets", &settings()).unwrap(), CloudMerge::Accepted { commit: HEAD.into() });
+    }
+
+    #[test]
+    fn a_merge_whose_answer_was_lost_is_settled_by_reading_the_pull_request() {
+        // It went through: said as a merge, so the runtime is told.
+        let lost = FakeGithub::new(clean_pr());
+        *lost.fail.lock().unwrap() = Some("gh pr merge: connection reset".into());
+        *lost.then.lock().unwrap() = Some("MERGED".into());
+        assert_eq!(merge(&lost, &ready(), "acme/widgets", &settings()).unwrap(), CloudMerge::Merged { commit: HEAD.into() });
+        // It did not: the error stands.
+        let failed = FakeGithub::new(clean_pr());
+        *failed.fail.lock().unwrap() = Some("gh pr merge: connection reset".into());
+        assert!(merge(&failed, &ready(), "acme/widgets", &settings()).unwrap_err().to_string().contains("connection reset"));
     }
 
     #[test]

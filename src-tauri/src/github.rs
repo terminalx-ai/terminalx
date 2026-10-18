@@ -440,8 +440,8 @@ fn merge_pr_at_with(
     let now = snapshot(cwd, number);
     match (merged.success, now) {
         (_, Ok(pr)) if pr.state == "MERGED" => Ok(PinnedMerge::Merged),
-        (true, Ok(_)) => Ok(PinnedMerge::Accepted),
-        (true, Err(error)) => Err(error.context("The merge was accepted, but the pull request could not be read back.")),
+        // GitHub took it; whether it is merged yet is read on the next look.
+        (true, _) => Ok(PinnedMerge::Accepted),
         (false, Ok(pr)) if !pr.head_sha.eq_ignore_ascii_case(commit) => Ok(PinnedMerge::HeadMoved { head: pr.head_sha }),
         (false, _) => Ok(PinnedMerge::Refused(if merged.stderr.is_empty() { "GitHub refused the merge.".into() } else { merged.stderr })),
     }
@@ -898,6 +898,8 @@ mod tests {
         assert_eq!(merge_pr_at_with(cwd, 7, "merge", head, |_, _| Ok(output(false, "", "timeout")), |_, _| at("MERGED", head)).unwrap(), PinnedMerge::Merged);
         // A merge queue takes the request and merges later.
         assert_eq!(merge_pr_at_with(cwd, 7, "merge", head, |_, _| Ok(output(true, "", "")), |_, _| at("OPEN", head)).unwrap(), PinnedMerge::Accepted);
+        // Taken, and not readable back: still taken, for the next look to settle.
+        assert_eq!(merge_pr_at_with(cwd, 7, "merge", head, |_, _| Ok(output(true, "", "")), |_, _| bail!("HTTP 502")).unwrap(), PinnedMerge::Accepted);
     }
 
     #[test]

@@ -49,10 +49,11 @@ export const WORKSPACE_PROTOCOL = "terminalx-workspace-rpc/1";
  *   runtime looks at its own worktrees, removes the ones that are safe and
  *   due, and records them; this client only says that it is on;
  * - `pipeline/1` (#433): the issue pipelines the runtime carries.
- *   `pipeline.list` and the `pipeline.changed` notification; `pipeline.act`
- *   and `pipeline.noteMerge` for a manager. A runtime never merges: the
- *   desktop does, with its reader's own `gh`, and says so with
- *   `pipeline.noteMerge`. `session.create` takes an issue only where it is granted.
+ *   `pipeline.list` and the `pipeline.changed` notification; `pipeline.act`,
+ *   `pipeline.noteMerge` and `pipeline.noteTracker` for a manager. A runtime
+ *   never merges and holds no Linear key: the desktop merges with its
+ *   reader's own `gh` and moves a Linear issue to review with their key, and
+ *   says so. `session.create` takes an issue only where it is granted.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
@@ -115,6 +116,7 @@ export const MUTATING_METHODS = new Set([
   "workspace.restoreRemoved",
   "pipeline.act",
   "pipeline.noteMerge",
+  "pipeline.noteTracker",
   "pty.create",
   "fs.write",
   "fs.writePart",
@@ -1169,6 +1171,12 @@ export class WorkspaceRpcClient {
   /** `pipeline/1`: this desktop merged the pipeline's pull request, pinned to `commit`; the runtime reads it back and records it. */
   async noteMerge(pipeline: string, commit: string): Promise<RuntimeIssuePipeline> {
     const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.noteMerge", { pipeline, commit });
+    return result.pipeline;
+  }
+
+  /** `pipeline/1`: this desktop moved the pipeline's Linear issue to review; `message` says what it did, for the record. */
+  async noteTracker(pipeline: string, message: string): Promise<RuntimeIssuePipeline> {
+    const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.noteTracker", { pipeline, message });
     return result.pipeline;
   }
 

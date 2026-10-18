@@ -2040,6 +2040,8 @@ export const issuePipelines = {
   act: (id: string, action: PipelineAction) => invoke<IssuePipeline>("issue_pipeline_act", { id, action }),
   /** Merge a cloud workspace's pull request with the reader's own `gh`, pinned to the reviewed commit; `repository` is the cloud project's own. */
   mergeCloud: (pipeline: IssuePipeline, repository: string, settings: IssuePipelineSettings) => invoke<CloudMerge>("issue_pipeline_merge_cloud", { pipeline, repository, settings }),
+  /** Move a cloud workspace's Linear issue to review with the reader's own Linear key; what it did, for the record. */
+  linearToReview: (id: string, identifier: string) => invoke<string>("issue_pipeline_linear_to_review", { id, identifier }),
 };
 
 // ---- transcription models and dictation input

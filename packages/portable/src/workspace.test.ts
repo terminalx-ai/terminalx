@@ -226,6 +226,11 @@ class FakeRuntime implements WorkspaceTransport {
         this.cache.set(key!, result);
         return ok(result);
       }
+      case "pipeline.noteTracker": {
+        const result = { pipeline: { id: params.pipeline, cloud: true, events: [{ kind: "tracker", message: params.message }] } };
+        this.cache.set(key!, result);
+        return ok(result);
+      }
       case "session.create": {
         const result = { sessionId: "s9", tabId: "t9", pipeline: params.issue ? { id: "p9", cloud: true } : null, pipelineNote: null };
         this.cache.set(key!, result);
@@ -702,10 +707,12 @@ describe("workspace RPC client", () => {
       expect(await client.listPipelines()).toEqual([{ id: "p1", cloud: true, state: "working" }]);
       expect(await client.actOnPipeline("p1", "stop")).toMatchObject({ id: "p1", state: "stopped" });
       expect(await client.noteMerge("p1", "1111111")).toMatchObject({ state: "merged", merged: { commit: "1111111", by: "person" } });
+      expect(await client.noteTracker("p1", "Moved ENG-42 to In Review in Linear.")).toMatchObject({ events: [{ kind: "tracker" }] });
       const sent = (method: string) => runtime.sent.find((frame) => frame.method === method)!.params as Record<string, unknown>;
       expect(sent("pipeline.act")).toMatchObject({ pipeline: "p1", action: "stop" });
       expect(sent("pipeline.noteMerge")).toMatchObject({ pipeline: "p1", commit: "1111111" });
-      for (const method of ["pipeline.act", "pipeline.noteMerge"]) {
+      expect(sent("pipeline.noteTracker")).toMatchObject({ pipeline: "p1", message: "Moved ENG-42 to In Review in Linear." });
+      for (const method of ["pipeline.act", "pipeline.noteMerge", "pipeline.noteTracker"]) {
         expect(typeof sent(method).clientRequestId, method).toBe("string");
         expect(MUTATING_METHODS.has(method), method).toBe(true);
       }

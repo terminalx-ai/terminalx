@@ -3359,6 +3359,19 @@ pub async fn issue_pipeline_act(app: AppHandle, id: String, action: crate::issue
     .map_err(err)?
 }
 
+/// Move a cloud workspace's Linear issue to its team's review state with the
+/// reader's own Linear key: the workspace has none. What it did, as the
+/// pipeline's record says it.
+#[tauri::command]
+pub async fn issue_pipeline_linear_to_review(id: String, identifier: String) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let moved = crate::issues::linear_move_to_review(&linear_key()?, &id).map_err(err)?;
+        Ok(crate::issue_pipeline::host::review_move_line(&identifier, moved))
+    })
+    .await
+    .map_err(err)?
+}
+
 /// Merge a cloud workspace's pull request as the reader, with their own `gh`
 /// (`issue_pipeline::cloud_merge`): a cloud workspace never merges by itself.
 /// `pipeline` is as the workspace reported it, and `repository` the cloud

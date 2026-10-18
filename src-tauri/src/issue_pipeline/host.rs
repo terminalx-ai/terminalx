@@ -70,11 +70,37 @@ fn linear_key() -> Result<String> {
     crate::store::settings::load().linear_api_key.filter(|key| !key.trim().is_empty()).ok_or_else(|| anyhow!("Linear is not connected. Add an API key in Settings → Integrations."))
 }
 
+/// What moving a Linear issue to its team's review state did, as the record says it.
+pub fn review_move_line(identifier: &str, moved: LinearReviewMove) -> String {
+    match moved {
+        LinearReviewMove::Moved(state) => format!("Moved {identifier} to {state} in Linear."),
+        LinearReviewMove::Unchanged(state) => format!("{identifier} is {state} in Linear and was left there."),
+        LinearReviewMove::NoReviewState => format!("{identifier} was left where it is: its Linear team has no review state."),
+    }
+}
+
 /// The number at the end of a pull request URL.
 pub(crate) fn pr_number(url: &str) -> Option<u64> {
     let mut parts = url.trim().trim_end_matches('/').rsplit('/');
     let number = parts.next()?.parse().ok()?;
     (parts.next()? == "pull").then_some(number)
+}
+
+/// A transcript's last finished turn: when it ended, and its reply (the
+/// turn's final text, else its last message). A subagent's turns are not the tab's.
+fn last_reply(events: &[crate::events::AgentEvent]) -> Option<(DateTime<Utc>, String)> {
+    use crate::events::{Payload, TurnStatus};
+    let end = events.iter().rposition(|event| event.subagent.is_none() && matches!(event.payload, Payload::TurnCompleted { status: TurnStatus::Ok, .. }))?;
+    let at = DateTime::parse_from_rfc3339(&events[end].ts).ok()?.with_timezone(&Utc);
+    let said = |event: &crate::events::AgentEvent| match &event.payload {
+        Payload::AssistantText { text, .. } if event.subagent.is_none() && !text.trim().is_empty() => Some(text.clone()),
+        _ => None,
+    };
+    let reply = match &events[end].payload {
+        Payload::TurnCompleted { final_text: Some(text), .. } if !text.trim().is_empty() => text.clone(),
+        _ => events[..end].iter().rev().take_while(|event| !matches!(event.payload, Payload::TurnStarted { .. })).find_map(said)?,
+    };
+    Some((at, reply))
 }
 
 /// A checkout as git reports it now.
@@ -156,6 +182,10 @@ impl Host for LocalHost {
     fn send(&self, to: &SessionRef, prompt: &str) -> Result<()> {
         self.manager.send(&to.session_id, &to.tab_id, prompt.to_string(), Vec::new())?;
         Ok(())
+    }
+
+    fn last_reply(&self, session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
+        last_reply(&self.manager.load_events(&session.session_id, &session.tab_id).ok()?)
     }
 
     /// A session of its own in the author's checkout, with the author's
@@ -251,18 +281,13 @@ impl Host for LocalHost {
     }
 
     fn move_to_review(&self, issue: &IssueRef) -> Result<Option<String>> {
-        if issue.provider != "linear" {
+        // The Linear key is the reader's and stays on their computer: a cloud
+        // workspace's desktop makes the move when it sees the pull request,
+        // and records it here (`engine::note_tracker`).
+        if issue.provider != "linear" || self.cloud() {
             return Ok(None);
         }
-        // The Linear key is the reader's and stays on their computer.
-        if self.cloud() {
-            return Ok(Some(format!("{} was left where it is: a cloud workspace has no Linear connection, so move it to review in Linear yourself.", issue.identifier)));
-        }
-        Ok(Some(match crate::issues::linear_move_to_review(&linear_key()?, &issue.id)? {
-            LinearReviewMove::Moved(state) => format!("Moved {} to {state} in Linear.", issue.identifier),
-            LinearReviewMove::Unchanged(state) => format!("{} is {state} in Linear and was left there.", issue.identifier),
-            LinearReviewMove::NoReviewState => format!("{} was left where it is: its Linear team has no review state.", issue.identifier),
-        }))
+        Ok(Some(review_move_line(&issue.identifier, crate::issues::linear_move_to_review(&linear_key()?, &issue.id)?)))
     }
 
     fn changed(&self, pipeline: &Pipeline) {
@@ -401,6 +426,36 @@ mod tests {
         assert_eq!(base_ref(root, "main"), "origin/main");
         assert_eq!(diff(root, "origin/main", &head).unwrap().paths, ["src/auth.rs"]);
         assert!(diff(root, "origin/main", "0000000").is_err());
+    }
+
+    #[test]
+    fn a_tabs_last_reply_is_its_last_finished_turns() {
+        let event = |seq: u64, ts: &str, subagent: bool, payload: serde_json::Value| -> crate::events::AgentEvent {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("e{seq}"), "sessionId": "s", "tabId": "t", "harness": "claude", "seq": seq, "ts": ts,
+                "subagent": if subagent { serde_json::json!({ "id": "sub" }) } else { serde_json::Value::Null }, "payload": payload,
+            }))
+            .unwrap()
+        };
+        let mut events = vec![
+            event(1, "2026-10-18T10:00:00.000Z", false, serde_json::json!({ "type": "turn_started" })),
+            event(2, "2026-10-18T10:01:00.000Z", false, serde_json::json!({ "type": "assistant_text", "text": "Working on it." })),
+            event(3, "2026-10-18T10:02:00.000Z", false, serde_json::json!({ "type": "assistant_text", "text": "Done.\n```terminalx-status\n{}\n```" })),
+            event(4, "2026-10-18T10:02:30.000Z", true, serde_json::json!({ "type": "assistant_text", "text": "a subagent's aside" })),
+            event(5, "2026-10-18T10:03:00.000Z", false, serde_json::json!({ "type": "turn_completed", "status": "ok" })),
+        ];
+        let (at, reply) = last_reply(&events).unwrap();
+        assert_eq!(at.to_rfc3339(), "2026-10-18T10:03:00+00:00");
+        assert!(reply.starts_with("Done."), "{reply}");
+        // The turn's own final text, where it has one.
+        events.push(event(6, "2026-10-18T11:00:00.000Z", false, serde_json::json!({ "type": "turn_started" })));
+        events.push(event(7, "2026-10-18T11:01:00.000Z", false, serde_json::json!({ "type": "turn_completed", "status": "ok", "finalText": "All of it." })));
+        assert_eq!(last_reply(&events).unwrap().1, "All of it.");
+        // A turn that was aborted is not a reply.
+        events.push(event(8, "2026-10-18T12:00:00.000Z", false, serde_json::json!({ "type": "turn_started" })));
+        events.push(event(9, "2026-10-18T12:01:00.000Z", false, serde_json::json!({ "type": "turn_completed", "status": "aborted" })));
+        assert_eq!(last_reply(&events).unwrap().1, "All of it.");
+        assert!(last_reply(&[]).is_none());
     }
 
     #[test]

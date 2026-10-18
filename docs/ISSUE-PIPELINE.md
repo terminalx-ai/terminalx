@@ -219,9 +219,10 @@ attached after the start: the runtime hears each turn end as the desktop
 does, pushes and opens the pull request with the workspace's own GitHub
 token, starts the reviewer session in the author's checkout, and watches the
 pull request's checks. While it pushes, opens a pull request or waits for
-checks it counts as running work, so the workspace is not suspended halfway;
-checks that have not finished after an hour are left to a person, as on this
-computer.
+checks it counts as running work, so the workspace is not suspended halfway.
+A wait counts for an hour from when it began and no longer, whether or not
+GitHub can be read meanwhile; after that the pipeline stops for a person, as
+on this computer.
 
 What is different:
 
@@ -239,13 +240,17 @@ What is different:
   it; if the workspace is asleep, it is told when it next connects.
 - **Checks the workspace may not read.** The workspace's token is a GitHub
   App's, which may not have been granted a repository's checks. The runtime
-  then reads the pull request without them, never takes them for passed, and
-  stops at *Ready to merge* saying so; **Merge** reads them with your own
+  then reads the pull request without them, never takes them for passed (nor
+  a branch GitHub calls blocked, which it does while required checks run),
+  and stops at *Ready to merge* saying so; **Merge** reads them with your own
   sign-in before anything is merged.
 - **The issue goes with the session.** The workspace cannot read the
   tracker (its GitHub token has no access to issues, and the Linear key stays
   on this computer), so the issue's text is sent with the session for the
-  reviewer, and a Linear issue is not moved to In Review: the record says so.
+  reviewer. A Linear issue is moved to In Review by a desktop that manages
+  the workspace and has the Linear key, once it sees the pull request open
+  (when it is connected then, or the next time it connects), and the runtime
+  records the move (`pipeline.noteTracker`).
 - **Settings are this computer's.** **Issue pipeline…** in a cloud project's
   menu sets whether issue sessions are carried on, the review rounds, the
   merge method used by **Merge**, and the checks that never hold a merge.
@@ -253,11 +258,14 @@ What is different:
   session started from here, where the runtime reads them at each decision.
 - **A restart picks up where it was.** A workspace is put to sleep and woken
   as a matter of course. On waking, a pipeline waiting for a session's report
-  keeps waiting, and one at the merge stage is looked at again. Only a turn
-  the restart ended is reported, as *Needs you*.
+  keeps waiting, and one at the merge stage is looked at again. A report the
+  session gave just before the restart, whose step was lost with it, is
+  taken from its transcript then. Only a turn the restart ended is reported,
+  as *Needs you*.
 - **What the page shows.** A desktop reads a workspace's pipelines whenever
   it connects to it (`pipeline.list`), follows them while connected
-  (`pipeline.changed`), and keeps the last ones read with the cloud catalog,
+  (`pipeline.changed`; the newest that fit in one message, without the
+  issue's text), and keeps the last ones read with the cloud catalog,
   so the issue page shows them while the workspace sleeps, and says so.
   Stop, Resume and the other buttons are asked of the runtime and wake the
   workspace; the look the page takes when it opens never wakes it.

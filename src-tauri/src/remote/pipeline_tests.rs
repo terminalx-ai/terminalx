@@ -149,7 +149,10 @@ async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_a
     // Its pipeline started here, in the runtime, before the prompt went.
     let pipeline = &created["pipeline"];
     assert_eq!((pipeline["cloud"].as_bool(), pipeline["autoMerge"].as_bool(), pipeline["stage"].as_str()), (Some(true), Some(false), Some("work")));
-    assert_eq!(pipeline["issueBody"], "Sessions stop at code.");
+    // The issue's text is kept here for the reviewer and never sent to a desktop.
+    assert!(pipeline.get("issueBody").is_none());
+    let kept = crate::issue_pipeline::store::get(pipeline["id"].as_str().unwrap()).unwrap();
+    assert_eq!(kept.issue_body.as_deref(), Some("Sessions stop at code."));
     assert_eq!(pipeline["author"]["sessionId"], created["sessionId"]);
     assert_eq!(pipeline["maxRounds"], 2, "the desktop's settings for the project are the ones stored here");
     assert!(created["pipelineNote"].is_null());
@@ -158,11 +161,15 @@ async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_a
     let id = pipeline["id"].as_str().unwrap().to_string();
 
     // Whoever may see the sessions hears of it and may read it; a desktop that did not ask for pipeline/1 does not.
-    assert!(announced(&mut manager_events).await.iter().any(|heard| heard["id"] == id.as_str()));
+    let heard = announced(&mut manager_events).await;
+    assert!(heard.iter().any(|heard| heard["id"] == id.as_str()));
+    assert!(heard.iter().all(|heard| heard.get("issueBody").is_none()));
     assert!(announced(&mut viewer_events).await.iter().any(|heard| heard["id"] == id.as_str()));
     assert!(announced(&mut older_events).await.is_empty());
     let listed = call(&f.rpc, &viewer, "pipeline.list", json!({})).await.unwrap();
     assert_eq!(listed["pipelines"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["truncated"], false);
+    assert!(listed["pipelines"][0].get("issueBody").is_none());
 
     // Steering is the manager's, and a runtime never merges.
     assert_eq!(call(&f.rpc, &viewer, "pipeline.act", json!({ "clientRequestId": "request-0002", "pipeline": id, "action": "stop" })).await.unwrap_err().0, "forbidden");
@@ -179,6 +186,12 @@ async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_a
     assert_eq!(missing.0, "not_found");
     // There is no pull request yet: nothing to have merged.
     assert_eq!(call(&f.rpc, &manager, "pipeline.noteMerge", json!({ "clientRequestId": "request-0007", "pipeline": id, "commit": "1111111" })).await.unwrap_err().0, "conflict");
+    // A tracker line is one line, for a Linear issue only, and the manager's to write.
+    let multi = call(&f.rpc, &manager, "pipeline.noteTracker", json!({ "clientRequestId": "request-0008", "pipeline": id, "message": "Moved.\nCloses #1" })).await.unwrap_err();
+    assert_eq!(multi.0, "invalid_params");
+    let github = call(&f.rpc, &manager, "pipeline.noteTracker", json!({ "clientRequestId": "request-0009", "pipeline": id, "message": "Moved #433 to In Review." })).await.unwrap_err();
+    assert_eq!(github.0, "conflict");
+    assert_eq!(call(&f.rpc, &viewer, "pipeline.noteTracker", json!({ "clientRequestId": "request-0010", "pipeline": id, "message": "Moved." })).await.unwrap_err().0, "forbidden");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -208,4 +221,32 @@ async fn an_issue_is_held_to_what_a_tracker_gives_and_one_on_the_root_gets_no_pi
     let none = call(&f.rpc, &manager, "session.create", json!({ "clientRequestId": "request-none-1", "agent": "claude", "useWorktree": true, "issue": issue(), "pipeline": false })).await.unwrap();
     assert!(none["pipeline"].is_null() && none["pipelineNote"].is_null());
     assert!(crate::issue_pipeline::store::list().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_list_of_pipelines_fits_one_frame_newest_first() {
+    let f = fixture();
+    let (viewer, _events) = peer(&f.rpc, "desktop", Authority::Manage, &["pipeline/1"]).await;
+    // Many pipelines, each with a long issue text and a full record: more than a frame would hold.
+    let root = f.root.to_string_lossy().into_owned();
+    for n in 0..60 {
+        let mut pipeline: crate::issue_pipeline::Pipeline = serde_json::from_value(json!({
+            "id": format!("p{n:03}"), "projectPath": root, "issue": issue(), "branch": "raccoon/433",
+            "author": { "sessionId": "s", "tabId": "t" }, "stage": "merge", "state": "merged", "maxRounds": 3,
+            "issueBody": "x".repeat(16 * 1024), "created": format!("2026-10-18T00:{:02}:{:02}Z", n / 60, n % 60), "modified": "2026-10-18T00:00:00Z",
+        }))
+        .unwrap();
+        for event in 0..200 {
+            pipeline.record("2026-10-18T00:00:00Z", "note", format!("A line of the record that says what happened, number {event}."));
+        }
+        crate::issue_pipeline::store::insert(&pipeline).unwrap();
+    }
+    let listed = call(&f.rpc, &viewer, "pipeline.list", json!({})).await.unwrap();
+    let pipelines = listed["pipelines"].as_array().unwrap();
+    assert!(!pipelines.is_empty() && pipelines.len() <= 50, "{}", pipelines.len());
+    assert_eq!(listed["truncated"], true);
+    assert!(listed.to_string().len() < crate::remote::server::MAX_FRAME_BYTES, "{} bytes", listed.to_string().len());
+    // The newest are the ones sent.
+    assert_eq!(pipelines[0]["id"], "p059");
+    assert!(pipelines.iter().all(|pipeline| pipeline.get("issueBody").is_none()));
 }

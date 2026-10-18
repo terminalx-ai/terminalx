@@ -303,7 +303,9 @@ pub fn decide(facts: &Facts<'_>) -> Gate {
     }
     match pr.merge_state.as_str() {
         "BEHIND" => return Gate::NeedsYou(StopReason::Behind),
-        "BLOCKED" => return Gate::NeedsYou(StopReason::Blocked),
+        // GitHub says BLOCKED while required checks run or fail, too: with
+        // the checks unread that says nothing more than that they are unread.
+        "BLOCKED" if !pr.checks_unread => return Gate::NeedsYou(StopReason::Blocked),
         _ => {}
     }
     // Nothing merges on checks nobody read. In a cloud workspace a person
@@ -451,6 +453,19 @@ pub(crate) mod tests {
         // In a cloud workspace a person merges, and their own sign-in reads the checks first.
         case.cloud = true;
         assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::ChecksUnreadable { workspace: true }));
+        // GitHub reports a branch blocked while its required checks run: unread, that is no more than unread.
+        case.pr.merge_state = "BLOCKED".into();
+        assert_eq!(case.decide(), Gate::ReadyToMerge(StopReason::ChecksUnreadable { workspace: true }));
+        case.cloud = false;
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::ChecksUnreadable { workspace: false }));
+        case.cloud = true;
+        // With the checks read, a block is a block.
+        case.pr.checks_unread = false;
+        case.pr.checks = vec![check("build", "success")];
+        assert_eq!(case.decide(), Gate::NeedsYou(StopReason::Blocked));
+        case.pr.checks_unread = true;
+        case.pr.checks = Vec::new();
+        case.pr.merge_state = "CLEAN".into();
         // What can be read still decides first.
         case.pr.mergeable = "CONFLICTING".into();
         assert_eq!(case.decide(), Gate::NeedsYou(StopReason::Conflicts));

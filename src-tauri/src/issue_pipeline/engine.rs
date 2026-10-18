@@ -79,6 +79,11 @@ pub trait Host: Send + Sync {
     fn pause(&self) {}
     /// Type a prompt into a session's tab.
     fn send(&self, to: &SessionRef, prompt: &str) -> Result<()>;
+    /// A tab's last finished turn: when it ended and its last reply. For a
+    /// runtime that restarted between a turn's end and the step it started.
+    fn last_reply(&self, _session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
+        None
+    }
     /// A new session in the author's checkout, for the review.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef>;
     fn workspace(&self, cwd: &Path) -> Result<Workspace>;
@@ -145,10 +150,16 @@ impl Drop for Running {
 /// being started), or a pull request whose checks are being waited for. A
 /// cloud workspace counts them as running turns, so it is not put to sleep
 /// halfway (`cloud_activity`). A look at a pipeline parked on a person is not
-/// counted: it would keep an idle workspace awake. The wait is bounded: after
-/// [`CHECKS_WAIT_MINUTES`] the pipeline stops for a person.
+/// counted: it would keep an idle workspace awake. A wait counts for
+/// [`CHECKS_WAIT_MINUTES`] from when it began and no longer, whether or not
+/// GitHub could be read meanwhile; the poller then stops it for a person.
 pub fn holding() -> usize {
-    STEPS.load(Ordering::Relaxed) + store::waiting()
+    holding_at(Utc::now())
+}
+
+pub(crate) fn holding_at(now: DateTime<Utc>) -> usize {
+    let waits = store::waits().into_iter().filter(|since| (now - *since).num_minutes() < i64::from(CHECKS_WAIT_MINUTES)).count();
+    STEPS.load(Ordering::Relaxed) + waits
 }
 
 fn step_lock(id: &str) -> Arc<Mutex<()>> {
@@ -1147,6 +1158,27 @@ pub fn note_merge(host: &dyn Host, id: &str, commit: &str) -> Result<Pipeline> {
     })
 }
 
+/// A desktop moved a cloud workspace's Linear issue to its team's review
+/// state, with the reader's own Linear key, once the pull request was open:
+/// the runtime has no key to do it with. Recorded once, as the tracker line
+/// of the pull request stage.
+pub fn note_tracker(host: &dyn Host, id: &str, message: &str) -> Result<Pipeline> {
+    run(host, id, true, OnError::Report, |step| {
+        if !step.p.cloud || step.p.issue.provider != "linear" {
+            bail!("{} is not a Linear issue carried by a cloud workspace.", step.p.issue.identifier);
+        }
+        if step.p.pr.is_none() {
+            bail!("{} has no pull request yet.", step.p.issue.identifier);
+        }
+        if step.p.events.iter().any(|event| event.kind == "tracker") {
+            return Ok(());
+        }
+        let url = step.p.issue.url.clone();
+        step.record("tracker", message).url = Some(url);
+        Ok(())
+    })
+}
+
 /// How often a pipeline that is parked on a person is looked at again, for a
 /// merge made elsewhere or a head that moved.
 const PARKED_EVERY_MINUTES: i64 = 5;
@@ -1187,6 +1219,21 @@ pub fn poll(host: &dyn Host) {
         let look = |step: &mut Step<'_>| if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) } else { step.notice_outcome() };
         if let Err(error) = run(host, &pipeline.id, false, OnError::Report, look) {
             log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+            // But not for ever: a wait that has run out stops for a person
+            // even while GitHub cannot be read, as it would once it could.
+            let ran_out = pipeline.state == State::Waiting && store::waiting_since(&pipeline).is_some_and(|since| (now - since).num_minutes() >= i64::from(CHECKS_WAIT_MINUTES));
+            if ran_out {
+                let message = format!("It waited {CHECKS_WAIT_MINUTES} minutes for GitHub, and GitHub could not be read: {error:#}");
+                let stop = |step: &mut Step<'_>| {
+                    if step.p.state == State::Waiting {
+                        step.needs_you(StopReason::Failed { step: "Reading the pull request".into(), message: message.clone() });
+                    }
+                    Ok(())
+                };
+                if let Err(error) = run(host, &pipeline.id, false, OnError::NeedsYou, stop) {
+                    log::warn!("issue pipeline {}: {error:#}", pipeline.id);
+                }
+            }
         }
     }
 }
@@ -1217,8 +1264,10 @@ pub fn recover(host: &dyn Host) {
 /// After a cloud workspace's runtime starts. A workspace is put to sleep and
 /// woken as a matter of course, so unlike [`recover`] a pipeline picks up
 /// where it was: one waiting for a session's report keeps waiting, and one at
-/// the merge stage is looked at by the poller. Only what the restart did end
-/// is said: a turn that was running in the author's or the reviewer's tab
+/// the merge stage is looked at by the poller. A report the session gave just
+/// before the restart, whose step was lost with it (its turn ended after the
+/// pipeline last changed), is taken now. Only what the restart did end is
+/// said: a turn that was running in the author's or the reviewer's tab
 /// (`interrupted`), and a pull request that was being opened.
 pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
     let Ok(pipelines) = store::list() else {
@@ -1227,6 +1276,18 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
     let ended = |session: &SessionRef| interrupted.iter().any(|(session_id, tab_id)| *session_id == session.session_id && *tab_id == session.tab_id);
     let restarted = "The workspace's runtime restarted during its turn.";
     for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working) {
+        let waits_on = match pipeline.stage {
+            Stage::Work | Stage::Address => Some(pipeline.author.clone()),
+            Stage::Review => pipeline.reviewer.clone(),
+            Stage::PullRequest | Stage::Merge => None,
+        };
+        if let Some(session) = waits_on.filter(|session| !ended(session)) {
+            let changed = DateTime::parse_from_rfc3339(&pipeline.modified).ok().map(|at| at.with_timezone(&Utc));
+            if let Some((_, reply)) = host.last_reply(&session).filter(|(at, _)| changed.is_some_and(|changed| *at > changed)) {
+                turn_completed(host, &session.session_id, &session.tab_id, Some(&reply));
+            }
+            continue;
+        }
         let reason = match pipeline.stage {
             Stage::Work | Stage::Address if ended(&pipeline.author) => StopReason::SessionStopped { role: Role::Author.label().into(), detail: restarted.into() },
             Stage::Review if pipeline.reviewer.as_ref().is_some_and(ended) => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: restarted.into() },

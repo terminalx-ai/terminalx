@@ -16,8 +16,8 @@
   repository. The Issues view lists a cloud project's GitHub issues beside
   this computer's projects, the issue page shows the pipeline and its record,
   and shows the last one read while the workspace sleeps. A Linear issue
-  works too, except that the workspace cannot move it to In Review, and says
-  so in the record. The settings are under **Issue pipeline…** in the cloud
+  works too: the workspace has no Linear key, so a desktop with one moves it
+  to In Review when it sees the pull request open. The settings are under **Issue pipeline…** in the cloud
   project's menu; `terminalx sessions create --project cloud:… --issue`
   starts one from the command line. A runtime that predates this starts a
   plain session, and the page says so. (#433, #461)

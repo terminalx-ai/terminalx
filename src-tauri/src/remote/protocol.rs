@@ -56,9 +56,11 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   (`issue_pipeline`). `pipeline.list` and the `pipeline.changed`
 ///   notification for anyone who may see the workspace's sessions;
 ///   `pipeline.act` (stop, resume, carry on, review again, look again) and
-///   `pipeline.noteMerge` for its manager. A runtime never merges: the
-///   desktop does, with its reader's own `gh`, and says so with
-///   `pipeline.noteMerge`. It also lets `session.create` take an issue, which
+///   `pipeline.noteMerge` and `pipeline.noteTracker` for its manager. A
+///   runtime never merges: the desktop does, with its reader's own `gh`, and
+///   says so with `pipeline.noteMerge`; nor does it hold a Linear key, so a
+///   desktop that does moves a Linear issue to review and says so with
+///   `pipeline.noteTracker`. It also lets `session.create` take an issue, which
 ///   an older runtime would ignore: a client sends one only once this is granted.
 pub const CAPABILITIES: [&str; 21] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "ports/1",
@@ -215,6 +217,7 @@ pub const METHODS: &[Method] = &[
     method("pipeline.list", "pipeline/1", Participate, false),
     method("pipeline.act", "pipeline/1", Manage, true),
     method("pipeline.noteMerge", "pipeline/1", Manage, true),
+    method("pipeline.noteTracker", "pipeline/1", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
     method("lifecycle.dispositionFacts", "lifecycle/1", Participate, false),
     // PRO-33: free memory and disk of the machine; read-only. A runtime
@@ -496,7 +499,7 @@ mod tests {
         }
         // A pipeline is read by whoever sees the sessions and steered by the manager.
         assert_eq!(find_method("pipeline.list").map(|method| (method.capability, method.authority, method.idempotent)), Some(("pipeline/1", Participate, false)));
-        for name in ["pipeline.act", "pipeline.noteMerge"] {
+        for name in ["pipeline.act", "pipeline.noteMerge", "pipeline.noteTracker"] {
             let method = find_method(name).unwrap();
             assert_eq!((method.capability, method.authority, method.idempotent), ("pipeline/1", Manage, true), "{name}");
         }

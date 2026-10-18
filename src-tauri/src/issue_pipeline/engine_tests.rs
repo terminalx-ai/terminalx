@@ -13,7 +13,7 @@ use crate::github::{PinnedMerge, PrCheck, PrSnapshot};
 use crate::store::index::{IssueRef, SessionEntry};
 use crate::store::projects::IssuePipelineSettings;
 
-use super::engine::{self, act, note_merge, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
+use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
 use super::{store, MergedBy, Pipeline, SessionRef, Stage, State};
@@ -60,6 +60,8 @@ struct World {
     merge_hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     /// A cloud workspace's runtime.
     cloud: bool,
+    /// Each session's last finished turn, as its transcript has it.
+    replies: BTreeMap<String, (DateTime<Utc>, String)>,
 }
 
 struct FakeHost(Mutex<World>);
@@ -117,6 +119,7 @@ impl FakeHost {
             settings_error: None,
             merge_hold: None,
             cloud: false,
+            replies: BTreeMap::new(),
         }))
     }
 
@@ -142,6 +145,10 @@ impl Host for FakeHost {
 
     fn cloud(&self) -> bool {
         self.world().cloud
+    }
+
+    fn last_reply(&self, session: &SessionRef) -> Option<(DateTime<Utc>, String)> {
+        self.world().replies.get(&session.session_id).cloned()
     }
 
     fn session(&self, session_id: &str) -> Result<SessionEntry> {
@@ -1616,6 +1623,25 @@ fn a_cloud_workspace_that_may_not_read_the_checks_stops_at_ready_to_merge_saying
 }
 
 #[test]
+fn a_cloud_workspaces_linear_issue_is_moved_to_review_by_a_desktop_and_recorded_once() {
+    let run = Run::start_in(cloud_host(&linear_issue()), false);
+    // No pull request yet: nothing to have moved it for.
+    assert!(note_tracker(&run.host, &run.id, "Moved ENG-42 to In Review in Linear.").unwrap_err().to_string().contains("no pull request"));
+    run.to_review();
+    // The desktop's line, once; a second desktop saying it again adds nothing.
+    let noted = note_tracker(&run.host, &run.id, "Moved ENG-42 to In Review in Linear.").unwrap();
+    let tracker: Vec<_> = noted.events.iter().filter(|event| event.kind == "tracker").collect();
+    assert_eq!(tracker.len(), 1);
+    assert_eq!((tracker[0].message.as_str(), tracker[0].url.as_deref()), ("Moved ENG-42 to In Review in Linear.", Some("https://linear.app/acme/issue/ENG-42")));
+    assert_eq!(note_tracker(&run.host, &run.id, "ENG-42 is In Review in Linear and was left there.").unwrap().events.iter().filter(|event| event.kind == "tracker").count(), 1);
+    drop(run);
+    // Only for a Linear issue in a cloud workspace.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.to_review();
+    assert!(note_tracker(&run.host, &run.id, "Moved.").unwrap_err().to_string().contains("not a Linear issue"));
+}
+
+#[test]
 fn a_cloud_reviewer_reads_the_issue_as_the_session_was_started_with_it() {
     let run = Run::start_with(cloud_host(&linear_issue()), None, Some("  Login times out after 30s.\n  "));
     assert_eq!(run.pipeline().issue_body.as_deref(), Some("Login times out after 30s."));
@@ -1654,11 +1680,11 @@ fn a_desktop_merge_github_has_only_queued_is_waited_for_and_stays_the_persons() 
     // GitHub took it into a merge queue: the pull request is still open at the reviewed commit.
     let queued = note_merge(&run.host, &run.id, C1).unwrap();
     assert_eq!((queued.state, queued.merge_requested.as_ref().map(|request| request.by)), (State::Waiting, Some(MergedBy::Person)));
-    assert_eq!(store::waiting(), 1, "waiting on GitHub holds the workspace awake");
+    assert_eq!(engine::holding_at(run.host.now()), 1, "waiting on GitHub holds the workspace awake");
     run.host.world().pr.as_mut().unwrap().state = "MERGED".into();
     let merged = run.poll();
     assert_eq!((merged.state, merged.merged.unwrap().by), (State::Merged, MergedBy::Person));
-    assert_eq!(store::waiting(), 0);
+    assert_eq!(engine::holding_at(run.host.now()), 0);
 }
 
 #[test]
@@ -1668,10 +1694,10 @@ fn a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish(
     let run = Run::start_in(host, false);
     let waiting = run.to_gate();
     assert_eq!(waiting.state, State::Waiting);
-    assert_eq!(engine::holding(), 1);
+    assert_eq!(engine::holding_at(run.host.now()), 1);
     run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success")];
     assert_eq!(run.poll().state, State::ReadyToMerge);
-    assert_eq!(engine::holding(), 0);
+    assert_eq!(engine::holding_at(run.host.now()), 0);
     drop(run);
     // Not for ever: checks that never finish are left to a person, and the workspace may sleep.
     let host = cloud_host(&github_issue());
@@ -1680,7 +1706,54 @@ fn a_pipeline_waiting_on_checks_holds_a_cloud_workspace_awake_until_they_finish(
     run.to_gate();
     run.host.world().now += TimeDelta::minutes(i64::from(engine::CHECKS_WAIT_MINUTES));
     assert!(matches!(run.poll().reason, Some(StopReason::ChecksStalled { .. })));
-    assert_eq!(engine::holding(), 0);
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+}
+
+#[test]
+fn a_wait_on_github_holds_a_cloud_workspace_no_longer_than_its_limit_even_when_github_cannot_be_read() {
+    let host = cloud_host(&github_issue());
+    host.world().checks = vec![check("build", "in_progress")];
+    let run = Run::start_in(host, false);
+    assert_eq!(run.to_gate().state, State::Waiting);
+    // The App was removed from the repository, or GitHub is down: the pull request cannot be read.
+    run.host.world().pr = None;
+    assert_eq!(run.poll().state, State::Waiting, "a look that fails changes nothing at first");
+    assert_eq!(engine::holding_at(run.host.now()), 1);
+    // The hold ends with the limit whatever happens to the looks.
+    let limit = TimeDelta::minutes(i64::from(engine::CHECKS_WAIT_MINUTES));
+    assert_eq!(engine::holding_at(run.host.now() + limit), 0);
+    // And the next look after it stops the pipeline for a person, saying why.
+    run.host.world().now += limit;
+    let stopped = run.poll();
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::Failed { step, message }) if step == "Reading the pull request" && message.contains("could not be read")), "{:?}", stopped.reason);
+    assert_eq!(engine::holding_at(run.host.now()), 0);
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn a_report_whose_step_the_restart_lost_is_taken_when_the_runtime_wakes_and_an_older_one_is_not() {
+    // The author reported the work done; the runtime stopped before the step that opens the pull request wrote anything.
+    let run = Run::start_in(cloud_host(&github_issue()), false);
+    run.host.world().replies.insert("author".into(), (Utc::now() + TimeDelta::minutes(1), done("Pads the minutes.")));
+    resume(&run.host, &[]);
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.stage, reviewing.state), (Stage::Review, State::Working));
+    assert_eq!(run.host.world().pushes, [C1]);
+    assert_eq!(run.host.world().created.len(), 1);
+    let reviewer = reviewing.reviewer.unwrap().session_id;
+
+    // A reply from before the pipeline last changed was already acted on, or answered by a person: not taken again.
+    run.host.world().replies.insert(reviewer.clone(), (Utc::now() - TimeDelta::hours(1), reviewed(C1, "merge", "[]")));
+    resume(&run.host, &[]);
+    assert_eq!((run.pipeline().stage, run.pipeline().state), (Stage::Review, State::Working));
+    // The reviewer's verdict whose step was lost is.
+    run.host.world().now += TimeDelta::minutes(4);
+    run.host.world().replies.insert(reviewer, (Utc::now() + TimeDelta::minutes(1), reviewed(C1, "merge", "[]")));
+    resume(&run.host, &[]);
+    let ready = run.pipeline();
+    assert_eq!((ready.stage, ready.state, ready.reason), (Stage::Merge, State::ReadyToMerge, Some(StopReason::CloudWorkspace)));
+    assert_eq!(run.host.world().created.len(), 1, "one pull request, however often the runtime wakes");
 }
 
 #[test]
