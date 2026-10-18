@@ -502,11 +502,11 @@ interface Editing {
 
 /**
  * The description, and an Edit that turns it into the Markdown editor. Save
- * sends the `updatedAt` the editor started from; the provider refuses it with
- * `conflict` when the issue has changed since. The issue is then read again:
- * when its description is still the one the editor started from (a label or
- * a comment moved `updatedAt`), the save goes through on the new `updatedAt`,
- * and otherwise nothing is written until the reader chooses.
+ * sends the description and `updatedAt` the editor started from; the
+ * provider refuses it with `conflict` when the description has changed
+ * since. The issue is then read again: when its description is after all
+ * the one the editor started from, the save goes through on the new
+ * `updatedAt`, and otherwise nothing is written until the reader chooses.
  *
  * Render it keyed by the issue, so nothing of one issue's edit outlives a
  * switch to another.
@@ -535,10 +535,11 @@ export function IssueDescription({ edits, children }: { edits: IssueEdits; child
     refocus.current = false;
   }, [editing]);
 
-  const save = async (expected: string) => {
+  const save = async (expected: Editing["base"]) => {
     if (saving || !issue || !edits.projectPath || !editing) return;
     const { projectPath } = edits;
-    const send = (updatedAt: string) => issueOps.setDescription(projectPath, issue.provider, issue.id, { description: editing.draft, expectedUpdatedAt: updatedAt });
+    const send = (from: Editing["base"]) =>
+      issueOps.setDescription(projectPath, issue.provider, issue.id, { description: editing.draft, expectedUpdatedAt: from.updatedAt, expectedDescription: from.description });
     setSaving(true);
     setError(null);
     try {
@@ -555,7 +556,7 @@ export function IssueDescription({ edits, children }: { edits: IssueEdits; child
           setShowTheirs(false);
           return;
         }
-        answer = await send(now.updatedAt);
+        answer = await send({ updatedAt: now.updatedAt, description: now.description });
       }
       if (!live.current) return;
       edits.accept(answer);
@@ -640,12 +641,12 @@ export function IssueDescription({ edits, children }: { edits: IssueEdits; child
           Cancel
         </Button>
         {theirs ? (
-          <Button variant="destructive" size="sm" aria-disabled={saving} onClick={() => void save(theirs.updatedAt)}>
+          <Button variant="destructive" size="sm" aria-disabled={saving} onClick={() => void save({ updatedAt: theirs.updatedAt, description: theirs.description })}>
             {saving && <Loader2 className="animate-spin" />}
             Replace theirs with mine
           </Button>
         ) : (
-          <Button variant="accent" size="sm" aria-disabled={saving} onClick={() => void save(editing.base.updatedAt)}>
+          <Button variant="accent" size="sm" aria-disabled={saving} onClick={() => void save(editing.base)}>
             {saving && <Loader2 className="animate-spin" />}
             Save
           </Button>

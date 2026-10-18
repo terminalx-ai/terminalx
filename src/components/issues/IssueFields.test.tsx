@@ -260,6 +260,7 @@ describe.each(["github", "linear"] as const)("%s description", (provider) => {
 
   it("edits in Write, shows Preview, and saves against the issue it started from", async () => {
     const before = stored(provider).updatedAt;
+    const startedFrom = stored(provider).description;
     const area = await startEditing();
     expect((area as HTMLTextAreaElement).value).toBe(stored(provider).description);
     fireEvent.change(area, { target: { value: "## Steps\n\nRun a long command." } });
@@ -267,7 +268,7 @@ describe.each(["github", "linear"] as const)("%s description", (provider) => {
     expect(screen.getByTestId("markdown-preview").textContent).toContain("Run a long command.");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByTestId("description-editor")).toBeNull());
-    expect(writes("issue_set_description")[0].args.edit).toEqual({ description: "## Steps\n\nRun a long command.", expectedUpdatedAt: before });
+    expect(writes("issue_set_description")[0].args.edit).toEqual({ description: "## Steps\n\nRun a long command.", expectedUpdatedAt: before, expectedDescription: startedFrom });
     expect(screen.getByText(/Run a long command\./)).toBeTruthy();
   });
 
@@ -322,6 +323,7 @@ describe.each(["github", "linear"] as const)("%s description", (provider) => {
   });
 
   it("saves through a newer issue whose description is still the one it started from", async () => {
+    const startedFrom = stored(provider).description;
     const area = await startEditing();
     fireEvent.change(area, { target: { value: "Mine" } });
     // A comment or a label moved the issue on, not its description.
@@ -329,7 +331,19 @@ describe.each(["github", "linear"] as const)("%s description", (provider) => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(screen.queryByTestId("description-editor")).toBeNull());
     expect(stored(provider).description).toBe("Mine");
-    expect(writes("issue_set_description").map((call) => (call.args.edit as { expectedUpdatedAt: string }).expectedUpdatedAt)[1]).toBe("2026-10-05T00:00:00Z");
+    // The description it started from goes with the save, so a newer updatedAt alone is no conflict.
+    expect(writes("issue_set_description")).toHaveLength(1);
+    expect((writes("issue_set_description")[0].args.edit as { expectedDescription: string }).expectedDescription).toBe(startedFrom);
+  });
+
+  it("still saves when the provider calls it a conflict but the description is the one it started from", async () => {
+    const area = await startEditing();
+    fireEvent.change(area, { target: { value: "Mine" } });
+    mock.fail("issue_set_description", "conflict");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.queryByTestId("description-editor")).toBeNull());
+    expect(writes("issue_set_description")).toHaveLength(2);
+    expect(stored(provider).description).toBe("Mine");
   });
 
   it("keeps the draft and says why when the save fails", async () => {
