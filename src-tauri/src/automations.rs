@@ -1014,6 +1014,51 @@ fn issue_number(reference: &index::IssueRef) -> Result<i64> {
         .context("GitHub issue identifier is not a number")
 }
 
+/// The labels an issue ends with after a report adds and takes some away.
+/// GitHub matches label names without regard to case.
+fn labels_after(current: Vec<String>, add: &[String], remove: &[String]) -> Vec<String> {
+    let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    let mut labels: Vec<String> = current
+        .into_iter()
+        .filter(|label| !remove.iter().any(|gone| same(gone, label)))
+        .collect();
+    for label in add {
+        if !labels.iter().any(|have| same(have, label)) {
+            labels.push(label.clone());
+        }
+    }
+    labels
+}
+
+/// Add and take away a GitHub issue's labels through the issue operations'
+/// setter, which takes the whole set. The report's change is applied to the
+/// labels read immediately before the write, never to an earlier read, so a
+/// label someone added in the meantime stays; only one put on between that
+/// read and the write itself could be lost.
+fn edit_issue_labels(
+    cwd: &Path,
+    repo: &str,
+    number: i64,
+    add: &[String],
+    remove: &[String],
+) -> Result<()> {
+    let target = crate::issue_ops::Target::Github {
+        cwd: cwd.to_path_buf(),
+        repo: repo.to_string(),
+    };
+    let id = number.to_string();
+    let issue = crate::issue_ops::details(&target, &id)?;
+    let current = issue
+        .issue
+        .labels
+        .into_iter()
+        .map(|label| label.id.unwrap_or(label.name))
+        .collect();
+    let labels = labels_after(current, add, remove);
+    crate::issue_ops::set_labels(&target, &id, &labels)?;
+    Ok(())
+}
+
 fn has_commits(cwd: &Path) -> bool {
     let Ok(base) = crate::git::resolve_base(cwd, None) else {
         return false;
@@ -1067,7 +1112,7 @@ fn report_issue_run(
             }
         }
         if !failure.add_labels.is_empty() {
-            match crate::issues::github_edit_labels(
+            match edit_issue_labels(
                 cwd,
                 &trigger.repo,
                 number,
@@ -1116,7 +1161,7 @@ fn report_issue_run(
             }
         }
         if !report.add_labels.is_empty() || !report.remove_labels.is_empty() {
-            match crate::issues::github_edit_labels(
+            match edit_issue_labels(
                 cwd,
                 &trigger.repo,
                 number,
@@ -1532,6 +1577,16 @@ pub fn start_scheduler(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_after_a_report_keep_the_rest_and_ignore_case() {
+        let labels = labels_after(
+            vec!["bug".into(), "Needs Review".into(), "raccoon".into()],
+            &["done".into(), "BUG".into()],
+            &["needs review".into(), "absent".into()],
+        );
+        assert_eq!(labels, vec!["bug", "raccoon", "done"]);
+    }
 
     fn at(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)

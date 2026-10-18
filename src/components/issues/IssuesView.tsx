@@ -11,6 +11,7 @@ import { AutomationEditor, type AutomationEditorPrefill } from "@/components/aut
 import { AssigneePicker } from "@/components/issues/AssigneePicker";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
+import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -236,13 +237,12 @@ export function IssuesView({
       selectedAtTick.current = tick;
     }
     if (!selected || !project) return;
-    // A Linear row carries its body, and is as fresh as the list it came with.
-    if (selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick) {
-      setDetail(selected);
-      return;
-    }
+    // A Linear row carries its body, so it is shown while the issue is read
+    // whole: what editing it needs comes only with that.
+    const rowFirst = !again && selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick;
+    if (rowFirst) setDetail(selected);
     let live = true;
-    if (!again) setDetailLoading(true);
+    if (!again && !rowFirst) setDetailLoading(true);
     issuesApi
       .details(project.path, selected.provider, selected.id)
       .then((d) => live && setDetail((now) => newer(now, d)))
@@ -327,6 +327,15 @@ export function IssuesView({
   };
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
+  // A write answers with the issue as the provider has it now: the page and its row follow.
+  const changed = useCallback((next: IssueDetails) => {
+    const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
+    setDetail((now) => (same(now) ? newer(now, next) : now));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
+  }, []);
+  const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  // The editors are the open issue's own: a switch starts them afresh.
+  const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
   // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
@@ -507,7 +516,7 @@ export function IssuesView({
             <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
                 <span className="font-mono text-xs text-faint">{selected.identifier}</span>
-                <h2 className="min-w-0 flex-1 text-[15px] font-semibold leading-snug">{selected.title}</h2>
+                <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 {current?.state && <span>{current.state}</span>}
@@ -519,6 +528,13 @@ export function IssuesView({
                   Open in browser <ExternalLink className="size-3" />
                 </button>
               </div>
+              {(edits.issue || (current?.labels.length ?? 0) > 0) && (
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <IssuePriority key={issueKey} edits={edits} />
+                  <IssueLabels key={issueKey} edits={edits} labels={current?.labels ?? []} />
+                </div>
+              )}
+              {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} />
                 <DropdownMenu>
@@ -596,7 +612,11 @@ export function IssuesView({
               {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
-                {detail && (detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>)}
+                {detail && (
+                  <IssueDescription key={issueKey} edits={edits}>
+                    {detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>}
+                  </IssueDescription>
+                )}
               </div>
             </div>
           </>
