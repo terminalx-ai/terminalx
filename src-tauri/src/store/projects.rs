@@ -39,9 +39,10 @@ pub struct Project {
     /// review and a merge. Absent is every default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_pipeline: Option<IssuePipelineSettings>,
-    /// Agents in this project's sessions may comment on its issues and move
-    /// their status through `terminalx issues` without the person being asked
-    /// each time. Assigning, labelling and creating still ask. Off by default.
+    /// `terminalx issues` may comment on the issues of this project's GitHub
+    /// repository and move their status without the person being asked each
+    /// time. Assigning, labelling, creating and Linear issues still ask. Off
+    /// by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_issue_updates: bool,
 }

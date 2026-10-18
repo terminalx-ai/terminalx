@@ -938,10 +938,10 @@ impl ControlService {
 
     #[cfg(feature = "desktop")]
     /// `issues.view|comment|status|assign|label|create` (PRO-100): one issue,
-    /// through the contract's operations, with an agent's writes put to the
+    /// through the contract's operations, with every write put to the
     /// person first (see `issue_control`).
     fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        use crate::issue_control::{authorize, run, Caller, Live, Subject, Write};
+        use crate::issue_control::{authorize, in_project, run, Caller, Live, Subject, Write};
         use crate::issue_ops::{Provider, Target};
         let action = command.trim_start_matches("issues.");
         let caller = Caller::of(&params);
@@ -960,16 +960,22 @@ impl ControlService {
             refuse_other_repository(&project.path, reference)?;
         }
         let target = Target::resolve(Path::new(&project.path), if provider == "linear" { Provider::Linear } else { Provider::Github }).map_err(crate::issue_control::op_error)?;
+        let project_repo = match &target {
+            Target::Github { repo, .. } => Some(repo.clone()),
+            Target::Linear { .. } => None,
+        };
+        // Shown in the question as the caller's claim, never trusted.
         let session_title = caller.session.as_deref().and_then(|session| resolve_session(session).ok()).map(|session| session.title);
-        let gate = |write: &Write, subject: &str| {
+        let gate = |write: &Write, subject: &str, issue_repo: Option<&str>| {
             let subject = Subject {
                 issue: subject,
                 provider,
                 project_name: &project.name,
-                project_allows_updates: project.agent_issue_updates,
+                // The switch is the project's, and applies only to an issue that is verifiably its own.
+                routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
                 session_title: session_title.as_deref(),
             };
-            authorize(&caller, write, &subject, self.questions.as_ref())
+            authorize(write, &subject, self.questions.as_ref())
         };
         run(action, &params, id.as_deref(), &Live(target), &gate)
     }
@@ -1347,15 +1353,15 @@ mod tests {
         let session = crate::session_ops::create_session_entry(serde_json::from_value(json!({
             "projectPath": project.path, "useWorktree": false, "tab": {"harness": "codex"},
         })).unwrap()).unwrap();
-        let nobody = Caller { session: None, cwd: None, agent: false };
+        let nobody = Caller { session: None, cwd: None };
         assert_eq!(issue_project(&json!({"project": second.name}), &nobody).unwrap().path, second.path);
-        let in_session = Caller { session: Some(session.id.clone()), cwd: Some(second.path.clone()), agent: true };
+        let in_session = Caller { session: Some(session.id.clone()), cwd: Some(second.path.clone()) };
         assert_eq!(issue_project(&json!({}), &in_session).unwrap().path, project.path, "the session wins over the directory");
         let sub = dir.path().join("src");
         std::fs::create_dir(&sub).unwrap();
-        let in_folder = Caller { session: None, cwd: Some(sub.to_string_lossy().into_owned()), agent: false };
+        let in_folder = Caller { session: None, cwd: Some(sub.to_string_lossy().into_owned()) };
         assert_eq!(issue_project(&json!({}), &in_folder).unwrap().path, project.path);
-        let elsewhere = Caller { session: None, cwd: Some("/".into()), agent: false };
+        let elsewhere = Caller { session: None, cwd: Some("/".into()) };
         assert!(issue_project(&json!({}), &elsewhere).unwrap_err().message.contains("Pass --project"));
         // A GitHub URL into another repository is refused rather than read as this one's number.
         assert!(refuse_other_repository(&project.path, "https://github.com/acme/api/issues/12").unwrap_err().message.contains("That issue is in acme/api"));

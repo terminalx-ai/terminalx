@@ -1,12 +1,14 @@
 //! `terminalx issues view/comment/status/assign/label/create` (PRO-100).
 //!
 //! Reads answer at once. A write changes shared state on GitHub or Linear
-//! and may notify other people, so one that comes from an agent's session is
-//! put to the person first, in the same native question the cloud requests
-//! use (`cloud_control_question`): its default button refuses, it expires,
-//! and computer use is paused while it is on screen. A project may let its
-//! agents comment and move status without being asked; assigning, labels
-//! and new issues always ask.
+//! and may notify other people, so every write is put to the person first,
+//! in the same native question the cloud requests use
+//! (`cloud_control_question`): its default button refuses, it expires, and
+//! computer use is paused while it is on screen. The app cannot tell an
+//! agent's request from the person's own (they share the control token), so
+//! it never tries. A project may let comments and status moves on its own
+//! GitHub repository's issues go ahead without a question; assigning,
+//! labels, new issues and anything on Linear always ask.
 
 use std::sync::Arc;
 
@@ -27,27 +29,20 @@ pub struct Question {
 /// Shows a [`Question`] and waits for the answer. Only the desktop app has one.
 pub type Ask = Arc<dyn Fn(Question) -> Answer + Send + Sync>;
 
-/// Who sent the request, as the CLI saw its own environment.
+/// Where the CLI says it ran. It is the caller's own claim: anything that
+/// can reach the socket can write any of it, so it is shown and never
+/// trusted. Every write is asked whoever claims to send it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Caller {
     pub session: Option<String>,
     pub cwd: Option<String>,
-    /// The CLI runs where TerminalX started an agent: in its session, or
-    /// with the token the app hands its agents.
-    pub agent: bool,
 }
 
 impl Caller {
-    /// A request that does not say where it comes from (an older CLI, or a
-    /// hand-made frame) is taken for an agent's.
     pub fn of(params: &Value) -> Self {
-        let Some(caller) = params.get("caller").filter(|caller| caller.is_object()) else {
-            return Self { agent: true, ..Self::default() };
-        };
-        let text = |name: &str| caller.get(name).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
-        let session = text("session");
-        let agent_environment = caller.get("agentEnvironment").and_then(Value::as_bool).unwrap_or(true);
-        Self { agent: session.is_some() || agent_environment, session, cwd: text("cwd") }
+        let caller = params.get("caller").filter(|caller| caller.is_object());
+        let text = |name: &str| caller.and_then(|caller| caller.get(name)).and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        Self { session: text("session"), cwd: text("cwd") }
     }
 }
 
@@ -81,7 +76,7 @@ impl Write {
     fn describe(&self, issue: &str) -> String {
         let names = |names: &[String]| names.iter().map(|name| format!("\u{201c}{}\u{201d}", one_line(name, 80))).collect::<Vec<_>>().join(", ");
         match self {
-            Self::Comment { body } => format!("post this comment on {issue}:\n\n{}", excerpt(body)),
+            Self::Comment { body } => format!("post this comment on {issue}:\n\n{}", quoted(body)),
             Self::Status { to } => format!("move {issue} to \u{201c}{}\u{201d}.", one_line(to, 80)),
             Self::Assign { me: true, .. } => format!("assign {issue} to you."),
             Self::Assign { to, .. } if to.is_empty() => format!("remove everyone assigned to {issue}."),
@@ -97,32 +92,67 @@ impl Write {
                 format!("change the labels of {issue}: {}.", parts.join(" and "))
             }
             Self::Create { title, body } => {
-                let mut text = format!("create the issue \u{201c}{}\u{201d} in {issue}", one_line(title, 200));
+                let mut text = format!("create the issue \u{201c}{}\u{201d} in {issue}", one_line(title, SHOWN_CHARS));
                 match body.as_deref().filter(|body| !body.trim().is_empty()) {
-                    Some(body) => text.push_str(&format!(":\n\n{}", excerpt(body))),
+                    Some(body) => text.push_str(&format!(" with this description:\n\n{}", quoted(body))),
                     None => text.push('.'),
                 }
                 text
             }
         }
     }
+
+    /// Text the question would have to cut. What is asked about is posted
+    /// whole, so it must be shown whole: a longer one is refused instead.
+    fn too_long(&self) -> Option<&'static str> {
+        let long = |text: &str| text.chars().count() > SHOWN_CHARS;
+        match self {
+            Self::Comment { body } if long(body) => Some("comment"),
+            Self::Create { title, .. } if long(title) => Some("title"),
+            Self::Create { body: Some(body), .. } if long(body) => Some("description"),
+            _ => None,
+        }
+    }
 }
 
-/// The longest comment or description shown in full in the question.
-const EXCERPT_CHARS: usize = 1200;
+/// The longest comment, title or description the question shows; it is
+/// shown in full or the write is refused.
+const SHOWN_CHARS: usize = 4000;
 
-fn excerpt(text: &str) -> String {
-    let text: String = text.trim().chars().filter(|ch| *ch == '\n' || !ch.is_control()).collect();
-    let count = text.chars().count();
-    if count <= EXCERPT_CHARS {
-        return text;
+/// A character that changes how the text around it reads without showing
+/// itself: bidirectional overrides and isolates, zero-width characters and
+/// other format characters. The question names them instead.
+fn invisible(ch: char) -> bool {
+    matches!(ch,
+        '\u{00AD}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E0000}'..='\u{E007F}')
+}
+
+/// `text` with every control and invisible character written out (`⟨U+202E⟩`);
+/// a tab is spaces and, when `lines`, a newline stays a newline.
+fn visible(text: &str, lines: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' if lines => out.push('\n'),
+            '\t' => out.push_str("    "),
+            '\r' if lines => {}
+            ch if ch.is_control() || invisible(ch) => out.push_str(&format!("\u{27e8}U+{:04X}\u{27e9}", ch as u32)),
+            ch => out.push(ch),
+        }
     }
-    let shown: String = text.chars().take(EXCERPT_CHARS).collect();
-    format!("{shown}\u{2026}\n\n({} more characters not shown)", count - EXCERPT_CHARS)
+    out
+}
+
+/// A comment or description as the question shows it: whole, every line
+/// behind a bar so none of it reads as the question's own words.
+fn quoted(text: &str) -> String {
+    visible(text.trim_end(), true).trim_start_matches('\n').lines().map(|line| format!("\u{2503} {line}")).collect::<Vec<_>>().join("\n")
 }
 
 fn one_line(text: &str, limit: usize) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|ch| !ch.is_control()).collect();
+    let flat = visible(&text.split_whitespace().collect::<Vec<_>>().join(" "), false);
     if flat.chars().count() <= limit {
         return flat;
     }
@@ -135,36 +165,52 @@ pub struct Subject<'a> {
     pub issue: &'a str,
     pub provider: &'a str,
     pub project_name: &'a str,
-    /// Lets this project's agents comment and move status without asking.
-    pub project_allows_updates: bool,
-    /// The title of the agent's session, when the request named one.
+    /// The project lets comments and status moves go ahead without a
+    /// question, and the issue verifiably belongs to it (see [`in_project`]).
+    pub routine_allowed: bool,
+    /// The session the request says it comes from. Claimed, so only shown.
     pub session_title: Option<&'a str>,
+}
+
+/// Whether the project's switch may apply to an issue: only a GitHub issue
+/// read from the project's own repository. A Linear key reaches every team
+/// of the workspace and a project names none, so a Linear issue is never
+/// the project's to wave through.
+pub fn in_project(issue_repo: Option<&str>, project_repo: Option<&str>) -> bool {
+    matches!((issue_repo, project_repo), (Some(issue), Some(project)) if issue.eq_ignore_ascii_case(project))
 }
 
 pub fn question(write: &Write, subject: &Subject) -> Question {
     let provider = if subject.provider == "linear" { "Linear" } else { "GitHub" };
+    let project = one_line(subject.project_name, 80);
     let who = match subject.session_title {
-        Some(title) => format!("An agent in the session \u{201c}{}\u{201d} ({})", one_line(title, 80), one_line(subject.project_name, 80)),
-        None => format!("A terminalx command run by an agent in {}", one_line(subject.project_name, 80)),
+        Some(title) => format!("A terminalx command in {project}, which says it comes from the session \u{201c}{}\u{201d},", one_line(title, 80)),
+        None => format!("A terminalx command in {project}"),
     };
     Question {
         title: format!("{provider} issue request"),
-        message: format!("{who} asks to {}\n\nThis changes the issue on {provider}, where other people can see it and may be notified.", write.describe(subject.issue)),
+        message: format!("{who} asks to {}\n\nThis acts on {provider}, where other people can see it and may be notified. If you did not ask an agent for this, refuse.", write.describe(subject.issue)),
         agree: write.agree().to_string(),
     }
 }
 
-/// Lets `write` go ahead, or says why it may not. A write from the person's
-/// own shell, or a comment or status move in a project that allows them,
-/// goes ahead without a question.
-pub fn authorize(caller: &Caller, write: &Write, subject: &Subject, ask: Option<&Ask>) -> Result<(), ControlError> {
-    if !caller.agent || (write.routine() && subject.project_allows_updates) {
+/// Lets `write` go ahead, or says why it may not. Only a comment or status
+/// move that the project allows goes ahead without a question.
+pub fn authorize(write: &Write, subject: &Subject, ask: Option<&Ask>) -> Result<(), ControlError> {
+    if write.routine() && subject.routine_allowed {
         return Ok(());
+    }
+    if let Some(what) = write.too_long() {
+        return Err(ControlError::new(
+            "invalid_arguments",
+            format!("The {what} is longer than {SHOWN_CHARS} characters, too long to show the person in full before it is posted. Nothing was changed."),
+            Some(format!("Shorten the {what} to at most {SHOWN_CHARS} characters, or link to the details instead.")),
+        ));
     }
     let Some(ask) = ask else {
         return Err(ControlError::new(
             "confirmation_unavailable",
-            "Changing an issue from an agent's session needs the person's answer, and this runtime has no window to ask in. Nothing was changed.",
+            "Changing an issue from the command line needs the person's answer, and this runtime has no window to ask in. Nothing was changed.",
             Some("Ask the person to make the change, or run the command in the TerminalX desktop app.".to_string()),
         ));
     };
@@ -197,7 +243,7 @@ pub fn pick_state<'a, T>(states: &'a [T], name: impl Fn(&T) -> &str, to: &str) -
 /// prefix or a near miss. `what` and `all` are the item's word, alone and plural.
 fn pick<'a, T>(what: &str, all: &str, items: &'a [T], names: impl Fn(&T) -> Vec<&str>, wanted: &str) -> Result<&'a T, ControlError> {
     let wanted = wanted.trim();
-    let found: Vec<&T> = items.iter().filter(|item| names(item).iter().any(|name| name.trim().eq_ignore_ascii_case(wanted))).collect();
+    let found: Vec<&T> = items.iter().filter(|item| names(item).iter().any(|name| same_name(name, wanted))).collect();
     let valid = || {
         let mut shown: Vec<String> = items.iter().take(LISTED).map(|item| format!("\u{201c}{}\u{201d}", names(item).first().copied().unwrap_or_default())).collect();
         if items.len() > LISTED {
@@ -214,6 +260,11 @@ fn pick<'a, T>(what: &str, all: &str, items: &'a [T], names: impl Fn(&T) -> Vec<
             Some(format!("Ask the person which {what} is meant.")),
         )),
     }
+}
+
+/// Names equal ignoring case, in any script: \u{201c}ÉTAT\u{201d} names \u{201c}état\u{201d}.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
 /// The most names an error lists.
@@ -328,9 +379,10 @@ pub fn op_error(error: IssueOpError) -> ControlError {
     ControlError::new(&code, error.message, Some(recovery.to_string()))
 }
 
-/// Asks the person when it must (see [`authorize`]); `subject` names the
-/// issue, or for a new issue where it goes.
-pub type Gate<'a> = dyn Fn(&Write, &str) -> Result<(), ControlError> + 'a;
+/// Asks the person when it must (see [`authorize`]). It is given what names
+/// the issue (or, for a new issue, where it goes) and the GitHub repository
+/// the issue was read from, if any.
+pub type Gate<'a> = dyn Fn(&Write, &str, Option<&str>) -> Result<(), ControlError> + 'a;
 
 /// Run one `issues.<command>` against `backend`. `id` is what
 /// `parse_issue_reference` read from the command line; `create` has none.
@@ -343,6 +395,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
     // Read first: the question names the issue, and a write starts from what it holds now.
     let issue = backend.details(id).map_err(op_error)?;
     let subject = format!("{} (\u{201c}{}\u{201d})", issue.issue.identifier, one_line(&issue.issue.title, 120));
+    let repo = if provider == Provider::Github { issue.repo.as_deref() } else { None };
     let text = |name: &str| params.get(name).and_then(Value::as_str).map(str::to_string);
     let list = |name: &str| params.get(name).and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
     let reread = |details: IssueDetails| Ok(json!({ "issue": details }));
@@ -357,7 +410,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
         }
         "comment" => {
             let body = text("body").filter(|body| !body.trim().is_empty()).ok_or_else(|| ControlError::invalid("The comment is empty."))?;
-            gate(&Write::Comment { body: body.clone() }, &subject)?;
+            gate(&Write::Comment { body: body.clone() }, &subject, repo)?;
             Ok(json!({ "comment": backend.comment_add(id, &body).map_err(op_error)? }))
         }
         "status" => {
@@ -388,7 +441,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
                     (StateChange::WorkflowState { state_id: state.id.clone() }, state.name.clone())
                 }
             };
-            gate(&Write::Status { to: named }, &subject)?;
+            gate(&Write::Status { to: named }, &subject, repo)?;
             reread(backend.set_state(id, &change).map_err(op_error)?)
         }
         "assign" => {
@@ -421,7 +474,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
                 }
                 (ids, names)
             };
-            gate(&Write::Assign { to: names, me }, &subject)?;
+            gate(&Write::Assign { to: names, me }, &subject, repo)?;
             reread(backend.set_assignees(id, &ids).map_err(op_error)?)
         }
         "label" => {
@@ -450,7 +503,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
                 // Nothing would change: nobody is asked and nothing is written.
                 return Ok(json!({ "issue": issue }));
             }
-            gate(&Write::Label { add: added, remove: removed }, &subject)?;
+            gate(&Write::Label { add: added, remove: removed }, &subject, repo)?;
             let ids: Vec<String> = kept.into_iter().map(|(id, _)| id).collect();
             reread(backend.set_labels(id, &ids).map_err(op_error)?)
         }
@@ -504,7 +557,7 @@ fn create(params: &Value, backend: &dyn Backend, gate: &Gate) -> Result<Value, C
         }
     }
     input.priority = params.get("priority").and_then(Value::as_u64).map(|priority| priority.min(4) as u8);
-    gate(&Write::Create { title, body: (!description.trim().is_empty()).then_some(description) }, &place)?;
+    gate(&Write::Create { title, body: (!description.trim().is_empty()).then_some(description) }, &place, None)?;
     Ok(json!({ "issue": backend.create(&input).map_err(op_error)? }))
 }
 
@@ -515,11 +568,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn subject(allows: bool) -> Subject<'static> {
-        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", project_allows_updates: allows, session_title: Some("Fix login") }
-    }
-
-    fn agent() -> Caller {
-        Caller { session: Some("s1".into()), cwd: None, agent: true }
+        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", routine_allowed: allows, session_title: Some("Fix login") }
     }
 
     /// An `Ask` that records each question and answers `answer`.
@@ -533,25 +582,22 @@ mod tests {
     }
 
     #[test]
-    fn the_caller_is_an_agent_unless_its_shell_carries_nothing_terminalx_gave_an_agent() {
-        assert!(!Caller::of(&json!({"caller": {"session": null, "tab": null, "agentEnvironment": false, "cwd": "/repo"}})).agent);
-        assert!(Caller::of(&json!({"caller": {"session": "s1", "agentEnvironment": false}})).agent);
-        assert!(Caller::of(&json!({"caller": {"session": null, "agentEnvironment": true}})).agent);
-        assert!(Caller::of(&json!({"caller": {"session": "  "}})).agent, "a caller that does not say is an agent");
-        assert!(Caller::of(&json!({})).agent);
-        assert!(Caller::of(&json!({"caller": "me"})).agent);
-        assert_eq!(Caller::of(&json!({"caller": {"session": "s1", "cwd": "/repo"}})).cwd.as_deref(), Some("/repo"));
+    fn the_caller_is_read_for_display_and_nothing_it_claims_decides() {
+        let claimed = Caller::of(&json!({"caller": {"session": "s1", "agentEnvironment": false, "cwd": "/repo"}}));
+        assert_eq!(claimed, Caller { session: Some("s1".into()), cwd: Some("/repo".into()) });
+        assert_eq!(Caller::of(&json!({"caller": {"session": "  "}})), Caller::default());
+        assert_eq!(Caller::of(&json!({"caller": "me"})), Caller::default());
     }
 
     #[test]
-    fn a_write_from_an_agent_is_asked_and_names_the_issue_the_action_and_the_text() {
+    fn a_write_is_asked_and_names_the_issue_the_action_and_the_text() {
         let (ask, asked) = asking(|| Answer::Accepted);
         let write = Write::Comment { body: "Fixed in https://github.com/acme/api/pull/13".into() };
-        authorize(&agent(), &write, &subject(false), Some(&ask)).unwrap();
+        authorize(&write, &subject(false), Some(&ask)).unwrap();
         let question = asked.lock().unwrap().pop().unwrap();
         assert_eq!((question.title.as_str(), question.agree.as_str()), ("Linear issue request", "Post comment"));
-        assert!(question.message.starts_with("An agent in the session \u{201c}Fix login\u{201d} (raccoon) asks to post this comment on PRO-42 (Fix the login):"), "{}", question.message);
-        assert!(question.message.contains("Fixed in https://github.com/acme/api/pull/13"));
+        assert!(question.message.starts_with("A terminalx command in raccoon, which says it comes from the session \u{201c}Fix login\u{201d}, asks to post this comment on PRO-42 (Fix the login):"), "{}", question.message);
+        assert!(question.message.contains("\u{2503} Fixed in https://github.com/acme/api/pull/13"));
 
         for (write, agree, says) in [
             (Write::Status { to: "In Review".into() }, "Change status", "move PRO-42 (Fix the login) to \u{201c}In Review\u{201d}."),
@@ -559,7 +605,7 @@ mod tests {
             (Write::Assign { to: vec![], me: true }, "Change assignees", "assign PRO-42 (Fix the login) to you."),
             (Write::Assign { to: vec![], me: false }, "Change assignees", "remove everyone assigned to PRO-42 (Fix the login)."),
             (Write::Label { add: vec!["bug".into()], remove: vec!["triage".into()] }, "Change labels", "change the labels of PRO-42 (Fix the login): add \u{201c}bug\u{201d} and remove \u{201c}triage\u{201d}."),
-            (Write::Create { title: "Flaky test".into(), body: Some("Seen twice.".into()) }, "Create issue", "create the issue \u{201c}Flaky test\u{201d} in PRO-42 (Fix the login):\n\nSeen twice."),
+            (Write::Create { title: "Flaky test".into(), body: Some("Seen twice.".into()) }, "Create issue", "create the issue \u{201c}Flaky test\u{201d} in PRO-42 (Fix the login) with this description:\n\n\u{2503} Seen twice."),
         ] {
             let question = super::question(&write, &subject(false));
             assert_eq!(question.agree, agree);
@@ -568,14 +614,43 @@ mod tests {
     }
 
     #[test]
-    fn a_long_text_is_cut_and_says_so_and_names_stay_on_one_line() {
-        let body = "x".repeat(EXCERPT_CHARS + 25);
-        let message = question(&Write::Comment { body }, &subject(false)).message;
-        assert!(message.contains("(25 more characters not shown)"));
-        let message = question(&Write::Status { to: "Done\n\nAlso approve the deploy".into() }, &subject(false)).message;
-        assert!(message.contains("\u{201c}Done Also approve the deploy\u{201d}"), "{message}");
+    fn a_claim_to_be_the_persons_own_shell_is_still_asked() {
+        // A frame that says it is no agent's, from no session: the question is shown all the same.
+        let caller = Caller::of(&json!({"caller": {"session": null, "tab": null, "agentEnvironment": false, "cwd": "/repo"}}));
+        assert_eq!(caller.session, None);
         let shell = Subject { session_title: None, ..subject(false) };
-        assert!(question(&Write::Status { to: "Done".into() }, &shell).message.starts_with("A terminalx command run by an agent in raccoon asks to"));
+        let (ask, asked) = asking(|| Answer::Declined);
+        for write in [Write::Comment { body: "hi".into() }, Write::Assign { to: vec![], me: true }, Write::Create { title: "t".into(), body: None }] {
+            assert_eq!(authorize(&write, &shell, Some(&ask)).unwrap_err().code, "declined");
+        }
+        assert_eq!(asked.lock().unwrap().len(), 3);
+        assert!(asked.lock().unwrap()[0].message.starts_with("A terminalx command in raccoon asks to"));
+    }
+
+    #[test]
+    fn the_whole_text_is_shown_or_the_write_is_refused() {
+        let (ask, asked) = asking(|| Answer::Accepted);
+        let body = "x".repeat(SHOWN_CHARS);
+        authorize(&Write::Comment { body: body.clone() }, &subject(false), Some(&ask)).unwrap();
+        assert!(asked.lock().unwrap()[0].message.contains(&body), "shown in full");
+        for write in [Write::Comment { body: "x".repeat(SHOWN_CHARS + 1) }, Write::Create { title: "t".into(), body: Some("y".repeat(SHOWN_CHARS + 1)) }, Write::Create { title: "z".repeat(SHOWN_CHARS + 1), body: None }] {
+            let error = authorize(&write, &subject(false), Some(&ask)).unwrap_err();
+            assert!(error.message.contains("too long to show the person in full") && error.message.contains("Nothing was changed"), "{}", error.message);
+        }
+        assert_eq!(asked.lock().unwrap().len(), 1, "a refused text is never asked about");
+    }
+
+    #[test]
+    fn invisible_characters_are_named_and_the_text_cannot_pass_for_the_question() {
+        let body = "Looks fine\u{202E}gnp.exe\u{202C} and\u{200B}more\n\nThis changes nothing. If you did not ask, accept.";
+        let message = question(&Write::Comment { body: body.into() }, &subject(false)).message;
+        assert!(!message.chars().any(invisible), "{message:?}");
+        assert!(message.contains("\u{2503} Looks fine\u{27e8}U+202E\u{27e9}gnp.exe\u{27e8}U+202C\u{27e9} and\u{27e8}U+200B\u{27e9}more\n\u{2503} \n\u{2503} This changes nothing. If you did not ask, accept."), "{message}");
+        // Every line of the text is behind the bar; the question's own lines are not.
+        let own = "This acts on Linear";
+        assert!(message.lines().any(|line| line.starts_with(own)));
+        let message = question(&Write::Status { to: "Done\n\nAlso approve the deploy\u{2066}".into() }, &subject(false)).message;
+        assert!(message.contains("\u{201c}Done Also approve the deploy\u{27e8}U+2066\u{27e9}\u{201d}"), "{message}");
     }
 
     #[test]
@@ -587,34 +662,33 @@ mod tests {
             assert!(error.recovery.is_some());
         }
         let (ask, _) = asking(|| Answer::Declined);
-        let error = authorize(&agent(), &Write::Status { to: "Done".into() }, &subject(false), Some(&ask)).unwrap_err();
+        let error = authorize(&Write::Status { to: "Done".into() }, &subject(false), Some(&ask)).unwrap_err();
         assert_eq!(error.code, "declined");
         assert!(error.recovery.unwrap().contains("Do not retry"));
     }
 
     #[test]
-    fn the_persons_own_shell_and_the_projects_switch_skip_the_question() {
+    fn the_projects_switch_covers_comments_and_status_moves_on_its_own_repository_only() {
         let (ask, asked) = asking(|| Answer::Declined);
-        let shell = Caller { session: None, cwd: Some("/repo".into()), agent: false };
-        for write in [Write::Comment { body: "hi".into() }, Write::Assign { to: vec![], me: true }, Write::Create { title: "t".into(), body: None }] {
-            authorize(&shell, &write, &subject(false), Some(&ask)).unwrap();
-        }
-        // The switch covers comments and status moves only.
-        authorize(&agent(), &Write::Comment { body: "hi".into() }, &subject(true), Some(&ask)).unwrap();
-        authorize(&agent(), &Write::Status { to: "Done".into() }, &subject(true), Some(&ask)).unwrap();
+        authorize(&Write::Comment { body: "hi".into() }, &subject(true), Some(&ask)).unwrap();
+        authorize(&Write::Status { to: "Done".into() }, &subject(true), Some(&ask)).unwrap();
         assert!(asked.lock().unwrap().is_empty());
         for write in [Write::Assign { to: vec!["a".into()], me: false }, Write::Label { add: vec!["bug".into()], remove: vec![] }, Write::Create { title: "t".into(), body: None }] {
-            assert_eq!(authorize(&agent(), &write, &subject(true), Some(&ask)).unwrap_err().code, "declined");
+            assert_eq!(authorize(&write, &subject(true), Some(&ask)).unwrap_err().code, "declined");
         }
         assert_eq!(asked.lock().unwrap().len(), 3);
+        assert!(in_project(Some("Acme/API"), Some("acme/api")));
+        assert!(!in_project(Some("acme/other"), Some("acme/api")), "another project's repository");
+        assert!(!in_project(None, Some("acme/api")), "a Linear issue");
+        assert!(!in_project(Some("acme/api"), None), "a project with no GitHub remote");
     }
 
     #[test]
-    fn without_a_window_an_agents_write_is_refused_rather_than_made() {
-        let error = authorize(&agent(), &Write::Comment { body: "hi".into() }, &subject(false), None).unwrap_err();
+    fn without_a_window_a_write_is_refused_rather_than_made() {
+        let error = authorize(&Write::Comment { body: "hi".into() }, &subject(false), None).unwrap_err();
         assert_eq!(error.code, "confirmation_unavailable");
         assert!(error.message.contains("Nothing was changed"));
-        authorize(&agent(), &Write::Comment { body: "hi".into() }, &subject(true), None).unwrap();
+        authorize(&Write::Comment { body: "hi".into() }, &subject(true), None).unwrap();
     }
 
     #[test]
@@ -629,6 +703,7 @@ mod tests {
         // Never a prefix or a near miss.
         assert!(pick_state(&states, |state| state, "In").is_err());
         assert!(pick_state(&states, |state| state, "Cancelled").is_err());
+        assert_eq!(*pick_state(&["Écrit", "Fertig"], |state| state, "écrit").unwrap(), "Écrit", "case is ignored beyond ASCII");
         let twice = ["Done", "In Review", "done"];
         let ambiguous = pick_state(&twice, |state| state, "DONE").unwrap_err();
         assert_eq!(ambiguous.code, "ambiguous_selector");
@@ -657,6 +732,7 @@ mod tests {
             "state": "Todo", "stateType": "unstarted", "labels": labels.iter().map(|name| json!({"name": name, "color": ""})).collect::<Vec<_>>(),
             "updatedAt": "2026-10-18T00:00:00Z", "description": "It fails.", "assignees": [], "createdAt": "2026-10-01T00:00:00Z",
             "capabilities": crate::issue_ops::IssueCapabilities::of(kind),
+            "repo": (kind == Provider::Github).then_some("acme/api"),
         }))
         .unwrap()
     }
@@ -766,12 +842,13 @@ mod tests {
         }
     }
 
-    /// The gate as the control service builds it, for an agent in `project`.
+    /// The gate as the control service builds it, for a project of
+    /// `acme/api` whose switch is `allows`.
     fn run_as_agent(fake: &Fake, command: &str, params: Value, id: Option<&str>, answer: fn() -> Answer, allows: bool) -> (Result<Value, ControlError>, Vec<Question>) {
         let (ask, asked) = asking(answer);
-        let gate = |write: &Write, issue: &str| {
-            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", project_allows_updates: allows, session_title: Some("Fix login") };
-            authorize(&agent(), write, &subject, Some(&ask))
+        let gate = |write: &Write, issue: &str, repo: Option<&str>| {
+            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", routine_allowed: allows && in_project(repo, Some("acme/api")), session_title: Some("Fix login") };
+            authorize(write, &subject, Some(&ask))
         };
         let result = run(command, &params, id, fake, &gate);
         let asked = asked.lock().unwrap().clone();
@@ -800,7 +877,7 @@ mod tests {
         assert_eq!(refused.unwrap_err().code, "declined");
         assert!(fake.writes().is_empty(), "a refusal changes nothing");
         assert_eq!(asked.len(), 1);
-        assert!(asked[0].message.contains("post this comment on #12 (\u{201c}Fix the login\u{201d}):\n\nPR: #13"), "{}", asked[0].message);
+        assert!(asked[0].message.contains("post this comment on #12 (\u{201c}Fix the login\u{201d}):\n\n\u{2503} PR: #13"), "{}", asked[0].message);
         assert_eq!(asked[0].title, "GitHub issue request");
 
         let (posted, _) = run_as_agent(&fake, "comment", json!({"body": "PR: #13"}), Some("12"), || Answer::Accepted, false);
@@ -812,6 +889,26 @@ mod tests {
         let (_, asked) = run_as_agent(&fake, "comment", json!({"body": "again"}), Some("12"), || Answer::Declined, true);
         assert!(asked.is_empty());
         assert_eq!(fake.writes().len(), 2);
+    }
+
+    #[test]
+    fn the_switch_follows_the_issue_and_not_the_project_an_agent_names() {
+        // A project that allows it, and an issue of another repository: asked.
+        let mut elsewhere = github();
+        elsewhere.issue.repo = Some("acme/other".into());
+        let (refused, asked) = run_as_agent(&elsewhere, "comment", json!({"body": "hi"}), Some("12"), || Answer::Declined, true);
+        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
+        assert!(elsewhere.writes().is_empty());
+        // Linear: the key reaches every team, so the switch never applies.
+        let linear = linear();
+        let (refused, asked) = run_as_agent(&linear, "status", json!({"to": "Done"}), Some("PRO-42"), || Answer::Declined, true);
+        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
+        assert!(linear.writes().is_empty());
+        // Its own repository's issue: not asked.
+        let own = github();
+        let (posted, asked) = run_as_agent(&own, "status", json!({"to": "closed"}), Some("12"), || Answer::Declined, true);
+        posted.unwrap();
+        assert!(asked.is_empty());
     }
 
     #[test]
@@ -901,7 +998,7 @@ mod tests {
         let params = json!({"title": "Flaky test", "body": "Seen twice.", "team": "pro", "assignees": ["Alan Turing"], "labels": ["ci"], "state": "todo", "priority": 2});
         let (created, asked) = run_as_agent(&fake, "create", params, None, || Answer::Accepted, true);
         created.unwrap();
-        assert!(asked[0].message.contains("create the issue \u{201c}Flaky test\u{201d} in the Linear team PRO:\n\nSeen twice."), "{}", asked[0].message);
+        assert!(asked[0].message.contains("create the issue \u{201c}Flaky test\u{201d} in the Linear team PRO with this description:\n\n\u{2503} Seen twice."), "{}", asked[0].message);
         assert_eq!(fake.writes(), vec![json!({"create": {"teamId": "t-pro", "title": "Flaky test", "description": "Seen twice.", "assignees": ["u-alan"], "labels": ["l-ci"], "stateId": "s-todo", "priority": 2}})]);
         let no_team = run_as_agent(&fake, "create", json!({"title": "t"}), None, || Answer::Accepted, false).0.unwrap_err();
         assert!(no_team.message.contains("pass --team with one of PRO, OPS"), "{}", no_team.message);
@@ -929,15 +1026,16 @@ mod tests {
 
     /// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test -- --ignored live_sandbox`):
     /// the real `gh` login and Linear key, and only the two sandbox issues the
-    /// owner set aside. As the person's own shell: nobody is asked.
+    /// owner set aside, with the person who runs it as the one who agrees.
     #[test]
     #[ignore]
     fn live_sandbox() {
         if std::env::var("TERMINALX_LIVE_ISSUE_SANDBOX").as_deref() != Ok("1") {
             return;
         }
-        let shell = Caller { session: None, cwd: None, agent: false };
-        let gate = |write: &Write, issue: &str| authorize(&shell, write, &Subject { issue, provider: "", project_name: "", project_allows_updates: false, session_title: None }, None);
+        // The person running this check is the one who agrees.
+        let (ask, _) = asking(|| Answer::Accepted);
+        let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, provider: "", project_name: "", routine_allowed: false, session_title: None }, Some(&ask));
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         for (provider, id) in [(Provider::Github, "527"), (Provider::Linear, "PRO-101")] {
             let backend = Live(crate::issue_ops::Target::resolve(&repo, provider).unwrap());

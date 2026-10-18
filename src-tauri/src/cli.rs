@@ -795,7 +795,7 @@ fn parse_issues(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, C
         params["issue"] = json!(issue);
     }
     tokens.finish()?;
-    // Who is asking decides whether a write is put to the person first.
+    // Where it runs: the default project, and a session to name in the question.
     params["caller"] = issue_caller();
     Ok(Action::Rpc {
         command: format!("issues.{command}"),
@@ -809,15 +809,14 @@ fn parse_issues(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, C
 /// the write and the read after it, so the app's answer is what is printed.
 const ISSUE_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Where an issue command runs from. The app asks the person before a write
-/// that comes from an agent's session; a shell of the person's own carries
-/// neither the session nor the token TerminalX hands its agents.
+/// Where an issue command runs from. The app finds the project from it and
+/// names the session in its question; it decides nothing, since any process
+/// can say anything here. Every write is asked.
 fn issue_caller() -> Value {
     let present = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
     json!({
         "session": present("RACCOON_SESSION_ID"),
         "tab": present("RACCOON_TAB_ID"),
-        "agentEnvironment": present(crate::hooks::CONTROL_TOKEN_ENV).is_some(),
         "cwd": std::env::current_dir().ok().map(|cwd| cwd.to_string_lossy().into_owned()),
     })
 }
@@ -1315,13 +1314,13 @@ mod tests {
     }
 
     #[test]
-    fn an_issue_command_says_whether_it_runs_in_an_agents_session() {
+    fn an_issue_command_says_where_it_runs() {
         let (_, params, _) = rpc_of(&["issues", "view", "12"]);
         let caller = &params["caller"];
-        for key in ["session", "tab", "agentEnvironment", "cwd"] {
+        for key in ["session", "tab", "cwd"] {
             assert!(caller.get(key).is_some(), "{key}");
         }
-        assert_eq!(caller["agentEnvironment"], json!(std::env::var(crate::hooks::CONTROL_TOKEN_ENV).is_ok_and(|token| !token.trim().is_empty())));
+        assert!(caller.get("agentEnvironment").is_none(), "nothing the caller says decides whether it is asked");
         for text in [help_text(), GUIDE.to_string()] {
             for command in ["issues view", "issues comment", "issues status", "issues assign", "issues label", "issues create"] {
                 assert!(text.contains(command), "missing {command}");

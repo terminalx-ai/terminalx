@@ -228,12 +228,13 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
 Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them. When the command runs in an agent's session, TerminalX
-asks the person in a native dialog that names the issue, the action and the text. A refusal
-answers `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell
-the person what you wanted to do instead. A project can let its agents comment and change
-status without asking (Issue pipeline… in the project menu); assigning, labels and new issues
-always ask.
+other people see it and may notify them, so TerminalX asks the person in a native dialog that
+names the issue, the action and the whole text, whoever runs the command. A refusal answers
+`declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
+what you wanted to do instead. A comment, title or description longer than 4000 characters is
+refused before anyone is asked; link to the details instead. A project can let comments and
+status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
+the project menu); assigning, labels, new issues and Linear issues always ask.
 
 When to use them: read the issue you were started on (`view --comments`) before working on it,
 and when you are done, comment the pull-request link or a short summary on the issue. Move its
@@ -531,8 +532,8 @@ JSON failures have this shape:
 - `declined`: the person refused the request in the app window. Do not retry.
 - `expired`, `busy`, `backoff`: an issue write was not answered in time, another question was
   already on screen, or the person refused one a moment ago. Nothing was changed.
-- `confirmation_unavailable`: an agent's issue write needs the person's answer and this runtime
-  has no window to ask in. Nothing was changed; ask the person.
+- `confirmation_unavailable`: an issue write needs the person's answer and this runtime has no
+  window to ask in. Nothing was changed; ask the person.
 - `account_signed_out`: sign in to TerminalX in the app.
 - `cloud_unavailable`: the app's window did not answer. Check the session with `read` before
   repeating a `send`.

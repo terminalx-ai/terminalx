@@ -206,7 +206,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
           </label>
           <SettingRow
             label="Agents comment and change status without asking"
-            description="An agent in this project's sessions can post a comment on an issue or move its status with terminalx issues, and you are not asked each time. Assigning, labels and new issues always ask."
+            description="A terminalx issues command can comment on this project's GitHub issues or move their status without asking you each time. Assigning, labels, new issues and Linear issues always ask."
             control={<Switch aria-label="Agents comment and change status without asking" checked={agentUpdatesOn} onCheckedChange={saveAgentUpdates} />}
           />
         </div>
