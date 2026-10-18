@@ -16,9 +16,16 @@ export interface SessionSummary {
   tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
 }
 
-export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }
+export interface ChatNote {
+  id: string;
+  body: string;
+  createdAt: number;
+  author: { userId: string; displayName?: string };
+  /** The tabs it was sent to as a message, and the user message each send published (#541). */
+  promotedTo?: { tabId: string; seq: number }[];
+}
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
-export type PromoteNoteResult = { sent: true; queued: boolean } | { sent: false; message: string };
+export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
 
 export class HostApi {
@@ -126,19 +133,7 @@ export class HostApi {
     return { sent: false, message: "The host did not add this note." };
   }
 
-  async promoteNote(sessionId: string, tabId: string, noteId: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
-    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("chat.promoteToAgent", {
-      worktreeId: sessionId,
-      tabId,
-      messageIds: [noteId],
-      ...(attachments.length ? { attachments } : {}),
-    });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
-    if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
-    return { sent: false, message: "The host did not send this note to the agent." };
-  }
-
-  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
+  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<SendResult> {
     const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("session.send", {
       tabId,
       text,
@@ -208,5 +203,12 @@ function isChatNote(value: unknown): value is ChatNote {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   const author = record.author as Record<string, unknown> | undefined;
-  return typeof record.id === "string" && typeof record.body === "string" && typeof record.createdAt === "number" && !!author && typeof author.userId === "string" && (author.displayName === undefined || typeof author.displayName === "string");
+  return typeof record.id === "string" && typeof record.body === "string" && typeof record.createdAt === "number" && !!author && typeof author.userId === "string" && (author.displayName === undefined || typeof author.displayName === "string")
+    && (record.promotedTo === undefined || (Array.isArray(record.promotedTo) && record.promotedTo.every(isNotePromotion)));
+}
+
+function isNotePromotion(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.tabId === "string" && typeof record.seq === "number";
 }

@@ -730,7 +730,8 @@ struct SessionSendParams {
 
 fn send_session(manager: &PairingManager, device: &DeviceEntry, params: SessionSendParams) -> Result<Value> {
     let (session, _) = find_tab(&params.tab_id)?;
-    send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)
+    let outcome = send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)?;
+    Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
 #[derive(Deserialize)]
@@ -761,6 +762,20 @@ struct ChatNote {
     body: String,
     created_at: i64,
     author: NoteAuthor,
+    /// The tabs this note was sent to with `chat.promoteToAgent`. Each send
+    /// published the note's text as that tab's user message, so the phone
+    /// leaves the note out of that conversation rather than show it twice
+    /// (#541).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    promoted_to: Vec<NotePromotion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotePromotion {
+    tab_id: String,
+    /// The user message the send published.
+    seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -816,6 +831,7 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         body,
         created_at: Utc::now().timestamp_millis(),
         author,
+        promoted_to: Vec::new(),
     };
     {
         let _guard = manager.mobile.notes.lock().unwrap();
@@ -863,7 +879,44 @@ fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPro
         text.push(note.body.clone());
     }
     drop(_guard);
-    send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)
+    let outcome = send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
+    // The message is with the agent now, so a failure to mark the notes must
+    // not read as a failed send: the phone would send it again.
+    if let Some(message) = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. })) {
+        if let Err(error) = record_promotion(manager, &params.worktree_id, &params.tab_id, &params.message_ids, message.seq) {
+            log::warn!("could not mark promoted notes: {error:#}");
+        }
+    }
+    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+}
+
+fn record_promotion(manager: &PairingManager, worktree_id: &str, tab_id: &str, ids: &[String], seq: u64) -> Result<()> {
+    {
+        let _guard = manager.mobile.notes.lock().unwrap();
+        let mut file = load_notes()?;
+        let Some(notes) = file.sessions.get_mut(worktree_id) else { return Ok(()) };
+        if !mark_promoted(notes, ids, tab_id, seq) {
+            return Ok(());
+        }
+        save_notes(&file)?;
+    }
+    manager.mobile.broadcast(json!({
+        "method": "chat.changed",
+        "params": { "worktreeId": worktree_id },
+    }));
+    Ok(())
+}
+
+/// Only a tab's latest send of a note is kept, so a note sent again and
+/// again names each tab once.
+fn mark_promoted(notes: &mut [ChatNote], ids: &[String], tab_id: &str, seq: u64) -> bool {
+    let mut marked = false;
+    for note in notes.iter_mut().filter(|note| ids.contains(&note.id)) {
+        note.promoted_to.retain(|promotion| promotion.tab_id != tab_id);
+        note.promoted_to.push(NotePromotion { tab_id: tab_id.into(), seq });
+        marked = true;
+    }
+    marked
 }
 
 fn send_attributed(
@@ -873,7 +926,7 @@ fn send_attributed(
     tab_id: &str,
     text: &str,
     attachments: Vec<RemoteAttachmentInput>,
-) -> Result<Value> {
+) -> Result<crate::session::SendOutcome> {
     validate_session_tab(session_id, tab_id)?;
     let text = text.trim();
     if text.is_empty() && attachments.is_empty() {
@@ -898,15 +951,7 @@ fn send_attributed(
         "authority": "host",
     });
     let attributed = format!("[TerminalX Effective User v1] {envelope}\n{prompt}");
-    let session_manager = sessions(manager)?;
-    let outcome = session_manager.send_with_display_text(
-        session_id,
-        tab_id,
-        attributed,
-        text.to_string(),
-        images,
-    )?;
-    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+    sessions(manager)?.send_with_display_text(session_id, tab_id, attributed, text.to_string(), images)
 }
 
 fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
@@ -1656,6 +1701,30 @@ mod tests {
         .unwrap();
         assert_eq!(with_attachment.attachments.len(), 1);
         assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
+    }
+
+    #[test]
+    fn promoted_notes_name_each_tab_they_were_sent_to_once() {
+        // Notes saved before promotions were recorded read as never sent.
+        let file: NotesFile = serde_json::from_value(json!({ "sessions": { "worktree": [
+            { "id": "a", "body": "run the tests", "createdAt": 1, "author": { "userId": "user-1", "displayName": "Paresh" } },
+            { "id": "b", "body": "deploying at 5", "createdAt": 2, "author": { "userId": "user-1", "displayName": "Paresh" } },
+        ] } }))
+        .unwrap();
+        let mut notes = file.sessions["worktree"].clone();
+        assert!(notes.iter().all(|note| note.promoted_to.is_empty()));
+        assert!(serde_json::to_value(&notes[0]).unwrap().get("promotedTo").is_none());
+
+        assert!(mark_promoted(&mut notes, &["a".into()], "claude", 7));
+        assert!(mark_promoted(&mut notes, &["a".into()], "codex", 9));
+        assert!(mark_promoted(&mut notes, &["a".into()], "claude", 12));
+        assert_eq!(
+            serde_json::to_value(&notes[0]).unwrap()["promotedTo"],
+            json!([{ "tabId": "codex", "seq": 9 }, { "tabId": "claude", "seq": 12 }]),
+        );
+        assert!(notes[1].promoted_to.is_empty());
+        // A note gone since the send leaves the file as it was.
+        assert!(!mark_promoted(&mut notes, &["evicted".into()], "claude", 13));
     }
 
     #[test]

@@ -100,7 +100,7 @@ beforeEach(() => {
       respondPermission: vi.fn(async () => ({ answered: true })),
       queueInput: vi.fn(async () => true), releaseInput: vi.fn(async () => {}),
       postNote: vi.fn(async (_session, text) => ({ sent: true, note: { id: "note", body: text, createdAt: 0, author: { userId: "me" } } })),
-      promoteNote: vi.fn(async () => ({ sent: true, queued: false })),
+      sendSession: vi.fn(async () => ({ sent: true, queued: false })),
     },
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -289,7 +289,7 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).not.toContain("claude transcript");
     await type("Codex draft");
     await click("Send");
-    expect(mocks.app.api.promoteNote).toHaveBeenCalledWith("worktree", "codex", "note", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", []);
     await select("claude");
     expect(input().value).toBe("Claude draft");
     expect(container.textContent).not.toContain("codex transcript");
@@ -333,7 +333,7 @@ describe("mobile conversation navigation", () => {
 
   it("keeps an in-flight send scoped when returning to its conversation", async () => {
     let finish!: (value: unknown) => void;
-    mocks.app.api.promoteNote.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    mocks.app.api.sendSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await render(); await type("Send once"); await click("Send");
     await select("codex"); await type("Other draft"); await select("claude");
     expect(button("Send").disabled).toBe(true);
@@ -623,5 +623,40 @@ describe("mobile latest conversation edge", () => {
       expect(mocks.app.api.tail).toHaveBeenLastCalledWith("worktree", "claude", 80);
       expect(mocks.listProps.data).toHaveLength(41);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("a message sent from the phone (#541)", () => {
+  const rows = () => mocks.listProps.data.map((item: any) => item.kind === "note" ? `note: ${item.note.body}` : `${item.row.kind}: ${item.row.text}`);
+  const publish = async (text: string, seq: number) => { await act(async () => mocks.sessionListeners.get("claude")!(event("claude", text, seq))); };
+
+  it("goes to the agent as a message and shows once, as the prompt", async () => {
+    await render(); await type("run the tests"); await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "run the tests", []);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
+    expect(input().value).toBe("");
+    await publish("run the tests", 2);
+    expect(rows().filter((row: string) => row.endsWith("run the tests"))).toEqual(["prompt: run the tests"]);
+  });
+
+  it("leaves no note behind when the send fails, and a retry sends it once", async () => {
+    mocks.app.api.sendSession.mockResolvedValueOnce({ sent: false, message: "The agent is restarting." });
+    await render(); await type("run the tests"); await click("Send");
+    expect(container.textContent).toContain("Message not sent: The agent is restarting.");
+    expect(input().value).toBe("run the tests");
+    expect(rows()).toEqual(["prompt: claude transcript"]);
+    await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledTimes(2);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
+    await publish("run the tests", 2);
+    expect(rows().filter((row: string) => row.endsWith("run the tests"))).toEqual(["prompt: run the tests"]);
+  });
+
+  it("adds a worktree note once and sends nothing to the agent", async () => {
+    await render(); await click("Add worktree note"); await type("deploying at 5"); await click("Send");
+    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "deploying at 5");
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Note added.");
+    expect(rows().filter((row: string) => row.endsWith("deploying at 5"))).toEqual(["note: deploying at 5"]);
   });
 });

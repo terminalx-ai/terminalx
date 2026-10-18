@@ -27,7 +27,7 @@ cloud copy of a transcript.
 The Expo app renders native views over shared portable event/fold types. It does
 not import desktop UI or Tauri APIs. Version one can discover and pair machines,
 read existing sessions and tabs, render chat/transcript and terminal output,
-post notes, promote a note, and send write-gated terminal input. It does not
+post notes, send messages to an agent, and send write-gated terminal input. It does not
 create sessions, worktrees, terminals, files, commits, reviews, issues, or
 automations, and it exposes no general-purpose host command surface.
 
@@ -226,8 +226,15 @@ accepts, or displays a PTY id, pane id, process handle, host path, or arbitrary
 filesystem path. The Rust host resolves each tab id under the session lock and
 rechecks that mapping at the point of use.
 
-Chat notes remain distinct from agent messages. Posting uses `chat.post`;
-promotion uses `chat.promoteToAgent` and passes the multiplayer write gate.
+Chat notes remain distinct from agent messages. A message for the agent uses
+`session.send` and shows once, as the prompt of its turn; posting a note uses
+`chat.post`. `chat.promoteToAgent` sends saved notes to a tab's agent (older
+phones sent every message that way) and passes the multiplayer write gate. It
+records each send on the note as `promotedTo: [{ tabId, seq }]`, and the
+Session screen leaves a note out of a conversation it was sent to, where its
+text is already the prompt. A note saved before promotions were recorded is
+left out when a user message of that tab with the same text follows it within
+a minute (#541).
 Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.
