@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setPrefs } from "@/lib/prefs";
 import type { Issue } from "@/lib/api";
 import type { IssueCreate, IssueProvider } from "@/lib/issueOps";
-import { emptyIssueDraft, getIssueDraft } from "@/lib/issueDrafts";
-import { createIssueOpsMock, githubOptionsFixture, issueTemplatesFixture, type IssueOpsMock } from "@/test/issueOpsMock";
+import { clearIssueDraft, emptyIssueDraft, getIssueDraft, setIssueDraft } from "@/lib/issueDrafts";
+import { createIssueOpsMock, githubOptionsFixture, issueOpError, issueTemplatesFixture, type IssueOpsMock } from "@/test/issueOpsMock";
 import type { Project } from "@/types/session";
 
 // The new-issue form in the Issues view, against the issue-operations mock.
@@ -49,11 +49,13 @@ const { applyTemplate, createInput } = await import("./NewIssueForm");
 
 let mock: IssueOpsMock;
 let gate: { release: () => void; promise: Promise<void> } | null;
+// Whether the list reads hold the issues made here; by default they are too new to.
+let listsNew = false;
 
 /** The list answers rows, without what only a full read brings. */
 function rows(provider: IssueProvider): Issue[] {
   return [...mock.issues.values()]
-    .filter((each) => each.issue.provider === provider && !each.issue.id.startsWith("linear-new") && Number(each.issue.number) < 100)
+    .filter((each) => each.issue.provider === provider && (listsNew || (!each.issue.id.startsWith("linear-new") && Number(each.issue.number) < 100)))
     .map(({ issue: { provider: p, id, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team } }) => ({ provider: p, id, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team }));
 }
 
@@ -61,7 +63,10 @@ beforeEach(() => {
   localStorage.clear();
   mock = createIssueOpsMock();
   gate = null;
+  listsNew = false;
   sessionStore.newIssueRequested = false;
+  clearIssueDraft("/repo", "github");
+  clearIssueDraft("/repo", "linear");
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "issues_list") return rows(args?.provider as IssueProvider);
     if (command === "issue_create" && gate) await gate.promise;
@@ -88,6 +93,21 @@ async function openForm(provider: IssueProvider) {
   fireEvent.click(await screen.findByRole("button", { name: /New issue/ }));
   return screen.findByTestId("new-issue");
 }
+
+const listed = (identifier: string) => screen.queryAllByRole("button").find((button) => button.closest("ul") && button.textContent?.includes(identifier));
+const listReads = () => invoke.mock.calls.filter(([command]) => command === "issues_list").length;
+/** Refresh, and wait for that read's answer to be in. */
+async function refresh() {
+  const before = listReads();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => expect(listReads()).toBeGreaterThan(before));
+  await act(async () => {});
+}
+const gated = () => {
+  let release!: () => void;
+  gate = { promise: new Promise<void>((resolve) => (release = resolve)), release: () => release() };
+  return gate;
+};
 
 const menu = async (name: string | RegExp) => {
   fireEvent.pointerDown(await screen.findByRole("button", { name }), { button: 0, ctrlKey: false });
@@ -294,6 +314,150 @@ describe("NewIssueForm", () => {
     fireEvent.click(await screen.findByText("Repair the login timeout"));
     expect(screen.queryByTestId("new-issue")).toBeNull();
     expect(getIssueDraft("/repo", "github")?.title).toBe("Later");
+  });
+
+  it("clears a draft whose team was filled in from the list's filter once its issue is created", async () => {
+    // Written before, with all teams shown: no team yet.
+    setIssueDraft("/repo", "linear", { ...emptyIssueDraft(), title: "From before" });
+    setPrefs({ issueProvider: "linear" });
+    render(<IssuesView />);
+    await menu("All teams");
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Operations/ }));
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    const form = await screen.findByTestId("new-issue");
+    expect(within(form).getByRole("button", { name: "Team: Operations" })).toBeTruthy();
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+    expect(creates()).toEqual([expect.objectContaining({ teamId: "team-ops", title: "From before" })]);
+    expect(getIssueDraft("/repo", "linear")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    expect((within(await screen.findByTestId("new-issue")).getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe("");
+  });
+
+  it("clears the draft when the only team arrives after the typing, once its issue is created", async () => {
+    let teamsCame!: () => void;
+    const teamsGate = new Promise<void>((resolve) => (teamsCame = resolve));
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "linear_teams") {
+        await teamsGate;
+        return [{ id: "team-eng", key: "ENG", name: "Engineering" }];
+      }
+      return base(command, args);
+    });
+    const form = await openForm("linear");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Typed first" } });
+    await act(async () => teamsCame());
+    await waitFor(() => expect(within(form).getByRole("button", { name: "Team: Engineering" })).toBeTruthy());
+    expect(getIssueDraft("/repo", "linear")?.teamId).toBe("team-eng");
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+    expect(getIssueDraft("/repo", "linear")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    expect((within(await screen.findByTestId("new-issue")).getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe("");
+  });
+
+  it("finds the issue a create made though its answer was lost, and opens it rather than offer to make it again", async () => {
+    listsNew = true;
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command !== "issue_create") return base(command, args);
+      await mock.handle(command, args);
+      // Made just now, by the reader; then the connection dropped.
+      mock.issue("github", "101").createdAt = new Date().toISOString();
+      throw issueOpError("network");
+    });
+    const form = await openForm("github");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Made anyway" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+    expect(creates()).toHaveLength(1);
+    expect(within(screen.getByTestId("issue-detail")).getByRole("button", { name: "Copy #101" })).toBeTruthy();
+    expect(getIssueDraft("/repo", "github")).toBeNull();
+  });
+
+  it("says a create whose answer was lost may have made the issue, and offers to create it again", async () => {
+    // An issue with the same title, but an old one: not the one this create could have made.
+    mock.issue("github", "41").title = "Lost answer";
+    const form = await openForm("github");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Lost answer" } });
+    mock.fail("issue_create", "network");
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    const alert = await within(form).findByRole("alert");
+    expect(alert.textContent).toContain("may have been created all the same");
+    expect(alert.textContent).toContain("Nothing was lost");
+    expect(getIssueDraft("/repo", "github")?.title).toBe("Lost answer");
+    // A refusal is not in doubt.
+    fireEvent.click(within(form).getByRole("button", { name: "Create again" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+    expect(creates()).toHaveLength(2);
+  });
+
+  it("does not close on Escape while creating, and says a failure that came after the form was closed when it opens again", async () => {
+    const slow = gated();
+    const form = await openForm("github");
+    const title = within(form).getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "Closed meanwhile" } });
+    title.focus();
+    fireEvent.keyDown(title, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(title.readOnly).toBe(true));
+    fireEvent.keyDown(title, { key: "Escape" });
+    expect(screen.getByTestId("new-issue")).toBeTruthy();
+
+    // Opening another issue closes it all the same.
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    expect(screen.queryByTestId("new-issue")).toBeNull();
+    mock.fail("issue_create", "forbidden", "You can't create issues in this repository.");
+    await act(async () => slow.release());
+
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    const again = await screen.findByTestId("new-issue");
+    expect((await within(again).findByRole("alert")).textContent).toContain("You can't create issues in this repository.");
+    expect((within(again).getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe("Closed meanwhile");
+  });
+
+  it("keeps the form open on an Escape that ends an input method's composition", async () => {
+    const form = await openForm("github");
+    const title = within(form).getByRole("textbox", { name: "Title" });
+    title.focus();
+    fireEvent.keyDown(title, { key: "Escape", isComposing: true });
+    expect(screen.getByTestId("new-issue")).toBeTruthy();
+    fireEvent.keyDown(title, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+  });
+
+  it("lets go of the issue pinned at the top once a list read holds it, or the filter changes", async () => {
+    const form = await openForm("github");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Pinned for now" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+
+    // A read too soon to hold it: still listed, as the detail pane last had it.
+    fireEvent.click(within(screen.getByTestId("issue-detail")).getByRole("button", { name: "Edit title" }));
+    const edit = within(screen.getByTestId("issue-detail")).getByRole("textbox", { name: "Title" });
+    fireEvent.change(edit, { target: { value: "Renamed since" } });
+    fireEvent.keyDown(edit, { key: "Enter" });
+    await waitFor(() => expect(mock.issue("github", "101").title).toBe("Renamed since"));
+    await refresh();
+    expect(listed("#101")?.textContent).toContain("Renamed since");
+
+    // Once a read holds it, it is the list's like any other.
+    listsNew = true;
+    await refresh();
+    expect(listed("#101")).toBeTruthy();
+    listsNew = false;
+    await refresh();
+    await waitFor(() => expect(listed("#101")).toBeUndefined());
+  });
+
+  it("does not pin the created issue into a list filtered since", async () => {
+    const form = await openForm("github");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Under no filter" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(listed("#101")).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "login" } });
+    await waitFor(() => expect(listed("#101")).toBeUndefined());
   });
 });
 

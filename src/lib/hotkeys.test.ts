@@ -111,6 +111,21 @@ describe("the binder and the reader's keys", () => {
     expect(arrows).toHaveBeenCalledTimes(1);
   });
 
+  it("leaves the keys of an input method's composition to it, Escape included", () => {
+    const escape = vi.fn();
+    const sidebar = vi.fn();
+    cleanups.push(registerHotkey("escape", escape, { global: true }), registerShortcut("app.toggleSidebar", sidebar));
+    const escapeEvent = press({ key: "Escape", isComposing: true });
+    // WebKit's keydown for the key that ends a composition.
+    press({ key: "Escape", keyCode: 229 } as KeyboardEventInit);
+    press({ key: "b", code: "KeyB", ctrlKey: true, isComposing: true });
+    expect(escape).not.toHaveBeenCalled();
+    expect(sidebar).not.toHaveBeenCalled();
+    expect(escapeEvent.defaultPrevented).toBe(false);
+    press({ key: "Escape" });
+    expect(escape).toHaveBeenCalledTimes(1);
+  });
+
   it("binds nothing while the Shortcuts tab records keys", () => {
     const handler = vi.fn();
     cleanups.push(registerShortcut("app.toggleSidebar", handler));

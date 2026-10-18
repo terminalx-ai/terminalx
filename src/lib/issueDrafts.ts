@@ -39,6 +39,8 @@ export const draftHasContent = (draft: IssueDraft) =>
 
 const PREFIX = "terminalx.issueDraft:";
 const drafts = new Map<string, IssueDraft>();
+// Bumped on every write and clear, so a create can tell whether the draft changed while it was out.
+const revisions = new Map<string, number>();
 const keyOf = (projectPath: string, provider: IssueProvider) => `${PREFIX}${provider}:${projectPath}`;
 
 export function getIssueDraft(projectPath: string, provider: IssueProvider): IssueDraft | null {
@@ -58,9 +60,15 @@ export function getIssueDraft(projectPath: string, provider: IssueProvider): Iss
   return null;
 }
 
+/** Which write of the draft this is: the same number after a create means nothing was typed meanwhile. */
+export const issueDraftRevision = (projectPath: string, provider: IssueProvider) => revisions.get(keyOf(projectPath, provider)) ?? 0;
+
+const bump = (key: string) => revisions.set(key, (revisions.get(key) ?? 0) + 1);
+
 export function setIssueDraft(projectPath: string, provider: IssueProvider, draft: IssueDraft) {
   const key = keyOf(projectPath, provider);
   drafts.set(key, draft);
+  bump(key);
   try {
     localStorage.setItem(key, JSON.stringify(draft));
   } catch {
@@ -71,6 +79,7 @@ export function setIssueDraft(projectPath: string, provider: IssueProvider, draf
 export function clearIssueDraft(projectPath: string, provider: IssueProvider) {
   const key = keyOf(projectPath, provider);
   drafts.delete(key);
+  bump(key);
   try {
     localStorage.removeItem(key);
   } catch {

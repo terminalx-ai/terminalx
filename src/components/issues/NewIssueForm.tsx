@@ -18,9 +18,9 @@ import { MarkdownEditor } from "@/components/issues/MarkdownEditor";
 import { AvatarStack, PeoplePicker, PeoplePickerAction } from "@/components/issues/People";
 import { LabelChooser, LabelDot, PRIORITY_NAMES, PriorityIcon, useEscapeCancels } from "@/components/issues/IssueFields";
 import { groupWorkflowStates } from "@/components/issues/IssueStatusPicker";
-import { errorMessage, type IssueTeam } from "@/lib/api";
-import { clearIssueDraft, draftHasContent, emptyIssueDraft, getIssueDraft, setIssueDraft, type IssueDraft } from "@/lib/issueDrafts";
-import { issueOps, type IssueCreate, type IssueDetails, type IssueOptions, type IssueProvider, type IssueTemplate, type IssueUser } from "@/lib/issueOps";
+import { errorMessage, issues, type IssueTeam } from "@/lib/api";
+import { clearIssueDraft, draftHasContent, emptyIssueDraft, getIssueDraft, issueDraftRevision, setIssueDraft, type IssueDraft } from "@/lib/issueDrafts";
+import { isIssueOpError, issueOps, type IssueCreate, type IssueDetails, type IssueOptions, type IssueProvider, type IssueTemplate, type IssueUser } from "@/lib/issueOps";
 import { bindingText } from "@/lib/shortcuts";
 
 /**
@@ -45,6 +45,64 @@ const draftKey = (projectPath: string, provider: IssueProvider) => `${provider}:
  * how it ended, rather than offer to create it twice.
  */
 const creating = new Map<string, Promise<IssueDetails>>();
+
+/** How a create ended badly; kept here when the form was closed meanwhile, and said when it opens again. */
+interface Failure {
+  message: string;
+  /** The answer was lost, not refused: the issue may exist all the same. */
+  uncertain: boolean;
+}
+const failed = new Map<string, Failure>();
+
+/** A create whose answer never came, and no issue it could have made turned up. */
+class Unanswered {
+  constructor(readonly cause: unknown) {}
+}
+
+// A dropped connection, a timeout or a reply that couldn't be read can all come after the provider made the issue.
+const unanswered = (e: unknown) => !isIssueOpError(e) || e.kind === "network" || e.kind === "other";
+
+function failureOf(e: unknown): Failure {
+  if (e instanceof Unanswered) {
+    return {
+      message: `${errorMessage(e.cause)} The issue may have been created all the same, but it isn't in the list: look there before you create it again. Nothing was lost: what you wrote is still here.`,
+      uncertain: true,
+    };
+  }
+  return { message: `${errorMessage(e)} Nothing was lost: what you wrote is still here.`, uncertain: false };
+}
+
+// How long before the create was sent an issue found afterwards may say it was made: the clocks may differ.
+const CLOCK_SLACK_MS = 2 * 60_000;
+
+/**
+ * The issue a create whose answer was lost made, if it did: one with the
+ * same title, by the reader, made since the create was sent. GitHub's
+ * list without a search is newest first and not behind a search index;
+ * Linear's is the team's, most recently updated first.
+ */
+export async function findJustCreated(projectPath: string, provider: IssueProvider, input: IssueCreate, viewer: IssueUser | null | undefined, since: number): Promise<IssueDetails | null> {
+  const me = viewer ?? (await issueOps.viewer(projectPath, provider).catch(() => null));
+  if (!me) return null;
+  const rows = await issues.list(projectPath, provider, { teamId: provider === "linear" ? input.teamId : null });
+  for (const row of rows.filter((each) => each.title.trim() === input.title).slice(0, 3)) {
+    const issue = await issueOps.details(projectPath, provider, row.id).catch(() => null);
+    if (issue && issue.author?.id === me.id && Date.parse(issue.createdAt) >= since - CLOCK_SLACK_MS) return issue;
+  }
+  return null;
+}
+
+async function createOrFind(projectPath: string, provider: IssueProvider, input: IssueCreate, viewer: IssueUser | null | undefined): Promise<IssueDetails> {
+  const since = Date.now();
+  try {
+    return await issueOps.create(projectPath, provider, input);
+  } catch (e) {
+    if (!unanswered(e)) throw e;
+    const found = await findJustCreated(projectPath, provider, input, viewer, since).catch(() => null);
+    if (found) return found;
+    throw new Unanswered(e);
+  }
+}
 
 /** What the provider is asked to create: the draft, with only the labels and people it still offers. */
 export function createInput(draft: IssueDraft, provider: IssueProvider, options: IssueOptions | null): IssueCreate {
@@ -120,6 +178,8 @@ export function NewIssueForm({
   const [draft, setDraftState] = useState<IssueDraft>(() => getIssueDraft(projectPath, provider) ?? emptyIssueDraft(provider === "linear" ? defaultTeamId : null));
   const [busy, setBusy] = useState(() => creating.has(key));
   const [error, setError] = useState<string | null>(null);
+  // The last create may have made the issue though no answer came: creating again says so.
+  const [uncertain, setUncertain] = useState(false);
   const [options, setOptions] = useState<IssueOptions | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   const [templates, setTemplates] = useState<IssueTemplate[]>([]);
@@ -153,8 +213,15 @@ export function NewIssueForm({
   useEffect(() => {
     if (provider !== "linear" || draft.teamId) return;
     const team = defaultTeamId ?? (teams.length === 1 ? teams[0].id : null);
-    if (team) setDraftState((now) => (now.teamId ? now : { ...now, teamId: team }));
-  }, [provider, draft.teamId, defaultTeamId, teams]);
+    if (!team) return;
+    setDraftState((now) => {
+      if (now.teamId) return now;
+      const next = { ...now, teamId: team };
+      // A draft with something in it keeps its team; an empty one takes the list's again next time.
+      if (draftHasContent(next)) setIssueDraft(projectPath, provider, next);
+      return next;
+    });
+  }, [projectPath, provider, draft.teamId, defaultTeamId, teams]);
 
   const scope = provider === "linear" ? draft.teamId : "repo";
   useEffect(() => {
@@ -191,21 +258,31 @@ export function NewIssueForm({
         () => {
           if (!live.current) return;
           setBusy(false);
+          setUncertain(false);
           setDraftState(getIssueDraft(projectPath, provider) ?? emptyIssueDraft(provider === "linear" ? defaultTeamId : null));
         },
         (e) => {
           if (!live.current) return;
           setBusy(false);
-          setError(`${errorMessage(e)} Nothing was lost: what you wrote is still here.`);
+          const failure = failed.get(key) ?? failureOf(e);
+          failed.delete(key);
+          setError(failure.message);
+          setUncertain(failure.uncertain);
           titleBox.current?.focus({ preventScroll: true });
         },
       );
     },
-    [projectPath, provider, defaultTeamId],
+    [key, projectPath, provider, defaultTeamId],
   );
   useEffect(() => {
     const pending = creating.get(key);
-    if (pending) watch(pending);
+    if (pending) return watch(pending);
+    // One that failed after the form was closed: said now.
+    const failure = failed.get(key);
+    if (!failure) return;
+    failed.delete(key);
+    setError(failure.message);
+    setUncertain(failure.uncertain);
   }, [key, watch]);
 
   const multiple = !!options?.capabilities.multiAssignee;
@@ -226,22 +303,26 @@ export function NewIssueForm({
       if (!draft.title.trim()) titleBox.current?.focus();
       return;
     }
-    const sent = draft;
-    const pending = issueOps.create(projectPath, provider, createInput(sent, provider, options)).then((issue) => {
-      // Only the draft that was sent: one typed since, in a form opened again, stays.
-      if (getIssueDraft(projectPath, provider) === sent) clearIssueDraft(projectPath, provider);
+    // Only the draft that was sent: one typed since, in a form opened again, stays.
+    const revision = issueDraftRevision(projectPath, provider);
+    const pending = createOrFind(projectPath, provider, createInput(draft, provider, options), viewer).then((issue) => {
+      if (issueDraftRevision(projectPath, provider) === revision) clearIssueDraft(projectPath, provider);
       return issue;
     });
     creating.set(key, pending);
     const done = () => creating.get(key) === pending && creating.delete(key);
-    pending.then(done, done);
+    pending.then(done, (e) => {
+      failed.set(key, failureOf(e));
+      done();
+    });
     pending.then((issue) => onCreated(projectPath, issue), () => {});
     setError(null);
     watch(pending);
   };
 
   const close = useCallback(() => onClose(), [onClose]);
-  useEscapeCancels(box, true, close);
+  // Not while the create is out: its failure is said here.
+  useEscapeCancels(box, true, close, busy);
 
   const chooseTemplate = (next: IssueTemplate | null) => {
     setReplacing(null);
@@ -597,7 +678,7 @@ export function NewIssueForm({
             {/* Never disabled: a disabled button drops the focus, and the keys with it. */}
             <Button variant="accent" size="sm" aria-disabled={busy || !!missing} onClick={submit} title={missing ?? undefined}>
               {busy && <Loader2 className="animate-spin" />}
-              {busy ? "Creating…" : "Create issue"}
+              {busy ? "Creating…" : uncertain ? "Create again" : "Create issue"}
             </Button>
           </div>
         </div>

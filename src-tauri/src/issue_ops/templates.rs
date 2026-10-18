@@ -33,7 +33,14 @@ pub struct IssueTemplate {
 /// The templates in `<project>/.github/ISSUE_TEMPLATE`, by file name. None
 /// when there is no such folder.
 pub fn list(project: &Path) -> Vec<IssueTemplate> {
-    let Ok(entries) = std::fs::read_dir(project.join(".github").join("ISSUE_TEMPLATE")) else { return Vec::new() };
+    let github = project.join(".github");
+    let folder = github.join("ISSUE_TEMPLATE");
+    // Only the checkout's own folder: one linked from elsewhere could be anything on disk.
+    // (A linked template file is skipped below: an entry's metadata does not follow the link.)
+    if [&github, &folder].iter().any(|path| std::fs::symlink_metadata(path).map_or(true, |meta| !meta.is_dir())) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&folder) else { return Vec::new() };
     let mut templates: Vec<IssueTemplate> = entries
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md")))
@@ -148,6 +155,31 @@ mod tests {
         std::fs::write(folder.join("form.yml"), "name: Form\nbody: []\n").unwrap();
         let names: Vec<String> = list(dir.path()).into_iter().map(|template| template.name).collect();
         assert_eq!(names, vec!["Bug report", "Feature request"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_no_link_out_of_the_checkout() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "---\nname: Elsewhere\n---\nNot the repo's\n").unwrap();
+        let linked_folder = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(linked_folder.path().join(".github")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), linked_folder.path().join(".github").join("ISSUE_TEMPLATE")).unwrap();
+        assert!(list(linked_folder.path()).is_empty());
+
+        let linked_github = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("ISSUE_TEMPLATE")).unwrap();
+        std::fs::write(outside.path().join("ISSUE_TEMPLATE").join("bug.md"), "Steps\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), linked_github.path().join(".github")).unwrap();
+        assert!(list(linked_github.path()).is_empty());
+
+        let linked_file = tempfile::tempdir().unwrap();
+        let folder = linked_file.path().join(".github").join("ISSUE_TEMPLATE");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("bug.md"), "Steps\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), folder.join("secret.md")).unwrap();
+        let names: Vec<String> = list(linked_file.path()).into_iter().map(|template| template.name).collect();
+        assert_eq!(names, vec!["bug"]);
     }
 
     #[test]

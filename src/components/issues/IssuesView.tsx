@@ -117,8 +117,10 @@ export function IssuesView({
   const [statusOpen, setStatusOpen] = useState(false);
   // The new-issue form, in the detail column in place of the open issue.
   const [composing, setComposing] = useState(false);
-  // The issue created here last: listed and open even when the list read since doesn't hold it yet.
-  const created = useRef<{ projectPath: string; issue: IssueDetails } | null>(null);
+  // The issue created here last: listed and open even when the list read since doesn't hold it yet, under
+  // the filter it was made under. Let go of once a read holds it or the filter changes.
+  const created = useRef<{ projectPath: string; filter: string; issue: Issue } | null>(null);
+  const filterKey = `${assignedToMe}\n${teamId ?? ""}\n${search}`;
   const [copied, setCopied] = useState(false);
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
@@ -233,13 +235,15 @@ export function IssuesView({
       try {
         const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
         if (live) {
+          // An issue just created here may not be in a list read so soon after; it stays at the top until it is.
+          const mine = created.current;
+          const pinned = mine && mine.projectPath === project.path && mine.issue.provider === provider && mine.filter === filterKey ? mine.issue : null;
+          if (!pinned || r.some((row) => writeKey(row) === writeKey(pinned))) created.current = null;
+          const pin = created.current ? pinned : null;
           // A row written to since the read started keeps the state the write gave it.
           setList((rows) => {
             const read = r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row));
-            // An issue just created here may not be in a list read so soon after; it stays at the top until it is.
-            const mine = created.current;
-            const pin = mine && mine.projectPath === project.path && mine.issue.provider === provider && !read.some((row) => writeKey(row) === writeKey(mine.issue));
-            return pin ? [mine.issue, ...read] : read;
+            return pin ? [rows.find((each) => writeKey(each) === writeKey(pin)) ?? pin, ...read] : read;
           });
           setListOf(`${project.path}\n${provider}`);
           setAssignedHere(new Map());
@@ -258,7 +262,7 @@ export function IssuesView({
       live = false;
       window.clearTimeout(t);
     };
-  }, [project, provider, assignedToMe, teamId, search, linear?.connected, tick]);
+  }, [project, provider, assignedToMe, teamId, search, filterKey, linear?.connected, tick]);
 
   // Body on demand: GitHub lists come without it. A refresh reads the open
   // issue again as well, since its state may have moved; what is on the page
@@ -391,14 +395,18 @@ export function IssuesView({
     const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
     setDetail((now) => (same(now) ? newer(now, next) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
+    const mine = created.current;
+    if (mine && same(mine.issue)) created.current = { ...mine, issue: next };
   }, []);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
   const projectNow = useRef(project?.path);
   projectNow.current = project?.path;
+  const filterNow = useRef(filterKey);
+  filterNow.current = filterKey;
   // Created: selected in the list and open beside it, ready for "Start session".
   const onIssueCreated = useCallback((projectPath: string, issue: IssueDetails) => {
     if (projectNow.current !== projectPath) return;
-    created.current = { projectPath, issue };
+    created.current = { projectPath, filter: filterNow.current, issue };
     setComposing(false);
     setProvider(issue.provider);
     setList((rows) => [issue, ...rows.filter((row) => writeKey(row) !== writeKey(issue))]);
@@ -435,7 +443,7 @@ export function IssuesView({
 
   return (
     <div className="flex h-full min-h-0">
-      <div className="flex min-w-0 flex-1 flex-col border-r border-hairline">
+      <div className="@container flex min-w-0 flex-1 flex-col border-r border-hairline">
         <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2 pt-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -505,19 +513,23 @@ export function IssuesView({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <div className="ml-auto flex items-center gap-1">
-            <div className="flex h-7 items-center gap-1 rounded-md bg-well px-2">
+          <div className="ml-auto flex min-w-0 max-w-full items-center gap-1">
+            <div className="flex h-7 min-w-0 items-center gap-1 rounded-md bg-well px-2">
               <Search className="size-3.5 text-faint" />
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search"
-                className="w-36 bg-transparent text-xs outline-none placeholder:text-faint"
+                className="w-36 min-w-0 bg-transparent text-xs outline-none placeholder:text-faint"
               />
             </div>
-            <Button variant="secondary" size="sm" className="gap-1" onClick={() => setComposing(true)} disabled={!project}>
-              <Plus /> New issue
-            </Button>
+            {/* A narrow list column keeps the icon alone, so the toolbar stays on its side. */}
+            <WithTooltip label="New issue">
+              <Button variant="secondary" size="sm" className="shrink-0 gap-1" aria-label="New issue" onClick={() => setComposing(true)} disabled={!project}>
+                <Plus />
+                <span className="hidden @lg:inline">New issue</span>
+              </Button>
+            </WithTooltip>
             <WithTooltip label="Refresh">
               <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => setTick((t) => t + 1)}>
                 {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
