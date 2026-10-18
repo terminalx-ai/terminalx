@@ -26,17 +26,26 @@ export function issuePrompt(issue: Issue & { description?: string }, comments?: 
   return `Work on ${provider} issue ${issue.identifier}: ${issue.title}${body}${discussion}\n\nIssue link: ${issue.url}\nWhen done, summarise what changed.`;
 }
 
+/** How long a session's start waits for the thread before going without it. */
+export const PROMPT_COMMENTS_WAIT_MS = 15_000;
+
 /**
  * `issuePrompt` with the issue's comments read from its provider. A thread
- * that cannot be read does not stop the session: the prompt is then what it
- * was before comments were read.
+ * that cannot be read, or not in `PROMPT_COMMENTS_WAIT_MS`, does not stop the
+ * session: the prompt is then what it was before comments were read.
  */
-export async function issuePromptWithComments(projectPath: string, issue: Issue & { description?: string }): Promise<string> {
+export async function issuePromptWithComments(projectPath: string, issue: Issue & { description?: string }, waitMs = PROMPT_COMMENTS_WAIT_MS): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("The issue's comments took too long to read.")), waitMs);
+  });
   try {
-    return issuePrompt(issue, await readAllComments(projectPath, issue.provider, issue.id));
+    return issuePrompt(issue, await Promise.race([readAllComments(projectPath, issue.provider, issue.id), late]));
   } catch (error) {
     console.error("issue comments were not read for the prompt", error);
     return issuePrompt(issue);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

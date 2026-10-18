@@ -17,13 +17,15 @@ const comment = (index: number, body = `Comment ${index}`): IssueComment => ({
   viewerCanDelete: false,
 });
 
-beforeEach(() => invoke.mockReset());
+beforeEach(() => {
+  invoke.mockReset();
+});
 
 describe("readAllComments", () => {
   it("follows the cursor to the end, oldest first", async () => {
     const all = Array.from({ length: 120 }, (_, index) => comment(index));
     const issues = createIssueOpsMock({ issues: [githubIssueFixture()], comments: { "github:41": all } });
-    invoke.mockImplementation((command?: string, args?: Record<string, unknown>) => (command ? issues.handle(command, args) : undefined));
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => issues.handle(command, args));
     expect((await readAllComments("/repo", "github", "41")).map((each) => each.id)).toEqual(all.map((each) => each.id));
   });
 
@@ -76,12 +78,15 @@ describe("issuePrompt", () => {
 
   it("reads the thread for the prompt, and starts without it when it cannot", async () => {
     const issues = createIssueOpsMock();
-    invoke.mockImplementation((command?: string, args?: Record<string, unknown>) => (command ? issues.handle(command, args) : undefined));
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => issues.handle(command, args));
     const github = githubIssueFixture();
     expect(await issuePromptWithComments("/repo", github)).toContain("**alex** (2026-09-01):\nSeen it on staging too.");
     issues.fail("issue_comments", "not_signed_in");
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(await issuePromptWithComments("/repo", github)).toBe(issuePrompt(github));
+    // A provider that never answers does not hold the session's start.
+    invoke.mockImplementation(() => new Promise(() => undefined));
+    expect(await issuePromptWithComments("/repo", github, 20)).toBe(issuePrompt(github));
     logged.mockRestore();
   });
 });

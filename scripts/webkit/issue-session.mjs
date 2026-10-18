@@ -37,6 +37,7 @@ try {
           list_models: [model("claude", "opus", "Opus", ["low", "high", "max"], "high"), model("codex", "gpt-6-astra", "GPT-6 Astra", ["low", "medium", "high"], "medium")],
           gh_available: true, github_repo: "demo/project", linear_status: { connected: true }, linear_teams: [],
           issues_list: [issue], issue_details: issue,
+          issue_comments: { comments: [{ id: "c1", author: { id: "kim", name: "kim", login: "kim" }, body: "Synthetic comment: keep Home and End working too.", createdAt: "2026-10-01T00:00:00Z", viewerCanEdit: false, viewerCanDelete: false }], nextCursor: null },
           preview_workspace_name: "demo-workspace",
           work_status: { isRepo: true, dirty: false, branch: "main", defaultBranch: "main", head: "abc" },
           load_tab_events: [],
@@ -123,6 +124,17 @@ try {
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the merge switch is offered, off, and fits the detail pane": startRow.inside && !startRow.scrolls && startRow.checked === "false",
       }, startRow);
+      // The thread sits under the description, inside the same pane, without a sideways scroll.
+      await page.getByText("Synthetic comment: keep Home and End working too.", { exact: true }).waitFor();
+      const thread = await page.getByRole("region", { name: "Comments", exact: true }).evaluate((section) => {
+        const pane = section.parentElement.parentElement;
+        const bounds = pane.getBoundingClientRect();
+        const parts = [...section.querySelectorAll("li, li > *")].map((node) => node.getBoundingClientRect());
+        return { inside: parts.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1), scrolls: pane.scrollWidth > pane.clientWidth, items: section.querySelectorAll("li").length };
+      });
+      failed += report(`${mode}, ${provider}, ${width}px`, {
+        "the comment thread fits the detail pane": thread.items === 1 && thread.inside && !thread.scrolls,
+      }, thread);
       if (shots) await page.screenshot({ path: join(shots, `issue-${mode}-${provider}-${width}.png`) });
       await page.getByRole("button", { name: "Start session", exact: true }).click();
       await page.getByTitle("Model: GPT-6 Astra · High", { exact: true }).waitFor();
@@ -137,6 +149,7 @@ try {
       assert.deepEqual(started.start, { sessionId: "demo-session", tabId: "demo-tab", autoMerge: false });
       assert.ok(started.prompt.startsWith(`Work on ${provider === "github" ? "GitHub" : "Linear"} issue `), started.prompt);
       assert.ok(started.prompt.endsWith("\n\nEnd every reply with a status block."), started.prompt);
+      assert.ok(started.prompt.includes("## Comments\n\n**kim** (2026-10-01):\nSynthetic comment: keep Home and End working too."), started.prompt);
       await page.getByTestId("session-pipeline").waitFor();
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the session header says where its pipeline stands": (await page.getByTestId("session-pipeline").textContent()).trim() === "Working",
