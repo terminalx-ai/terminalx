@@ -96,20 +96,34 @@ function visibleUserText(text: string): string {
 }
 
 /**
- * Take a queued message out of the turn it was a note in. The agent held it
- * until that turn was over and then took it as its next prompt; a
- * `turn_started` naming its seq says so (the message itself is published
- * once, when it is sent). One the agent took mid-turn has no such event and
- * stays where it is.
+ * Take a message out of where it was drawn, to be the prompt of the turn the
+ * agent has now started on it; a `turn_started` naming its seq says so (the
+ * message itself is published once, when it is sent).
+ *
+ * Usually it is a queued message, a note in the turn it waited behind: the
+ * agent held it until that turn was over. One the agent took mid-turn has no
+ * such event and stays where it is. A turn the note was alone in goes with it.
+ *
+ * It can also be a prompt. One sent just as the agent began a turn of its own
+ * (#540), before the app had heard of it, was drawn as the start of a turn,
+ * and that turn's work beneath it; the prompt leaves that work behind.
  */
-function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+function takePrompt(turns: Turn[], current: Turn | null, seq: number): { prompt: NonNullable<Turn["prompt"]>; moved: boolean } | undefined {
   for (let index = turns.length - 1; index >= 0; index--) {
-    const work = turns[index].work;
-    const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
+    const turn = turns[index];
+    if (turn.prompt?.seq === seq) {
+      // Nothing under it yet: it is where it belongs.
+      if (!turn.work.length && !turn.completed) return undefined;
+      const prompt = turn.prompt;
+      turn.prompt = undefined;
+      return { prompt, moved: true };
+    }
+    const at = turn.work.findIndex((item) => item.kind === "queued" && item.seq === seq);
     if (at < 0) continue;
-    const [held] = work.splice(at, 1);
+    const [held] = turn.work.splice(at, 1);
     if (held.kind !== "queued") return undefined;
-    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+    if (turn !== current && !turn.prompt && !turn.work.length && !turn.completed) turns.splice(index, 1);
+    return { prompt: { text: held.text, images: held.images, ts: held.ts ?? turn.completed?.ts ?? "", seq: held.seq }, moved: false };
   }
   return undefined;
 }
@@ -170,8 +184,10 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       case "user_message": {
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
         if (!text.trim() && !payload.images?.length && text !== payload.text) break;
-        if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
+        // Queued behind the turn the agent is in, even one whose start is not
+        // here yet: a turn it began without a prompt (#540).
+        if (payload.queued) {
+          ensureTurn(event).work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
@@ -191,10 +207,17 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         break;
       }
       case "turn_started": {
-        if (payload.promptSeq == null) break;
-        const prompt = takeQueued(turns, payload.promptSeq);
-        if (!prompt) break;
-        if (current && !current.completed && !current.prompt) {
+        if (payload.promptSeq == null) {
+          // A turn with no prompt of its own: the agent started it by itself
+          // (#540). Where it starts, the agent is working.
+          ensureTurn(event);
+          workingSince ??= Date.parse(event.ts);
+          break;
+        }
+        const taken = takePrompt(turns, current, payload.promptSeq);
+        if (!taken) break;
+        const { prompt, moved } = taken;
+        if (!moved && current && !current.completed && !current.prompt) {
           current.prompt = prompt;
         } else {
           for (const call of calls.values()) if (!call.result) call.abandoned = true;

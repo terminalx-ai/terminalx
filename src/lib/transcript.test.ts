@@ -229,6 +229,102 @@ describe("buildTranscript", () => {
     expect(t.turns[1].prompt).toBeUndefined();
   });
 
+  // #540: what the app logs when the agent starts a turn by itself (a
+  // scheduled task) and the reader sends a message while it runs.
+  it("draws a turn the agent started by itself as working, with a message sent meanwhile after it", () => {
+    const queued = ev({ type: "user_message", text: "a goal for the work", queued: true });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "assistant_text", text: "done" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started" }),
+      ev({ type: "status", text: "A scheduled task started this turn." }),
+      queued,
+      ev({ type: "tool_call_started", callId: "d", name: "Bash", toolType: "shell", input: { command: "date -u" }, title: "date -u" }),
+      ev({ type: "assistant_text", text: "Status: all green" }),
+    ];
+    let t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "queued", "tool", "text"]);
+    expect(t.turns[1].live).toBe(true);
+    expect(t.workingSince).toBe(Date.parse(events[3].ts));
+
+    events.push(
+      ev({ type: "turn_completed", status: "ok", authFailed: false, durationMs: 4000 }),
+      ev({ type: "turn_started", promptSeq: queued.seq }),
+      ev({ type: "assistant_text", text: "on it" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+    );
+    t = buildTranscript(events, false);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined, "a goal for the work"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool", "text"]);
+    expect(t.turns[1].completed?.durationMs).toBe(4000);
+    expect(t.turns[2].work.map((w) => w.kind === "text" && w.text)).toEqual(["on it"]);
+  });
+
+  it("starts nothing new at a promptless turn_started inside a prompted turn", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "go", queued: false }),
+      ev({ type: "turn_started", model: "auto" }),
+      ev({ type: "assistant_text", text: "went" }),
+    ], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.workingSince).toBe(Date.parse(t.turns[0].ts));
+  });
+
+  // The safety net: a message the app drew as the start of a turn just as the
+  // agent began one of its own. What the agent did before taking it stays
+  // where it was, without the message over it.
+  it("moves a prompt below the work the agent did before it took it", () => {
+    for (const midTurn of [false, true]) {
+      const prompt = ev({ type: "user_message", text: "a goal for the work", queued: false });
+      const events = [prompt, ev({ type: "assistant_text", text: "unprompted work" })];
+      if (!midTurn) events.push(ev({ type: "turn_completed", status: "ok", authFailed: false }));
+      events.push(ev({ type: "turn_started", promptSeq: prompt.seq }), ev({ type: "assistant_text", text: "on it" }), ev({ type: "turn_completed", status: "ok", authFailed: false }));
+      const t = buildTranscript(events, false);
+      expect(t.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, "a goal for the work"]);
+      expect(t.turns[0].work.map((w) => w.kind === "text" && w.text)).toEqual(["unprompted work"]);
+      expect(!!t.turns[0].completed).toBe(!midTurn);
+      expect(t.turns[1].prompt?.seq).toBe(prompt.seq);
+      expect(t.turns[1].work.map((w) => w.kind === "text" && w.text)).toEqual(["on it"]);
+      expect(t.turns[1].completed?.status).toBe("ok");
+    }
+  });
+
+  it("leaves a prompt that nothing came between where it is", () => {
+    const prompt = ev({ type: "user_message", text: "go", queued: false });
+    const t = buildTranscript([prompt, ev({ type: "turn_started", promptSeq: prompt.seq }), ev({ type: "assistant_text", text: "went" })], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].prompt?.text).toBe("go");
+    expect(t.turns[0].work).toHaveLength(1);
+  });
+
+  // The agent was working on something the chat had not drawn yet (a turn
+  // it started by itself, a prompt typed in its terminal whose record is
+  // still to come). A message sent then is queued, and shown as queued.
+  it("keeps a message queued before any of the running turn has arrived as a note, and drops the note's turn once it is taken", () => {
+    const queued = ev({ type: "user_message", text: "then this", queued: true });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      queued,
+    ];
+    let t = buildTranscript(events, true);
+    expect(t.turns).toHaveLength(2);
+    expect(t.turns[1].prompt).toBeUndefined();
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["queued"]);
+
+    events.push(
+      ev({ type: "user_message", text: "typed in the terminal", queued: false }),
+      ev({ type: "assistant_text", text: "typed one done" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started", promptSeq: queued.seq }),
+      ev({ type: "assistant_text", text: "then done" }),
+    );
+    t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", "typed in the terminal", "then this"]);
+  });
+
   it("reads context occupancy off the latest reading", () => {
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),

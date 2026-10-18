@@ -19,6 +19,11 @@
 //! `queued_command` attachment when it was typed while a turn was running —
 //! the CLI hands that one to the model with the next tool result and never
 //! writes a `user` record for it.
+//!
+//! Not every `user` record that starts a turn is somebody's prompt. The CLI
+//! starts turns by itself too — a scheduled task firing, a background task
+//! reporting in, another agent's message — and those start the turn without
+//! drawing a message from the reader (#540).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -297,18 +302,33 @@ pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
 }
 
 /// [`decode_line`], and what the record says about the turn, for the session
-/// watcher: a prompt opens one; the `turn_duration` record the CLI writes
-/// when it prints "Worked for …", or an interruption, ends it. Both come from
-/// the one parse of the record.
+/// watcher: a prompt opens one, and so does a turn the CLI started by itself;
+/// the `turn_duration` record the CLI writes when it prints "Worked for …",
+/// or an interruption, ends it. Both come from the one parse of the record.
 pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     if line.trim().is_empty() {
         return None;
     }
     let v = serde_json::from_str::<Value>(line).ok()?;
-    if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
+    if v["isSidechain"].as_bool().unwrap_or(false) {
         return None;
     }
     if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
+        return None;
+    }
+    // Before the meta check: a scheduled prompt and another agent's message
+    // are meta records, and each starts a turn all the same.
+    if v["type"] == "user" {
+        match speaker(&v) {
+            Speaker::Person => {}
+            Speaker::Itself => {
+                started_by_itself(&v, out);
+                return Some(TurnMark::Opened);
+            }
+            Speaker::Aside => return None,
+        }
+    }
+    if v["isMeta"].as_bool().unwrap_or(false) {
         return None;
     }
     match v["type"].as_str().unwrap_or("") {
@@ -368,6 +388,87 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
 #[cfg(test)]
 fn turn_mark(line: &str) -> Option<TurnMark> {
     decode_marked(line, &HashSet::new(), &mut Vec::new())
+}
+
+/// Whose words a `user` record is.
+#[derive(Debug, PartialEq)]
+enum Speaker {
+    /// Somebody prompting the CLI: the reader, or a program driving it.
+    Person,
+    /// The CLI starting a turn of its own (#540).
+    Itself,
+    /// Nobody's, and the start of nothing: what the CLI keeps in the
+    /// conversation for the model alone.
+    Aside,
+}
+
+/// Claude Code tags the prompt that opens each turn with where it came from
+/// (`turnOrigin`, 2.1.283 on). `human` is the reader. `sdk` is a program
+/// that drives the CLI, prompting for whoever it works for, and `unknown` is
+/// a prompt the CLI could not place; both are taken as prompts, as every
+/// prompt was before the CLI said. Anything else — `scheduled` (`/loop`,
+/// cron, a wakeup), `task_notification`, `peer` (another agent, a channel),
+/// `auto_continuation`, `host_synthetic`, `system` — is the CLI starting a
+/// turn by itself. It writes those as meta records or as notification markup,
+/// and either way nobody typed them. Without a turn to start from, the app
+/// believed the CLI idle all through one, and published a message sent
+/// meanwhile as the start of a new turn: above the reply it then drew
+/// beneath it.
+///
+/// What compaction kept of the conversation carries the origin of the turn it
+/// was made in, and is that turn's, not a new one. A background task's note
+/// the CLI keeps only in the transcript (`queueTranscriptOnly`) starts none
+/// either.
+fn speaker(v: &Value) -> Speaker {
+    if v["isCompactSummary"].as_bool().unwrap_or(false) {
+        return Speaker::Aside;
+    }
+    match v["turnOrigin"].as_str() {
+        None | Some("human" | "sdk" | "unknown") => {}
+        Some(_) => return Speaker::Itself,
+    }
+    match v["origin"]["kind"].as_str() {
+        None | Some("human") => Speaker::Person,
+        Some(_) if v["queueTranscriptOnly"].as_bool().unwrap_or(false) => Speaker::Aside,
+        // A notification with no `turnOrigin` beside it, as the CLI wrote
+        // them before it had one.
+        Some(_) => Speaker::Itself,
+    }
+}
+
+/// A turn the CLI started by itself: its start, and a line at the top of it
+/// saying what started it, where a prompt would otherwise be.
+fn started_by_itself(v: &Value, out: &mut Vec<Payload>) {
+    out.push(Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None });
+    let mut say = |text: String| out.push(Payload::Status { text });
+    let origin = v["turnOrigin"].as_str().unwrap_or_else(|| v["origin"]["kind"].as_str().unwrap_or(""));
+    match origin {
+        "scheduled" => say("A scheduled task started this turn.".into()),
+        "task_notification" | "task-notification" => {
+            // Each notification sums itself up: `Agent "…" finished`,
+            // `Background command "…" completed (exit code 0)`.
+            let text = text_of(&v["message"]["content"]);
+            let mut rest = text.as_str();
+            let mut said = false;
+            while let Some(at) = rest.find("<summary>") {
+                rest = &rest[at..];
+                let Some(summary) = tagged(rest, "summary") else { break };
+                if !summary.is_empty() {
+                    say(summary.to_string());
+                    said = true;
+                }
+                rest = &rest["<summary>".len()..];
+            }
+            if !said {
+                say("A background task finished.".into());
+            }
+        }
+        "peer" => say(match v["origin"]["name"].as_str().map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => format!("A message from {name} started this turn."),
+            None => "A message from another agent started this turn.".into(),
+        }),
+        _ => say("Claude Code started this turn by itself.".into()),
+    }
 }
 
 fn decode_user(v: &Value, out: &mut Vec<Payload>) {
@@ -522,6 +623,8 @@ mod tests {
                 Payload::UsageUpdate(_) => "usage",
                 Payload::TurnCompleted { .. } => "end",
                 Payload::ContextCompacted { .. } => "compacted",
+                Payload::TurnStarted { prompt_seq: None, .. } => "start",
+                Payload::Status { .. } => "status",
                 _ => "other",
             })
             .collect()
@@ -669,6 +772,143 @@ mod tests {
             assert_eq!(decode_marked(&record, &HashSet::new(), &mut out), None, "{record}");
             assert!(out.is_empty(), "{record}");
         }
+    }
+
+    /// Turns Claude Code 2.1.284–2.1.300 started by itself, as it wrote them,
+    /// cut down to the keys the decoder reads and with the text replaced: a
+    /// `/loop` wakeup, a background agent reporting in, and a message from
+    /// another session. The wakeup's `scheduled_task_fire` lands before the
+    /// previous turn's own end, as it did in the file it was taken from.
+    const SELF_STARTED: &str = r#"{"parentUuid":"p0","isSidechain":false,"type":"user","uuid":"h1","cwd":"/w","sessionId":"s","promptSource":"typed","turnOrigin":"human","origin":{"kind":"human"},"message":{"role":"user","content":"Fix the flaky test"}}
+{"parentUuid":"h1","isSidechain":false,"type":"assistant","uuid":"h2","cwd":"/w","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Fixed."}]}}
+{"parentUuid":"h2","isSidechain":false,"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (Sep 29 1:10am)","isMeta":false,"uuid":"f1","taskId":"c2304d0e","prompt":"Report progress","taskKind":"loop","cwd":"/w","sessionId":"s","version":"2.1.284"}
+{"parentUuid":"h2","isSidechain":false,"type":"system","subtype":"stop_hook_summary","hookCount":1,"uuid":"h3","cwd":"/w","sessionId":"s"}
+{"parentUuid":"h3","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":8018,"uuid":"h4","isMeta":false,"cwd":"/w","sessionId":"s"}
+{"parentUuid":"f1","isSidechain":false,"promptId":"p1","type":"user","message":{"role":"user","content":"Report progress."},"isMeta":true,"uuid":"s1","promptSource":"system","scheduledTaskId":"c2304d0e","scheduledFireId":"f1","turnOrigin":"scheduled","turnPosition":{"promptIndex":1,"turnIndex":3},"queuePriority":"later","cwd":"/w","sessionId":"s","version":"2.1.284"}
+{"parentUuid":"s1","isSidechain":false,"type":"assistant","uuid":"s2","cwd":"/w","sessionId":"s","message":{"id":"m2","role":"assistant","content":[{"type":"tool_use","id":"toolu_s","name":"Bash","input":{"command":"date -u"}}]}}
+{"parentUuid":"s2","isSidechain":false,"type":"user","uuid":"s3","cwd":"/w","sessionId":"s","message":{"role":"user","content":[{"tool_use_id":"toolu_s","type":"tool_result","content":"Mon Sep 29 01:10:00 UTC 2026"}]}}
+{"parentUuid":"s3","isSidechain":false,"type":"assistant","uuid":"s4","cwd":"/w","sessionId":"s","message":{"id":"m3","role":"assistant","content":[{"type":"text","text":"Status: all green."}]}}
+{"parentUuid":"s4","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":4000,"uuid":"s5","isMeta":false,"cwd":"/w","sessionId":"s"}
+{"parentUuid":"s5","isSidechain":false,"promptId":"p2","type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a88</task-id>\n<tool-use-id>toolu_b</tool-use-id>\n<output-file>/tmp/a88.output</output-file>\n<status>completed</status>\n<summary>Agent \"Console fixes\" finished</summary>\n<result>All done.</result>\n</task-notification>"},"uuid":"t1","permissionMode":"bypassPermissions","origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","turnOrigin":"task_notification","turnPosition":{"promptIndex":1,"turnIndex":2},"queueSkipAttachments":true,"cwd":"/w","sessionId":"s","version":"2.1.300"}
+{"parentUuid":"t1","isSidechain":false,"type":"assistant","uuid":"t2","cwd":"/w","sessionId":"s","message":{"id":"m4","role":"assistant","content":[{"type":"text","text":"The agent finished."}]}}
+{"parentUuid":"t2","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":2000,"uuid":"t3","isMeta":false,"cwd":"/w","sessionId":"s"}
+{"parentUuid":"t3","isSidechain":false,"promptId":"p3","type":"user","message":{"role":"user","content":"Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-name=\"clever-amber-marten\">\nNo reply needed.\n</cross-session-message>"},"isMeta":true,"uuid":"r1","origin":{"kind":"peer","from":"uds:/tmp/cc-socks/1.sock","name":"clever-amber-marten","body":"No reply needed."},"promptSource":"system","turnOrigin":"peer","cwd":"/w","sessionId":"s","version":"2.1.284"}
+{"parentUuid":"r1","isSidechain":false,"type":"assistant","uuid":"r2","cwd":"/w","sessionId":"s","message":{"id":"m5","role":"assistant","content":[{"type":"text","text":"Noted."}]}}
+{"parentUuid":"r2","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":1000,"uuid":"r3","isMeta":false,"cwd":"/w","sessionId":"s"}
+"#;
+
+    /// #540. Each turn the CLI started by itself opens and ends like any
+    /// other, says what started it, and draws nobody's message: the reader's
+    /// prompt is the only one in the chat.
+    #[test]
+    fn a_turn_the_cli_started_by_itself_opens_and_ends_with_no_prompt() {
+        let p = Streamer::at(0, decode_line).push(SELF_STARTED.as_bytes());
+        assert_eq!(kinds(&p), ["user", "text", "start", "status", "tool", "result", "text", "start", "status", "text", "start", "status", "text"]);
+        let prompts: Vec<&str> = p.iter().filter_map(|p| match p { Payload::UserMessage { text, .. } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(prompts, ["Fix the flaky test"]);
+        let said: Vec<&str> = p.iter().filter_map(|p| match p { Payload::Status { text } => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(said, ["A scheduled task started this turn.", "Agent \"Console fixes\" finished", "A message from clever-amber-marten started this turn."]);
+
+        // The wakeup fires before the turn ahead of it has ended; the record
+        // that starts the scheduled turn is its prompt, after that end.
+        let marks: Vec<TurnMark> = SELF_STARTED.lines().filter_map(turn_mark).collect();
+        use TurnMark::{Ended, Opened};
+        assert_eq!(marks, [Opened, Ended, Opened, Ended, Opened, Ended, Opened, Ended]);
+    }
+
+    /// Claude Code 2.1.302, run interactively against a stand-in model: a
+    /// prompt that schedules a one-shot cron job, the scheduled turn when it
+    /// fired, and a message typed while that turn was writing its reply,
+    /// which the CLI held until the turn was over. Captured whole, less the
+    /// context records the decoder never reads, with the working directory
+    /// replaced.
+    const SCHEDULED: &str = include_str!("fixtures/scheduled_turn.jsonl");
+
+    #[test]
+    fn a_real_scheduled_turn_is_a_turn_of_its_own_and_the_held_message_comes_after_it() {
+        let p = Streamer::at(0, decode_line).push(SCHEDULED.as_bytes());
+        let told: Vec<String> = p
+            .iter()
+            .filter_map(|p| match p {
+                Payload::UserMessage { text, .. } => Some(format!("user: {text}")),
+                Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
+                Payload::ToolCallStarted { name, .. } => Some(format!("tool: {name}")),
+                Payload::TurnStarted { .. } => Some("turn".into()),
+                Payload::Status { text } => Some(format!("status: {text}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            told,
+            [
+                "user: SCHEDULE-ME please",
+                "tool: CronCreate",
+                "reply: Scheduled.",
+                "turn",
+                "status: A scheduled task started this turn.",
+                "reply: Checking the time first.",
+                "tool: Bash",
+                "reply: Status report: all green and nothing needs a decision from you right now.",
+                "user: MY-GOAL: make the baselines comparable",
+                "reply: Working on MY-GOAL.",
+            ]
+        );
+        let marks: Vec<TurnMark> = SCHEDULED.lines().filter_map(turn_mark).collect();
+        use TurnMark::{Ended, Opened};
+        assert_eq!(marks, [Opened, Ended, Opened, Ended, Opened, Ended]);
+    }
+
+    /// What else the CLI writes as a `user` record with an origin: the
+    /// reader's prompts and a program's are prompts, and compaction's summary
+    /// and a note kept for the transcript alone are nobody's and start
+    /// nothing.
+    #[test]
+    fn only_a_person_s_prompt_is_drawn_as_one() {
+        let user = |extra: &str, content: &str| format!(r#"{{"type":"user","uuid":"x","cwd":"/w","message":{{"role":"user","content":"{content}"}}{extra}}}"#);
+        let decode = |line: String| {
+            let mut out = Vec::new();
+            let mark = decode_marked(&line, &HashSet::new(), &mut out);
+            (kinds(&out), mark)
+        };
+        let prompt = (vec!["user"], Some(TurnMark::Opened));
+        let started = (vec!["start", "status"], Some(TurnMark::Opened));
+        let nothing = (vec![], None);
+        // Someone prompting: typed, a suggestion taken, held and then sent, a program's.
+        assert_eq!(decode(user(r#","turnOrigin":"human","promptSource":"typed","origin":{"kind":"human"}"#, "hi")), prompt);
+        assert_eq!(decode(user(r#","turnOrigin":"human","promptSource":"queued","origin":{"kind":"human"}"#, "hi")), prompt);
+        assert_eq!(decode(user(r#","turnOrigin":"sdk","promptSource":"sdk""#, "hi")), prompt);
+        assert_eq!(decode(user(r#","turnOrigin":"unknown""#, "hi")), prompt);
+        // The CLI on its own, by every origin it names, meta or not.
+        for origin in ["scheduled", "task_notification", "peer", "auto_continuation", "host_synthetic", "system"] {
+            assert_eq!(decode(user(&format!(r#","turnOrigin":"{origin}","isMeta":true"#), "go on")), started, "{origin}");
+            assert_eq!(decode(user(&format!(r#","turnOrigin":"{origin}""#), "go on")), started, "{origin}");
+        }
+        // A notification from before the CLI named origins still starts a turn.
+        assert_eq!(decode(user(r#","origin":{"kind":"task-notification"}"#, r#"<task-notification><summary>Background command \"make\" completed (exit code 0)</summary></task-notification>"#)), started);
+        // Kept for the transcript alone: what a session left running before it was resumed.
+        assert_eq!(decode(user(r#","origin":{"kind":"task-notification"},"promptSource":"system","queueTranscriptOnly":true"#, r"<task-notification><status>stopped</status></task-notification>")), nothing);
+        // What compaction kept, whichever turn it was made in.
+        for origin in [r#","turnOrigin":"human""#, r#","turnOrigin":"task_notification""#, ""] {
+            assert_eq!(decode(user(&format!(r#"{origin},"isCompactSummary":true,"isVisibleInTranscriptOnly":true"#), "This session is being continued")), nothing, "{origin}");
+        }
+        // A meta record that names no origin stays out, as before.
+        assert_eq!(decode(user(r#","isMeta":true"#, "Caveat")), nothing);
+    }
+
+    #[test]
+    fn a_notification_says_each_thing_it_reports() {
+        let notified = |content: &str| {
+            let line = format!(r#"{{"type":"user","uuid":"n","turnOrigin":"task_notification","message":{{"role":"user","content":{}}}}}"#, serde_json::to_string(content).unwrap());
+            let mut out = Vec::new();
+            decode_line(&line, &HashSet::new(), &mut out);
+            out.iter().filter_map(|p| match p { Payload::Status { text } => Some(text.clone()), _ => None }).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            notified("<task-notification>\n<summary>Agent \"a\" finished</summary>\n</task-notification>\n<task-notification>\n<summary>Monitor event: \"b\"</summary>\n<event>b happened</event>\n</task-notification>"),
+            ["Agent \"a\" finished", "Monitor event: \"b\""]
+        );
+        assert_eq!(notified("<task-notification><task-id>1</task-id></task-notification>"), ["A background task finished."]);
+        assert_eq!(notified("<task-notification><summary> </summary></task-notification>"), ["A background task finished."]);
     }
 
     /// A slash command reads as it was typed, which is what the composer

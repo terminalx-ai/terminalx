@@ -113,6 +113,19 @@ fn claude_reply_record(text: &str) -> String {
     format!("{}\n", json!({ "type": "assistant", "uuid": uuid::Uuid::new_v4().to_string(), "message": { "role": "assistant", "content": [{ "type": "text", "text": text }] } }))
 }
 
+/// A background task reporting in, which starts a turn of the CLI's own (#540).
+fn claude_notification_record(summary: &str) -> String {
+    let content = format!("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>");
+    format!(
+        "{}\n",
+        json!({ "type": "user", "uuid": uuid::Uuid::new_v4().to_string(), "cwd": "/w", "origin": { "kind": "task-notification" }, "promptSource": "system", "turnOrigin": "task_notification", "message": { "role": "user", "content": content } })
+    )
+}
+
+fn claude_turn_end_record() -> String {
+    format!("{}\n", json!({ "type": "system", "subtype": "turn_duration", "durationMs": 1000, "uuid": uuid::Uuid::new_v4().to_string() }))
+}
+
 struct Rig {
     manager: SessionManager,
     sink: Arc<crate::sink::BroadcastSink>,
@@ -552,6 +565,32 @@ fn a_conversation_the_app_has_never_seen_is_brought_in_from_its_first_turn() {
     rig.told.doing(CLAUDE_PID, Activity::Idle);
     rig.wait("its end", || rig.said(&tab.id).ends_with(&["user: third".to_string(), "claude: 3".to_string(), "turn Ok".to_string()]));
     assert_eq!(rig.said(&tab.id).len(), 9);
+}
+
+/// #540, for a CLI started by hand: a turn it started by itself is a turn
+/// of its own, in the history brought in and while it runs, and its
+/// notification markup is nobody's message.
+#[test]
+fn a_turn_a_hand_started_cli_began_by_itself_is_a_turn_of_its_own() {
+    let rig = Rig::new(json!([]));
+    let pane = rig.shell(1);
+    let transcript = rig.dir.path().join("claude.jsonl");
+    append(&transcript, &format!("{}{}{}{}", claude_turns(1), claude_notification_record(r#"Agent "a" finished"#), claude_reply_record("Noted."), claude_turn_end_record()));
+    std::fs::File::options().write(true).open(&transcript).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+    rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &transcript)), Some(Activity::Idle));
+    rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+    let tab = rig.tab();
+    rig.wait("the conversation's earlier turns", || rig.said(&tab.id).len() == 6);
+    assert_eq!(rig.said(&tab.id), ["user: Reply with exactly: pong", "claude: pong", "turn Ok", r#"status: Agent "a" finished"#, "claude: Noted.", "turn Ok"]);
+    assert_eq!(rig.status(&tab.id), TabStatus::Idle);
+
+    rig.told.doing(CLAUDE_PID, Activity::Busy);
+    append(&transcript, &claude_notification_record(r#"Background command "make" completed (exit code 0)"#));
+    rig.wait("the live turn", || rig.status(&tab.id) == TabStatus::InProgress);
+    append(&transcript, &format!("{}{}", claude_reply_record("Built."), claude_turn_end_record()));
+    rig.wait("its end", || rig.said(&tab.id).len() == 9);
+    assert_eq!(rig.said(&tab.id)[6..], [r#"status: Background command "make" completed (exit code 0)"#, "claude: Built.", "turn Ok"]);
+    rig.told.doing(CLAUDE_PID, Activity::Idle);
 }
 
 #[test]

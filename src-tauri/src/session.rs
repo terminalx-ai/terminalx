@@ -159,6 +159,14 @@ struct ComposerEcho {
     command: bool,
     /// The `seq` the composer's own `user_message` was published under.
     seq: u64,
+    /// Sent as the start of a turn, and then the CLI was heard starting a
+    /// turn of its own before it took it (#540): the app had taken it to be
+    /// idle a moment too soon. That turn's work was drawn under this prompt.
+    ///
+    /// Only the start of such a turn says so. Work alone does not: Claude
+    /// Code 2.1.302 can append a turn's first reply ahead of the prompt it
+    /// answers.
+    overtaken: bool,
 }
 
 /// A prompt typed behind a running turn, as it was typed: what to type again
@@ -174,6 +182,7 @@ struct HeldPrompt {
 struct Echoed {
     queued: bool,
     seq: u64,
+    overtaken: bool,
 }
 
 /// How long a composer prompt waits for its echo once no turn is running.
@@ -202,7 +211,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0 }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0, overtaken: false }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -283,7 +292,7 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
     pending[at].confirm_delivery();
-    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
+    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq, overtaken: pending[at].overtaken };
     pending.drain(..=at);
     Some(echoed)
 }
@@ -2705,9 +2714,15 @@ impl SessionManager {
                 // opened that turn already, but only a prompt resets the latch
                 // that lets `Stop` close it, and this record is that prompt.
                 let held = echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed()));
-                if held {
+                // One published as the start of a turn just as the CLI began
+                // a turn of its own (#540) starts its turn here instead,
+                // after that one.
+                let overtaken = !echo.queued && echo.overtaken;
+                if held || overtaken {
                     if !rt.turn_open {
                         rt.prompt_taken(false);
+                    } else if overtaken {
+                        rt.turn_started_at = Some(Instant::now());
                     }
                     if let Engine::Cli(p) = &mut rt.engine {
                         p.turn_tail.opened();
@@ -2727,6 +2742,20 @@ impl SessionManager {
             // A reply is work: the turn is not a bare command's.
             if matches!(payload, Payload::AssistantText { .. }) {
                 rt.turn_by_command = false;
+            }
+            // A turn the CLI started by itself (#540). Nobody's prompt is
+            // drawn for it, but the tab is working, what the composer sends
+            // now waits behind it, and its end closes it. A prompt already
+            // published as the start of a turn is not this one's.
+            if matches!(payload, Payload::TurnStarted { .. }) {
+                rt.prompt_taken(false);
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.turn_tail.opened();
+                    for echo in p.echoed.iter_mut().filter(|echo| !echo.queued && !echo.command) {
+                        echo.overtaken = true;
+                    }
+                }
+                self.set_status(&mut rt, TabStatus::InProgress);
             }
             if matches!(payload, Payload::UserMessage { .. }) {
                 self.delivery_confirmed(&mut rt);
@@ -3855,7 +3884,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0 }));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");

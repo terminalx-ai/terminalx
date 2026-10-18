@@ -1130,6 +1130,228 @@ fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
     }
 }
 
+/// What Claude Code 2.1.284 writes when a `/loop` wakeup fires (#540): the
+/// fire, and the scheduled prompt as a meta record. No hook is relied on.
+fn scheduled_wakeup(prompt: &str) -> String {
+    format!(
+        r#"{{"parentUuid":"a","isSidechain":false,"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (Sep 29 1:10am)","isMeta":false,"uuid":"fire-{prompt}","taskKind":"loop","cwd":"/w","sessionId":"s"}}
+{{"parentUuid":"fire-{prompt}","isSidechain":false,"type":"user","message":{{"role":"user","content":"{prompt}"}},"isMeta":true,"uuid":"sched-{prompt}","promptSource":"system","turnOrigin":"scheduled","queuePriority":"later","cwd":"/w","sessionId":"s"}}
+"#
+    )
+}
+
+/// And when a background task it started reports in (2.1.300): a `user`
+/// record that is not meta, all notification markup.
+fn task_notification(summary: &str) -> String {
+    let content = serde_json::to_string(&format!("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>")).unwrap();
+    format!(
+        r#"{{"parentUuid":"a","isSidechain":false,"type":"user","message":{{"role":"user","content":{content}}},"uuid":"note-{}","origin":{{"kind":"task-notification","producer":"session-task"}},"promptSource":"system","turnOrigin":"task_notification","cwd":"/w","sessionId":"s"}}
+"#,
+        summary.len()
+    )
+}
+
+/// The record Claude Code writes when it prints "Worked for …".
+const TURN_DURATION: &str = r#"{"parentUuid":"a","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":4000,"uuid":"duration","isMeta":false,"cwd":"/w","sessionId":"s"}
+"#;
+
+impl Rig {
+    /// [`Rig::told`], with where each turn starts: `turn` for one the agent
+    /// started by itself, with what it said about why, and `taken: …` for one
+    /// started by a message already in the chat.
+    fn told_with_starts(&self) -> Vec<String> {
+        let events = self.events();
+        let text_at = |seq: u64| events.iter().find(|e| e.seq == seq).and_then(|e| match &e.payload {
+            Payload::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                Payload::UserMessage { text, queued: false, .. } => Some(format!("user: {text}")),
+                Payload::UserMessage { text, queued: true, .. } => Some(format!("queued: {text}")),
+                Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
+                Payload::TurnCompleted { .. } => Some("end".to_string()),
+                Payload::TurnStarted { prompt_seq: None, .. } => Some("turn".to_string()),
+                Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("taken: {}", text_at(*seq).unwrap_or_else(|| format!("no message at {seq}")))),
+                Payload::Status { text } => Some(format!("status: {text}")),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// #540. The CLI starts a turn by itself — a `/loop` wakeup, a background
+/// task reporting in — and the reader sends a message while it runs. The
+/// tab is working throughout, the message is queued behind that turn, and
+/// the turn it starts is the one after: the chat draws it below the reply
+/// the CLI gave first, where the terminal has it. It used to be published
+/// as a new turn, and the CLI's reply drawn under it as the answer to it.
+#[test]
+fn a_message_sent_while_the_cli_runs_a_turn_of_its_own_waits_behind_it() {
+    for (what, starts, said) in [
+        ("a scheduled task", scheduled_wakeup("Report progress"), "A scheduled task started this turn."),
+        ("a background task", task_notification(r#"Agent "tests" finished"#), r#"Agent "tests" finished"#),
+    ] {
+        for ends_by_hook in [true, false] {
+            let case = format!("{what}, ended by {}", if ends_by_hook { "the Stop hook" } else { "the transcript alone" });
+            let rig = Rig::new();
+            rig.compose("start", 0);
+            rig.cli_takes("start");
+            rig.cli_replies("done");
+            assert!(!rig.turn_open(), "{case}");
+
+            rig.append(&starts);
+            assert!(rig.turn_open(), "{case}");
+            assert_eq!(rig.status(), TabStatus::InProgress, "{case}: the tab is working");
+            assert!(rig.compose("a goal for the work", 0), "{case}: the agent is busy, so the message waits");
+            rig.append(&rig.cli().reply("Status: all green"));
+            if ends_by_hook {
+                rig.hook("Stop", json!({ "last_assistant_message": "Status: all green" }));
+            } else {
+                rig.append(TURN_DURATION);
+                rig.advance(PATIENCE.settle);
+                rig.tick();
+            }
+            assert!(!rig.turn_open(), "{case}");
+            assert_eq!(rig.completed_turns(), 2, "{case}: the turn the CLI started ends with its own end");
+
+            // The CLI takes the message once its own turn is over.
+            rig.cli_takes("a goal for the work");
+            assert!(rig.turn_open(), "{case}");
+            rig.cli_replies("on it");
+            assert_eq!(
+                rig.told_with_starts(),
+                [
+                    "user: start".to_string(),
+                    "reply: done".into(),
+                    "end".into(),
+                    "turn".into(),
+                    format!("status: {said}"),
+                    "queued: a goal for the work".into(),
+                    "reply: Status: all green".into(),
+                    "end".into(),
+                    "taken: a goal for the work".into(),
+                    "reply: on it".into(),
+                    "end".into(),
+                ],
+                "{case}"
+            );
+            assert_eq!(rig.status(), TabStatus::Completed, "{case}");
+        }
+    }
+}
+
+/// The same against what Claude Code 2.1.302 really wrote and the hooks it
+/// really sent, in their order: it runs `UserPromptSubmit` for the scheduled
+/// prompt too. That hook opened the turn, but drew nothing and left `Stop`
+/// unable to close it: the message went in as a new turn's prompt, the
+/// report was drawn under it, and the tab said "Working" from then on.
+#[test]
+fn a_real_scheduled_turn_with_a_message_sent_from_the_chat_meanwhile() {
+    const SCHEDULED: &str = include_str!("harness/claude/fixtures/scheduled_turn.jsonl");
+    const SENT: &str = "MY-GOAL: make the baselines comparable";
+    let rig = Rig::new();
+    let mut sent = false;
+    let records: Vec<serde_json::Value> = SCHEDULED.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    for (at, record) in records.iter().enumerate() {
+        let content = &record["message"]["content"];
+        let reply = content.as_array().into_iter().flatten().filter_map(|part| part["text"].as_str()).next_back().map(str::to_string);
+        if record["type"] == "user" && record["turnOrigin"].is_string() {
+            rig.hook("UserPromptSubmit", json!({ "prompt": content.as_str().unwrap() }));
+        }
+        // Sent from the chat while the report was being written.
+        if reply.as_deref().is_some_and(|text| text.starts_with("Status report")) {
+            assert!(rig.turn_open());
+            assert_eq!(rig.status(), TabStatus::InProgress, "the scheduled turn is work");
+            assert!(rig.compose(SENT, 0), "behind the scheduled turn, the message is queued");
+            sent = true;
+        }
+        rig.append(&format!("{record}\n"));
+        for part in content.as_array().into_iter().flatten() {
+            if part["type"] == "tool_use" {
+                rig.hook("PreToolUse", json!({ "tool_name": part["name"], "tool_input": part["input"], "tool_use_id": part["id"] }));
+            }
+            if part["type"] == "tool_result" {
+                rig.hook("PostToolUse", json!({ "tool_name": "Bash", "tool_use_id": part["tool_use_id"] }));
+            }
+        }
+        if records.get(at + 1).is_some_and(|next| next["subtype"] == "stop_hook_summary") {
+            rig.hook("Stop", json!({ "last_assistant_message": reply }));
+        }
+    }
+    assert!(sent);
+    assert_eq!(
+        rig.told_with_starts(),
+        [
+            "user: SCHEDULE-ME please",
+            "reply: Scheduled.",
+            "end",
+            "turn",
+            "status: A scheduled task started this turn.",
+            "reply: Checking the time first.",
+            &format!("queued: {SENT}"),
+            "reply: Status report: all green and nothing needs a decision from you right now.",
+            "end",
+            &format!("taken: {SENT}"),
+            "reply: Working on MY-GOAL.",
+            "end",
+        ]
+    );
+    assert!(!rig.turn_open());
+    assert_eq!(rig.status(), TabStatus::Completed);
+}
+
+/// The same, with the message sent a moment before the wakeup was read: the
+/// app still took the CLI to be idle and published it as a new turn. What
+/// the CLI does first is not the answer to it, and the turn the message
+/// starts is said to be the one after, whether the CLI holds it until its
+/// own turn is over or hands it over with a tool's result.
+#[test]
+fn a_message_sent_as_the_cli_starts_a_turn_of_its_own_is_moved_below_it() {
+    for taken_mid_turn in [false, true] {
+        let rig = Rig::new();
+        assert!(!rig.compose("a goal for the work", 0));
+        rig.append(&scheduled_wakeup("Report progress"));
+        rig.append(&rig.cli().reply("Status: all green"));
+        if taken_mid_turn {
+            rig.append(&rig.cli().steer("a goal for the work"));
+            assert!(rig.turn_open());
+        } else {
+            rig.hook("Stop", json!({ "last_assistant_message": "Status: all green" }));
+            assert!(!rig.turn_open());
+            rig.cli_takes("a goal for the work");
+            assert!(rig.turn_open());
+        }
+        assert_eq!(rig.status(), TabStatus::InProgress);
+        rig.cli_replies("on it");
+        let mut told = vec!["user: a goal for the work", "turn", "status: A scheduled task started this turn.", "reply: Status: all green"];
+        if !taken_mid_turn {
+            told.push("end");
+        }
+        told.extend(["taken: a goal for the work", "reply: on it", "end"]);
+        assert_eq!(rig.told_with_starts(), told, "taken mid-turn: {taken_mid_turn}");
+        assert_eq!(rig.status(), TabStatus::Completed);
+    }
+}
+
+/// Only the start of a turn the CLI began by itself moves a prompt. Found
+/// in the app with Claude Code 2.1.302 and a quick stand-in model: the CLI
+/// appended the turn's first tool call ahead of the prompt that asked for
+/// it. That prompt is still the start of its turn, and stays there.
+#[test]
+fn a_prompt_recorded_after_its_own_first_reply_stays_where_it_is() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        assert!(!rig.compose("start", 0));
+        rig.hook("UserPromptSubmit", json!({ "prompt": "start" }));
+        rig.append(&rig.cli().reply("working on it"));
+        rig.append(&rig.cli().prompt("start"));
+        rig.cli_replies("done");
+        assert_eq!(rig.told_with_starts(), ["user: start", "reply: working on it", "reply: done", "end"], "{kind:?}");
+    }
+}
+
 /// Escape, from the chat and from the agent's own terminal (#427): the same
 /// rig and the same two CLIs, and a headless tab beside them.
 #[path = "session_interrupt_tests.rs"]

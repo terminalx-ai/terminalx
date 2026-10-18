@@ -595,7 +595,7 @@ impl SessionManager {
             _ => return,
         };
         let mut records = tail.drain_records();
-        let prompts: Vec<usize> = records.iter().enumerate().filter(|(_, (payloads, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. }))).map(|(at, _)| at).collect();
+        let prompts: Vec<usize> = records.iter().enumerate().filter(|(_, (payloads, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. } | Payload::TurnStarted { .. }))).map(|(at, _)| at).collect();
         // Still the first read until there is something to sort.
         let wait = |first: First| {
             if let Engine::Cli(CliTab { by_hand: Some(by), .. }) = &mut rt_arc.lock().unwrap().engine {
@@ -648,7 +648,8 @@ impl SessionManager {
                 for payload in payloads {
                     match payload {
                         Payload::ProviderSettings { signal } => self.provider_settings(&mut rt, signal),
-                        Payload::UserMessage { .. } => {
+                        // A prompt, or a turn the CLI started by itself (#540).
+                        Payload::UserMessage { .. } | Payload::TurnStarted { .. } => {
                             if open {
                                 self.publish(&mut rt, ended(TurnStatus::Ok), None);
                             }
