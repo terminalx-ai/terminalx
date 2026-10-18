@@ -124,6 +124,8 @@ export interface Project {
   archived?: boolean;
   /** Absent while every setting is the default. */
   issuePipeline?: IssuePipelineSettings | null;
+  /** Agents may comment on issues and move their status without asking. Absent is off. */
+  agentIssueUpdates?: boolean;
 }
 
 export interface ProjectPatch {
@@ -134,6 +136,7 @@ export interface ProjectPatch {
   pinned?: boolean;
   archived?: boolean;
   issuePipeline?: IssuePipelineSettings;
+  agentIssueUpdates?: boolean;
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */

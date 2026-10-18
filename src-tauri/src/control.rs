@@ -54,7 +54,7 @@ impl ControlError {
         }
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(
             "invalid_arguments",
             message,
@@ -241,6 +241,9 @@ pub struct ControlService {
     /// Set by the headless runtime (`cloud-workspace`, `local`); the desktop
     /// app reports none.
     runtime_kind: Option<String>,
+    /// Asks the person before an agent's write to an issue. Only the desktop
+    /// app has a window to ask in; without one such a write is refused.
+    questions: Option<crate::issue_control::Ask>,
     /// Computer use and the built-in browser; the headless runtime has neither.
     #[cfg(feature = "desktop")]
     desktop: Option<DesktopControl>,
@@ -268,6 +271,7 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: None,
+            questions: None,
             desktop: Some(DesktopControl { computer, browser, pairing: None }),
         }
     }
@@ -285,6 +289,7 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: Some(runtime_kind),
+            questions: None,
             #[cfg(feature = "desktop")]
             desktop: None,
         }
@@ -296,6 +301,11 @@ impl ControlService {
             Ok(result) => ControlResponse::success(id, result),
             Err(error) => ControlResponse::failure(id, error),
         }
+    }
+
+    pub(crate) fn with_questions(mut self, ask: crate::issue_control::Ask) -> Self {
+        self.questions = Some(ask);
+        self
     }
 
     #[cfg(feature = "desktop")]
@@ -468,6 +478,7 @@ impl ControlService {
             }
             "worktrees.delete" => self.worktree_delete(params),
             "issues.list" => self.issues_list(params),
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => self.issue_op(command, params),
             #[cfg(feature = "desktop")]
             "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
@@ -913,6 +924,91 @@ impl ControlService {
         .map_err(ControlError::internal)?;
         Ok(json!({"project": project, "provider": provider, "issues": issues}))
     }
+
+    /// `issues.view|comment|status|assign|label|create` (PRO-100): one issue,
+    /// through the contract's operations, with an agent's writes put to the
+    /// person first (see `issue_control`).
+    fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::issue_control::{authorize, run, Caller, Live, Subject, Write};
+        use crate::issue_ops::{Provider, Target};
+        let action = command.trim_start_matches("issues.");
+        let caller = Caller::of(&params);
+        let named = optional_string(&params, "provider");
+        let reference = optional_string(&params, "issue");
+        let (provider, id) = match &reference {
+            Some(reference) => {
+                let (provider, id) = crate::issues::parse_issue_reference(reference, named.as_deref()).map_err(ControlError::invalid)?;
+                (provider, Some(id))
+            }
+            None if action == "create" => (if named.as_deref() == Some("linear") { "linear" } else { "github" }, None),
+            None => return Err(ControlError::invalid("Missing issue.")),
+        };
+        let project = issue_project(&params, &caller)?;
+        if let Some(reference) = &reference {
+            refuse_other_repository(&project.path, reference)?;
+        }
+        let target = Target::resolve(Path::new(&project.path), if provider == "linear" { Provider::Linear } else { Provider::Github }).map_err(crate::issue_control::op_error)?;
+        let session_title = caller.session.as_deref().and_then(|session| resolve_session(session).ok()).map(|session| session.title);
+        let gate = |write: &Write, subject: &str| {
+            let subject = Subject {
+                issue: subject,
+                provider,
+                project_name: &project.name,
+                project_allows_updates: project.agent_issue_updates,
+                session_title: session_title.as_deref(),
+            };
+            authorize(&caller, write, &subject, self.questions.as_ref())
+        };
+        run(action, &params, id.as_deref(), &Live(target), &gate)
+    }
+}
+
+/// The project an issue command is for: the one named, else the one of the
+/// session it runs in, else the one holding its working directory. A new
+/// issue's project is always named.
+fn issue_project(params: &Value, caller: &crate::issue_control::Caller) -> Result<Project, ControlError> {
+    if let Some(selector) = optional_string(params, "project") {
+        return resolve_project(&selector);
+    }
+    let (projects, _) = projects::list().map_err(ControlError::internal)?;
+    let own = |path: &str| projects.iter().find(|project| project.path == path).cloned();
+    if let Some(session) = caller.session.as_deref().and_then(|session| resolve_session(session).ok()) {
+        if let Some(project) = own(&session.project_path) {
+            return Ok(project);
+        }
+    }
+    if let Some(cwd) = caller.cwd.as_deref() {
+        let here = canonical_or_original(cwd);
+        // A worktree lives outside its project's folder: its sessions say whose it is.
+        let sessions = index::load().map_err(ControlError::internal)?;
+        let mut best: Option<(usize, Project)> = None;
+        let candidates = projects.iter().map(|project| (project.path.clone(), project.clone()))
+            .chain(sessions.iter().filter(|session| !session.worktree_removed).filter_map(|session| own(&session.project_path).map(|project| (canonical_or_original(&session.cwd), project))));
+        for (path, project) in candidates {
+            if Path::new(&here).starts_with(&path) && best.as_ref().is_none_or(|(length, _)| path.len() > *length) {
+                best = Some((path.len(), project));
+            }
+        }
+        if let Some((_, project)) = best {
+            return Ok(project);
+        }
+    }
+    Err(ControlError::invalid("Could not tell which project the issue belongs to. Pass --project."))
+}
+
+/// A GitHub URL names its repository; the issue is read from the project's
+/// own, so a URL into another one would act on this repository's issue of
+/// the same number.
+fn refuse_other_repository(project_path: &str, reference: &str) -> Result<(), ControlError> {
+    let Some(named) = crate::issues::github_issue_url_repo(reference) else { return Ok(()) };
+    let own = crate::issues::github_repo(Path::new(project_path));
+    if own.as_deref().is_some_and(|own| own.eq_ignore_ascii_case(&named)) {
+        return Ok(());
+    }
+    Err(ControlError::invalid(format!(
+        "That issue is in {named}, and this project is {}. Pass --project with a project of that repository.",
+        own.as_deref().unwrap_or("not a GitHub repository")
+    )))
 }
 
 #[derive(Clone)]

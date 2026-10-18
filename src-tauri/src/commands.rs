@@ -2929,7 +2929,7 @@ pub async fn cloud_control_confirm(app: tauri::AppHandle, what: String, ok_label
 /// - Computer-use actions are refused for as long as the dialog is on screen.
 ///
 /// [`QUESTION_TTL`]: crate::cloud_control::QUESTION_TTL
-async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
+pub(crate) async fn cloud_control_question(app: tauri::AppHandle, title: String, message: String, ok_label: String) -> crate::cloud_control::Answer {
     use crate::cloud_control::{question_answered, question_begin, question_closed, question_expired, Confirming, QUESTION_TTL};
     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
     // Kept short and on one line: the label comes from this app, but never trust its length.

@@ -292,6 +292,12 @@ pub fn linear_viewer(key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("Linear did not say who the key belongs to."))
 }
 
+/// The id of the person the key belongs to, as an assignee is named.
+pub fn linear_viewer_id(key: &str) -> Result<String> {
+    let data = graphql(key, "query { viewer { id } }", json!({}))?;
+    data["viewer"]["id"].as_str().map(String::from).ok_or_else(|| anyhow!("Linear did not say who the key belongs to."))
+}
+
 pub fn linear_teams(key: &str) -> Result<Vec<IssueTeam>> {
     let data = graphql(key, "query { teams(first: 100) { nodes { id key name } } }", json!({}))?;
     Ok(parse_linear_teams(&data))
