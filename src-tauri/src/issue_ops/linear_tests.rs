@@ -148,6 +148,29 @@ fn a_description_edit_conflicts_only_when_the_issue_moved_on() {
 }
 
 #[test]
+fn only_a_changed_description_conflicts_when_the_editor_says_what_it_started_from() {
+    // A comment moved `updatedAt`; the description is as the editor saw it.
+    let current = json!({"updatedAt": "2026-10-18T07:21:44.971Z", "description": "Steps\r\n1. Log in\n"});
+    let started = |description: Option<&str>| DescriptionEdit { description: "New".into(), expected_updated_at: Some("2026-10-18T07:04:57.658Z".into()), expected_description: description.map(String::from) };
+    assert!(!conflicts(&current, &started(Some("Steps\n1. Log in"))));
+    assert!(conflicts(&current, &started(Some("Steps"))));
+    assert!(conflicts(&current, &started(None)));
+    assert!(!conflicts(&json!({"updatedAt": "2026-10-18T07:04:57.658Z"}), &started(None)));
+    assert!(!conflicts(&current, &DescriptionEdit::default()));
+    assert!(!conflicts(&json!({"description": null}), &DescriptionEdit { expected_description: Some("".into()), ..DescriptionEdit::default() }));
+}
+
+#[test]
+fn a_comment_is_changed_only_on_its_own_issue() {
+    let comment = json!({"issue": {"id": "6aecdaa3-5396-40c2-85a0-7e9d44871943", "identifier": "ENG-101"}});
+    assert!(comment_belongs(&comment, "ENG-101"));
+    assert!(comment_belongs(&comment, "eng-101"));
+    assert!(comment_belongs(&comment, "6aecdaa3-5396-40c2-85a0-7e9d44871943"));
+    assert!(!comment_belongs(&comment, "ENG-5"));
+    assert!(!comment_belongs(&Value::Null, "ENG-101"));
+}
+
+#[test]
 fn a_new_issue_needs_a_team_and_takes_one_assignee() {
     let input = IssueCreate {
         team_id: Some("team-eng".into()),
@@ -207,6 +230,9 @@ fn live_every_operation_on_the_sandbox_issue() {
     }
     let mine = seen.iter().find(|comment| comment.id == added.id).unwrap();
     assert!(mine.viewer_can_edit && mine.body.contains("edited"));
+    let elsewhere = request(key, "query { issues(first: 1, filter: { title: { notStartsWith: \"[TerminalX test]\" } }) { nodes { identifier } } }", json!({})).unwrap()["issues"]["nodes"][0]["identifier"].as_str().unwrap().to_string();
+    // Named with another issue, the comment is refused before anything is sent.
+    assert_eq!(comment_delete(key, &elsewhere, &added.id).unwrap_err().kind, IssueOpErrorKind::NotFound);
     comment_delete(key, &id, &added.id).unwrap();
     assert_eq!(comment_delete(key, &id, &added.id).unwrap_err().kind, IssueOpErrorKind::NotFound);
     step("comments: add, edit, page, delete");
@@ -229,12 +255,20 @@ fn live_every_operation_on_the_sandbox_issue() {
     step("labels, priority, title");
 
     let current = details(key, &id).unwrap();
-    let edit = DescriptionEdit { description: format!("{}\n\nEdited by a live check.", before.description), expected_updated_at: Some(current.issue.updated_at.clone()) };
+    // A comment posted while the editor is open moves `updatedAt` (not always
+    // at once), never the description.
+    let interim = comment_add(key, &id, "[TerminalX test] live check — will be deleted").unwrap();
+    let edit = DescriptionEdit {
+        description: format!("{}\n\nEdited by a live check.", before.description),
+        expected_updated_at: Some(current.issue.updated_at.clone()),
+        expected_description: Some(current.description.clone()),
+    };
     let after = set_description(key, &id, &edit).unwrap();
     assert!(after.description.ends_with("Edited by a live check."));
-    // The editor started from `current`; the issue has moved on since.
+    comment_delete(key, &id, &interim.id).unwrap();
+    // The editor started from `current`; the description has moved on since.
     assert_eq!(set_description(key, &id, &DescriptionEdit { description: "stale".into(), ..edit }).unwrap_err().kind, IssueOpErrorKind::Conflict);
-    step("description, and a stale one refused as a conflict");
+    step("description: a comment meanwhile is no conflict, a changed description is");
 
     assert_eq!(details(key, "PRO-999999").unwrap_err().kind, IssueOpErrorKind::NotFound);
     assert_eq!(details("lin_api_not_a_real_key_0000000000000000000000", &id).unwrap_err().kind, IssueOpErrorKind::NotSignedIn);
@@ -253,7 +287,7 @@ fn live_every_operation_on_the_sandbox_issue() {
     set_labels(key, &id, &before.issue.labels.iter().filter_map(|label| label.id.clone()).collect::<Vec<_>>()).unwrap();
     set_priority(key, &id, before.priority.unwrap_or(0)).unwrap();
     set_title(key, &id, &before.issue.title).unwrap();
-    let restored = set_description(key, &id, &DescriptionEdit { description: before.description.clone(), expected_updated_at: None }).unwrap();
+    let restored = set_description(key, &id, &DescriptionEdit { description: before.description.clone(), ..DescriptionEdit::default() }).unwrap();
     assert_eq!((restored.issue.title, restored.description, restored.state_id, restored.priority), (before.issue.title, before.description, before.state_id, before.priority));
     step("restored");
 }

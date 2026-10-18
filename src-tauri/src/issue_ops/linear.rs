@@ -197,15 +197,35 @@ pub fn comment_add(key: &str, id: &str, body: &str) -> OpResult<IssueComment> {
     written_comment(&data["commentCreate"])
 }
 
-pub fn comment_edit(key: &str, _id: &str, comment_id: &str, body: &str) -> OpResult<IssueComment> {
+pub fn comment_edit(key: &str, id: &str, comment_id: &str, body: &str) -> OpResult<IssueComment> {
+    let body = non_empty(body)?;
+    comment_on_issue(key, id, comment_id)?;
     let query = format!("mutation($id: String!, $input: CommentUpdateInput!) {{ commentUpdate(id: $id, input: $input) {{ success comment {{ {COMMENT_FIELDS} }} }} }}");
-    let data = request(key, &query, json!({"id": comment_id, "input": {"body": non_empty(body)?}}))?;
+    let data = request(key, &query, json!({"id": comment_id, "input": {"body": body}}))?;
     written_comment(&data["commentUpdate"])
 }
 
-pub fn comment_delete(key: &str, _id: &str, comment_id: &str) -> OpResult<()> {
+pub fn comment_delete(key: &str, id: &str, comment_id: &str) -> OpResult<()> {
+    comment_on_issue(key, id, comment_id)?;
     let data = request(key, "mutation($id: String!) { commentDelete(id: $id) { success } }", json!({"id": comment_id}))?;
     succeeded(&data["commentDelete"])
+}
+
+/// Linear finds a comment by its id alone. One named with another issue is
+/// refused as not found, so an edit never lands on the wrong issue.
+fn comment_on_issue(key: &str, id: &str, comment_id: &str) -> OpResult<()> {
+    let data = request(key, "query($id: String!) { comment(id: $id) { issue { id identifier } } }", json!({"id": comment_id}))?;
+    if comment_belongs(&data["comment"], id) {
+        Ok(())
+    } else {
+        Err(IssueOpError::with_message(IssueOpErrorKind::NotFound, "That comment isn't on this issue any more. Refresh the issue, then try again."))
+    }
+}
+
+/// Whether a `comment { issue { id identifier } }` is on the issue `id` names (its UUID or `ENG-42`).
+pub fn comment_belongs(comment: &Value, id: &str) -> bool {
+    let issue = &comment["issue"];
+    issue["id"].as_str() == Some(id) || issue["identifier"].as_str().is_some_and(|identifier| identifier.eq_ignore_ascii_case(id))
 }
 
 fn succeeded(payload: &Value) -> OpResult<()> {
@@ -302,7 +322,12 @@ pub fn options(key: &str, id: Option<&str>, team_id: Option<&str>, refresh: bool
 fn update(key: &str, id: &str, input: Value) -> OpResult<IssueDetails> {
     let query = format!("mutation($id: String!, $input: IssueUpdateInput!) {{ issueUpdate(id: $id, input: $input) {{ success issue {{ {DETAILS_FIELDS} }} }} }}");
     let data = request(key, &query, json!({"id": id, "input": input}))?;
-    written_issue(&data["issueUpdate"])
+    let payload = &data["issueUpdate"];
+    match written_issue(payload) {
+        // Written, but answered without the issue: read it rather than guess.
+        Err(_) if payload["success"].as_bool() == Some(true) => details(key, id),
+        result => result,
+    }
 }
 
 fn written_issue(payload: &Value) -> OpResult<IssueDetails> {
@@ -344,18 +369,33 @@ pub fn set_title(key: &str, id: &str, title: &str) -> OpResult<IssueDetails> {
     update(key, id, json!({"title": title.trim()}))
 }
 
-/// Refused as a conflict when the issue changed since `expected_updated_at`.
-/// Linear has no conditional update, so this reads first; the window
-/// between the read and the write is one round trip.
+/// Refused as a conflict when someone else changed the description since
+/// the editor started (see [`conflicts`]). Linear has no conditional update,
+/// so this reads first; the window between the read and the write is one
+/// round trip.
 pub fn set_description(key: &str, id: &str, edit: &DescriptionEdit) -> OpResult<IssueDetails> {
-    if let Some(expected) = edit.expected_updated_at.as_deref() {
-        let data = request(key, "query($id: String!) { issue(id: $id) { updatedAt } }", json!({"id": id}))?;
-        let current = data["issue"]["updatedAt"].as_str().ok_or_else(|| IssueOpError::new(IssueOpErrorKind::NotFound, LINEAR))?;
-        if changed_since(current, expected) {
+    if edit.expected_description.is_some() || edit.expected_updated_at.is_some() {
+        let data = request(key, "query($id: String!) { issue(id: $id) { updatedAt description } }", json!({"id": id}))?;
+        if data["issue"].is_null() {
+            return Err(IssueOpError::new(IssueOpErrorKind::NotFound, LINEAR));
+        }
+        if conflicts(&data["issue"], edit) {
             return Err(IssueOpError::new(IssueOpErrorKind::Conflict, LINEAR));
         }
     }
     update(key, id, json!({"description": edit.description}))
+}
+
+/// Whether the issue as read now (`updatedAt`, `description`) refuses the
+/// edit. With the description the editor started from, only a changed
+/// description does: a new comment moves Linear's `updatedAt` too.
+pub fn conflicts(current: &Value, edit: &DescriptionEdit) -> bool {
+    let normal = |text: &str| text.replace("\r\n", "\n").trim_end().to_string();
+    match (edit.expected_description.as_deref(), edit.expected_updated_at.as_deref()) {
+        (Some(expected), _) => normal(current["description"].as_str().unwrap_or("")) != normal(expected),
+        (None, Some(expected)) => changed_since(current["updatedAt"].as_str().unwrap_or(""), expected),
+        (None, None) => false,
+    }
 }
 
 /// Whether `current` is a different moment from `expected`. Both are

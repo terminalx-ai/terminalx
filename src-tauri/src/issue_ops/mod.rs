@@ -226,15 +226,20 @@ pub enum StateChange {
     Reopen,
 }
 
-/// A description edit. `expected_updated_at` is the `updatedAt` the editor
-/// started from; when the issue changed since, the write is refused with
-/// [`IssueOpErrorKind::Conflict`] instead of overwriting someone else's edit.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// A description edit, refused with [`IssueOpErrorKind::Conflict`] instead
+/// of overwriting someone else's edit. `expected_description` is the
+/// description the editor started from: the edit conflicts only when the
+/// description itself changed since. Without it, `expected_updated_at` (the
+/// `updatedAt` the editor started from) is checked, which a new comment also
+/// moves.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DescriptionEdit {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_description: Option<String>,
 }
 
 /// A new issue: in the project's GitHub repository, or in a Linear team.

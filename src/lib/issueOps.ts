@@ -132,10 +132,16 @@ export type StateChange =
   | { kind: "close"; reason: CloseReason }
   | { kind: "reopen" };
 
-/** `expectedUpdatedAt` is the `updatedAt` the editor started from; a newer issue is a `conflict`. */
+/**
+ * `expectedDescription` is the description the editor started from: the edit
+ * is a `conflict` only when the description changed since. Without it,
+ * `expectedUpdatedAt` (the `updatedAt` the editor started from) is checked,
+ * which a new comment also moves.
+ */
 export interface DescriptionEdit {
   description: string;
   expectedUpdatedAt?: string | null;
+  expectedDescription?: string | null;
 }
 
 export interface IssueCreate {

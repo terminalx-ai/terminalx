@@ -30,7 +30,7 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 | `issue_set_labels(id, labels)` | `IssueDetails`. The whole set: Linear label ids, GitHub label names |
 | `issue_set_priority(id, priority)` | `IssueDetails`. Linear only, 0 (none) to 4 (low) |
 | `issue_set_title(id, title)` | `IssueDetails` |
-| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedUpdatedAt` turns a stale edit into a `conflict` |
+| `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedDescription` (the description the editor started from) turns an edit of a changed description into a `conflict`; without it, `edit.expectedUpdatedAt` is checked, which a new comment also moves |
 | `issue_create(input)` | `IssueDetails`. A GitHub issue in the project's repository, or a Linear one in `input.teamId` |
 
 Every write answers with the issue as re-read from the provider.
@@ -69,8 +69,12 @@ The contract is final; the follow-up tickets fill it in. Today
   members, the labels its issues can take (the team's and the workspace's;
   a group comes before the labels in it) and the five priorities. They are
   cached per key and team until `refresh`.
-* **Descriptions** are read again before they are written: when
-  `updatedAt` moved past `expectedUpdatedAt`, the edit is a `conflict`.
+* **Descriptions** are read again before they are written: the edit is a
+  `conflict` when the description is no longer `expectedDescription`, or,
+  without it, when `updatedAt` is no longer `expectedUpdatedAt` (a new
+  comment moves Linear's `updatedAt`; editing one doesn't).
+* **Comments** are edited and deleted only on the issue they belong to;
+  another issue's comment is `not_found`.
 * **Errors**: a stale state, label or assignee id is `invalid`; an issue,
   team or comment that is gone is `not_found`.
 * **The agent's discussion.** Neither `body` nor `description` carries

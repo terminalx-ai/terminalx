@@ -51,6 +51,10 @@ describe("the issue-operations mock", () => {
     await expect(issueOps.setDescription("/repo", "linear", linear.id, { description: "x", expectedUpdatedAt: "2026-01-01T00:00:00Z" })).rejects.toMatchObject({ kind: "conflict" });
     const edited = await issueOps.setDescription("/repo", "linear", linear.id, { description: "x", expectedUpdatedAt: linear.updatedAt });
     expect(edited.description).toBe("x");
+    // With the description it started from, only a changed description conflicts, not a newer updatedAt.
+    await expect(issueOps.setDescription("/repo", "linear", linear.id, { description: "y", expectedDescription: "not x" })).rejects.toMatchObject({ kind: "conflict" });
+    const again = await issueOps.setDescription("/repo", "linear", linear.id, { description: "y", expectedUpdatedAt: "2026-01-01T00:00:00Z", expectedDescription: "x" });
+    expect(again.description).toBe("y");
 
     const added = await issueOps.commentAdd("/repo", "github", "41", "On it");
     const page = await issueOps.comments("/repo", "github", "41");
