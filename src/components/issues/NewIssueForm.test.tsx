@@ -64,6 +64,8 @@ beforeEach(() => {
   mock = createIssueOpsMock();
   gate = null;
   listsNew = false;
+  // The list's filter is kept per project in the preferences.
+  setPrefs({ issueFilters: {} });
   sessionStore.newIssueRequested = false;
   clearIssueDraft("/repo", "github");
   clearIssueDraft("/repo", "linear");
@@ -415,6 +417,25 @@ describe("NewIssueForm", () => {
     const again = await screen.findByTestId("new-issue");
     expect((await within(again).findByRole("alert")).textContent).toContain("You can't create issues in this repository.");
     expect((within(again).getByRole("textbox", { name: "Title" }) as HTMLInputElement).value).toBe("Closed meanwhile");
+  });
+
+  it("keeps the open issue's keys off while the form is shown in its place", async () => {
+    setPrefs({ issueProvider: "github" });
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    await screen.findByRole("button", { name: "Status: Open" });
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    const create = within(await screen.findByTestId("new-issue")).getByRole("button", { name: "Create issue" });
+    create.focus();
+    fireEvent.keyDown(create, { key: "s", code: "KeyS" });
+    fireEvent.keyDown(create, { key: "a", code: "KeyA" });
+    expect(screen.getByTestId("new-issue")).toBeTruthy();
+    // Nor are the pickers left to open by themselves once the issue is back.
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await screen.findByRole("button", { name: "Status: Open" });
+    await act(async () => {});
+    expect(screen.queryByRole("menuitem", { name: "Close as completed" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Assignees" })).toBeNull();
   });
 
   it("keeps the form open on an Escape that ends an input method's composition", async () => {

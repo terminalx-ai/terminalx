@@ -910,6 +910,9 @@ impl ControlService {
                 .unwrap_or(false),
             team_id: optional_string(&params, "team"),
             search: optional_string(&params, "search"),
+            // As this command always listed them: GitHub's newest first, Linear's recently updated first.
+            sort: (provider == "github").then(|| "created".into()),
+            ..Default::default()
         };
         let issues = match provider.as_str() {
             "github" => crate::issues::github_list(Path::new(&project.path), &filter),

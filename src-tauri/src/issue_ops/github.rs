@@ -111,6 +111,7 @@ pub fn parse_issue(v: &Value, repo: &str) -> Option<IssueDetails> {
             None => "open",
         }
         .into(),
+        workflow_state_type: None,
         labels,
         assignee: assignees.first().map(|first| IssueAssignee { name: first.name.clone(), avatar_url: first.avatar_url.clone() }),
         assignees,

@@ -78,14 +78,14 @@ const CLOCK_SLACK_MS = 2 * 60_000;
 
 /**
  * The issue a create whose answer was lost made, if it did: one with the
- * same title, by the reader, made since the create was sent. GitHub's
- * list without a search is newest first and not behind a search index;
- * Linear's is the team's, most recently updated first.
+ * same title, by the reader, made since the create was sent. The list is
+ * read without a search, newest first: GitHub's search index lags behind.
  */
 export async function findJustCreated(projectPath: string, provider: IssueProvider, input: IssueCreate, viewer: IssueUser | null | undefined, since: number): Promise<IssueDetails | null> {
   const me = viewer ?? (await issueViewer(projectPath, provider).catch(() => null));
   if (!me) return null;
-  const rows = await issues.list(projectPath, provider, { teamId: provider === "linear" ? input.teamId : null });
+  // Newest first, whatever its state: the create may have put it straight into a closed one.
+  const rows = await issues.list(projectPath, provider, { state: "all", sort: "created", teamId: provider === "linear" ? input.teamId : null });
   for (const row of rows.filter((each) => each.title.trim() === input.title).slice(0, 3)) {
     const issue = await issueOps.details(projectPath, provider, row.id).catch(() => null);
     if (issue && issue.author?.id === me.id && Date.parse(issue.createdAt) >= since - CLOCK_SLACK_MS) return issue;
