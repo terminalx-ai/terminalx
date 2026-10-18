@@ -16,6 +16,7 @@ export function MarkdownEditor({
   placeholder = "Write in Markdown",
   autoFocus = false,
   disabled = false,
+  readOnly = false,
   rows = 4,
   onSubmit,
   onCancel,
@@ -30,6 +31,8 @@ export function MarkdownEditor({
   placeholder?: string;
   autoFocus?: boolean;
   disabled?: boolean;
+  /** While a save is out: the focus and its keys stay here, but the text doesn't change. */
+  readOnly?: boolean;
   /** The height to start at; it grows with the text up to a limit, then scrolls. */
   rows?: number;
   onSubmit?: () => void;
@@ -73,7 +76,7 @@ export function MarkdownEditor({
   );
 
   return (
-    <div className={cn("flex min-w-0 flex-col rounded-lg bg-well hairline", disabled && "opacity-70", className)}>
+    <div className={cn("flex min-w-0 flex-col rounded-lg bg-well hairline", (disabled || readOnly) && "opacity-70", className)}>
       <div role="tablist" aria-label={`${label} mode`} className="flex items-center gap-0.5 px-1.5 pt-1.5">
         {tab("write", "Write")}
         {tab("preview", "Preview")}
@@ -86,6 +89,8 @@ export function MarkdownEditor({
             value={value}
             rows={rows}
             disabled={disabled}
+            readOnly={readOnly}
+            aria-busy={readOnly || undefined}
             placeholder={placeholder}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {

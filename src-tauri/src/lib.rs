@@ -678,6 +678,7 @@ pub fn run() {
             commands::issue_set_title,
             commands::issue_set_description,
             commands::issue_create,
+            commands::issue_templates,
             commands::linear_status,
             commands::linear_set_api_key,
             commands::linear_teams,

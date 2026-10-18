@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "@/icons";
+import { Check, ChevronDown, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -13,13 +13,14 @@ import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
 import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
+import { NewIssueForm } from "@/components/issues/NewIssueForm";
 import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
-import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openAutomation, selectProject, selectSession, takeNewIssueRequest, upsertSession, useSessionStore } from "@/lib/sessions";
 import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
@@ -114,6 +115,11 @@ export function IssuesView({
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
+  // The new-issue form, in the detail column in place of the open issue.
+  const [composing, setComposing] = useState(false);
+  // The issue created here last: listed and open even when the list read since doesn't hold it yet.
+  const created = useRef<{ projectPath: string; issue: IssueDetails } | null>(null);
+  const [copied, setCopied] = useState(false);
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
@@ -170,6 +176,13 @@ export function IssuesView({
     setPrefs({ issueProvider: provider });
   }, [provider]);
 
+  // The command palette's "New issue…".
+  useEffect(() => {
+    if (!store.newIssueRequested) return;
+    takeNewIssueRequest();
+    setComposing(true);
+  }, [store.newIssueRequested]);
+
   // Who is connected, and to what.
   useEffect(() => {
     let live = true;
@@ -221,7 +234,13 @@ export function IssuesView({
         const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
         if (live) {
           // A row written to since the read started keeps the state the write gave it.
-          setList((rows) => r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row)));
+          setList((rows) => {
+            const read = r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row));
+            // An issue just created here may not be in a list read so soon after; it stays at the top until it is.
+            const mine = created.current;
+            const pin = mine && mine.projectPath === project.path && mine.issue.provider === provider && !read.some((row) => writeKey(row) === writeKey(mine.issue));
+            return pin ? [mine.issue, ...read] : read;
+          });
           setListOf(`${project.path}\n${provider}`);
           setAssignedHere(new Map());
         }
@@ -337,6 +356,7 @@ export function IssuesView({
 
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
+    setComposing(false);
     setSelected(issue);
     setStatusOpen(false);
     setUseWorktree(prefs.useWorktree);
@@ -373,6 +393,24 @@ export function IssuesView({
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
   }, []);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  const projectNow = useRef(project?.path);
+  projectNow.current = project?.path;
+  // Created: selected in the list and open beside it, ready for "Start session".
+  const onIssueCreated = useCallback((projectPath: string, issue: IssueDetails) => {
+    if (projectNow.current !== projectPath) return;
+    created.current = { projectPath, issue };
+    setComposing(false);
+    setProvider(issue.provider);
+    setList((rows) => [issue, ...rows.filter((row) => writeKey(row) !== writeKey(issue))]);
+    setSelected(issue);
+    setDetail(issue);
+    setStatusOpen(false);
+  }, []);
+  useEffect(() => setCopied(false), [selected?.provider, selected?.id]);
+  const copyIdentifier = () => {
+    if (!selected) return;
+    void navigator.clipboard?.writeText(selected.identifier).then(() => setCopied(true), () => {});
+  };
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
   // The session working on the issue: the pipeline's author, never its reviewer.
@@ -430,6 +468,7 @@ export function IssuesView({
             onChange={(v) => {
               setProvider(v);
               setSelected(null);
+              created.current = null;
             }}
             options={[
               { value: "github", label: "GitHub" },
@@ -476,6 +515,9 @@ export function IssuesView({
                 className="w-36 bg-transparent text-xs outline-none placeholder:text-faint"
               />
             </div>
+            <Button variant="secondary" size="sm" className="gap-1" onClick={() => setComposing(true)} disabled={!project}>
+              <Plus /> New issue
+            </Button>
             <WithTooltip label="Refresh">
               <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => setTick((t) => t + 1)}>
                 {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -560,13 +602,40 @@ export function IssuesView({
           setStatusOpen(true);
         }}
       >
-        {!selected ? (
+        {composing && project ? (
+          <NewIssueForm
+            key={`${project.path}\n${provider}`}
+            projectPath={project.path}
+            provider={provider}
+            onProviderChange={(value) => {
+              setProvider(value);
+              setSelected(null);
+            }}
+            repo={repo}
+            teams={teams}
+            defaultTeamId={teamId}
+            viewer={viewer}
+            unavailable={emptyReason}
+            onCreated={onIssueCreated}
+            onClose={() => setComposing(false)}
+          />
+        ) : !selected ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-faint">Pick an issue to read it and start a session on it.</div>
         ) : (
           <>
             <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
-                <span className="font-mono text-xs text-faint">{selected.identifier}</span>
+                <WithTooltip label={copied ? "Copied" : "Copy identifier"}>
+                  <button
+                    type="button"
+                    aria-label={`Copy ${selected.identifier}`}
+                    onClick={copyIdentifier}
+                    className="group -mx-1 flex shrink-0 items-center gap-1 self-center rounded px-1 font-mono text-xs text-faint hover:bg-veil-raised hover:text-foreground"
+                  >
+                    {selected.identifier}
+                    {copied ? <Check className="size-3" /> : <Copy className="size-3 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />}
+                  </button>
+                </WithTooltip>
                 <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
