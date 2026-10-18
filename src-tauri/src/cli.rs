@@ -78,6 +78,14 @@ Usage:
   terminalx worktrees delete WORKTREE [--project PROJECT] --yes [--force] [--json]
   terminalx issues list --project PROJECT [--provider github|linear]
       [--assigned-to-me] [--team ID] [--search TEXT] [--json]
+  terminalx issues view ISSUE [--project PROJECT] [--provider github|linear] [--comments] [--json]
+  terminalx issues comment ISSUE --body TEXT|--body-file PATH [--project PROJECT] [--json]
+  terminalx issues status ISSUE --to STATE [--reason completed|not_planned] [--project PROJECT] [--json]
+  terminalx issues assign ISSUE (--to USER... | --me | --none) [--project PROJECT] [--json]
+  terminalx issues label ISSUE [--add LABEL...] [--remove LABEL...] [--project PROJECT] [--json]
+  terminalx issues create --project PROJECT [--provider github|linear] --title TEXT
+      [--body TEXT|--body-file PATH] [--team TEAM] [--assignee USER...] [--label LABEL...]
+      [--state STATE] [--priority none|urgent|high|medium|low] [--json]
   terminalx pipelines list [--project PROJECT] [--json]
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
@@ -394,7 +402,7 @@ fn parse_with_stdin(
         }
         "permissions" => parse_permissions(&mut tokens),
         "worktrees" => parse_worktrees(&mut tokens),
-        "issues" => parse_issues(&mut tokens),
+        "issues" => parse_issues(&mut tokens, stdin),
         "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
         "skills" => {
@@ -699,18 +707,151 @@ fn parse_worktrees(tokens: &mut Tokens) -> Result<Action, ControlError> {
     }
 }
 
-fn parse_issues(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    expect_word(tokens, "list", "issues")?;
-    let project = tokens.required_option("--project")?;
+fn parse_issues(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>) -> Result<Action, ControlError> {
+    let command = tokens.required_front("issues command")?;
+    if command == "list" {
+        let project = tokens.required_option("--project")?;
+        let provider = tokens.option("--provider")?;
+        let assigned = tokens.flag("--assigned-to-me")?;
+        let team = tokens.option("--team")?;
+        let search = tokens.option("--search")?;
+        return rpc(
+            "issues.list",
+            json!({"project": project, "provider": provider, "assignedToMe": assigned, "team": team, "search": search}),
+            tokens,
+        );
+    }
+    if !matches!(command.as_str(), "view" | "comment" | "status" | "assign" | "label" | "create") {
+        return Err(invalid(format!("Unknown issues command {command}. Use list, view, comment, status, assign, label or create.")));
+    }
     let provider = tokens.option("--provider")?;
-    let assigned = tokens.flag("--assigned-to-me")?;
-    let team = tokens.option("--team")?;
-    let search = tokens.option("--search")?;
-    rpc(
-        "issues.list",
-        json!({"project": project, "provider": provider, "assignedToMe": assigned, "team": team, "search": search}),
-        tokens,
-    )
+    if let Some(provider) = provider.as_deref().filter(|provider| !matches!(*provider, "github" | "linear")) {
+        return Err(invalid(format!("--provider takes github or linear, not {provider}.")));
+    }
+    let mut params = json!({"provider": provider});
+    if command == "create" {
+        params["project"] = json!(tokens.required_option("--project")?);
+        let title = tokens.required_option("--title")?;
+        if title.trim().is_empty() {
+            return Err(invalid("--title cannot be empty."));
+        }
+        params["title"] = json!(title);
+        params["body"] = json!(issue_body(tokens, stdin, false)?);
+        params["team"] = json!(tokens.option("--team")?);
+        params["assignees"] = json!(tokens.options("--assignee")?.iter().flat_map(|value| list_values(value)).collect::<Vec<_>>());
+        params["labels"] = json!(tokens.options("--label")?);
+        params["state"] = json!(tokens.option("--state")?);
+        params["priority"] = json!(tokens.option("--priority")?.map(|value| issue_priority(&value)).transpose()?);
+    } else {
+        params["project"] = json!(tokens.option("--project")?);
+    }
+    match command.as_str() {
+        "create" => (),
+        "view" => params["comments"] = json!(tokens.flag("--comments")?),
+        "comment" => params["body"] = json!(issue_body(tokens, stdin, true)?),
+        "status" => {
+            let to = tokens.required_option("--to")?;
+            if to.trim().is_empty() {
+                return Err(invalid("--to cannot be empty."));
+            }
+            let reason = tokens.option("--reason")?;
+            if let Some(reason) = reason.as_deref().filter(|reason| !matches!(*reason, "completed" | "not_planned")) {
+                return Err(invalid(format!("--reason takes completed or not_planned, not {reason}.")));
+            }
+            params["to"] = json!(to);
+            params["reason"] = json!(reason);
+        }
+        "assign" => {
+            let to: Vec<String> = tokens.options("--to")?.iter().flat_map(|value| list_values(value)).collect();
+            let me = tokens.flag("--me")?;
+            let none = tokens.flag("--none")?;
+            if usize::from(!to.is_empty()) + usize::from(me) + usize::from(none) != 1 {
+                return Err(invalid("assign takes exactly one of --to USER..., --me or --none."));
+            }
+            params["to"] = json!(to);
+            params["me"] = json!(me);
+            params["none"] = json!(none);
+        }
+        "label" => {
+            let add = tokens.options("--add")?;
+            let remove = tokens.options("--remove")?;
+            if add.is_empty() && remove.is_empty() {
+                return Err(invalid("label needs --add or --remove."));
+            }
+            if let Some(both) = add.iter().find(|label| remove.iter().any(|other| other.eq_ignore_ascii_case(label))) {
+                return Err(invalid(format!("{both} is both added and removed.")));
+            }
+            params["add"] = json!(add);
+            params["remove"] = json!(remove);
+        }
+        _ => unreachable!("checked above"),
+    }
+    if command != "create" {
+        let issue = tokens.required_front("issue")?;
+        let (provider, _) = crate::issues::parse_issue_reference(&issue, params["provider"].as_str()).map_err(invalid)?;
+        if provider == "linear" && !params["reason"].is_null() {
+            return Err(invalid("--reason is for closing a GitHub issue; a Linear issue moves to one of its team's states."));
+        }
+        params["issue"] = json!(issue);
+    }
+    tokens.finish()?;
+    // Where it runs: the default project, and a session to name in the question.
+    params["caller"] = issue_caller();
+    Ok(Action::Rpc {
+        command: format!("issues.{command}"),
+        params,
+        // A write may wait for the person's answer before the provider is asked.
+        timeout: if command == "view" { Duration::from_secs(60) } else { ISSUE_WRITE_TIMEOUT },
+    })
+}
+
+/// Longer than the app's question ([`crate::cloud_control::QUESTION_TTL`]),
+/// the write and the read after it, so the app's answer is what is printed.
+const ISSUE_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Where an issue command runs from. The app finds the project from it and
+/// names the session in its question; it decides nothing, since any process
+/// can say anything here. Every write is asked.
+fn issue_caller() -> Value {
+    let present = |name: &str| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
+    json!({
+        "session": present("RACCOON_SESSION_ID"),
+        "tab": present("RACCOON_TAB_ID"),
+        "cwd": std::env::current_dir().ok().map(|cwd| cwd.to_string_lossy().into_owned()),
+    })
+}
+
+/// `--body TEXT` or `--body-file PATH` (`-` for standard input).
+fn issue_body(tokens: &mut Tokens, stdin: &mut dyn FnMut() -> Result<String, ControlError>, required: bool) -> Result<Option<String>, ControlError> {
+    let body = match (tokens.option("--body")?, tokens.option("--body-file")?) {
+        (Some(_), Some(_)) => return Err(invalid("--body and --body-file are mutually exclusive.")),
+        (Some(body), None) => Some(body),
+        (None, Some(path)) if path == "-" => Some(stdin()?),
+        (None, Some(path)) => Some(std::fs::read_to_string(&path).map_err(|error| invalid(format!("Could not read --body-file {path}: {error}")))?),
+        (None, None) if required => return Err(invalid("Missing --body or --body-file.")),
+        (None, None) => None,
+    };
+    if required && body.as_deref().is_some_and(|body| body.trim().is_empty()) {
+        return Err(invalid("The comment is empty."));
+    }
+    Ok(body)
+}
+
+/// Linear's priorities by name or number: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+fn issue_priority(value: &str) -> Result<u8, ControlError> {
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "none" => Ok(0),
+        "1" | "urgent" => Ok(1),
+        "2" | "high" => Ok(2),
+        "3" | "medium" => Ok(3),
+        "4" | "low" => Ok(4),
+        other => Err(invalid(format!("--priority takes none, urgent, high, medium or low (or 0-4), not {other}."))),
+    }
+}
+
+/// `alice,bob` and `--to alice --to bob` both name two people.
+fn list_values(value: &str) -> Vec<String> {
+    value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).collect()
 }
 
 /// Issue pipelines: what became of the sessions started from issues.
@@ -845,6 +986,19 @@ impl Tokens {
     pub(crate) fn peek_option(&self, name: &str) -> Option<String> {
         let position = self.values.iter().position(|value| value == name)?;
         self.values.get(position + 1).cloned()
+    }
+
+    /// Every value of an option that may be repeated, in the order given.
+    pub(crate) fn options(&mut self, name: &str) -> Result<Vec<String>, ControlError> {
+        let mut values = Vec::new();
+        while let Some(position) = self.values.iter().position(|value| value == name) {
+            if position + 1 >= self.values.len() {
+                return Err(invalid(format!("{name} needs a value.")));
+            }
+            self.values.remove(position);
+            values.push(self.values.remove(position));
+        }
+        Ok(values)
     }
 
     pub(crate) fn required_option(&mut self, name: &str) -> Result<String, ControlError> {
@@ -1034,6 +1188,144 @@ mod tests {
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--provider", "linear"])).is_err());
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "433", "--auto-merge", "--no-auto-merge"])).is_err());
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex"])).is_err());
+    }
+
+    fn issue_rpc(values: &[&str]) -> (String, Value, Duration) {
+        let (command, mut params, timeout) = rpc_of(values);
+        // Where the test runs from is not what is being tested.
+        assert!(params.as_object_mut().unwrap().remove("caller").is_some(), "every issue command says who asks");
+        (command, params, timeout)
+    }
+
+    fn issue_error(values: &[&str]) -> String {
+        let error = parse(&args(values)).unwrap_err();
+        assert_eq!(error.code, "invalid_arguments", "{values:?}");
+        error.message
+    }
+
+    #[test]
+    fn an_issue_is_viewed_with_or_without_its_comments() {
+        let (command, params, timeout) = issue_rpc(&["issues", "view", "#433"]);
+        assert_eq!((command.as_str(), params), ("issues.view", json!({"issue": "#433", "provider": null, "project": null, "comments": false})));
+        assert_eq!(timeout, Duration::from_secs(60));
+        let (_, params, _) = issue_rpc(&["issues", "view", "--comments", "PRO-42", "--provider", "linear", "--project", "raccoon", "--json"]);
+        assert_eq!(params, json!({"issue": "PRO-42", "provider": "linear", "project": "raccoon", "comments": true}));
+        for reference in ["https://github.com/acme/api/issues/12", "https://linear.app/acme/issue/ENG-7/fix-it", "12"] {
+            assert_eq!(issue_rpc(&["issues", "view", reference]).1["issue"], json!(reference));
+        }
+        assert!(issue_error(&["issues", "view"]).contains("Missing issue"));
+        assert!(issue_error(&["issues", "view", "not an issue"]).contains("is not an issue"));
+        assert!(issue_error(&["issues", "view", "PRO-42", "--provider", "github"]).contains("is a Linear issue"));
+        assert!(issue_error(&["issues", "view", "12", "--provider", "jira"]).contains("github or linear"));
+        assert!(issue_error(&["issues", "view", "12", "13"]).contains("Unexpected argument 13"));
+        assert!(issue_error(&["issues", "close", "12"]).contains("Unknown issues command close"));
+        // The list keeps its exact request.
+        assert_eq!(rpc_of(&["issues", "list", "--project", "raccoon"]).1, json!({"project": "raccoon", "provider": null, "assignedToMe": false, "team": null, "search": null}));
+    }
+
+    #[test]
+    fn a_comment_comes_from_the_command_line_a_file_or_standard_input() {
+        let (command, params, timeout) = issue_rpc(&["issues", "comment", "#12", "--body", "PR: https://github.com/acme/api/pull/13"]);
+        assert_eq!((command.as_str(), params), ("issues.comment", json!({"issue": "#12", "provider": null, "project": null, "body": "PR: https://github.com/acme/api/pull/13"})));
+        assert!(timeout > crate::cloud_control::QUESTION_TTL + Duration::from_secs(30), "the person's answer and the write fit in the wait");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("comment.md");
+        std::fs::write(&file, "## Done\n\nSee the PR.").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        assert_eq!(issue_rpc(&["issues", "comment", "ENG-7", "--body-file", &path]).1["body"], json!("## Done\n\nSee the PR."));
+
+        let mut stdin = || Ok::<_, ControlError>("from a pipe".to_string());
+        let Action::Rpc { params, .. } = parse_with_stdin(&args(&["issues", "comment", "12", "--body-file", "-"]), &mut stdin).unwrap().action else { panic!("expected rpc") };
+        assert_eq!(params["body"], json!("from a pipe"));
+
+        assert!(issue_error(&["issues", "comment", "12"]).contains("Missing --body"));
+        assert!(issue_error(&["issues", "comment", "12", "--body", "  "]).contains("empty"));
+        assert!(issue_error(&["issues", "comment", "12", "--body", "a", "--body-file", &path]).contains("mutually exclusive"));
+        assert!(issue_error(&["issues", "comment", "12", "--body-file", &format!("{path}.missing")]).contains("Could not read --body-file"));
+        assert!(issue_error(&["issues", "comment", "12", "--body"]).contains("--body needs a value"));
+    }
+
+    #[test]
+    fn a_status_move_names_its_state_and_a_github_close_its_reason() {
+        let (command, params, _) = issue_rpc(&["issues", "status", "PRO-42", "--to", "In Review"]);
+        assert_eq!((command.as_str(), params), ("issues.status", json!({"issue": "PRO-42", "provider": null, "project": null, "to": "In Review", "reason": null})));
+        let (_, params, _) = issue_rpc(&["issues", "status", "#12", "--to", "closed", "--reason", "not_planned"]);
+        assert_eq!((&params["to"], &params["reason"]), (&json!("closed"), &json!("not_planned")));
+        assert_eq!(issue_rpc(&["issues", "status", "12", "--reason", "completed", "--to", "closed"]).1["reason"], json!("completed"));
+
+        assert!(issue_error(&["issues", "status", "12"]).contains("Missing --to"));
+        assert!(issue_error(&["issues", "status", "12", "--to", " "]).contains("--to cannot be empty"));
+        assert!(issue_error(&["issues", "status", "12", "--to", "closed", "--reason", "duplicate"]).contains("completed or not_planned"));
+        assert!(issue_error(&["issues", "status", "PRO-42", "--to", "Done", "--reason", "completed"]).contains("--reason is for closing a GitHub issue"));
+        assert!(issue_error(&["issues", "status", "12", "--to", "open", "--to", "closed"]).contains("only once"));
+    }
+
+    #[test]
+    fn assigning_takes_people_me_or_nobody_and_exactly_one_of_them() {
+        let (command, params, _) = issue_rpc(&["issues", "assign", "#12", "--to", "alice", "--to", "bob,carol"]);
+        assert_eq!((command.as_str(), params), ("issues.assign", json!({"issue": "#12", "provider": null, "project": null, "to": ["alice", "bob", "carol"], "me": false, "none": false})));
+        assert_eq!(issue_rpc(&["issues", "assign", "PRO-42", "--me"]).1, json!({"issue": "PRO-42", "provider": null, "project": null, "to": [], "me": true, "none": false}));
+        assert_eq!(issue_rpc(&["issues", "assign", "PRO-42", "--none"]).1["none"], json!(true));
+        for values in [
+            &["issues", "assign", "12"][..],
+            &["issues", "assign", "12", "--me", "--none"],
+            &["issues", "assign", "12", "--to", "alice", "--me"],
+            &["issues", "assign", "12", "--to", "alice", "--none"],
+            &["issues", "assign", "12", "--to", ","],
+        ] {
+            assert!(issue_error(values).contains("exactly one of"), "{values:?}");
+        }
+        assert!(issue_error(&["issues", "assign", "12", "--to"]).contains("--to needs a value"));
+    }
+
+    #[test]
+    fn labels_are_added_and_removed_by_name() {
+        let (command, params, _) = issue_rpc(&["issues", "label", "#12", "--add", "bug", "--add", "needs review", "--remove", "triage"]);
+        assert_eq!((command.as_str(), params), ("issues.label", json!({"issue": "#12", "provider": null, "project": null, "add": ["bug", "needs review"], "remove": ["triage"]})));
+        // A label's name may hold a comma: it is never split.
+        assert_eq!(issue_rpc(&["issues", "label", "12", "--remove", "a, b"]).1, json!({"issue": "12", "provider": null, "project": null, "add": [], "remove": ["a, b"]}));
+        assert!(issue_error(&["issues", "label", "12"]).contains("--add or --remove"));
+        assert!(issue_error(&["issues", "label", "12", "--add", "Bug", "--remove", "bug"]).contains("both added and removed"));
+    }
+
+    #[test]
+    fn an_issue_is_created_in_a_named_project() {
+        let (command, params, timeout) = issue_rpc(&["issues", "create", "--project", "raccoon", "--title", "Crash on start"]);
+        assert_eq!(
+            (command.as_str(), params),
+            ("issues.create", json!({"project": "raccoon", "provider": null, "title": "Crash on start", "body": null, "team": null, "assignees": [], "labels": [], "state": null, "priority": null}))
+        );
+        assert_eq!(timeout, ISSUE_WRITE_TIMEOUT);
+        let (_, params, _) = issue_rpc(&[
+            "issues", "create", "--provider", "linear", "--project", "raccoon", "--title", "Flaky test", "--body", "Seen twice.", "--team", "PRO",
+            "--assignee", "ada", "--label", "bug", "--label", "ci", "--state", "Todo", "--priority", "high",
+        ]);
+        assert_eq!(
+            params,
+            json!({"project": "raccoon", "provider": "linear", "title": "Flaky test", "body": "Seen twice.", "team": "PRO", "assignees": ["ada"], "labels": ["bug", "ci"], "state": "Todo", "priority": 2})
+        );
+        assert_eq!(issue_rpc(&["issues", "create", "--project", "p", "--title", "t", "--priority", "0"]).1["priority"], json!(0));
+        assert!(issue_error(&["issues", "create", "--title", "t"]).contains("Missing --project"));
+        assert!(issue_error(&["issues", "create", "--project", "p"]).contains("Missing --title"));
+        assert!(issue_error(&["issues", "create", "--project", "p", "--title", " "]).contains("--title cannot be empty"));
+        assert!(issue_error(&["issues", "create", "--project", "p", "--title", "t", "--priority", "p0"]).contains("--priority takes"));
+        assert!(issue_error(&["issues", "create", "--project", "p", "--title", "t", "#12"]).contains("Unexpected argument #12"));
+    }
+
+    #[test]
+    fn an_issue_command_says_where_it_runs() {
+        let (_, params, _) = rpc_of(&["issues", "view", "12"]);
+        let caller = &params["caller"];
+        for key in ["session", "tab", "cwd"] {
+            assert!(caller.get(key).is_some(), "{key}");
+        }
+        assert!(caller.get("agentEnvironment").is_none(), "nothing the caller says decides whether it is asked");
+        for text in [help_text(), GUIDE.to_string()] {
+            for command in ["issues view", "issues comment", "issues status", "issues assign", "issues label", "issues create"] {
+                assert!(text.contains(command), "missing {command}");
+            }
+        }
     }
 
     #[test]
