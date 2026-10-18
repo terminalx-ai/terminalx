@@ -361,10 +361,10 @@ describe("the status picker beside a running pipeline", () => {
 });
 
 describe("groupWorkflowStates", () => {
-  it("puts triage first, a type it does not know last, and each group in the team's order", () => {
+  it("puts triage first, a type it does not know last, each group in the team's order, and leaves Duplicate out", () => {
     const state = (id: string, type: string, position: number) => ({ id, name: id, type, color: "", position });
-    expect(groupWorkflowStates([state("Dup", "duplicate", 9), state("B", "started", 3), state("A", "started", 2), state("T", "triage", 0), state("Todo", "unstarted", 1)])
+    expect(groupWorkflowStates([state("Dup", "duplicate", 9), state("R", "review", 8), state("B", "started", 3), state("A", "started", 2), state("T", "triage", 0), state("Todo", "unstarted", 1)])
       .map((group) => [group.label, group.states.map((each) => each.id)]))
-      .toEqual([["Triage", ["T"]], ["Unstarted", ["Todo"]], ["Started", ["A", "B"]], ["Duplicate", ["Dup"]]]);
+      .toEqual([["Triage", ["T"]], ["Unstarted", ["Todo"]], ["Started", ["A", "B"]], ["Review", ["R"]]]);
   });
 });

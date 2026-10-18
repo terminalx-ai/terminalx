@@ -28,10 +28,16 @@ const TYPE_LABEL: Record<string, string> = {
   canceled: "Canceled",
 };
 
-/** A team's workflow states by type, in Linear's order; a type it has no name for goes last. */
+/**
+ * A team's workflow states by type, in Linear's order; a type it has no name
+ * for goes last. Duplicate is left out, as Linear's own picker does: an issue
+ * is only moved there by marking it a duplicate of another, and Linear
+ * refuses the plain move.
+ */
 export function groupWorkflowStates(states: WorkflowState[]): { type: string; label: string; states: WorkflowState[] }[] {
   const rank = (type: string) => (TYPE_ORDER.includes(type) ? TYPE_ORDER.indexOf(type) : TYPE_ORDER.length);
-  const types = [...new Set(states.map((state) => state.type))].sort((a, b) => rank(a) - rank(b));
+  const types = [...new Set(states.map((state) => state.type))]
+    .filter((type) => type !== "duplicate").sort((a, b) => rank(a) - rank(b));
   return types.map((type) => ({
     type,
     label: TYPE_LABEL[type] ?? type.charAt(0).toUpperCase() + type.slice(1),
