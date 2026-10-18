@@ -1,0 +1,269 @@
+{
+  "details": {
+    "data": {
+      "issue": {
+        "id": "6aecdaa3-5396-40c2-85a0-7e9d44871943",
+        "identifier": "ENG-101",
+        "number": 101,
+        "title": "[TerminalX test] issue-management sandbox — ignore",
+        "description": "Sandbox issue for testing the issue-management feature (ENG-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+        "url": "https://linear.app/acme/issue/ENG-101/terminalx-test-issue-management-sandbox-ignore",
+        "createdAt": "2026-10-18T06:31:11.160Z",
+        "updatedAt": "2026-10-18T06:31:11.160Z",
+        "priority": 0,
+        "state": {
+          "id": "884bd5ca-47eb-4eed-96f8-d44a7183b391",
+          "name": "Backlog",
+          "type": "backlog",
+          "color": "#bec2c8"
+        },
+        "labels": {
+          "nodes": []
+        },
+        "assignee": {
+          "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+          "name": "Sam Rivera",
+          "displayName": "sam",
+          "avatarUrl": null
+        },
+        "creator": {
+          "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+          "name": "Sam Rivera",
+          "displayName": "sam",
+          "avatarUrl": null
+        },
+        "team": {
+          "id": "54a8d6dc-e668-4521-9def-b0c2bd18bef8",
+          "key": "ENG",
+          "name": "Engineering"
+        }
+      }
+    }
+  },
+  "commentCreate": {
+    "data": {
+      "commentCreate": {
+        "success": true,
+        "comment": {
+          "id": "d9366664-83e4-4e52-a224-49be2c39c5ba",
+          "body": "[TerminalX test] identifier probe — will be deleted",
+          "createdAt": "2026-10-18T06:54:32.534Z",
+          "editedAt": null,
+          "url": "https://linear.app/acme/issue/ENG-101/terminalx-test-issue-management-sandbox-ignore#comment-d9366664",
+          "user": {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null
+          },
+          "botActor": null
+        }
+      }
+    }
+  },
+  "commentUpdate": {
+    "data": {
+      "commentUpdate": {
+        "success": true,
+        "comment": {
+          "id": "d9366664-83e4-4e52-a224-49be2c39c5ba",
+          "body": "[TerminalX test] edited — will be deleted",
+          "createdAt": "2026-10-18T06:54:32.534Z",
+          "editedAt": "2026-10-18T06:54:59.528Z",
+          "url": "https://linear.app/acme/issue/ENG-101/terminalx-test-issue-management-sandbox-ignore#comment-d9366664",
+          "user": {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null
+          },
+          "botActor": null
+        }
+      }
+    }
+  },
+  "commentDelete": {
+    "data": {
+      "commentDelete": {
+        "success": true
+      }
+    }
+  },
+  "commentDeleteGone": {
+    "errors": [
+      {
+        "message": "Entity not found: Comment",
+        "path": [
+          "commentDelete"
+        ],
+        "locations": [
+          {
+            "line": 1,
+            "column": 26
+          }
+        ],
+        "extensions": {
+          "type": "invalid input",
+          "code": "INPUT_ERROR",
+          "statusCode": 400,
+          "userError": true,
+          "userPresentableMessage": "Could not find referenced Comment."
+        }
+      }
+    ],
+    "data": null
+  },
+  "issueUpdate": {
+    "data": {
+      "issueUpdate": {
+        "success": true,
+        "issue": {
+          "id": "6aecdaa3-5396-40c2-85a0-7e9d44871943",
+          "identifier": "ENG-101",
+          "number": 101,
+          "title": "[TerminalX test] issue-management sandbox — ignore",
+          "description": "Sandbox issue for testing the issue-management feature (ENG-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+          "url": "https://linear.app/acme/issue/ENG-101/terminalx-test-issue-management-sandbox-ignore",
+          "createdAt": "2026-10-18T06:31:11.160Z",
+          "updatedAt": "2026-10-18T06:55:30.290Z",
+          "priority": 3,
+          "state": {
+            "id": "f093f06b-bdb5-4cc0-83a2-1ab468cf2210",
+            "name": "Todo",
+            "type": "unstarted",
+            "color": "#e2e2e2"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "id": "ccc19003-dd17-4f15-8a1c-791df99d854f",
+                "name": "Bug",
+                "color": "#EB5757"
+              }
+            ]
+          },
+          "assignee": null,
+          "creator": {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null
+          },
+          "team": {
+            "id": "54a8d6dc-e668-4521-9def-b0c2bd18bef8",
+            "key": "ENG",
+            "name": "Engineering"
+          }
+        }
+      }
+    }
+  },
+  "issueUpdateStaleState": {
+    "errors": [
+      {
+        "message": "Entity not found in validateAccess: stateId",
+        "path": [
+          "issueUpdate"
+        ],
+        "locations": [
+          {
+            "line": 1,
+            "column": 53
+          }
+        ],
+        "extensions": {
+          "meta": {
+            "missingIds": [
+              "00000000-0000-4000-8000-000000000000"
+            ]
+          },
+          "type": "invalid input",
+          "code": "INPUT_ERROR",
+          "statusCode": 400,
+          "userError": true,
+          "userPresentableMessage": "An item needed to save your changes is unavailable."
+        }
+      }
+    ],
+    "data": null
+  },
+  "issueUpdateStaleLabel": {
+    "errors": [
+      {
+        "message": "Entity not found in validateAccess: labelIds",
+        "path": [
+          "issueUpdate"
+        ],
+        "locations": [
+          {
+            "line": 1,
+            "column": 53
+          }
+        ],
+        "extensions": {
+          "meta": {
+            "missingIds": [
+              "00000000-0000-4000-8000-000000000000"
+            ]
+          },
+          "type": "invalid input",
+          "code": "INPUT_ERROR",
+          "statusCode": 400,
+          "userError": true,
+          "userPresentableMessage": "An item needed to save your changes is unavailable."
+        }
+      }
+    ],
+    "data": null
+  },
+  "issueCreate": {
+    "data": {
+      "issueCreate": {
+        "success": true,
+        "issue": {
+          "id": "3b1e1c8a-6ec5-4609-8f5a-241fa3dde213",
+          "identifier": "ENG-102",
+          "number": 102,
+          "title": "[TerminalX test] create check (fixture) — ignore",
+          "description": "Created by an automated check for ENG-92; canceled right away.",
+          "url": "https://linear.app/acme/issue/ENG-102/terminalx-test-create-check-fixture-ignore",
+          "createdAt": "2026-10-18T06:56:00.053Z",
+          "updatedAt": "2026-10-18T06:56:00.053Z",
+          "priority": 4,
+          "state": {
+            "id": "f093f06b-bdb5-4cc0-83a2-1ab468cf2210",
+            "name": "Todo",
+            "type": "unstarted",
+            "color": "#e2e2e2"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "id": "9d07c84e-3f8a-4bd6-a0b5-27a72084b8ca",
+                "name": "Improvement",
+                "color": "#4EA7FC"
+              }
+            ]
+          },
+          "assignee": {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null
+          },
+          "creator": {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null
+          },
+          "team": {
+            "id": "54a8d6dc-e668-4521-9def-b0c2bd18bef8",
+            "key": "ENG",
+            "name": "Engineering"
+          }
+        }
+      }
+    }
+  }
+}

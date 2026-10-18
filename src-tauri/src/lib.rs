@@ -85,6 +85,8 @@ mod github_identity;
 mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
+mod issue_control;
+#[cfg(feature = "desktop")]
 mod issue_pipeline;
 #[cfg(feature = "desktop")]
 mod issue_ops;
@@ -313,7 +315,11 @@ pub fn run() {
             // The agent CLIs' hooks reach the app through this socket; without
             // it a PTY-first tab still runs, it just cannot report or ask.
             let hooked = manager.clone();
-            let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone()).with_pairing(pairing.clone());
+            let asking = app.handle().clone();
+            let ask: issue_control::Ask = Arc::new(move |question: issue_control::Question| {
+                tauri::async_runtime::block_on(commands::cloud_control_question(asking.clone(), question.title, question.message, question.agree))
+            });
+            let service = control::ControlService::new(sink.clone(), manager.clone(), control_endpoint.clone(), computer.clone(), browser.clone()).with_pairing(pairing.clone()).with_questions(ask);
             match hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request)) {
                 Ok(path) => log::info!("hook socket at {}", path.display()),
                 Err(e) => log::warn!("hook socket: {e:#}"),

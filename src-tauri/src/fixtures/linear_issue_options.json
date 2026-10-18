@@ -1,0 +1,132 @@
+{
+  "data": {
+    "team": {
+      "id": "54a8d6dc-e668-4521-9def-b0c2bd18bef8",
+      "states": {
+        "nodes": [
+          {
+            "id": "1f33c18e-66d4-4a88-957a-98df0e703d60",
+            "name": "In Review",
+            "type": "started",
+            "color": "#0f783c",
+            "position": 1002
+          },
+          {
+            "id": "f093f06b-bdb5-4cc0-83a2-1ab468cf2210",
+            "name": "Todo",
+            "type": "unstarted",
+            "color": "#e2e2e2",
+            "position": 1
+          },
+          {
+            "id": "f01b8625-e677-4478-b6a3-9c6b48c4b1d4",
+            "name": "Done",
+            "type": "completed",
+            "color": "#5e6ad2",
+            "position": 3
+          },
+          {
+            "id": "dfdaae0a-74c8-458f-ab12-88280ccf88cc",
+            "name": "Duplicate",
+            "type": "duplicate",
+            "color": "#95a2b3",
+            "position": 5
+          },
+          {
+            "id": "d74db8f9-07aa-4ed3-94f0-3c0e63421ddc",
+            "name": "In Progress",
+            "type": "started",
+            "color": "#f2c94c",
+            "position": 2
+          },
+          {
+            "id": "884bd5ca-47eb-4eed-96f8-d44a7183b391",
+            "name": "Backlog",
+            "type": "backlog",
+            "color": "#bec2c8",
+            "position": 0
+          },
+          {
+            "id": "6f8394ad-fa2d-4df3-9ad7-60c8100f58db",
+            "name": "Canceled",
+            "type": "canceled",
+            "color": "#95a2b3",
+            "position": 4
+          }
+        ]
+      },
+      "members": {
+        "nodes": [
+          {
+            "id": "f67076e8-c94a-4fd5-9cf7-432123581ad7",
+            "name": "Robin Park",
+            "displayName": "robin",
+            "avatarUrl": "https://example.com/robin.png",
+            "active": true
+          },
+          {
+            "id": "d6b0323d-9198-4b93-96c4-7515a5f47c6e",
+            "name": "Sam Rivera",
+            "displayName": "sam",
+            "avatarUrl": null,
+            "active": true
+          },
+          {
+            "id": "user-gone",
+            "name": "Former Member",
+            "displayName": "former",
+            "avatarUrl": null,
+            "active": false
+          }
+        ]
+      }
+    },
+    "issueLabels": {
+      "nodes": [
+        {
+          "id": "ccc19003-dd17-4f15-8a1c-791df99d854f",
+          "name": "Bug",
+          "color": "#EB5757",
+          "description": null,
+          "isGroup": false,
+          "parent": null
+        },
+        {
+          "id": "9d07c84e-3f8a-4bd6-a0b5-27a72084b8ca",
+          "name": "Improvement",
+          "color": "#4EA7FC",
+          "description": null,
+          "isGroup": false,
+          "parent": null
+        },
+        {
+          "id": "1fdc41cc-3ab3-46c7-a760-939a719457f6",
+          "name": "Feature",
+          "color": "#BB87FC",
+          "description": null,
+          "isGroup": false,
+          "parent": null
+        },
+        {
+          "id": "label-group-area",
+          "name": "Area",
+          "color": "#5e6ad2",
+          "description": null,
+          "isGroup": true,
+          "parent": null
+        },
+        {
+          "id": "label-frontend",
+          "name": "Frontend",
+          "color": "#26b5ce",
+          "description": "UI work",
+          "isGroup": false,
+          "parent": {
+            "id": "label-group-area",
+            "name": "Area"
+          }
+        }
+      ]
+    }
+  }
+}

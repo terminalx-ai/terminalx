@@ -46,9 +46,8 @@ export interface IssueCapabilities {
 
 /**
  * An issue read whole: every field of the list's `Issue` plus the rest.
- * `labels[].id` is what `setLabels` takes. `body` keeps its older meaning
- * for now (on Linear the first comments are pasted under it for the agent);
- * `description` is the description alone.
+ * `labels[].id` is what `setLabels` takes. Neither `body` nor
+ * `description` carries comments on Linear; read them with `comments`.
  */
 export interface IssueDetails extends Issue {
   description: string;
@@ -106,6 +105,8 @@ export interface LabelOption {
   description?: string | null;
   /** The Linear label group this one sits in, by name. */
   group?: string | null;
+  /** That group's id: groups can share a name, and an issue takes one label per group. */
+  groupId?: string | null;
   /** A Linear label group itself, which issues are not given. */
   isGroup: boolean;
 }
@@ -133,10 +134,15 @@ export type StateChange =
   | { kind: "close"; reason: CloseReason }
   | { kind: "reopen" };
 
-/** `expectedUpdatedAt` is the `updatedAt` the editor started from; a newer issue is a `conflict`. */
+/**
+ * `expectedUpdatedAt` and `expectedDescription` are what the editor started from. With
+ * `expectedDescription`, only a changed description is a `conflict` (a new comment also moves
+ * `updatedAt`); without it, any newer issue is.
+ */
 export interface DescriptionEdit {
   description: string;
   expectedUpdatedAt?: string | null;
+  expectedDescription?: string | null;
 }
 
 export interface IssueCreate {

@@ -283,6 +283,12 @@ pub fn linear_viewer(key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("Linear did not say who the key belongs to."))
 }
 
+/// The id of the person the key belongs to, as an assignee is named.
+pub fn linear_viewer_id(key: &str) -> Result<String> {
+    let data = graphql(key, "query { viewer { id } }", json!({}))?;
+    data["viewer"]["id"].as_str().map(String::from).ok_or_else(|| anyhow!("Linear did not say who the key belongs to."))
+}
+
 pub fn linear_teams(key: &str) -> Result<Vec<IssueTeam>> {
     let data = graphql(key, "query { teams(first: 100) { nodes { id key name } } }", json!({}))?;
     Ok(parse_linear_teams(&data))
@@ -369,25 +375,64 @@ pub fn linear_list(key: &str, filter: &IssueFilter) -> Result<Vec<Issue>> {
     Ok(issues)
 }
 
+/// The issue as an agent's first prompt carries it: the description with the
+/// discussion under it ([`linear_discussion`]). The Issues view reads the
+/// two apart, through `issue_ops`.
 pub fn linear_details(key: &str, id: &str) -> Result<Issue> {
-    let query = format!("query($id: String!) {{ issue(id: $id) {{ {ISSUE_FIELDS} comments(first: 20) {{ nodes {{ body createdAt user {{ displayName name }} }} }} }} }}");
+    let query = format!("query($id: String!) {{ issue(id: $id) {{ {ISSUE_FIELDS} comments(first: {DISCUSSION_COMMENTS}) {{ nodes {{ body createdAt user {{ displayName name }} botActor {{ name }} }} pageInfo {{ hasNextPage }} }} }} }}");
     let data = graphql(key, &query, json!({"id": id}))?;
     let mut issue = parse_linear_issue(&data["issue"]).ok_or_else(|| anyhow!("Linear did not return that issue."))?;
-    append_linear_comments(&mut issue, &data["issue"]);
+    if let Some(discussion) = linear_discussion(&data["issue"]) {
+        let description = issue.body.take().unwrap_or_default();
+        issue.body = Some(format!("{}\n\n---\n\n{discussion}", description.trim_end()).trim_start().to_string());
+    }
     Ok(issue)
 }
 
-/// Comments ride along under the description so the agent sees the discussion too.
-pub(crate) fn append_linear_comments(issue: &mut Issue, node: &Value) {
-    if let Some(comments) = node["comments"]["nodes"].as_array().filter(|c| !c.is_empty()) {
-        let mut body = issue.body.clone().unwrap_or_default();
-        body.push_str("\n\n---\n\n## Comments\n");
-        for c in comments {
-            let who = c["user"]["displayName"].as_str().or_else(|| c["user"]["name"].as_str()).unwrap_or("someone");
-            body.push_str(&format!("\n**{who}**: {}\n", c["body"].as_str().unwrap_or("")));
+/// The most comments a prompt carries, and roughly how much of them.
+const DISCUSSION_COMMENTS: usize = 50;
+const DISCUSSION_CHARS: usize = 12_000;
+
+/// An issue's comments for an agent, oldest first, from a `comments`
+/// connection read newest first (Linear's order). The newest are kept when
+/// there are too many, and the cut is said with a link to the rest. `None`
+/// when nobody commented.
+pub fn linear_discussion(node: &Value) -> Option<String> {
+    let newest_first = node["comments"]["nodes"].as_array().filter(|comments| !comments.is_empty())?;
+    let mut kept = Vec::new();
+    let mut size = 0;
+    for comment in newest_first {
+        let who = comment["user"]["displayName"].as_str().or_else(|| comment["user"]["name"].as_str()).or_else(|| comment["botActor"]["name"].as_str()).unwrap_or("someone");
+        let when = comment["createdAt"].as_str().and_then(|at| at.get(..10)).map(|day| format!(" ({day})")).unwrap_or_default();
+        let mut entry = format!("**{who}**{when}: {}", comment["body"].as_str().unwrap_or("").trim());
+        if !kept.is_empty() && size + entry.len() > DISCUSSION_CHARS {
+            break;
         }
-        issue.body = Some(body);
+        // Even the newest comment is cut to the cap.
+        if entry.len() > DISCUSSION_CHARS {
+            let mut end = DISCUSSION_CHARS;
+            while !entry.is_char_boundary(end) {
+                end -= 1;
+            }
+            entry.truncate(end);
+            entry.push_str(&format!("\n\n…the rest of this comment is cut; read it at {}", node["url"].as_str().unwrap_or("the issue")));
+        }
+        size += entry.len();
+        kept.push(entry);
     }
+    let omitted = newest_first.len() - kept.len();
+    let more = node["comments"]["pageInfo"]["hasNextPage"].as_bool() == Some(true);
+    let url = node["url"].as_str().unwrap_or("");
+    let mut text = String::from("## Comments\n");
+    match (omitted, more) {
+        (0, false) => {}
+        (n, false) => text.push_str(&format!("\n…{n} earlier comment{} omitted; read {} at {url}\n", if n == 1 { "" } else { "s" }, if n == 1 { "it" } else { "them" })),
+        _ => text.push_str(&format!("\n…earlier comments omitted; read them at {url}\n")),
+    }
+    for entry in kept.iter().rev() {
+        text.push_str(&format!("\n{entry}\n"));
+    }
+    Some(text)
 }
 
 /// A Linear state type that means the issue is finished with, one way or another.
@@ -523,6 +568,41 @@ mod tests {
         assert_eq!(issues[0].assignee.as_ref().unwrap().name, "Sam");
         assert!(issues[0].body.is_none());
         assert_eq!(issues[1].state_type, "completed");
+    }
+
+    #[test]
+    fn the_agents_discussion_is_oldest_first_and_says_what_it_left_out() {
+        let comment = |who: &str, body: &str, at: &str| json!({"body": body, "createdAt": at, "user": {"displayName": who}});
+        // Linear reads them newest first.
+        let node = json!({"url": "https://linear.app/acme/issue/ENG-1", "comments": {"nodes": [
+            comment("Alex", "Fixed on main.", "2026-09-03T10:00:00.000Z"),
+            {"body": "PR opened.", "createdAt": "2026-09-02T10:00:00.000Z", "user": null, "botActor": {"name": "GitHub"}},
+            comment("Kim", "Seen it on staging too.", "2026-09-01T10:00:00.000Z"),
+        ], "pageInfo": {"hasNextPage": false}}});
+        assert_eq!(
+            linear_discussion(&node).unwrap(),
+            "## Comments\n\n**Kim** (2026-09-01): Seen it on staging too.\n\n**GitHub** (2026-09-02): PR opened.\n\n**Alex** (2026-09-03): Fixed on main.\n"
+        );
+        assert_eq!(linear_discussion(&json!({"comments": {"nodes": []}})), None);
+
+        let long = "x".repeat(DISCUSSION_CHARS / 2);
+        let crowded = json!({"url": "https://linear.app/acme/issue/ENG-1", "comments": {"nodes": [
+            comment("Alex", &long, "2026-09-03T10:00:00.000Z"),
+            comment("Kim", &long, "2026-09-02T10:00:00.000Z"),
+            comment("Sam", "first", "2026-09-01T10:00:00.000Z"),
+        ], "pageInfo": {"hasNextPage": false}}});
+        let text = linear_discussion(&crowded).unwrap();
+        assert!(text.contains("…2 earlier comments omitted; read them at https://linear.app/acme/issue/ENG-1"), "{text}");
+        assert!(text.contains("**Alex**") && !text.contains("**Kim**") && !text.contains("first"));
+
+        // A single huge comment is cut too.
+        let huge = json!({"url": "https://linear.app/acme/issue/ENG-1", "comments": {"nodes": [comment("Alex", &"é".repeat(DISCUSSION_CHARS), "2026-09-03T10:00:00.000Z")], "pageInfo": {"hasNextPage": false}}});
+        let text = linear_discussion(&huge).unwrap();
+        assert!(text.len() < DISCUSSION_CHARS + 200, "{}", text.len());
+        assert!(text.ends_with("…the rest of this comment is cut; read it at https://linear.app/acme/issue/ENG-1\n"));
+
+        let more = json!({"url": "u", "comments": {"nodes": [comment("Alex", "latest", "2026-09-03T10:00:00.000Z")], "pageInfo": {"hasNextPage": true}}});
+        assert!(linear_discussion(&more).unwrap().contains("…earlier comments omitted; read them at u"));
     }
 
     #[test]

@@ -39,6 +39,12 @@ pub struct Project {
     /// review and a merge. Absent is every default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_pipeline: Option<IssuePipelineSettings>,
+    /// `terminalx issues` may comment on the issues of this project's GitHub
+    /// repository and move their status without the person being asked each
+    /// time. Assigning, labelling, creating and Linear issues still ask. Off
+    /// by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_issue_updates: bool,
 }
 
 /// The kinds of change a project marks as always needing a person to merge.
@@ -143,6 +149,8 @@ pub struct ProjectPatch {
     pub archived: Option<bool>,
     #[serde(default)]
     pub issue_pipeline: Option<IssuePipelineSettings>,
+    #[serde(default)]
+    pub agent_issue_updates: Option<bool>,
 }
 
 fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<String>>, D::Error> {
@@ -174,6 +182,9 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
         // Every default is stored as nothing, so a project nobody configured
         // follows the defaults of whichever build reads it.
         p.issue_pipeline = (v != IssuePipelineSettings::default()).then_some(v);
+    }
+    if let Some(v) = patch.agent_issue_updates {
+        p.agent_issue_updates = v;
     }
     let out = p.clone();
     save(&f)?;
@@ -255,7 +266,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -283,7 +294,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -381,6 +392,23 @@ mod tests {
         assert!(issue_pipeline_settings("/not/attached").unwrap_err().to_string().contains("no longer attached"));
         std::fs::write(crate::store::root().unwrap().join("projects.json"), "{broken").unwrap();
         assert!(issue_pipeline_settings(&project.path).is_err());
+    }
+
+    #[test]
+    fn agents_ask_before_updating_issues_until_the_project_says_otherwise() {
+        let _home = crate::store::temp_home();
+        let older: Project = serde_json::from_str(r#"{"path":"/repo","name":"repo"}"#).unwrap();
+        assert!(!older.agent_issue_updates);
+        assert!(!serde_json::to_string(&older).unwrap().contains("agentIssueUpdates"));
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        assert!(!project.agent_issue_updates);
+        let allowed = update(&project.path, ProjectPatch { agent_issue_updates: Some(true), ..Default::default() }).unwrap();
+        assert!(allowed.agent_issue_updates);
+        assert!(serde_json::to_string(&allowed).unwrap().contains(r#""agentIssueUpdates":true"#));
+        // Another patch leaves it alone.
+        assert!(update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap().agent_issue_updates);
+        assert!(!update(&project.path, ProjectPatch { agent_issue_updates: Some(false), ..Default::default() }).unwrap().agent_issue_updates);
     }
 
     #[test]

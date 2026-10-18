@@ -1,0 +1,2465 @@
+{
+ "_recorded": "gh api against a sandbox issue on 2026-10-18; logins, ids and the repository renamed",
+ "repo": "acme/widgets",
+ "steps": {
+  "details": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": null,
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:31:10Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "options": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/assignees?per_page=100&page=1",
+    "reply": [
+     {
+      "login": "alex",
+      "id": 13,
+      "node_id": "U_alex",
+      "avatar_url": "https://avatars.githubusercontent.com/u/13?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    ]
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/labels?per_page=100&page=1",
+    "reply": [
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "BFD4F2",
+      "default": false,
+      "description": "Sign-in, pairing, cloud",
+      "id": 12042852692,
+      "name": "accounts",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ZVA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Next issue queued for isolated automation work",
+      "id": 12064164773,
+      "name": "automation-ready",
+      "node_id": "LA_kwDOUMU6QM8AAAACzxSLpQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Scheduled and issue-driven agent runs",
+      "id": 12042852426,
+      "name": "automations",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9YSg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D73A4A",
+      "default": true,
+      "description": "Something is broken",
+      "id": 12042842689,
+      "name": "bug",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yQQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "E99695",
+      "default": false,
+      "description": "Speech input",
+      "id": 12042852921,
+      "name": "dictation",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9aOQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0075ca",
+      "default": true,
+      "description": "Improvements or additions to documentation",
+      "id": 12042842696,
+      "name": "documentation",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ySA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "cfd3d7",
+      "default": true,
+      "description": "This issue or pull request already exists",
+      "id": 12042842703,
+      "name": "duplicate",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yTw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "a2eeef",
+      "default": true,
+      "description": "New feature or request",
+      "id": 12042842713,
+      "name": "enhancement",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yWQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "5319E7",
+      "default": false,
+      "description": "Multi-phase feature",
+      "id": 12042852180,
+      "name": "epic",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9XVA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0E8A16",
+      "default": false,
+      "description": "New capability",
+      "id": 12042852114,
+      "name": "feature",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9XEg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "7057ff",
+      "default": true,
+      "description": "Good for newcomers",
+      "id": 12042842724,
+      "name": "good first issue",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yZA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "008672",
+      "default": true,
+      "description": "Extra attention is needed",
+      "id": 12042842734,
+      "name": "help wanted",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ybg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D4C5F9",
+      "default": false,
+      "description": "Claimed by an active agent; do not pick up for duplicate work",
+      "id": 12106912635,
+      "name": "in-progress",
+      "node_id": "LA_kwDOUMU6QM8AAAAC0aDTew"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "e4e669",
+      "default": true,
+      "description": "This doesn't seem right",
+      "id": 12042842748,
+      "name": "invalid",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yfA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D4C5F9",
+      "default": false,
+      "description": "Companion app",
+      "id": 12042852815,
+      "name": "mobile",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Zzw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "F9D0C4",
+      "default": false,
+      "description": "Shared sessions",
+      "id": 12042852614,
+      "name": "multiplayer",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ZBg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "B60205",
+      "default": false,
+      "description": "Requires a cloud service",
+      "id": 12042852998,
+      "name": "needs-backend",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ahg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "B60205",
+      "default": false,
+      "description": "Privacy and data exposure concerns",
+      "id": 12175045364,
+      "name": "privacy",
+      "node_id": "LA_kwDOUMU6QM8AAAAC1bBy9A"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "d876e3",
+      "default": true,
+      "description": "Further information is requested",
+      "id": 12042842761,
+      "name": "question",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Picked up by issue automation",
+      "id": 12049617507,
+      "name": "raccoon",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSYw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0E8A16",
+      "default": false,
+      "description": "Completed by issue automation",
+      "id": 12049617516,
+      "name": "raccoon-done",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSbA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D73A4A",
+      "default": false,
+      "description": "Issue automation failed",
+      "id": 12049617512,
+      "name": "raccoon-failed",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSaA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "FBCA04",
+      "default": false,
+      "description": "Agent skills",
+      "id": 12042852531,
+      "name": "skills",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Ysw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "C5DEF5",
+      "default": false,
+      "description": "Usage and resource surfaces",
+      "id": 12042852563,
+      "name": "status-bar",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Y0w"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "ffffff",
+      "default": true,
+      "description": "This will not be worked on",
+      "id": 12042842771,
+      "name": "wontfix",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ykw"
+     }
+    ]
+   }
+  ],
+  "comment_add": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": null,
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:31:10Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "POST",
+    "path": "repos/acme/widgets/issues/527/comments",
+    "body": {
+     "body": "[TerminalX test] IM-1 live check comment — will be deleted"
+    },
+    "reply": {
+     "author_association": "MEMBER",
+     "body": "[TerminalX test] IM-1 live check comment — will be deleted",
+     "created_at": "2026-10-18T06:58:53Z",
+     "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+     "id": 6246849811,
+     "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+     "minimized": null,
+     "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+     "performed_via_github_app": null,
+     "pin": null,
+     "updated_at": "2026-10-18T06:58:53Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "comments": [
+   {
+    "method": "GET",
+    "path": "user",
+    "reply": {
+     "login": "sam",
+     "id": 12,
+     "node_id": "U_sam",
+     "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+     "type": "User",
+     "site_admin": false
+    }
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets",
+    "reply": {
+     "id": 1001,
+     "name": "widgets",
+     "full_name": "acme/widgets",
+     "private": false,
+     "permissions": {
+      "admin": true,
+      "maintain": true,
+      "pull": true,
+      "push": true,
+      "triage": true
+     }
+    }
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527/comments?per_page=50&page=1",
+    "reply": [
+     {
+      "author_association": "MEMBER",
+      "body": "[TerminalX test] IM-1 live check comment — will be deleted",
+      "created_at": "2026-10-18T06:58:53Z",
+      "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+      "id": 6246849811,
+      "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+      "minimized": null,
+      "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+      "performed_via_github_app": null,
+      "pin": null,
+      "updated_at": "2026-10-18T06:58:53Z",
+      "user": {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     }
+    ]
+   }
+  ],
+  "comment_edit": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "reply": {
+     "author_association": "MEMBER",
+     "body": "[TerminalX test] IM-1 live check comment — will be deleted",
+     "created_at": "2026-10-18T06:58:53Z",
+     "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+     "id": 6246849811,
+     "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+     "minimized": null,
+     "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+     "performed_via_github_app": null,
+     "pin": null,
+     "updated_at": "2026-10-18T06:58:53Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "body": {
+     "body": "[TerminalX test] IM-1 live check comment (edited) — will be deleted"
+    },
+    "reply": {
+     "author_association": "MEMBER",
+     "body": "[TerminalX test] IM-1 live check comment (edited) — will be deleted",
+     "created_at": "2026-10-18T06:58:53Z",
+     "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+     "id": 6246849811,
+     "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+     "minimized": null,
+     "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+     "performed_via_github_app": null,
+     "pin": null,
+     "updated_at": "2026-10-18T06:58:56Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "comment_edit_wrong_issue": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "reply": {
+     "author_association": "MEMBER",
+     "body": "[TerminalX test] IM-1 live check comment (edited) — will be deleted",
+     "created_at": "2026-10-18T06:58:53Z",
+     "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+     "id": 6246849811,
+     "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+     "minimized": null,
+     "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+     "performed_via_github_app": null,
+     "pin": null,
+     "updated_at": "2026-10-18T06:58:56Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "comment_delete": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "reply": {
+     "author_association": "MEMBER",
+     "body": "[TerminalX test] IM-1 live check comment (edited) — will be deleted",
+     "created_at": "2026-10-18T06:58:53Z",
+     "html_url": "https://github.com/acme/widgets/issues/527#issuecomment-6246849811",
+     "id": 6246849811,
+     "issue_url": "https://api.github.com/repos/acme/widgets/issues/527",
+     "minimized": null,
+     "node_id": "IC_kwDOUMU6QM8AAAABdFddEw",
+     "performed_via_github_app": null,
+     "pin": null,
+     "updated_at": "2026-10-18T06:58:56Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "DELETE",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "reply": null
+   }
+  ],
+  "comment_delete_again": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/comments/6246849811",
+    "error": "not_found"
+   }
+  ],
+  "close_not_planned": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": null,
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:58:58Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "state": "closed",
+     "state_reason": "not_planned"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": "2026-10-18T06:59:00Z",
+     "closed_by": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "closed",
+     "state_reason": "not_planned",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:00Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "close_completed": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": "2026-10-18T06:59:00Z",
+     "closed_by": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "closed",
+     "state_reason": "not_planned",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:00Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "state": "closed",
+     "state_reason": "completed"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": "2026-10-18T06:59:00Z",
+     "closed_by": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "closed",
+     "state_reason": "completed",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:02Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "reopen": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": "2026-10-18T06:59:00Z",
+     "closed_by": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "closed",
+     "state_reason": "completed",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:02Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "state": "open",
+     "state_reason": "reopened"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:03Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "assignees_none": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:03Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "DELETE",
+    "path": "repos/acme/widgets/issues/527/assignees",
+    "body": {
+     "assignees": [
+      "sam"
+     ]
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": null,
+     "assignees": [],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "updated_at": "2026-10-18T06:59:05Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "assignees_me": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": null,
+     "assignees": [],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:05Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "POST",
+    "path": "repos/acme/widgets/issues/527/assignees",
+    "body": {
+     "assignees": [
+      "sam"
+     ]
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "updated_at": "2026-10-18T06:59:06Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "labels_set": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:06Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "labels": [
+      "documentation",
+      "question"
+     ]
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "0075ca",
+       "default": true,
+       "description": "Improvements or additions to documentation",
+       "id": 12042842696,
+       "name": "documentation",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8ySA"
+      },
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "d876e3",
+       "default": true,
+       "description": "Further information is requested",
+       "id": 12042842761,
+       "name": "question",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+      }
+     ],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:08Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "labels_unknown": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/assignees?per_page=100&page=1",
+    "reply": [
+     {
+      "login": "alex",
+      "id": 13,
+      "node_id": "U_alex",
+      "avatar_url": "https://avatars.githubusercontent.com/u/13?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    ]
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/labels?per_page=100&page=1",
+    "reply": [
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "BFD4F2",
+      "default": false,
+      "description": "Sign-in, pairing, cloud",
+      "id": 12042852692,
+      "name": "accounts",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ZVA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Next issue queued for isolated automation work",
+      "id": 12064164773,
+      "name": "automation-ready",
+      "node_id": "LA_kwDOUMU6QM8AAAACzxSLpQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Scheduled and issue-driven agent runs",
+      "id": 12042852426,
+      "name": "automations",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9YSg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D73A4A",
+      "default": true,
+      "description": "Something is broken",
+      "id": 12042842689,
+      "name": "bug",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yQQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "E99695",
+      "default": false,
+      "description": "Speech input",
+      "id": 12042852921,
+      "name": "dictation",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9aOQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0075ca",
+      "default": true,
+      "description": "Improvements or additions to documentation",
+      "id": 12042842696,
+      "name": "documentation",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ySA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "cfd3d7",
+      "default": true,
+      "description": "This issue or pull request already exists",
+      "id": 12042842703,
+      "name": "duplicate",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yTw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "a2eeef",
+      "default": true,
+      "description": "New feature or request",
+      "id": 12042842713,
+      "name": "enhancement",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yWQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "5319E7",
+      "default": false,
+      "description": "Multi-phase feature",
+      "id": 12042852180,
+      "name": "epic",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9XVA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0E8A16",
+      "default": false,
+      "description": "New capability",
+      "id": 12042852114,
+      "name": "feature",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9XEg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "7057ff",
+      "default": true,
+      "description": "Good for newcomers",
+      "id": 12042842724,
+      "name": "good first issue",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yZA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "008672",
+      "default": true,
+      "description": "Extra attention is needed",
+      "id": 12042842734,
+      "name": "help wanted",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ybg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D4C5F9",
+      "default": false,
+      "description": "Claimed by an active agent; do not pick up for duplicate work",
+      "id": 12106912635,
+      "name": "in-progress",
+      "node_id": "LA_kwDOUMU6QM8AAAAC0aDTew"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "e4e669",
+      "default": true,
+      "description": "This doesn't seem right",
+      "id": 12042842748,
+      "name": "invalid",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yfA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D4C5F9",
+      "default": false,
+      "description": "Companion app",
+      "id": 12042852815,
+      "name": "mobile",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Zzw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "F9D0C4",
+      "default": false,
+      "description": "Shared sessions",
+      "id": 12042852614,
+      "name": "multiplayer",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ZBg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "B60205",
+      "default": false,
+      "description": "Requires a cloud service",
+      "id": 12042852998,
+      "name": "needs-backend",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9ahg"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "B60205",
+      "default": false,
+      "description": "Privacy and data exposure concerns",
+      "id": 12175045364,
+      "name": "privacy",
+      "node_id": "LA_kwDOUMU6QM8AAAAC1bBy9A"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "d876e3",
+      "default": true,
+      "description": "Further information is requested",
+      "id": 12042842761,
+      "name": "question",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "1D76DB",
+      "default": false,
+      "description": "Picked up by issue automation",
+      "id": 12049617507,
+      "name": "raccoon",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSYw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "0E8A16",
+      "default": false,
+      "description": "Completed by issue automation",
+      "id": 12049617516,
+      "name": "raccoon-done",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSbA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "D73A4A",
+      "default": false,
+      "description": "Issue automation failed",
+      "id": 12049617512,
+      "name": "raccoon-failed",
+      "node_id": "LA_kwDOUMU6QM8AAAACzjaSaA"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "FBCA04",
+      "default": false,
+      "description": "Agent skills",
+      "id": 12042852531,
+      "name": "skills",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Ysw"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "C5DEF5",
+      "default": false,
+      "description": "Usage and resource surfaces",
+      "id": 12042852563,
+      "name": "status-bar",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc9Y0w"
+     },
+     {
+      "archived_at": null,
+      "archived_by": null,
+      "color": "ffffff",
+      "default": true,
+      "description": "This will not be worked on",
+      "id": 12042842771,
+      "name": "wontfix",
+      "node_id": "LA_kwDOUMU6QM8AAAACzc8ykw"
+     }
+    ]
+   }
+  ],
+  "labels_clear": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "0075ca",
+       "default": true,
+       "description": "Improvements or additions to documentation",
+       "id": 12042842696,
+       "name": "documentation",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8ySA"
+      },
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "d876e3",
+       "default": true,
+       "description": "Further information is requested",
+       "id": 12042842761,
+       "name": "question",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+      }
+     ],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:08Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "labels": []
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:12Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "title_set": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:12Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "title": "[TerminalX test] issue-management sandbox — ignore (title edit check)"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore (title edit check)",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:13Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "title_restore": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore (title edit check)",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:13Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "title": "[TerminalX test] issue-management sandbox — ignore"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:15Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "description_stale": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:15Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "description_set": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:15Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.\n\n(description edit check)"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.\n\n(description edit check)",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:17Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "description_restore": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.\n\n(description edit check)",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:17Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/527",
+    "body": {
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done."
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Sandbox issue for testing the issue-management feature (PRO-91). Automated test sessions will comment, change status, assign, label and edit this issue. Please ignore; it will be closed when testing is done.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:31:09Z",
+     "html_url": "https://github.com/acme/widgets/issues/527",
+     "id": 5906872908,
+     "labels": [],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBO6TA",
+     "number": 527,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": "reopened",
+     "title": "[TerminalX test] issue-management sandbox — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:18Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "create": [
+   {
+    "method": "POST",
+    "path": "repos/acme/widgets/issues",
+    "body": {
+     "assignees": [
+      "sam"
+     ],
+     "body": "Created by the IM-1 live check; closed as not planned right away.",
+     "labels": [
+      "question"
+     ],
+     "title": "[TerminalX test] IM-1 create check — ignore"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Created by the IM-1 live check; closed as not planned right away.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:59:19Z",
+     "html_url": "https://github.com/acme/widgets/issues/530",
+     "id": 5907059514,
+     "labels": [
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "d876e3",
+       "default": true,
+       "description": "Further information is requested",
+       "id": 12042842761,
+       "name": "question",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+      }
+     ],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBaTOg",
+     "number": 530,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": null,
+     "title": "[TerminalX test] IM-1 create check — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:19Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "create_close": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/530",
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Created by the IM-1 live check; closed as not planned right away.",
+     "closed_at": null,
+     "closed_by": null,
+     "comments": 0,
+     "created_at": "2026-10-18T06:59:19Z",
+     "html_url": "https://github.com/acme/widgets/issues/530",
+     "id": 5907059514,
+     "labels": [
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "d876e3",
+       "default": true,
+       "description": "Further information is requested",
+       "id": 12042842761,
+       "name": "question",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+      }
+     ],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBaTOg",
+     "number": 530,
+     "performed_via_github_app": null,
+     "state": "open",
+     "state_reason": null,
+     "title": "[TerminalX test] IM-1 create check — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:19Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   },
+   {
+    "method": "PATCH",
+    "path": "repos/acme/widgets/issues/530",
+    "body": {
+     "state": "closed",
+     "state_reason": "not_planned"
+    },
+    "reply": {
+     "active_lock_reason": null,
+     "assignee": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "assignees": [
+      {
+       "login": "sam",
+       "id": 12,
+       "node_id": "U_sam",
+       "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+       "type": "User",
+       "site_admin": false
+      }
+     ],
+     "author_association": "MEMBER",
+     "body": "Created by the IM-1 live check; closed as not planned right away.",
+     "closed_at": "2026-10-18T06:59:20Z",
+     "closed_by": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     },
+     "comments": 0,
+     "created_at": "2026-10-18T06:59:19Z",
+     "html_url": "https://github.com/acme/widgets/issues/530",
+     "id": 5907059514,
+     "labels": [
+      {
+       "archived_at": null,
+       "archived_by": null,
+       "color": "d876e3",
+       "default": true,
+       "description": "Further information is requested",
+       "id": 12042842761,
+       "name": "question",
+       "node_id": "LA_kwDOUMU6QM8AAAACzc8yiQ"
+      }
+     ],
+     "locked": false,
+     "milestone": null,
+     "node_id": "I_kwDOUMU6QM8AAAABYBaTOg",
+     "number": 530,
+     "performed_via_github_app": null,
+     "state": "closed",
+     "state_reason": "not_planned",
+     "title": "[TerminalX test] IM-1 create check — ignore",
+     "type": null,
+     "updated_at": "2026-10-18T06:59:20Z",
+     "user": {
+      "login": "sam",
+      "id": 12,
+      "node_id": "U_sam",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+      "type": "User",
+      "site_admin": false
+     }
+    }
+   }
+  ],
+  "details_missing": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/99999999",
+    "error": "not_found"
+   }
+  ],
+  "details_pr": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/526",
+    "reply": {
+     "number": 526,
+     "title": "A pull request",
+     "state": "open",
+     "pull_request": {
+      "html_url": "https://github.com/acme/widgets/pull/526",
+      "merged_at": null
+     }
+    }
+   }
+  ],
+  "title_pr": [
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/526",
+    "reply": {
+     "number": 526,
+     "title": "A pull request",
+     "state": "open",
+     "pull_request": {
+      "html_url": "https://github.com/acme/widgets/pull/526",
+      "merged_at": null
+     }
+    }
+   }
+  ],
+  "comments_page_2": [
+   {
+    "method": "GET",
+    "path": "user",
+    "reply": {
+     "login": "sam",
+     "id": 12,
+     "node_id": "U_sam",
+     "avatar_url": "https://avatars.githubusercontent.com/u/12?v=4",
+     "type": "User",
+     "site_admin": false
+    }
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets",
+    "reply": {
+     "id": 1001,
+     "name": "widgets",
+     "full_name": "acme/widgets",
+     "private": false,
+     "permissions": {
+      "admin": true,
+      "maintain": true,
+      "pull": true,
+      "push": true,
+      "triage": true
+     }
+    }
+   },
+   {
+    "method": "GET",
+    "path": "repos/acme/widgets/issues/527/comments?per_page=50&page=2",
+    "reply": []
+   }
+  ]
+ }
+}
