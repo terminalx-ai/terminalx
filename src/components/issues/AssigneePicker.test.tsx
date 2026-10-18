@@ -9,7 +9,7 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
-const { AssigneePicker } = await import("./AssigneePicker");
+const { AssigneePicker, applyAssigneeChange } = await import("./AssigneePicker");
 
 let issues: IssueOpsMock;
 
@@ -201,8 +201,87 @@ describe("GitHub: several assignees", () => {
     expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, kim");
     expect(list.getByRole("option", { name: "sam" }).getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(list.getByRole("option", { name: "sam" }));
+    await waitFor(() => expect(answer).toBeDefined());
     await act(async () => answer());
     await waitFor(() => expect(list.getByRole("option", { name: "sam" }).getAttribute("aria-disabled")).toBeNull());
     expect(writes()).toEqual([["sam", "alex", "kim"]]);
+  });
+});
+
+describe("writes from a fresh read", () => {
+  const github = () => issues.issue("github", "41");
+
+  it("keeps someone added on the website while the picker was open", async () => {
+    render(<Header start={structuredClone(github())} />);
+    const list = await openPicker();
+    // robin is added on the website after the picker read the issue.
+    const robin: IssueUser = { id: "robin", name: "robin", login: "robin" };
+    issues.options.github.members.push(robin);
+    github().assignees.push(robin);
+    fireEvent.click(list.getByRole("option", { name: "kim" }));
+    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam, alex, robin, kim"));
+    expect(writes()).toEqual([["sam", "alex", "robin", "kim"]]);
+
+    // Clear takes off those shown, and nobody added since.
+    const lee: IssueUser = { id: "lee", name: "lee", login: "lee" };
+    issues.options.github.members.push(lee);
+    github().assignees.push(lee);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(trigger().getAttribute("aria-label")).toBe("Assignees: lee"));
+    expect(writes().at(-1)).toEqual(["lee"]);
+  });
+
+  it("applies a pick as what it changes", () => {
+    const [a, b, c] = ["a", "b", "c"].map((id): IssueUser => ({ id, name: id }));
+    expect(applyAssigneeChange([a, b], { add: [c], remove: ["a"] }, 10)).toEqual([b, c]);
+    expect(applyAssigneeChange([a, b], { add: [b], remove: [] }, 10)).toEqual([a, b]);
+    expect(applyAssigneeChange([a, b], { replace: [c] }, 1)).toEqual([c]);
+    // Adding past the cap is refused; taking off is not, even over it.
+    expect(applyAssigneeChange([a, b], { add: [c], remove: [] }, 2)).toBeNull();
+    expect(applyAssigneeChange([a, b, c], { add: [], remove: ["c"] }, 1)).toEqual([a, b]);
+  });
+
+  it("says so, and shows the issue, when the fresh read is already full", async () => {
+    render(<Header start={structuredClone(github())} />);
+    const list = await openPicker();
+    github().assignees = Array.from({ length: 10 }, (_, index): IssueUser => ({ id: `user${index}`, name: `user${index}`, login: `user${index}` }));
+    fireEvent.click(list.getByRole("option", { name: "kim" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("An issue can have up to 10 assignees.");
+    await waitFor(() => expect(trigger().getAttribute("aria-label")).toMatch(/^Assignees: user0, /));
+    expect(writes()).toEqual([]);
+  });
+});
+
+describe("switching issues", () => {
+  it("leaves the next issue alone when the last one's write answers", async () => {
+    const answers: (() => void)[] = [];
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command !== "issue_set_assignees") return issues.handle(command, args);
+      return new Promise((resolve) => answers.push(() => resolve(issues.handle(command, args))));
+    });
+    const onChange = vi.fn();
+    const linear = structuredClone(issues.issue("linear", "8a1c2e9e-0000-4000-8000-000000000042"));
+    // No key: the picker itself must not carry one issue's write over to another.
+    const { rerender } = render(<AssigneePicker projectPath="/repo" issue={structuredClone(issues.issue("github", "41"))} onChange={onChange} />);
+    const list = await openPicker();
+    issues.fail("issue_set_assignees", "forbidden");
+    fireEvent.click(list.getByRole("option", { name: "kim" }));
+    await waitFor(() => expect(answers).toHaveLength(1));
+
+    rerender(<AssigneePicker projectPath="/repo" issue={linear} onChange={onChange} />);
+    expect(trigger().getAttribute("aria-label")).toBe("Assignees: Sam");
+    await act(async () => answers[0]());
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    // The GitHub answer goes up for its own issue; the Linear header neither changes, shows its error, nor stays locked.
+    expect(onChange.mock.calls.every(([issue]) => issue.provider === "github")).toBe(true);
+    expect(trigger().getAttribute("aria-label")).toBe("Assignees: Sam");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(trigger().querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("shows a row's only assignee, by name, before the issue's details come", () => {
+    const row = { ...structuredClone(issues.issue("github", "41")), assignees: undefined, capabilities: undefined, assignee: { name: "sam" } };
+    render(<AssigneePicker projectPath="/repo" issue={row} onChange={vi.fn()} />);
+    expect(trigger().getAttribute("aria-label")).toBe("Assignees: sam");
   });
 });

@@ -46,6 +46,15 @@ function issueOfPipeline(pipeline: IssuePipeline): Issue {
 }
 
 /**
+ * `next`, unless `now` is the same issue read later: an answer that was
+ * slower than a write must not put back what the write changed.
+ */
+function newer(now: Issue | null, next: Issue): Issue {
+  const same = now && now.provider === next.provider && now.id === next.id;
+  return same && Date.parse(now.updatedAt) > Date.parse(next.updatedAt) ? now : next;
+}
+
+/**
  * Issues from the project's tracker, and a way to start a session on one.
  * The list is the tracker's own order (most recently updated first); the
  * detail column shows the body so the reader can judge before an agent
@@ -73,8 +82,9 @@ export function IssuesView({
   const [list, setList] = useState<Issue[]>([]);
   // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
   const [listOf, setListOf] = useState<string | null>(null);
-  // Rows of the "Assigned to me" list that were assigned away since it was read. They stay until the next read, marked, rather than vanish under the pointer.
-  const [notMine, setNotMine] = useState<ReadonlySet<string>>(new Set());
+  // Who has each issue whose assignees changed here since the list was read, by `provider:id`. A row of the
+  // "Assigned to me" list assigned away from the reader stays until the next read, marked, rather than vanish under the pointer.
+  const [assignedHere, setAssignedHere] = useState<ReadonlyMap<string, string[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
@@ -103,7 +113,8 @@ export function IssuesView({
   // Once an issue has a pipeline its switch is the pipeline's, on the panel
   // below; a session started on it again keeps what was chosen there.
   const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
-  const viewer = useIssueViewer(project?.path, provider);
+  // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
+  const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   const agentSelection = useSessionAgent(store.harnesses);
   const { harness, modelId, effort } = agentSelection;
   const linkedIssueUrls = useMemo(
@@ -193,7 +204,7 @@ export function IssuesView({
         if (live) {
           setList(r);
           setListOf(`${project.path}\n${provider}`);
-          setNotMine(new Set());
+          setAssignedHere(new Map());
         }
       } catch (e) {
         if (live) {
@@ -234,7 +245,7 @@ export function IssuesView({
     if (!again) setDetailLoading(true);
     issuesApi
       .details(project.path, selected.provider, selected.id)
-      .then((d) => live && setDetail(d))
+      .then((d) => live && setDetail((now) => newer(now, d)))
       .catch((e) => live && setError(errorMessage(e)))
       .finally(() => live && setDetailLoading(false));
     return () => {
@@ -301,21 +312,18 @@ export function IssuesView({
     setAutoMerge(pipelineDefaults.autoMerge);
   };
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
-  // An issue as a write answered with it: the open one shows it, and its row shows who has it now.
+  // An issue as a write answered with it: the open one shows it (even before its details came), and its row shows who has it now.
+  const selectedNow = useRef(selected);
+  selectedNow.current = selected;
   const assigned = (changed: IssueDetails) => {
     const same = (issue: Issue) => issue.provider === changed.provider && issue.id === changed.id;
-    setDetail((now) => (now && same(now) ? changed : now));
+    setDetail((now) => (selectedNow.current && same(selectedNow.current) ? newer(now, changed) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, assignee: changed.assignee, assignees: changed.assignees, updatedAt: changed.updatedAt } : row)));
-    if (!assignedToMe || !viewer) return;
-    const key = `${changed.provider}:${changed.id}`;
-    const mine = changed.assignees.some((person) => person.id === viewer.id);
-    setNotMine((keys) => {
-      if (mine === !keys.has(key)) return keys;
-      const next = new Set(keys);
-      if (mine) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setAssignedHere((map) => new Map(map).set(`${changed.provider}:${changed.id}`, changed.assignees.map((person) => person.id)));
+  };
+  const notMine = (issue: Issue) => {
+    const who = assignedHere.get(`${issue.provider}:${issue.id}`);
+    return assignedToMe && !!viewer && !!who && !who.includes(viewer.id);
   };
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
@@ -451,7 +459,7 @@ export function IssuesView({
                         issue={i}
                         selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
-                        notMine={notMine.has(`${i.provider}:${i.id}`)}
+                        notMine={notMine(i)}
                         pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
                         onSelect={() => open(i)}
                       />
@@ -504,7 +512,9 @@ export function IssuesView({
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 {current?.state && <span>{current.state}</span>}
                 {current?.team && <span>{current.team.name}</span>}
-                {project && current?.assignees && <AssigneePicker projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />}
+                {project && current && (current.assignees || current.assignee || !detailLoading) && (
+                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />
+                )}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
                 </button>

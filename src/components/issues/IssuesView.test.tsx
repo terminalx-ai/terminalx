@@ -841,4 +841,46 @@ describe("assignees", () => {
     await waitFor(() => expect(listed.isConnected).toBe(false));
     expect(screen.queryByText("No longer assigned to you")).toBeNull();
   });
+
+  /** Holds the first call of `command` (or every one) until the returned function is called. */
+  function hold(command: string, every = false) {
+    const answer = invoke.getMockImplementation()!;
+    const releases: (() => void)[] = [];
+    invoke.mockImplementation((name: string, args?: Record<string, unknown>) => {
+      if (name !== command || (!every && releases.length)) return answer(name, args);
+      // What the provider held when the call was made, answered late.
+      const then = answer(name, args);
+      return new Promise((resolve) => releases.push(() => resolve(then)));
+    });
+    return () => waitFor(() => expect(releases.length).toBeGreaterThan(0)).then(() => act(async () => releases.forEach((release) => release())));
+  }
+
+  it("shows a write made before the issue's details came, and keeps it over their late answer", async () => {
+    const release = hold("issue_details");
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, alex" }));
+    fireEvent.click(await screen.findByRole("option", { name: "kim" }));
+    await screen.findByRole("button", { name: "Assignees: sam, alex, kim" });
+
+    await release();
+    await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+    expect(screen.getByRole("button", { name: "Assignees: sam, alex, kim" })).toBeTruthy();
+  });
+
+  it("marks a row assigned away from the reader once who the reader is comes", async () => {
+    tracker.issue("github", "41").assignees = [tracker.options.github.members[0], kim()];
+    const release = hold("issue_viewer", true);
+    render(<IssuesView />);
+    fireEvent.click(screen.getByRole("button", { name: "Assigned to me" }));
+    const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
+    fireEvent.click(listed);
+    fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, kim" }));
+    fireEvent.click(await screen.findByRole("option", { name: "kim" }));
+    await screen.findByRole("button", { name: "Assignees: sam" });
+    expect(within(listed).queryByText("No longer assigned to you")).toBeNull();
+
+    await release();
+    expect(await within(listed).findByText("No longer assigned to you")).toBeTruthy();
+  });
 });

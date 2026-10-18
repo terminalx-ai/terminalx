@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import { ChevronDown, Loader2, UserPlus, X } from "@/icons";
 import { AvatarStack, PeoplePicker, PeoplePickerAction } from "@/components/issues/People";
@@ -12,10 +12,24 @@ import { issueOps, type IssueCapabilities, type IssueDetails, type IssueOptions,
  * closes the picker. GitHub takes up to `maxAssignees`: rows are checkboxes
  * and every tick is its own write. The people offered are the provider's
  * (the team's members, the repository's assignable users); nobody else can
- * be typed in. Each write answers with the issue re-read, which replaces
- * what is shown; a refused one says why and shows the issue as the provider
- * has it.
+ * be typed in. A write sends a whole set, so a tick is kept as what it
+ * changes and applied to the assignees read again just before the write:
+ * someone added on the website meanwhile stays. Each write answers with the
+ * issue re-read, which replaces what is shown; a refused one says why and
+ * shows the issue as the provider has it.
  */
+
+/** What a pick changes: Linear's one assignee replaced, or GitHub's set ticked on and off. */
+export type AssigneeChange = { replace: IssueUser[] } | { add: IssueUser[]; remove: string[] };
+
+/** The set `change` makes of `base`; `null` when it would pass `max`. */
+export function applyAssigneeChange(base: IssueUser[], change: AssigneeChange, max: number): IssueUser[] | null {
+  if ("replace" in change) return change.replace;
+  const removed = new Set(change.remove);
+  const kept = base.filter((person) => !removed.has(person.id));
+  const next = [...kept, ...change.add.filter((person) => !kept.some((each) => each.id === person.id))];
+  return next.length > max && next.length > kept.length ? null : next;
+}
 export function AssigneePicker({
   projectPath,
   issue,
@@ -36,12 +50,20 @@ export function AssigneePicker({
   const [pending, setPending] = useState<IssueUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const key = `${projectPath}\n${issue.provider}\n${issue.id}`;
+  // Which issue the picker is on now. A write answers after an await; its
+  // answer is still passed up (the view files it by issue), but it touches
+  // this picker's state only while the picker is on the same issue.
+  const on = useRef<string | null>(key);
 
   useEffect(() => {
+    on.current = key;
     setPending(null);
     setError(null);
     setOptions(null);
     setOptionsError(null);
+    return () => {
+      on.current = null;
+    };
   }, [key]);
 
   useEffect(() => {
@@ -56,7 +78,8 @@ export function AssigneePicker({
     };
   }, [open, options, projectPath, issue.provider, issue.id]);
 
-  const assignees = pending ?? issue.assignees ?? [];
+  // A row a pipeline remembers, or an older one, may have only the first assignee, by name.
+  const assignees = pending ?? issue.assignees ?? (issue.assignee ? [{ id: issue.assignee.name, name: issue.assignee.name, avatarUrl: issue.assignee.avatarUrl }] : []);
   const capabilities = issue.capabilities ?? options?.capabilities ?? null;
   const multiple = !!capabilities?.multiAssignee;
   const max = capabilities?.maxAssignees ?? 1;
@@ -67,17 +90,27 @@ export function AssigneePicker({
   const me = viewer && members.some((person) => person.id === viewer.id) ? members.find((person) => person.id === viewer.id)! : null;
   const isMine = !!me && assignees.some((person) => person.id === me.id);
 
-  const write = async (next: IssueUser[]) => {
-    setPending(next);
+  const write = async (change: AssigneeChange) => {
+    const mine = key;
+    const here = () => on.current === mine;
+    const { provider, id } = issue;
+    setPending(applyAssigneeChange(assignees, change, Infinity));
     setError(null);
     try {
-      onChange(await issueOps.setAssignees(projectPath, issue.provider, issue.id, next.map((person) => person.id)));
+      const fresh = await issueOps.details(projectPath, provider, id);
+      const next = applyAssigneeChange(fresh.assignees, change, max);
+      if (!next) {
+        onChange(fresh);
+        if (here()) setError(`An issue can have up to ${max} assignees.`);
+        return;
+      }
+      onChange(await issueOps.setAssignees(projectPath, provider, id, next.map((person) => person.id)));
     } catch (e) {
-      setError(errorMessage(e));
+      if (here()) setError(errorMessage(e));
       // What the provider holds now, which a refusal may not be the same as what was shown.
-      await issueOps.details(projectPath, issue.provider, issue.id).then(onChange, () => {});
+      await issueOps.details(projectPath, provider, id).then(onChange, () => {});
     } finally {
-      setPending(null);
+      if (here()) setPending(null);
     }
   };
 
@@ -85,11 +118,11 @@ export function AssigneePicker({
     const chosen = assignees.some((each) => each.id === person.id);
     if (!multiple) {
       setOpen(false);
-      if (!chosen) void write([person]);
+      if (!chosen) void write({ replace: [person] });
       return;
     }
-    if (chosen) void write(assignees.filter((each) => each.id !== person.id));
-    else if (assignees.length < max) void write([...assignees, person]);
+    if (chosen) void write({ add: [], remove: [person.id] });
+    else if (assignees.length < max) void write({ add: [person], remove: [] });
   };
 
   return (
@@ -154,7 +187,8 @@ export function AssigneePicker({
                           disabled={saving}
                           onClick={() => {
                             if (!multiple) setOpen(false);
-                            void write([]);
+                            // Those shown, not someone added elsewhere since.
+                            void write(multiple ? { add: [], remove: assignees.map((person) => person.id) } : { replace: [] });
                           }}
                         >
                           {multiple ? "Clear" : "Unassign"}
