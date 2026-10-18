@@ -14,7 +14,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::issue_ops::IssueUser;
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 const LIMIT: usize = 60;
@@ -35,6 +34,20 @@ pub struct IssueLabel {
 #[serde(rename_all = "camelCase")]
 pub struct IssueAssignee {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// A person as an issue shows them: an assignee, an author, a team member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueUser {
+    /// What `issue_set_assignees` takes: the user's id on Linear, the login on GitHub.
+    pub id: String,
+    pub name: String,
+    /// The GitHub login; Linear has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
 }
