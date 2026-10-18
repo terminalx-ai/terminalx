@@ -46,9 +46,8 @@ export interface IssueCapabilities {
 
 /**
  * An issue read whole: every field of the list's `Issue` plus the rest.
- * `labels[].id` is what `setLabels` takes. `body` keeps its older meaning
- * for now (on Linear the first comments are pasted under it for the agent);
- * `description` is the description alone.
+ * `labels[].id` is what `setLabels` takes. Neither `body` nor
+ * `description` carries comments on Linear; read them with `comments`.
  */
 export interface IssueDetails extends Issue {
   description: string;

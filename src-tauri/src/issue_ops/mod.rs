@@ -89,10 +89,8 @@ impl IssueCapabilities {
 /// An issue read whole. It carries every field of the list's [`Issue`] (so
 /// callers of the older `issue_details` keep working) plus the rest.
 ///
-/// `body` keeps its older meaning for now: on Linear it still has the first
-/// comments pasted under the description so a session started from it sees
-/// the discussion. `description` is the description alone; the comments
-/// ticket moves the discussion out of `body`.
+/// `description` is the description alone. On Linear neither it nor `body`
+/// carries comments; they are read through `issue_comments`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueDetails {
@@ -212,7 +210,6 @@ pub struct IssueOptions {
 }
 
 /// Linear's priorities, in its own order and words.
-#[allow(dead_code)] // Read by `linear::options` once it lands.
 pub fn linear_priorities() -> Vec<PriorityOption> {
     ["No priority", "Urgent", "High", "Medium", "Low"].iter().enumerate().map(|(value, label)| PriorityOption { value: value as u8, label: (*label).into() }).collect()
 }

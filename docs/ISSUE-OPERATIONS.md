@@ -57,6 +57,28 @@ like any other error.
 
 The contract is final; the follow-up tickets fill it in. Today
 `issue_details` works for both providers and every other command answers
-`not_implemented`. On Linear `body` still carries the first 20 comments
-pasted under the description, for the agent prompt; `description` is the
-description alone.
+`not_implemented`, except on Linear, where every command works.
+
+## Linear
+
+* **Comments** page oldest first, 50 at a time. Linear lists comments newest
+  first and its cursors walk that order, so a page is the oldest comments
+  created after the last one shown; `nextCursor` is that comment's creation
+  time. The viewer may edit and delete their own comments only.
+* **Options** are the team's workflow states in its order, its active
+  members, the labels its issues can take (the team's and the workspace's;
+  a group comes before the labels in it) and the five priorities. They are
+  cached per key and team until `refresh`.
+* **Descriptions** are read again before they are written: when
+  `updatedAt` moved past `expectedUpdatedAt`, the edit is a `conflict`.
+* **Errors**: a stale state, label or assignee id is `invalid`; an issue,
+  team or comment that is gone is `not_found`.
+* **The agent's discussion.** Neither `body` nor `description` carries
+  comments any more. A session started from the CLI or the issue pipeline
+  reads the issue through `issues::linear_details`, which puts
+  `issues::linear_discussion` under the description: the newest 50
+  comments, oldest first, cut at about 12,000 characters with a note and a
+  link to the rest.
+* `LINEAR_LIVE_ISSUE=<sandbox id> cargo test live_ -- --ignored --nocapture`
+  runs every operation against the real Linear on a sandbox issue (its
+  title must start with "[TerminalX test]") and puts it back afterwards.

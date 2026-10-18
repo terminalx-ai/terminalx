@@ -32,7 +32,7 @@ fn a_github_issue_keeps_every_assignee_and_its_close_reason() {
 }
 
 #[test]
-fn a_linear_issue_carries_its_state_priority_and_author_and_keeps_the_agent_discussion() {
+fn a_linear_issue_carries_its_state_priority_and_author_without_its_comments() {
     let data = fixture(include_str!("../fixtures/linear_issue_details.json"));
     let details = linear::parse_issue(&data["data"]["issue"]).unwrap();
     assert_eq!(details.state_id.as_deref(), Some("state-started"));
@@ -42,9 +42,8 @@ fn a_linear_issue_carries_its_state_priority_and_author_and_keeps_the_agent_disc
     assert_eq!(details.author.as_ref().unwrap().name, "Kim");
     assert_eq!(details.issue.labels[0].id.as_deref(), Some("label-bug"));
     assert_eq!(details.description, "Users get logged out.");
-    // Until the comments ticket, a session started from `body` still sees the discussion.
-    assert!(details.issue.body.as_deref().unwrap().contains("**Alex**: Seen it on staging too."));
-    assert!(!details.description.contains("Seen it on staging"));
+    // The discussion is read through `issue_comments`; neither text carries it.
+    assert_eq!(details.issue.body.as_deref(), Some("Users get logged out."));
     assert_eq!(details.capabilities.max_assignees, 1);
 }
 

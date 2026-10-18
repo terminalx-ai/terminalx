@@ -1,0 +1,259 @@
+use serde_json::{json, Value};
+
+use super::*;
+use crate::issue_ops::{CloseReason, IssueOpErrorKind};
+
+fn fixture(text: &str) -> Value {
+    serde_json::from_str(text).unwrap()
+}
+
+fn writes() -> Value {
+    fixture(include_str!("../fixtures/linear_issue_writes.json"))
+}
+
+const VIEWER: &str = "d6b0323d-9198-4b93-96c4-7515a5f47c6e";
+
+#[test]
+fn details_read_the_description_alone() {
+    let details = parse_issue(&writes()["details"]["data"]["issue"]).unwrap();
+    assert_eq!(details.issue.identifier, "ENG-101");
+    assert_eq!(details.issue.body.as_deref(), Some(details.description.as_str()));
+    assert_eq!((details.issue.state.as_str(), details.state_id.as_deref(), details.state_color.as_deref()), ("Backlog", Some("884bd5ca-47eb-4eed-96f8-d44a7183b391"), Some("bec2c8")));
+    assert_eq!(details.priority, Some(0));
+    assert_eq!(details.assignees.iter().map(|user| (user.id.as_str(), user.name.as_str())).collect::<Vec<_>>(), [(VIEWER, "sam")]);
+    assert_eq!(details.author.unwrap().id, VIEWER);
+    assert_eq!(details.issue.team.unwrap().key, "ENG");
+    assert_eq!(details.created_at, "2026-10-18T06:31:11.160Z");
+}
+
+#[test]
+fn a_comments_page_is_oldest_first_and_only_the_viewers_own_are_editable() {
+    let page = parse_comments_page(&fixture(include_str!("../fixtures/linear_issue_comments.json"))["data"]);
+    assert_eq!(page.next_cursor, None);
+    let bodies: Vec<_> = page.comments.iter().map(|comment| comment.body.as_str()).collect();
+    assert_eq!(bodies, ["Seen it on staging too.", "I can take this.", "Linked pull request opened."]);
+    let [mine, theirs, bot] = &page.comments[..] else { panic!() };
+    assert!(mine.viewer_can_edit && mine.viewer_can_delete);
+    assert_eq!(mine.author.as_ref().unwrap().name, "sam");
+    assert_eq!(mine.edited_at, None);
+    assert!(!theirs.viewer_can_edit && !theirs.viewer_can_delete);
+    assert_eq!(theirs.edited_at.as_deref(), Some("2026-09-12T12:00:00.000Z"));
+    assert_eq!(theirs.author.as_ref().unwrap().avatar_url.as_deref(), Some("https://example.com/robin.png"));
+    assert_eq!(bot.author.as_ref().unwrap().name, "GitHub");
+    assert!(!bot.viewer_can_edit);
+    assert_eq!(mine.url.as_deref(), Some("https://linear.app/acme/issue/ENG-5/fix-login-timeout#comment-0fd9dc42"));
+}
+
+#[test]
+fn comments_page_forward_from_the_last_one_shown() {
+    let node = |n: usize| json!({"id": format!("c{n}"), "body": format!("comment {n}"), "createdAt": format!("2026-09-01T10:{:02}:00.000Z", n), "user": {"id": VIEWER, "displayName": "sam"}});
+    // Linear answers `last:` oldest first; one more than a page says another follows.
+    let full = json!({"viewer": {"id": VIEWER}, "issue": {"comments": {"nodes": (0..=COMMENTS_PAGE).rev().map(node).collect::<Vec<_>>()}}});
+    let page = parse_comments_page(&full);
+    assert_eq!(page.comments.len(), COMMENTS_PAGE);
+    assert_eq!(page.comments[0].id, "c0");
+    assert_eq!(page.comments.last().unwrap().id, "c49");
+    assert_eq!(page.next_cursor.as_deref(), Some("2026-09-01T10:49:00.000Z"));
+    let next = comments_variables("ENG-5", page.next_cursor.as_deref());
+    assert_eq!(next, json!({"id": "ENG-5", "last": COMMENTS_PAGE + 1, "filter": {"createdAt": {"gt": "2026-09-01T10:49:00.000Z"}}}));
+    assert_eq!(comments_variables("ENG-5", None)["filter"], Value::Null);
+}
+
+#[test]
+fn options_list_states_in_order_active_members_and_grouped_labels() {
+    let options = parse_options(&fixture(include_str!("../fixtures/linear_issue_options.json"))["data"]);
+    let states: Vec<_> = options.states.iter().map(|state| (state.name.as_str(), state.state_type.as_str())).collect();
+    assert_eq!(
+        states,
+        [("Backlog", "backlog"), ("Todo", "unstarted"), ("In Progress", "started"), ("Done", "completed"), ("Canceled", "canceled"), ("Duplicate", "duplicate"), ("In Review", "started")]
+    );
+    assert_eq!(options.states[0].color, "bec2c8");
+    assert_eq!(options.states[6].position, 1002.0);
+    assert_eq!(options.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(), ["robin", "sam"]);
+    let labels: Vec<_> = options.labels.iter().map(|label| (label.name.as_str(), label.group.as_deref(), label.is_group)).collect();
+    assert_eq!(labels, [("Area", None, true), ("Frontend", Some("Area"), false), ("Bug", None, false), ("Feature", None, false), ("Improvement", None, false)]);
+    assert_eq!(options.labels[1].description.as_deref(), Some("UI work"));
+    assert_eq!(options.labels[2].color, "EB5757");
+    assert_eq!(options.priorities.iter().map(|priority| priority.value).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    assert!(options.close_reasons.is_empty());
+    assert_eq!(options.capabilities, IssueCapabilities::of(Provider::Linear));
+}
+
+#[test]
+fn options_are_cached_per_key_and_team() {
+    let options = parse_options(&fixture(include_str!("../fixtures/linear_issue_options.json"))["data"]);
+    OPTIONS.lock().unwrap().get_or_insert_with(HashMap::new).insert(options_key("lin_api_cached", "team-cached"), options.clone());
+    // Served without a request: the key is not a real one.
+    assert_eq!(super::options("lin_api_cached", None, Some("team-cached"), false).unwrap(), options);
+    assert_ne!(options_key("lin_api_cached", "team-cached"), options_key("lin_api_other", "team-cached"));
+    assert_eq!(super::options("lin_api_cached", None, None, false).unwrap_err().kind, IssueOpErrorKind::Invalid);
+}
+
+#[test]
+fn comment_writes_answer_with_the_comment() {
+    let recorded = writes();
+    let added = written_comment(&recorded["commentCreate"]["data"]["commentCreate"]).unwrap();
+    assert_eq!(added.body, "[TerminalX test] identifier probe — will be deleted");
+    assert!(added.viewer_can_edit && added.viewer_can_delete);
+    assert_eq!(added.edited_at, None);
+    assert_eq!(added.author.unwrap().id, VIEWER);
+    let edited = written_comment(&recorded["commentUpdate"]["data"]["commentUpdate"]).unwrap();
+    assert_eq!((edited.id.as_str(), edited.edited_at.as_deref()), (added.id.as_str(), Some("2026-10-18T06:54:59.528Z")));
+    assert_eq!(succeeded(&recorded["commentDelete"]["data"]["commentDelete"]), Ok(()));
+    assert_eq!(succeeded(&json!({"success": false})).unwrap_err().kind, IssueOpErrorKind::Other);
+    assert_eq!(written_comment(&json!({"success": false})).unwrap_err().kind, IssueOpErrorKind::Other);
+    assert_eq!(non_empty(" \n").unwrap_err().kind, IssueOpErrorKind::Invalid);
+}
+
+#[test]
+fn issue_writes_answer_with_the_issue_as_linear_now_has_it() {
+    let recorded = writes();
+    let updated = written_issue(&recorded["issueUpdate"]["data"]["issueUpdate"]).unwrap();
+    assert_eq!((updated.issue.state.as_str(), updated.issue.state_type.as_str()), ("Todo", "open"));
+    assert_eq!(updated.state_id.as_deref(), Some("f093f06b-bdb5-4cc0-83a2-1ab468cf2210"));
+    assert_eq!(updated.priority, Some(3));
+    assert_eq!(updated.issue.labels.iter().map(|label| (label.id.as_deref(), label.name.as_str())).collect::<Vec<_>>(), [(Some("ccc19003-dd17-4f15-8a1c-791df99d854f"), "Bug")]);
+    assert!(updated.assignees.is_empty() && updated.issue.assignee.is_none());
+    assert_eq!(updated.issue.updated_at, "2026-10-18T06:55:30.290Z");
+    let created = written_issue(&recorded["issueCreate"]["data"]["issueCreate"]).unwrap();
+    assert_eq!(created.issue.identifier, "ENG-102");
+    assert_eq!((created.issue.state.as_str(), created.priority), ("Todo", Some(4)));
+    assert_eq!(created.assignees[0].id, VIEWER);
+    assert_eq!(created.issue.labels[0].name, "Improvement");
+    assert_eq!(written_issue(&json!({"success": false, "issue": null})).unwrap_err().kind, IssueOpErrorKind::Other);
+}
+
+#[test]
+fn recorded_write_failures_map_to_their_kinds() {
+    let recorded = writes();
+    let kind = |name: &str| classify(200, &recorded[name]);
+    assert_eq!(kind("commentDeleteGone"), Some(IssueOpErrorKind::NotFound));
+    // A state or label that was removed since the picker loaded.
+    assert_eq!(kind("issueUpdateStaleState"), Some(IssueOpErrorKind::Invalid));
+    assert_eq!(kind("issueUpdateStaleLabel"), Some(IssueOpErrorKind::Invalid));
+    for name in ["details", "commentCreate", "commentUpdate", "commentDelete", "issueUpdate", "issueCreate"] {
+        assert_eq!(kind(name), None, "{name}");
+    }
+    // What reaches the UI is the fixed message, never the reply.
+    let error = IssueOpError::new(kind("issueUpdateStaleState").unwrap(), Provider::Linear);
+    assert!(!error.message.contains("validateAccess") && !error.message.contains("00000000"));
+}
+
+#[test]
+fn a_description_edit_conflicts_only_when_the_issue_moved_on() {
+    assert!(!changed_since("2026-10-18T06:31:11.160Z", "2026-10-18T06:31:11.160Z"));
+    assert!(!changed_since("2026-10-18T06:31:11.160Z", "2026-10-18T06:31:11.16+00:00"));
+    assert!(changed_since("2026-10-18T06:55:30.290Z", "2026-10-18T06:31:11.160Z"));
+    assert!(changed_since("2026-10-18T06:55:30.290Z", "yesterday"));
+}
+
+#[test]
+fn a_new_issue_needs_a_team_and_takes_one_assignee() {
+    let input = IssueCreate {
+        team_id: Some("team-eng".into()),
+        title: " Fix it ".into(),
+        description: "Steps".into(),
+        assignees: vec!["user-sam".into()],
+        labels: vec!["label-bug".into()],
+        state_id: Some("state-todo".into()),
+        priority: Some(2),
+    };
+    assert_eq!(
+        create_input(&input).unwrap(),
+        json!({"teamId": "team-eng", "title": "Fix it", "description": "Steps", "assigneeId": "user-sam", "labelIds": ["label-bug"], "stateId": "state-todo", "priority": 2})
+    );
+    let bare = IssueCreate { team_id: Some("team-eng".into()), title: "T".into(), ..IssueCreate::default() };
+    assert_eq!(create_input(&bare).unwrap(), json!({"teamId": "team-eng", "title": "T", "description": ""}));
+    let kind = |input: IssueCreate| create_input(&input).unwrap_err().kind;
+    assert_eq!(kind(IssueCreate { team_id: None, ..input.clone() }), IssueOpErrorKind::Invalid);
+    assert_eq!(kind(IssueCreate { assignees: vec!["a".into(), "b".into()], ..input.clone() }), IssueOpErrorKind::Invalid);
+    assert_eq!(kind(IssueCreate { priority: Some(5), ..input }), IssueOpErrorKind::Invalid);
+    assert_eq!(assignee(&[]).unwrap(), None);
+    assert_eq!(set_state("lin_api_unused", "ENG-1", &StateChange::Close { reason: CloseReason::Completed }).unwrap_err().kind, IssueOpErrorKind::Unsupported);
+}
+
+/// Every operation against the real Linear, on the sandbox issue only:
+/// `LINEAR_LIVE_ISSUE=PRO-101 cargo test live_ -- --ignored --nocapture`.
+/// It refuses any issue whose title doesn't start with "[TerminalX test]",
+/// and puts the issue back as it found it.
+#[test]
+#[ignore]
+fn live_every_operation_on_the_sandbox_issue() {
+    let Ok(id) = std::env::var("LINEAR_LIVE_ISSUE") else { return };
+    let crate::issue_ops::Target::Linear { key } = crate::issue_ops::Target::resolve(std::path::Path::new("."), Provider::Linear).unwrap() else { unreachable!() };
+    let key = key.as_str();
+    let before = details(key, &id).unwrap();
+    assert!(before.issue.title.starts_with("[TerminalX test]"), "not a sandbox issue");
+    let team = before.issue.team.clone().unwrap().id;
+    let step = |name: &str| println!("ok  {name}");
+
+    let options = super::options(key, Some(&id), None, true).unwrap();
+    assert!(!options.states.is_empty() && !options.members.is_empty());
+    assert_eq!(super::options(key, None, Some(&team), false).unwrap(), options);
+    step("options (read, cached, refreshed)");
+
+    let added = comment_add(key, &id, "[TerminalX test] live check — will be deleted").unwrap();
+    let edited = comment_edit(key, &id, &added.id, "[TerminalX test] live check, edited — will be deleted").unwrap();
+    assert!(edited.edited_at.is_some());
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = comments(key, &id, cursor.as_deref()).unwrap();
+        seen.extend(page.comments);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mine = seen.iter().find(|comment| comment.id == added.id).unwrap();
+    assert!(mine.viewer_can_edit && mine.body.contains("edited"));
+    comment_delete(key, &id, &added.id).unwrap();
+    assert_eq!(comment_delete(key, &id, &added.id).unwrap_err().kind, IssueOpErrorKind::NotFound);
+    step("comments: add, edit, page, delete");
+
+    let other = options.states.iter().find(|state| Some(&state.id) != before.state_id.as_ref() && state.state_type == "unstarted").unwrap();
+    assert_eq!(set_state(key, &id, &StateChange::WorkflowState { state_id: other.id.clone() }).unwrap().state_id.as_ref(), Some(&other.id));
+    assert_eq!(set_state(key, &id, &StateChange::WorkflowState { state_id: "00000000-0000-4000-8000-000000000000".into() }).unwrap_err().kind, IssueOpErrorKind::Invalid);
+    step("state");
+
+    let viewer = request(key, "query { viewer { id } }", json!({})).unwrap()["viewer"]["id"].as_str().unwrap().to_string();
+    assert!(set_assignees(key, &id, &[]).unwrap().assignees.is_empty());
+    assert_eq!(set_assignees(key, &id, std::slice::from_ref(&viewer)).unwrap().assignees[0].id, viewer);
+    step("assignee: none, the viewer");
+
+    let label = options.labels.iter().find(|label| !label.is_group).unwrap();
+    assert_eq!(set_labels(key, &id, std::slice::from_ref(&label.id)).unwrap().issue.labels[0].id.as_ref(), Some(&label.id));
+    assert_eq!(set_priority(key, &id, 3).unwrap().priority, Some(3));
+    let title = format!("{} (edited)", before.issue.title);
+    assert_eq!(set_title(key, &id, &title).unwrap().issue.title, title);
+    step("labels, priority, title");
+
+    let current = details(key, &id).unwrap();
+    let edit = DescriptionEdit { description: format!("{}\n\nEdited by a live check.", before.description), expected_updated_at: Some(current.issue.updated_at.clone()) };
+    let after = set_description(key, &id, &edit).unwrap();
+    assert!(after.description.ends_with("Edited by a live check."));
+    // The editor started from `current`; the issue has moved on since.
+    assert_eq!(set_description(key, &id, &DescriptionEdit { description: "stale".into(), ..edit }).unwrap_err().kind, IssueOpErrorKind::Conflict);
+    step("description, and a stale one refused as a conflict");
+
+    assert_eq!(details(key, "PRO-999999").unwrap_err().kind, IssueOpErrorKind::NotFound);
+    assert_eq!(details("lin_api_not_a_real_key_0000000000000000000000", &id).unwrap_err().kind, IssueOpErrorKind::NotSignedIn);
+    step("errors: not found, not signed in");
+
+    if std::env::var("LINEAR_LIVE_CREATE").is_ok() {
+        let created = create(key, &IssueCreate { team_id: Some(team.clone()), title: "[TerminalX test] create check — ignore".into(), description: "Created by a live check; canceled right away.".into(), assignees: vec![viewer.clone()], ..IssueCreate::default() }).unwrap();
+        let canceled = options.states.iter().find(|state| state.state_type == "canceled").unwrap();
+        assert_eq!(set_state(key, &created.issue.id, &StateChange::WorkflowState { state_id: canceled.id.clone() }).unwrap().issue.state_type, "canceled");
+        step(&format!("create {}, canceled", created.issue.identifier));
+    }
+
+    // Put it back.
+    set_state(key, &id, &StateChange::WorkflowState { state_id: before.state_id.clone().unwrap() }).unwrap();
+    set_assignees(key, &id, &before.assignees.iter().map(|user| user.id.clone()).collect::<Vec<_>>()).unwrap();
+    set_labels(key, &id, &before.issue.labels.iter().filter_map(|label| label.id.clone()).collect::<Vec<_>>()).unwrap();
+    set_priority(key, &id, before.priority.unwrap_or(0)).unwrap();
+    set_title(key, &id, &before.issue.title).unwrap();
+    let restored = set_description(key, &id, &DescriptionEdit { description: before.description.clone(), expected_updated_at: None }).unwrap();
+    assert_eq!((restored.issue.title, restored.description, restored.state_id, restored.priority), (before.issue.title, before.description, before.state_id, before.priority));
+    step("restored");
+}
