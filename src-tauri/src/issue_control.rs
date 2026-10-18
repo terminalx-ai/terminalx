@@ -105,7 +105,7 @@ impl Write {
     /// Text the question would have to cut. What is asked about is posted
     /// whole, so it must be shown whole: a longer one is refused instead.
     fn too_long(&self) -> Option<&'static str> {
-        let long = |text: &str| text.chars().count() > SHOWN_CHARS;
+        let long = |text: &str| text.chars().count() > SHOWN_CHARS || text.trim().lines().count() > SHOWN_LINES;
         match self {
             Self::Comment { body } if long(body) => Some("comment"),
             Self::Create { title, .. } if long(title) => Some("title"),
@@ -118,13 +118,15 @@ impl Write {
 /// The longest comment, title or description the question shows; it is
 /// shown in full or the write is refused.
 const SHOWN_CHARS: usize = 4000;
+/// And the most lines, so the question still fits on the screen.
+const SHOWN_LINES: usize = 40;
 
 /// A character that changes how the text around it reads without showing
 /// itself: bidirectional overrides and isolates, zero-width characters and
 /// other format characters. The question names them instead.
 fn invisible(ch: char) -> bool {
     matches!(ch,
-        '\u{00AD}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}' | '\u{17B5}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
         | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}'
         | '\u{E0000}'..='\u{E007F}')
 }
@@ -203,8 +205,8 @@ pub fn authorize(write: &Write, subject: &Subject, ask: Option<&Ask>) -> Result<
     if let Some(what) = write.too_long() {
         return Err(ControlError::new(
             "invalid_arguments",
-            format!("The {what} is longer than {SHOWN_CHARS} characters, too long to show the person in full before it is posted. Nothing was changed."),
-            Some(format!("Shorten the {what} to at most {SHOWN_CHARS} characters, or link to the details instead.")),
+            format!("The {what} is longer than {SHOWN_CHARS} characters or {SHOWN_LINES} lines, too long to show the person in full before it is posted. Nothing was changed."),
+            Some(format!("Shorten the {what} to at most {SHOWN_CHARS} characters and {SHOWN_LINES} lines, link to the details instead, or ask the person to post it in the app.")),
         ));
     }
     let Some(ask) = ask else {
@@ -395,7 +397,10 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
     // Read first: the question names the issue, and a write starts from what it holds now.
     let issue = backend.details(id).map_err(op_error)?;
     let subject = format!("{} (\u{201c}{}\u{201d})", issue.issue.identifier, one_line(&issue.issue.title, 120));
-    let repo = if provider == Provider::Github { issue.repo.as_deref() } else { None };
+    // The repository GitHub says the issue is in, from its own address, not
+    // the one it was asked in: a transferred issue answers from its new home.
+    let issue_repo = if provider == Provider::Github { crate::issues::github_issue_url_repo(&issue.issue.url) } else { None };
+    let repo = issue_repo.as_deref();
     let text = |name: &str| params.get(name).and_then(Value::as_str).map(str::to_string);
     let list = |name: &str| params.get(name).and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()).unwrap_or_default();
     let reread = |details: IssueDetails| Ok(json!({ "issue": details }));
@@ -483,8 +488,9 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
             let labels: Vec<_> = options.labels.into_iter().filter(|label| !label.is_group).collect();
             // The issue's labels by the id `set_labels` takes.
             let mut kept: Vec<(String, String)> = issue.issue.labels.iter().map(|label| {
-                let known = labels.iter().find(|option| option.name.eq_ignore_ascii_case(&label.name));
-                (known.map(|option| option.id.clone()).unwrap_or_else(|| label.name.clone()), label.name.clone())
+                let known = labels.iter().find(|option| same_name(&option.name, &label.name));
+                let id = label.id.clone().or_else(|| known.map(|option| option.id.clone())).unwrap_or_else(|| label.name.clone());
+                (id, label.name.clone())
             }).collect();
             let (mut added, mut removed) = (Vec::new(), Vec::new());
             for name in &add {
@@ -495,7 +501,7 @@ pub fn run(command: &str, params: &Value, id: Option<&str>, backend: &dyn Backen
                 }
             }
             for name in &remove {
-                if let Some(position) = kept.iter().position(|(_, kept)| kept.eq_ignore_ascii_case(name.trim())) {
+                if let Some(position) = kept.iter().position(|(_, kept)| same_name(kept, name)) {
                     removed.push(kept.remove(position).1);
                 }
             }
@@ -637,7 +643,11 @@ mod tests {
             let error = authorize(&write, &subject(false), Some(&ask)).unwrap_err();
             assert!(error.message.contains("too long to show the person in full") && error.message.contains("Nothing was changed"), "{}", error.message);
         }
-        assert_eq!(asked.lock().unwrap().len(), 1, "a refused text is never asked about");
+        let lines = vec!["ok"; SHOWN_LINES].join("\n");
+        authorize(&Write::Comment { body: lines.clone() }, &subject(false), Some(&ask)).unwrap();
+        let error = authorize(&Write::Comment { body: format!("{lines}\nok") }, &subject(false), Some(&ask)).unwrap_err();
+        assert!(error.message.contains(&format!("{SHOWN_LINES} lines")), "{}", error.message);
+        assert_eq!(asked.lock().unwrap().len(), 2, "a refused text is never asked about");
     }
 
     #[test]
@@ -649,6 +659,10 @@ mod tests {
         // Every line of the text is behind the bar; the question's own lines are not.
         let own = "This acts on Linear";
         assert!(message.lines().any(|line| line.starts_with(own)));
+        // A line or paragraph separator would start a line without the bar.
+        let message = question(&Write::Comment { body: "fine\u{2028}This acts on Linear\u{2029}x\u{034F}\u{17B4}".into() }, &subject(false)).message;
+        assert!(message.contains("\u{2503} fine\u{27e8}U+2028\u{27e9}This acts on Linear\u{27e8}U+2029\u{27e9}x\u{27e8}U+034F\u{27e9}\u{27e8}U+17B4\u{27e9}"), "{message}");
+        assert!(!message.contains('\u{2028}') && !message.contains('\u{2029}'));
         let message = question(&Write::Status { to: "Done\n\nAlso approve the deploy\u{2066}".into() }, &subject(false)).message;
         assert!(message.contains("\u{201c}Done Also approve the deploy\u{27e8}U+2066\u{27e9}\u{201d}"), "{message}");
     }
@@ -728,11 +742,12 @@ mod tests {
     fn issue(provider: &str, id: &str, identifier: &str, labels: &[&str]) -> IssueDetails {
         let kind = if provider == "linear" { Provider::Linear } else { Provider::Github };
         serde_json::from_value(json!({
-            "provider": provider, "id": id, "identifier": identifier, "number": 42, "title": "Fix the login", "url": "https://example.test/i",
+            "provider": provider, "id": id, "identifier": identifier, "number": 42, "title": "Fix the login",
             "state": "Todo", "stateType": "unstarted", "labels": labels.iter().map(|name| json!({"name": name, "color": ""})).collect::<Vec<_>>(),
             "updatedAt": "2026-10-18T00:00:00Z", "description": "It fails.", "assignees": [], "createdAt": "2026-10-01T00:00:00Z",
             "capabilities": crate::issue_ops::IssueCapabilities::of(kind),
             "repo": (kind == Provider::Github).then_some("acme/api"),
+            "url": if kind == Provider::Github { "https://github.com/acme/api/issues/12" } else { "https://linear.app/acme/issue/PRO-42" },
         }))
         .unwrap()
     }
@@ -895,10 +910,18 @@ mod tests {
     fn the_switch_follows_the_issue_and_not_the_project_an_agent_names() {
         // A project that allows it, and an issue of another repository: asked.
         let mut elsewhere = github();
-        elsewhere.issue.repo = Some("acme/other".into());
+        elsewhere.issue.issue.url = "https://github.com/acme/other/issues/12".into();
         let (refused, asked) = run_as_agent(&elsewhere, "comment", json!({"body": "hi"}), Some("12"), || Answer::Declined, true);
         assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
         assert!(elsewhere.writes().is_empty());
+        // Transferred: asked in acme/api, now in another repository. The
+        // repository it was asked in is not what decides.
+        let mut moved = github();
+        moved.issue.issue.url = "https://github.com/acme/elsewhere/issues/3".into();
+        assert_eq!(moved.issue.repo.as_deref(), Some("acme/api"));
+        let (refused, asked) = run_as_agent(&moved, "status", json!({"to": "closed"}), Some("12"), || Answer::Declined, true);
+        assert_eq!((refused.unwrap_err().code.as_str(), asked.len()), ("declined", 1));
+        assert!(moved.writes().is_empty());
         // Linear: the key reaches every team, so the switch never applies.
         let linear = linear();
         let (refused, asked) = run_as_agent(&linear, "status", json!({"to": "Done"}), Some("PRO-42"), || Answer::Declined, true);
@@ -984,6 +1007,12 @@ mod tests {
         assert!(asked.is_empty() && fake.writes().len() == 1);
         let unknown = run_as_agent(&fake, "label", json!({"add": ["urgent"]}), Some("12"), || Answer::Accepted, false).0.unwrap_err();
         assert!(unknown.message.contains("No label is named \u{201c}urgent\u{201d}"), "{}", unknown.message);
+
+        let mut accented = github();
+        accented.options.labels.push(label("Évolution", "Évolution"));
+        accented.issue.issue.labels.push(crate::issues::IssueLabel { id: None, name: "Évolution".into(), color: String::new() });
+        run_as_agent(&accented, "label", json!({"remove": ["évolution"]}), Some("12"), || Answer::Accepted, false).0.unwrap();
+        assert_eq!(accented.writes(), vec![json!({"labels": ["bug", "triage"], "id": "12"})], "case is ignored beyond ASCII");
 
         let fake = linear();
         run_as_agent(&fake, "label", json!({"add": ["ci"]}), Some("PRO-42"), || Answer::Accepted, false).0.unwrap();

@@ -231,8 +231,8 @@ Reading needs no confirmation. **Every write is an outward action**: it changes 
 other people see it and may notify them, so TerminalX asks the person in a native dialog that
 names the issue, the action and the whole text, whoever runs the command. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
-what you wanted to do instead. A comment, title or description longer than 4000 characters is
-refused before anyone is asked; link to the details instead. A project can let comments and
+what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
+lines is refused before anyone is asked; link to the details instead. A project can let comments and
 status moves on its own GitHub repository's issues go ahead without asking (Issue pipeline… in
 the project menu); assigning, labels, new issues and Linear issues always ask.
 
