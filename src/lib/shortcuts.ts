@@ -89,8 +89,11 @@ const ACTIONS = [
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
-  // Handled by the Issues view's detail pane, while the focus is in it.
-  { id: "issues.status", label: "Change the open issue's status", group: "Issues", keys: ["mod+shift+s"], scope: "context" },
+  // Handled by the Issues view, while the focus is in it and not in a text field.
+  { id: "issues.status", label: "Change the open issue's status", group: "Issues", keys: ["s", "mod+shift+s"], scope: "context" },
+  { id: "issues.assignee", label: "Change the open issue's assignees", group: "Issues", keys: ["a"], scope: "context" },
+  { id: "issues.labels", label: "Change the open issue's labels", group: "Issues", keys: ["l"], scope: "context" },
+  { id: "issues.comment", label: "Write a comment on the open issue", group: "Issues", keys: ["c"], scope: "context" },
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },

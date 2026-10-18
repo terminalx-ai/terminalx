@@ -35,6 +35,8 @@ export function AssigneePicker({
   issue,
   viewer,
   onChange,
+  open: openProp,
+  onOpenChange,
 }: {
   projectPath: string;
   /** The issue as last read: the list's row until its details come. */
@@ -42,8 +44,16 @@ export function AssigneePicker({
   /** The reader, for "Assign to me"; offered only once known. */
   viewer?: IssueUser | null;
   onChange: (issue: IssueDetails) => void;
+  /** Open from outside, as the view's keyboard shortcut does; left out, the picker keeps its own. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = openProp ?? ownOpen;
+  const setOpen = (value: boolean) => {
+    setOwnOpen(value);
+    onOpenChange?.(value);
+  };
   const [options, setOptions] = useState<IssueOptions | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   // What a write in flight will make the assignees, shown until it answers.

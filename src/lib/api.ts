@@ -1963,6 +1963,8 @@ export interface Issue {
   url: string;
   state: string;
   stateType: "open" | "started" | "completed" | "canceled";
+  /** Linear's own type for the workflow state (`triage`, `backlog`, `unstarted`, …), which `stateType` folds together. */
+  workflowStateType?: string | null;
   labels: IssueLabel[];
   /** The first of `assignees`. */
   assignee?: IssueAssignee | null;
@@ -1972,10 +1974,20 @@ export interface Issue {
   body?: string | null;
   team?: IssueTeam | null;
 }
+/** Who has the issue: the reader, nobody, or someone as assignees are named (the GitHub login, the Linear user id). */
+export type AssigneeFilter = { kind: "me" } | { kind: "unassigned" } | { kind: "person"; id: string };
 export interface IssueFilter {
+  /** The older spelling of `assignee: {kind: "me"}`. */
   assignedToMe?: boolean;
   teamId?: string | null;
   search?: string | null;
+  /** `open` (the default), `all`; `closed` on GitHub; a workflow state type on Linear. */
+  state?: string | null;
+  assignee?: AssigneeFilter | null;
+  /** Names. GitHub: issues with all of them; Linear: with any of them. */
+  labels?: string[];
+  /** `updated` (the default), `created` (newest), `created_asc` (oldest), `priority` (Linear). */
+  sort?: string | null;
 }
 export interface LinearStatus {
   connected: boolean;

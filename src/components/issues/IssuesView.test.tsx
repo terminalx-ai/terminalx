@@ -3,7 +3,7 @@ import { StrictMode, type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import type { ModelInfo } from "@/lib/api";
+import type { IssueFilter, ModelInfo } from "@/lib/api";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
 import type { IssuePipeline, IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project } from "@/types/session";
@@ -194,6 +194,14 @@ function mockBackend() {
   });
 }
 
+/** Narrows the list to `choice` in the Assignee filter: "Anyone", "Assigned to me", "Unassigned" or a person. */
+async function chooseAssignee(choice: string) {
+  fireEvent.click(await screen.findByRole("button", { name: /^Assignee: / }));
+  const menu = await screen.findByRole("dialog", { name: "Filter by assignee" });
+  fireEvent.click(await within(menu).findByRole(["Anyone", "Assigned to me", "Unassigned"].includes(choice) ? "button" : "option", { name: choice }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Filter by assignee" })).toBeNull());
+}
+
 function issueSwitch() {
   return screen.getByRole("switch", { name: "Start issue in a new worktree" });
 }
@@ -227,6 +235,7 @@ beforeEach(() => {
   catalog.models = models;
   mockBackend();
   setPrefs({
+    issueFilters: {},
     lastProject: "/repo",
     lastAgent: "claude",
     lastModel: {},
@@ -858,8 +867,8 @@ describe("assignees", () => {
     invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "issues_list") {
         const all = [...tracker.issues.values()].map((entry) => entry.issue).filter((issue) => issue.provider === args?.provider);
-        const filter = args?.filter as { assignedToMe?: boolean };
-        return all.filter((issue) => !filter.assignedToMe || issue.assignees.some((person) => person.id === tracker.viewer[issue.provider].id)).map(row);
+        const filter = args?.filter as { assignee?: { kind: string } | null };
+        return all.filter((issue) => filter.assignee?.kind !== "me" || issue.assignees.some((person) => person.id === tracker.viewer[issue.provider].id)).map(row);
       }
       return tracker.handle(command, args) ?? others(command, args);
     });
@@ -882,8 +891,8 @@ describe("assignees", () => {
   it("keeps a row assigned away from the reader in the Assigned to me list, marked, until the list is read again", async () => {
     tracker.issue("github", "41").assignees = [tracker.options.github.members[0], kim()];
     render(<IssuesView />);
-    fireEvent.click(screen.getByRole("button", { name: "Assigned to me" }));
-    await waitFor(() => expect(invoke.mock.calls.some(([command, args]) => command === "issues_list" && (args as { filter: { assignedToMe: boolean } }).filter.assignedToMe)).toBe(true));
+    await chooseAssignee("Assigned to me");
+    await waitFor(() => expect(invoke.mock.calls.some(([command, args]) => command === "issues_list" && (args as { filter: IssueFilter }).filter.assignee?.kind === "me")).toBe(true));
     const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
     fireEvent.click(listed);
     fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, kim" }));
@@ -936,7 +945,7 @@ describe("assignees", () => {
     tracker.issue("github", "41").assignees = [tracker.options.github.members[0], kim()];
     const release = hold("issue_viewer", true);
     render(<IssuesView />);
-    fireEvent.click(screen.getByRole("button", { name: "Assigned to me" }));
+    await chooseAssignee("Assigned to me");
     const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
     fireEvent.click(listed);
     fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, kim" }));
@@ -1081,7 +1090,7 @@ describe("who is working on an issue (#441)", () => {
     render(<IssuesView />);
     await within(await row("Fix login timeout")).findByText("Alice · working");
     const choose = async (label: string) => {
-      fireEvent.pointerDown(screen.getByRole("button", { name: "Filter by who is working" }), { button: 0, ctrlKey: false });
+      fireEvent.pointerDown(screen.getByRole("button", { name: /^Working: / }), { button: 0, ctrlKey: false });
       fireEvent.click(await screen.findByRole("menuitem", { name: label }));
     };
     await choose("Hide issues someone is working on");

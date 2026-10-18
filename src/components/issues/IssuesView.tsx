@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound, Users } from "@/icons";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { Check, ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, Users } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -10,6 +10,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { AssigneePicker } from "@/components/issues/AssigneePicker";
 import { IssueListItem } from "@/components/issues/IssueListItem";
+import { IssueListFilters } from "@/components/issues/IssueListFilters";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { IssueCommentComposer } from "@/components/issues/IssueCommentComposer";
 import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
@@ -21,8 +22,9 @@ import { SessionAgentControls } from "@/components/session/SessionAgentControls"
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
+import { filterMiss, issueFilterFor, issueFilterKey, wireFilter, type IssueListFilter } from "@/lib/issueListFilter";
 import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { setPrefs, usePrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
@@ -46,9 +48,10 @@ const WORK_FILTERS: { value: WorkFilter; label: string }[] = [
 
 /**
  * GitHub closes an issue a moment after the pull request that closes it is
- * merged. The list is read again once that has had time to happen.
+ * merged, and its lists show that some seconds later still. The list is read
+ * again once that has had time to happen, and once more after.
  */
-const AFTER_MERGE_MS = 3000;
+const AFTER_MERGE_MS = [3000, 12000];
 
 /**
  * A row for an issue the tracker's list no longer holds, from what its
@@ -66,9 +69,21 @@ function typingIn(target: EventTarget | null): boolean {
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || !!target.closest('[contenteditable]:not([contenteditable="false"])');
 }
 
-/** A row as read, with the state a later write gave it kept when the read is older than that write. */
-const keepState = (read: Issue, shown: Issue | undefined): Issue =>
-  shown ? { ...read, state: shown.state, stateType: shown.stateType, updatedAt: shown.updatedAt } : read;
+/** A row as read, with what a later change made here kept: its status, assignees, labels and title. */
+const keepEdits = (read: Issue, shown: Issue): Issue => ({
+  ...read,
+  title: shown.title,
+  state: shown.state,
+  stateType: shown.stateType,
+  workflowStateType: shown.workflowStateType,
+  labels: shown.labels,
+  assignee: shown.assignee,
+  assignees: shown.assignees,
+  updatedAt: shown.updatedAt,
+});
+
+/** True when the row shown holds a change the provider made after the row read: its lists lag a write by a few seconds. */
+const newerHere = (read: Issue, shown: Issue | undefined) => !!shown && Date.parse(shown.updatedAt) > Date.parse(read.updatedAt);
 
 /**
  * `next`, unless `now` is the same issue read later: an answer that was
@@ -79,11 +94,23 @@ function newer(now: Issue | null, next: Issue): Issue {
   return same && Date.parse(now.updatedAt) > Date.parse(next.updatedAt) ? now : next;
 }
 
+/** True when an arrow key on `target` already means something there: a menu, a list box, a radio group. */
+function arrowsTaken(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && !!target.closest('[role="menu"],[role="listbox"],[role="radiogroup"],[role="tablist"],[role="slider"]');
+}
+
 /**
  * Issues from the project's tracker, and a way to start a session on one.
- * The list is the tracker's own order (most recently updated first); the
- * detail column shows the body so the reader can judge before an agent
- * spends a worktree on it.
+ * The list is filtered and sorted by the tracker (most recently updated
+ * first, unless the reader chose otherwise); the detail column shows the
+ * body so the reader can judge before an agent spends a worktree on it. A
+ * change made in the detail column shows on its row at once, and a row that
+ * no longer matches the filter stays, dimmed, until the next refresh.
+ *
+ * Keys, while the focus is in the view and not in a text field: Up and Down
+ * move through the list (from the list's side; in the detail pane they
+ * scroll); the `issues.*` shortcuts open the open issue's
+ * status, assignee and label pickers and go to its comment box.
  */
 export function IssuesView({
   onCreated,
@@ -100,16 +127,16 @@ export function IssuesView({
   const prefs = usePrefs();
   const settingsKeys = useKeymap()["app.settings"][0];
   const [provider, setProvider] = useState<Provider>(prefs.issueProvider);
-  const [assignedToMe, setAssignedToMe] = useState(false);
-  const [teamId, setTeamId] = useState<string | null>(null);
   const [teams, setTeams] = useState<IssueTeam[]>([]);
   const [search, setSearch] = useState("");
   const [list, setList] = useState<Issue[]>([]);
+  const listNow = useRef(list);
+  listNow.current = list;
   // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
   const [listOf, setListOf] = useState<string | null>(null);
-  // Who has each issue whose assignees changed here since the list was read, by `provider:id`. A row of the
-  // "Assigned to me" list assigned away from the reader stays until the next read, marked, rather than vanish under the pointer.
-  const [assignedHere, setAssignedHere] = useState<ReadonlyMap<string, string[]>>(new Map());
+  // The issues changed here since the list was read, by `provider:id`. One that no longer matches the filter stays
+  // until the next read, dimmed, rather than vanish under the pointer.
+  const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
@@ -127,10 +154,22 @@ export function IssuesView({
   const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
   // Work on the issue to say before a session starts on it.
   const [takenBy, setTakenBy] = useState<IssueWorker[] | null>(null);
+  const [assigneeOpen, setAssigneeOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const detailPane = useRef<HTMLDivElement>(null);
+  const listColumn = useRef<HTMLDivElement>(null);
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
+  // The list's filter, as the reader left it for this project and tracker.
+  const filterKey = project ? issueFilterKey(project.path, provider) : null;
+  const filter = issueFilterFor(filterKey ? prefs.issueFilters[filterKey] : undefined, provider);
+  const filterAsked = JSON.stringify(wireFilter(filter, ""));
+  const setFilter = (next: IssueListFilter) => {
+    if (filterKey) setPrefs({ issueFilters: { ...getPrefs().issueFilters, [filterKey]: next } });
+  };
   const isGit = project?.kind !== "folder";
   const useWorktree = isGit && (controlledUseWorktree ?? localUseWorktree);
   const pipelines = useIssuePipelines();
@@ -175,8 +214,8 @@ export function IssuesView({
     mergedSeen.current = { project: project?.path, count: mergedHere };
     // Another project's count is not a merge that happened in this one.
     if (before.project !== project?.path || mergedHere <= before.count) return;
-    const timer = window.setTimeout(() => setTick((t) => t + 1), AFTER_MERGE_MS);
-    return () => window.clearTimeout(timer);
+    const timers = AFTER_MERGE_MS.map((ms) => window.setTimeout(() => setTick((t) => t + 1), ms));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [mergedHere, project?.path]);
 
   useEffect(() => {
@@ -236,12 +275,22 @@ export function IssuesView({
       setError(null);
       const started = writes.readStarted();
       try {
-        const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
+        const r = await issuesApi.list(project.path, provider, wireFilter(filter, search));
         if (live) {
-          // A row written to since the read started keeps the state the write gave it.
-          setList((rows) => r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row)));
+          // A row changed here since the read started, or whose change the read doesn't hold yet, keeps the change;
+          // it stays marked as changed until a read that has it.
+          const shown = new Map(listNow.current.map((row) => [writeKey(row), row]));
+          const kept = new Set<string>();
+          const rows = r.map((row) => {
+            const key = writeKey(row);
+            const here = shown.get(key);
+            if (!here || !(writes.outdated(key, started) || newerHere(row, here))) return row;
+            kept.add(key);
+            return keepEdits(row, here);
+          });
+          setList(rows);
           setListOf(`${project.path}\n${provider}`);
-          setAssignedHere(new Map());
+          setChangedHere(kept);
         }
       } catch (e) {
         if (live) {
@@ -257,7 +306,7 @@ export function IssuesView({
       live = false;
       window.clearTimeout(t);
     };
-  }, [project, provider, assignedToMe, teamId, search, linear?.connected, tick]);
+  }, [project, provider, filterAsked, search, linear?.connected, tick]);
 
   // Body on demand: GitHub lists come without it. A refresh reads the open
   // issue again as well, since its state may have moved; what is on the page
@@ -364,6 +413,8 @@ export function IssuesView({
   const open = (issue: Issue) => {
     setSelected(issue);
     setStatusOpen(false);
+    setAssigneeOpen(false);
+    setLabelsOpen(false);
     setUseWorktree(prefs.useWorktree);
     setAutoMerge(pipelineDefaults.autoMerge);
   };
@@ -374,7 +425,9 @@ export function IssuesView({
   const statusChanged = (issue: Issue) => {
     const same = (each: Issue) => each.id === issue.id && each.provider === issue.provider;
     setDetail((d) => (d && same(d) ? { ...d, ...issue } : d));
-    setList((rows) => rows.map((row) => (same(row) ? { ...row, state: issue.state, stateType: issue.stateType, updatedAt: issue.updatedAt } : row)));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, state: issue.state, stateType: issue.stateType, workflowStateType: issue.workflowStateType, updatedAt: issue.updatedAt } : row)));
+    writes.touch(writeKey(issue));
+    setChangedHere((keys) => new Set(keys).add(writeKey(issue)));
   };
   // An issue as a write answered with it: the open one shows it (even before its details came), and its row shows who has it now.
   const selectedNow = useRef(selected);
@@ -383,20 +436,20 @@ export function IssuesView({
     const same = (issue: Issue) => issue.provider === changed.provider && issue.id === changed.id;
     setDetail((now) => (selectedNow.current && same(selectedNow.current) ? newer(now, changed) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, assignee: changed.assignee, assignees: changed.assignees, updatedAt: changed.updatedAt } : row)));
-    setAssignedHere((map) => new Map(map).set(`${changed.provider}:${changed.id}`, changed.assignees.map((person) => person.id)));
+    writes.touch(writeKey(changed));
+    setChangedHere((keys) => new Set(keys).add(writeKey(changed)));
   };
-  const notMine = (issue: Issue) => {
-    const who = assignedHere.get(`${issue.provider}:${issue.id}`);
-    return assignedToMe && !!viewer && !!who && !who.includes(viewer.id);
-  };
+  const outOfFilter = (issue: Issue) => (changedHere.has(writeKey(issue)) ? filterMiss(issue, filter, provider, viewer?.id ?? null) : null);
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
   // A write answers with the issue as the provider has it now: the page and its row follow.
   const changed = useCallback((next: IssueDetails) => {
     const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
     setDetail((now) => (same(now) ? newer(now, next) : now));
-    setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
-  }, []);
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, workflowStateType: next.workflowStateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
+    writes.touch(writeKey(next));
+    setChangedHere((keys) => new Set(keys).add(writeKey(next)));
+  }, [writes.touch]);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
@@ -404,6 +457,60 @@ export function IssuesView({
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
+
+  // Who has the issue shows once that is known: from the row, or from its details.
+  const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
+  // Up and Down through the rows, the listed ones and then those below them; the row moved to takes the focus.
+  const move = (by: 1 | -1) => {
+    const rows = [...list, ...unlisted.map((each) => each.issue)];
+    if (!rows.length) return;
+    const at = rows.findIndex(isOpen);
+    const next = at < 0 ? (by > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, at + by));
+    if (next !== at) open(rows[next]);
+    const row = root.current?.querySelector<HTMLElement>(`[data-issue-row="${writeKey(rows[next])}"]`);
+    row?.focus();
+    row?.scrollIntoView?.({ block: "nearest" });
+  };
+  const onViewKeyDown = (e: ReactKeyboardEvent) => {
+    // Not while typing or composing, not for a key something inside already took, and not from a menu
+    // opened out of the view (its keys reach here through React, though it is elsewhere on the page).
+    if (e.defaultPrevented || e.nativeEvent.isComposing || typingIn(e.target) || !(e.target instanceof Node) || !root.current?.contains(e.target)) return;
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
+      // The list's own keys: in the detail pane they scroll the issue, as anywhere else.
+      if (arrowsTaken(e.target) || !(e.target === root.current || listColumn.current?.contains(e.target))) return;
+      e.preventDefault();
+      move(e.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (!current || !project) return;
+    const native = e.nativeEvent;
+    if (matchesShortcut(native, "issues.status")) {
+      // Only an issue read whole has a picker to open, and not while a change to it is on its way.
+      const capabilities = (current as Partial<IssueDetails>).capabilities;
+      if (!capabilities || !(capabilities.workflowStates || capabilities.closeReasons) || writes.writing.has(writeKey(current))) return;
+      e.preventDefault();
+      setStatusOpen(true);
+    } else if (matchesShortcut(native, "issues.assignee")) {
+      // Only once the picker is on the page; it would otherwise open by itself when it came.
+      if (!assigneeShown) return;
+      e.preventDefault();
+      setAssigneeOpen(true);
+    } else if (matchesShortcut(native, "issues.labels")) {
+      // The label picker needs the issue read whole.
+      if (!edits.issue) return;
+      e.preventDefault();
+      setLabelsOpen(true);
+    } else if (matchesShortcut(native, "issues.comment")) {
+      // The composer's box under the comments, else the thread's last text box; without one, the thread is shown.
+      const thread = detailPane.current?.querySelector<HTMLElement>('section[aria-label="Comments"]');
+      if (!thread) return;
+      e.preventDefault();
+      const boxes = thread.querySelectorAll<HTMLTextAreaElement>("textarea");
+      const box = thread.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]') ?? boxes[boxes.length - 1];
+      if (box) box.focus();
+      else thread.scrollIntoView?.({ block: "nearest" });
+    }
+  };
 
   if (automationPrefill) {
     return (
@@ -421,8 +528,8 @@ export function IssuesView({
   }
 
   return (
-    <div className="flex h-full min-h-0">
-      <div className="flex min-w-0 flex-1 flex-col border-r border-hairline">
+    <div ref={root} className="flex h-full min-h-0 outline-none" tabIndex={-1} onKeyDown={onViewKeyDown} data-testid="issues-view">
+      <div ref={listColumn} className="flex min-w-0 flex-1 flex-col border-r border-hairline">
         <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2 pt-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -461,59 +568,6 @@ export function IssuesView({
               { value: "linear", label: "Linear" },
             ]}
           />
-          <button
-            type="button"
-            aria-pressed={assignedToMe}
-            onClick={() => setAssignedToMe((v) => !v)}
-            className={cn(
-              "flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors",
-              assignedToMe ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
-            )}
-          >
-            <UserRound className="size-3.5" /> Assigned to me
-          </button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Filter by who is working"
-                className={cn(
-                  "flex h-7 items-center gap-1 rounded-md px-2 text-xs transition-colors",
-                  workFilter !== "all" ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
-                )}
-              >
-                <Users className="size-3.5" /> {workFilter === "all" ? "Anyone" : workFilter === "free" ? "Nobody working" : "Only mine"}
-                <ChevronDown className="size-3 text-faint" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              {WORK_FILTERS.map((option) => (
-                <DropdownMenuItem key={option.value} onSelect={() => setWorkFilter(option.value)}>
-                  <Check className={cn("size-3.5", workFilter !== option.value && "invisible")} />
-                  {option.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          {provider === "linear" && teams.length > 0 && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-1 text-xs">
-                  {teams.find((t) => t.id === teamId)?.name ?? "All teams"}
-                  <ChevronDown className="text-faint" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem onSelect={() => setTeamId(null)}>All teams</DropdownMenuItem>
-                {teams.map((t) => (
-                  <DropdownMenuItem key={t.id} onSelect={() => setTeamId(t.id)}>
-                    <span className="font-mono text-[11px] text-faint">{t.key}</span>
-                    <span>{t.name}</span>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
           <div className="ml-auto flex items-center gap-1">
             <div className="flex h-7 items-center gap-1 rounded-md bg-well px-2">
               <Search className="size-3.5 text-faint" />
@@ -521,7 +575,8 @@ export function IssuesView({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search"
-                className="w-36 bg-transparent text-xs outline-none placeholder:text-faint"
+                aria-label="Search issues"
+                className="w-28 min-w-0 bg-transparent text-xs outline-none placeholder:text-faint sm:w-36"
               />
             </div>
             <WithTooltip label="Refresh">
@@ -531,6 +586,29 @@ export function IssuesView({
             </WithTooltip>
           </div>
         </div>
+        {!emptyReason && (
+          <div className="flex flex-wrap items-center gap-1 px-4 pb-2" role="toolbar" aria-label="Filter issues">
+            <IssueListFilters key={filterKey ?? ""} projectPath={project?.path ?? null} provider={provider} filter={filter} onChange={setFilter} teams={provider === "linear" ? teams : []} viewer={viewer} />
+            {/* Who works on them (#441): what this Mac, the reader's other machines and the team say, not the tracker. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label={`Working: ${WORK_FILTERS.find((option) => option.value === workFilter)?.label}`} className={cn("gap-1 text-xs", workFilter !== "all" && "bg-veil-strong text-foreground")}>
+                  <Users className="size-3.5" />
+                  {workFilter === "all" ? "Anyone working" : workFilter === "free" ? "Nobody working" : "Only mine"}
+                  <ChevronDown className="text-faint" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {WORK_FILTERS.map((option) => (
+                  <DropdownMenuItem key={option.value} onSelect={() => setWorkFilter(option.value)}>
+                    <Check className={cn("size-3.5", workFilter !== option.value && "invisible")} />
+                    {option.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
 
         {workNote && !emptyReason && <div className="px-4 pb-1.5 text-[11px] text-faint" data-testid="issues-work-note">{workNote}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -546,7 +624,13 @@ export function IssuesView({
             </div>
           ) : shownList.length === 0 && !loading ? (
             <div className="px-4 py-6 text-sm text-muted-foreground">
-              {list.length > 0 && workFilter === "free" ? "Someone is working on every open issue listed." : list.length > 0 && workFilter === "mine" ? "You are not working on any of these issues." : "No open issues match."}
+              {list.length > 0 && workFilter === "free"
+                ? "Someone is working on every issue listed."
+                : list.length > 0 && workFilter === "mine"
+                  ? "You are not working on any of these issues."
+                  : filter.state === "open"
+                    ? "No open issues match."
+                    : "No issues match."}
             </div>
           ) : (
             <ul className="px-2 pb-4">
@@ -558,7 +642,7 @@ export function IssuesView({
                         issue={i}
                         selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
-                        notMine={notMine(i)}
+                        outOfFilter={outOfFilter(i)}
                         pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
                         work={workOf(i)}
                         now={work.now}
@@ -600,19 +684,7 @@ export function IssuesView({
         </div>
       </div>
 
-      <div
-        className="flex w-[46%] min-w-[20rem] max-w-[40rem] flex-col outline-none"
-        tabIndex={-1}
-        data-testid="issue-detail"
-        onKeyDown={(e) => {
-          if (!current || typingIn(e.target) || !matchesShortcut(e.nativeEvent, "issues.status")) return;
-          // Only an issue read whole has a picker to open, and not while a change to it is on its way.
-          const capabilities = (current as Partial<IssueDetails>).capabilities;
-          if (!capabilities || !(capabilities.workflowStates || capabilities.closeReasons) || writes.writing.has(writeKey(current))) return;
-          e.preventDefault();
-          setStatusOpen(true);
-        }}
-      >
+      <div ref={detailPane} className="flex w-[46%] min-w-[18rem] max-w-[40rem] flex-col outline-none" tabIndex={-1} data-testid="issue-detail">
         {!selected ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-faint">Pick an issue to read it and start a session on it.</div>
         ) : (
@@ -641,8 +713,8 @@ export function IssuesView({
                   />
                 )}
                 {current?.team && <span>{current.team.name}</span>}
-                {project && current && (current.assignees || current.assignee || !detailLoading) && (
-                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />
+                {project && current && assigneeShown && (
+                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} open={assigneeOpen} onOpenChange={setAssigneeOpen} />
                 )}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
@@ -651,7 +723,7 @@ export function IssuesView({
               {(edits.issue || (current?.labels.length ?? 0) > 0) && (
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <IssuePriority key={issueKey} edits={edits} />
-                  <IssueLabels key={issueKey} edits={edits} labels={current?.labels ?? []} />
+                  <IssueLabels key={issueKey} edits={edits} labels={current?.labels ?? []} open={labelsOpen} onOpenChange={setLabelsOpen} />
                 </div>
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
