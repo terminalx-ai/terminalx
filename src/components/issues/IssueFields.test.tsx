@@ -6,7 +6,7 @@ import { setPrefs } from "@/lib/prefs";
 import { registerHotkey } from "@/lib/hotkeys";
 import type { Issue } from "@/lib/api";
 import type { IssueProvider } from "@/lib/issueOps";
-import { createIssueOpsMock, type IssueOpsMock } from "@/test/issueOpsMock";
+import { createIssueOpsMock, githubIssueFixture, linearIssueFixture, type IssueOpsMock } from "@/test/issueOpsMock";
 import type { Project } from "@/types/session";
 
 // The Issues view against the issue-operations mock, with the window's real
@@ -43,20 +43,45 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { IssuesView } = await import("./IssuesView");
+const { labelsAfter } = await import("./IssueFields");
 
 let mock: IssueOpsMock;
+/** Replies held back: the provider has done the write, the answer is still on its way. */
+let held: Map<string, Promise<void>[]>;
 
-/** What the list answers: the row, without what only a full read brings. GitHub rows have no body. */
-function row(provider: IssueProvider): Issue {
-  const { provider: p, id, nodeId, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team } = [...mock.issues.values()].find((each) => each.issue.provider === provider)!.issue;
-  return { provider: p, id, nodeId, identifier, number, title, url, state, stateType, labels: labels.map(({ name, color }) => ({ name, color })), assignee, updatedAt, body: provider === "linear" ? body : null, team };
+/** Hold the next reply to `command` until the returned function is called. */
+function hold(command: string) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  held.set(command, [...(held.get(command) ?? []), gate]);
+  return () => act(async () => {
+    release();
+    await gate;
+  });
 }
 
+/** What the list answers: the rows, without what only a full read brings. GitHub rows have no body. */
+function rows(provider: IssueProvider): Issue[] {
+  return [...mock.issues.values()]
+    .filter((each) => each.issue.provider === provider)
+    .map(({ issue: { provider: p, id, nodeId, identifier, number, title, url, state, stateType, labels, assignee, updatedAt, body, team } }) => (
+      { provider: p, id, nodeId, identifier, number, title, url, state, stateType, labels: labels.map(({ name, color }) => ({ name, color })), assignee, updatedAt, body: provider === "linear" ? body : null, team }
+    ));
+}
+
+const secondGithub = () => ({ ...githubIssueFixture(), id: "42", nodeId: "I_kwDOExample42", identifier: "#42", number: 42, title: "Speed up the startup", url: "https://github.com/acme/widgets/issues/42", description: "Startup takes too long.", body: "Startup takes too long." });
+
 beforeEach(() => {
-  mock = createIssueOpsMock();
+  mock = createIssueOpsMock({ issues: [githubIssueFixture(), secondGithub(), linearIssueFixture()] });
+  held = new Map();
   invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-    if (command === "issues_list") return [row(args?.provider as IssueProvider)];
+    if (command === "issues_list") return rows(args?.provider as IssueProvider);
     const answered = mock.handle(command, args);
+    const gate = held.get(command)?.shift();
+    if (answered && gate) return answered.then(async (value) => (await gate, value), async (error) => {
+      await gate;
+      throw error;
+    });
     if (answered) return answered;
     if (command === "linear_status") return { connected: true };
     if (command === "linear_teams") return [];
@@ -72,7 +97,7 @@ afterEach(() => {
 });
 
 const TITLES: Record<IssueProvider, string> = { github: "Repair the login timeout", linear: "Fix login timeout" };
-const ids = (provider: IssueProvider) => [...mock.issues.values()].find((each) => each.issue.provider === provider)!.issue.id;
+const ids = (provider: IssueProvider) => (provider === "github" ? "41" : linearIssueFixture().id);
 const stored = (provider: IssueProvider) => mock.issue(provider, ids(provider));
 const writes = (command: string) => mock.calls.filter((call) => call.command === command);
 const listRow = () => screen.getAllByRole("button").find((button) => button.closest("ul") && button.textContent?.includes(stored(provider_).identifier))!;
@@ -315,4 +340,177 @@ describe.each(["github", "linear"] as const)("%s description", (provider) => {
     expect(await screen.findByText("Couldn't reach the provider. Check your connection, then try again.")).toBeTruthy();
     expect((screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement).value).toBe("Mine");
   });
+});
+
+describe("writes that overlap", () => {
+  const choosePriority = async (from: string, to: string) => {
+    fireEvent.pointerDown(await screen.findByRole("button", { name: `Priority: ${from}` }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: to }));
+  };
+
+  it("shows the newest change when an older answer arrives after it", async () => {
+    await openIssue("linear");
+    const urgentAnswer = hold("issue_set_priority");
+    await choosePriority("High", "Urgent");
+    await choosePriority("Urgent", "Low");
+    await waitFor(() => expect(writes("issue_set_priority")).toHaveLength(2));
+    await screen.findByRole("button", { name: "Priority: Low" });
+    await urgentAnswer();
+    expect(screen.getByRole("button", { name: "Priority: Low" })).toBeTruthy();
+    expect(stored("linear").priority).toBe(4);
+  });
+
+  it("keeps a later change that went through when an earlier one fails, and reads the issue again", async () => {
+    await openIssue("linear");
+    mock.fail("issue_set_labels", "forbidden");
+    const labelsAnswer = hold("issue_set_labels");
+    fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Frontend" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search labels" }), { key: "Escape" });
+    await waitFor(() => expect(writes("issue_set_labels")).toHaveLength(1));
+    await choosePriority("High", "Urgent");
+    await screen.findByRole("button", { name: "Priority: Urgent" });
+    await waitFor(() => expect(writes("issue_set_priority")).toHaveLength(1));
+    const readsBefore = writes("issue_details").length;
+    await labelsAnswer();
+    expect(await screen.findByText("Your account doesn't have permission to do that.")).toBeTruthy();
+    // Not put back to High from before the label write: the issue is read again.
+    await waitFor(() => expect(writes("issue_details").length).toBe(readsBefore + 1));
+    expect(screen.getByRole("button", { name: "Priority: Urgent" })).toBeTruthy();
+    expect(within(screen.getByTestId("issue-labels")).queryByText("Frontend")).toBeNull();
+  });
+
+  it("puts a label change on top of the labels the issue has when it is sent", async () => {
+    await openIssue("github");
+    fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
+    fireEvent.click(await screen.findByRole("option", { name: "bug" }));
+    // Someone adds a label on the website while the picker is open.
+    stored("github").labels.push({ id: "enhancement", name: "enhancement", color: "a2eeef" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search labels" }), { key: "Escape" });
+    await waitFor(() => expect(writes("issue_set_labels")).toHaveLength(1));
+    expect(writes("issue_set_labels")[0].args.labels).toEqual(["enhancement"]);
+    await waitFor(() => expect(within(screen.getByTestId("issue-labels")).getByText("enhancement")).toBeTruthy());
+  });
+
+  it("works out labels from a change: removed, added, and one per Linear group", () => {
+    const options = mock.options.linear.labels.concat({ id: "label-backend", name: "Backend", color: "", group: "Area", isGroup: false });
+    expect(labelsAfter(["label-bug", "label-frontend"], { add: ["label-backend"], remove: [] }, options)).toEqual(["label-bug", "label-backend"]);
+    expect(labelsAfter(["label-bug", "label-frontend"], { add: [], remove: ["label-bug"] }, options)).toEqual(["label-frontend"]);
+    expect(labelsAfter(["label-bug"], { add: ["label-bug"], remove: [] }, options)).toEqual(["label-bug"]);
+  });
+});
+
+describe("an edit on its way when another issue is opened", () => {
+  it("title: the old save neither closes nor locks the next issue's editor", async () => {
+    fireEvent.click(await openIssue("github"));
+    const answer = hold("issue_set_title");
+    const input = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(writes("issue_set_title")).toHaveLength(1));
+    fireEvent.click(screen.getByText("Speed up the startup"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit title" }));
+    const next = screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+    expect(next.value).toBe("Speed up the startup");
+    expect(next.readOnly).toBe(false);
+    await answer();
+    expect(screen.getByRole("textbox", { name: "Title" })).toBe(next);
+    expect(next.readOnly).toBe(false);
+    expect(stored("github").title).toBe("Renamed");
+  });
+
+  it("description: a late conflict does not reach the next issue's editor", async () => {
+    await openIssue("github");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Description" }), { target: { value: "Mine" } });
+    Object.assign(stored("github"), { description: "Theirs", updatedAt: "2026-10-05T00:00:00Z" });
+    const answer = hold("issue_set_description");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(writes("issue_set_description")).toHaveLength(1));
+    fireEvent.click(screen.getByText("Speed up the startup"));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    expect((screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement).value).toBe("Startup takes too long.");
+    await answer();
+    // The old save reads #41 again on its conflict; that answer has nowhere to land.
+    const saved = mock.calls.findIndex((call) => call.command === "issue_set_description");
+    await waitFor(() => expect(mock.calls.slice(saved).some((call) => call.command === "issue_details" && call.args.id === "41")).toBe(true));
+    await act(async () => {});
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect((screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement).readOnly).toBe(false);
+  });
+});
+
+describe("the focus, and Escape, while a save is on its way", () => {
+  it("title: stays in the field, so Escape stays the editor's; after a failure too", async () => {
+    fireEvent.click(await openIssue("github"));
+    const others = otherEscapes();
+    try {
+      mock.fail("issue_set_title", "network");
+      const answer = hold("issue_set_title");
+      const input = screen.getByRole("textbox", { name: "Title" }) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "Renamed" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(input.readOnly).toBe(true));
+      expect(document.activeElement).toBe(input);
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(others.binding).not.toHaveBeenCalled();
+      // A save on its way is not called back by Escape.
+      expect(screen.getByRole("textbox", { name: "Title" })).toBe(input);
+      await answer();
+      await screen.findByText("Couldn't reach the provider. Check your connection, then try again.");
+      expect(input.readOnly).toBe(false);
+      expect(document.activeElement).toBe(input);
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull();
+      expect(others.binding).not.toHaveBeenCalled();
+      // Back on the title it edited.
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit title" }));
+    } finally {
+      others.off();
+    }
+  });
+
+  it("title: goes back to the title once saved", async () => {
+    fireEvent.click(await openIssue("github"));
+    const input = screen.getByRole("textbox", { name: "Title" });
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit title" })));
+  });
+
+  it("description: Save leaves the focus in the editor, and Escape stays the editor's", async () => {
+    await openIssue("github");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const area = screen.getByRole("textbox", { name: "Description" }) as HTMLTextAreaElement;
+    expect(document.activeElement).toBe(area);
+    const others = otherEscapes();
+    try {
+      const answer = hold("issue_set_description");
+      fireEvent.change(area, { target: { value: "Mine" } });
+      const save = screen.getByRole("button", { name: "Save" });
+      expect(fireEvent.mouseDown(save)).toBe(false);
+      fireEvent.click(save);
+      await waitFor(() => expect(area.readOnly).toBe(true));
+      expect(document.activeElement).toBe(area);
+      fireEvent.keyDown(area, { key: "Escape" });
+      expect(others.binding).not.toHaveBeenCalled();
+      expect(screen.getByTestId("description-editor")).toBeTruthy();
+      await answer();
+      await waitFor(() => expect(screen.queryByTestId("description-editor")).toBeNull());
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit" }));
+    } finally {
+      others.off();
+    }
+  });
+});
+
+it("label search: Enter that ends an IME composition picks nothing", async () => {
+  await openIssue("github");
+  fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
+  const search = await screen.findByRole("textbox", { name: "Search labels" });
+  await screen.findByRole("option", { name: "bug" });
+  fireEvent.keyDown(search, { key: "Enter", isComposing: true });
+  expect(screen.getByRole("option", { name: "bug" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(search, { key: "Enter" });
+  expect(screen.getByRole("option", { name: "bug" }).getAttribute("aria-selected")).toBe("false");
 });

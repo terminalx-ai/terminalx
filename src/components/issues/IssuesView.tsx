@@ -304,6 +304,8 @@ export function IssuesView({
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, updatedAt: next.updatedAt } : row)));
   }, []);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  // The editors are the open issue's own: a switch starts them afresh.
+  const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
   // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
@@ -483,7 +485,7 @@ export function IssuesView({
             <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
                 <span className="font-mono text-xs text-faint">{selected.identifier}</span>
-                <IssueTitle edits={edits} title={current?.title ?? selected.title} />
+                <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 {current?.state && <span>{current.state}</span>}
@@ -495,8 +497,8 @@ export function IssuesView({
               </div>
               {(edits.issue || (current?.labels.length ?? 0) > 0) && (
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                  <IssuePriority edits={edits} />
-                  <IssueLabels edits={edits} labels={current?.labels ?? []} />
+                  <IssuePriority key={issueKey} edits={edits} />
+                  <IssueLabels key={issueKey} edits={edits} labels={current?.labels ?? []} />
                 </div>
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
@@ -578,7 +580,7 @@ export function IssuesView({
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
                 {detail && (
-                  <IssueDescription edits={edits}>
+                  <IssueDescription key={issueKey} edits={edits}>
                     {detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>}
                   </IssueDescription>
                 )}

@@ -1031,7 +1031,10 @@ fn labels_after(current: Vec<String>, add: &[String], remove: &[String]) -> Vec<
 }
 
 /// Add and take away a GitHub issue's labels through the issue operations'
-/// setter, which takes the whole set: the issue's labels are read first.
+/// setter, which takes the whole set. The report's change is applied to the
+/// labels read immediately before the write, never to an earlier read, so a
+/// label someone added in the meantime stays; only one put on between that
+/// read and the write itself could be lost.
 fn edit_issue_labels(
     cwd: &Path,
     repo: &str,

@@ -12,7 +12,7 @@ import { cn } from "@/lib/cn";
 export function IssueMarkdownEditor({
   value,
   onChange,
-  disabled = false,
+  readOnly = false,
   autoFocus = false,
   placeholder = "Add a description…",
   "aria-label": ariaLabel = "Description",
@@ -20,7 +20,8 @@ export function IssueMarkdownEditor({
 }: {
   value: string;
   onChange: (value: string) => void;
-  disabled?: boolean;
+  /** While a save is out: still focused, so its keys stay here, but not changing. */
+  readOnly?: boolean;
   autoFocus?: boolean;
   placeholder?: string;
   "aria-label"?: string;
@@ -51,10 +52,11 @@ export function IssueMarkdownEditor({
           ref={area}
           aria-label={ariaLabel}
           value={value}
-          disabled={disabled}
+          readOnly={readOnly}
+          aria-busy={readOnly}
           placeholder={placeholder}
           onChange={(e) => onChange(e.target.value)}
-          className="min-h-40 w-full resize-y rounded-md bg-well px-3 py-2 font-mono text-xs leading-relaxed outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60"
+          className="min-h-40 w-full resize-y rounded-md bg-well px-3 py-2 font-mono text-xs leading-relaxed outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/30 read-only:opacity-60"
         />
       ) : (
         <div className="min-h-40 rounded-md px-3 py-2 hairline" data-testid="markdown-preview">
