@@ -123,6 +123,8 @@ mod stats;
 mod star_nag;
 mod summaries;
 mod terminal_perf;
+#[cfg(feature = "desktop")]
+mod work_claims;
 mod workspaces;
 mod worktree_cleanup;
 
@@ -141,6 +143,8 @@ pub struct AppState {
     pub workspace_config: Arc<organization_workspace_config::WorkspaceConfigService>,
     pub organization_environment: Arc<organization_environment::OrganizationEnvironmentService>,
     pub pairing: Arc<pairing::PairingManager>,
+    /// Who works on which issue, across machines and teammates (#441).
+    pub work_claims: Arc<work_claims::WorkClaims>,
     pub host: Arc<harness::host::Host>,
     pub terminals: Arc<pty::Terminals>,
     pub dictation: Arc<dictation::Dictation>,
@@ -175,6 +179,8 @@ pub fn run() {
     let account = Arc::new(account::AccountManager::default());
     let pairing = Arc::new(pairing::PairingManager::new(account.clone()));
     let cloud_workspaces = Arc::new(cloud_workspaces::CloudWorkspaceService::new(account.clone()));
+    let paired = pairing.clone();
+    let work_claims = Arc::new(work_claims::WorkClaims::new(account.clone(), move || paired.host_id()));
     let organization_members = Arc::new(organization_members::OrganizationMembersService::new(account.clone()));
     let agent_keys = Arc::new(cloud_agent_client::KeychainKeys::default());
     let cloud_agents = Arc::new(
@@ -198,6 +204,7 @@ pub fn run() {
         workspace_config,
         organization_environment,
         pairing: pairing.clone(),
+        work_claims: work_claims.clone(),
         host: host.clone(),
         terminals: terminals.clone(),
         dictation: Arc::new(dictation::Dictation::default()),
@@ -352,6 +359,7 @@ pub fn run() {
             manager.follow_terminals();
             automations::start_scheduler(app.handle().clone());
             issue_pipeline::desktop::start(app.handle().clone());
+            work_claims.start(app.handle().clone());
             // The built-in browser: sweep daemons a crashed run left behind,
             // then keep this run's own daemons warm and its page list honest.
             browser.attach(app.handle().clone());
@@ -652,6 +660,15 @@ pub fn run() {
             commands::worktree_cleanup_stop,
             commands::merged_cleanup_settings,
             commands::set_merged_cleanup_settings,
+            commands::work_claims_list,
+            commands::work_claims_set_cloud,
+            commands::work_status_settings,
+            commands::set_work_status_settings,
+            commands::organization_work_status,
+            commands::set_organization_work_status,
+            commands::session_link_issue,
+            commands::session_unlink_issue,
+            commands::session_set_work_private,
             commands::merged_cleanup_sweep,
             commands::merged_cleanup_hold,
             commands::merged_cleanup_records,

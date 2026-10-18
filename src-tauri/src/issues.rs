@@ -267,6 +267,14 @@ pub fn github_details(cwd: &Path, number: &str) -> Result<Issue> {
     Ok(parse_github_issue(&v))
 }
 
+/// An issue in a repository named by `owner/name`, with no checkout of it
+/// here: a cloud workspace's (#441).
+pub fn github_details_in(repo: &str, number: &str) -> Result<Issue> {
+    let out = run_gh(&std::env::temp_dir(), &["issue", "view", number, "--repo", repo, "--json", GH_VIEW_FIELDS])?;
+    let v: Value = serde_json::from_str(&out).context("parse gh issue view")?;
+    Ok(parse_github_issue(&v))
+}
+
 const GH_AUTOMATION_FIELDS: &str = "number,id,title,body,updatedAt,labels,url,state";
 
 /// Run an automation's raw GitHub search through the same `gh` authority and

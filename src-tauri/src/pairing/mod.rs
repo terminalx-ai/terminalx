@@ -451,6 +451,22 @@ impl PairingManager {
         true
     }
 
+    /// The id this Mac is paired by, which its work status is published
+    /// under too (#441). Made now if it was never needed before.
+    pub(crate) fn host_id(&self) -> Option<String> {
+        self.host_key(false).or_else(|_| self.host_key(true)).ok().map(|keypair| keypair.host_id())
+    }
+
+    /// This Mac's name as Settings → Account shows it to `user_id`.
+    pub(crate) fn host_name(user_id: &str) -> String {
+        registry::load_account_mirror()
+            .ok()
+            .flatten()
+            .filter(|mirror| mirror.user_id == user_id)
+            .and_then(|mirror| mirror.host_display_name)
+            .unwrap_or_else(host_display_name)
+    }
+
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
         self.secrets
             .host_key(create)?

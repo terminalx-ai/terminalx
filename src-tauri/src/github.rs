@@ -559,6 +559,68 @@ pub fn branch_prs(cwd: &Path, branches: &[String]) -> Result<std::collections::H
     Ok(found)
 }
 
+/// What a branch's pull request says about the issues it works on (#441):
+/// its state, and the issues it closes as GitHub links them, with its title
+/// and body for the trackers GitHub does not link (a Linear `ENG-42`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPrIssues {
+    /// OPEN | MERGED | CLOSED
+    pub state: String,
+    pub title: String,
+    pub body: String,
+    /// `(owner/name, number)` of each issue it closes.
+    pub closes: Vec<(String, u64)>,
+}
+
+fn branch_pr_issues_query(count: usize) -> String {
+    let variables: String = (0..count).map(|i| format!(",$b{i}:String!")).collect();
+    let fields: String = (0..count)
+        .map(|i| format!("b{i}:pullRequests(headRefName:$b{i},first:5,orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number state isCrossRepository title body closingIssuesReferences(first:10){{nodes{{number repository{{nameWithOwner}}}}}}}}}}"))
+        .collect();
+    format!("query($owner:String!,$name:String!{variables}){{repository(owner:$owner,name:$name){{{fields}}}}}")
+}
+
+fn parse_branch_pr_issues(out: &str, branches: &[String]) -> Result<std::collections::HashMap<String, BranchPrIssues>> {
+    let value: Value = serde_json::from_str(out)?;
+    let repository = &value["data"]["repository"];
+    if !repository.is_object() {
+        bail!("GitHub did not return the repository (no access, or it was renamed)");
+    }
+    let mut found = std::collections::HashMap::new();
+    for (i, branch) in branches.iter().enumerate() {
+        let nodes = repository[format!("b{i}")]["nodes"].as_array().with_context(|| format!("GitHub did not answer for the branch {branch}"))?;
+        // As `pick_pr`: the open one, else the newest; never a fork's.
+        let own = nodes.iter().filter(|pr| pr["isCrossRepository"].as_bool() != Some(true));
+        let Some(pr) = own.max_by_key(|pr| (pr["state"].as_str() == Some("OPEN"), pr["number"].as_u64().unwrap_or(0))) else { continue };
+        let Some(state) = pr["state"].as_str() else { continue };
+        let closes = pr["closingIssuesReferences"]["nodes"]
+            .as_array()
+            .map(|nodes| nodes.iter().filter_map(|issue| Some((issue["repository"]["nameWithOwner"].as_str()?.to_string(), issue["number"].as_u64()?))).collect())
+            .unwrap_or_default();
+        found.insert(branch.clone(), BranchPrIssues { state: state.into(), title: pr["title"].as_str().unwrap_or("").into(), body: pr["body"].as_str().unwrap_or("").into(), closes });
+    }
+    Ok(found)
+}
+
+/// [`branch_prs`], with the issues each pull request closes (#441).
+pub fn branch_pr_issues(cwd: &Path, branches: &[String]) -> Result<std::collections::HashMap<String, BranchPrIssues>> {
+    let mut found = std::collections::HashMap::new();
+    if branches.is_empty() {
+        return Ok(found);
+    }
+    let repo = repo_ref(cwd)?;
+    for chunk in branches.chunks(BRANCHES_PER_REQUEST) {
+        let fields: Vec<String> = [format!("query={}", branch_pr_issues_query(chunk.len())), format!("owner={}", repo.owner), format!("name={}", repo.name)]
+            .into_iter()
+            .chain(chunk.iter().enumerate().map(|(i, branch)| format!("b{i}={branch}")))
+            .collect();
+        let mut args = vec!["api", "graphql", "--hostname", repo.host.as_str()];
+        args.extend(fields.iter().flat_map(|field| ["-f", field.as_str()]));
+        found.extend(parse_branch_pr_issues(&run_bounded(cwd, &args)?, chunk)?);
+    }
+    Ok(found)
+}
+
 /// Lets a test answer for GitHub about the repository at one path, which a
 /// repository made in a temporary directory has no GitHub to ask about.
 #[cfg(test)]
@@ -803,6 +865,26 @@ mod tests {
         // No repository, or no answer for a branch, is not "no pull request".
         assert!(parse_branch_prs(r#"{"data":{"repository":null}}"#, &branches).is_err());
         assert!(parse_branch_prs(r#"{"data":{"repository":{"b0":{"nodes":[]}}}}"#, &branches).is_err());
+    }
+
+    #[test]
+    fn a_branch_pull_request_says_which_issues_it_closes() {
+        let query = branch_pr_issues_query(1);
+        assert!(query.contains("b0:pullRequests(headRefName:$b0,") && query.contains("closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}"), "{query}");
+        let branches = ["raccoon/441-work".to_string(), "raccoon/none".to_string()];
+        let out = serde_json::json!({ "data": { "repository": {
+            "b0": { "nodes": [
+                { "number": 3, "state": "CLOSED", "isCrossRepository": false, "title": "Old", "body": "", "closingIssuesReferences": { "nodes": [] } },
+                { "number": 5, "state": "OPEN", "isCrossRepository": false, "title": "Work status (ENG-42)", "body": "Fixes #441", "closingIssuesReferences": { "nodes": [{ "number": 441, "repository": { "nameWithOwner": "acme/widgets" } }] } },
+            ] },
+            "b1": { "nodes": [] },
+        } } })
+        .to_string();
+        let found = parse_branch_pr_issues(&out, &branches).unwrap();
+        assert_eq!(found.len(), 1);
+        let pr = &found["raccoon/441-work"];
+        assert_eq!((pr.state.as_str(), pr.title.as_str(), pr.closes.clone()), ("OPEN", "Work status (ENG-42)", vec![("acme/widgets".to_string(), 441)]));
+        assert!(parse_branch_pr_issues(r#"{"data":{"repository":null}}"#, &branches).is_err());
     }
 
     #[test]

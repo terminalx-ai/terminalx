@@ -273,6 +273,42 @@ pub struct IssueRef {
     pub url: String,
 }
 
+/// How a session's issue link came about, when it was not started on the
+/// issue (#441). Automatic links are shown as such and can be removed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueLinkSource {
+    /// The branch or worktree name carries the issue's number or identifier.
+    Branch,
+    /// A pull request the session's branch opened closes the issue.
+    PullRequest,
+    /// The first prompt names the issue.
+    Prompt,
+    /// Linked by hand.
+    Manual,
+}
+
+/// What the work status of a session says about its issue (#441).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IssueWork {
+    /// Absent while `issue` is the one the session was started on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<IssueLinkSource>,
+    /// Issue URLs unlinked by hand: never linked again automatically.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unlinked: Vec<String>,
+    /// "Don't share this session": its work status never leaves this machine.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
+}
+
+impl IssueWork {
+    pub fn is_empty(&self) -> bool {
+        self.link.is_none() && self.unlinked.is_empty() && !self.private
+    }
+}
+
 /// The automation run that created this ordinary session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -364,9 +400,12 @@ pub struct SessionEntry {
     pub worktree_removed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_workspace: Option<RemovedWorkspace>,
-    /// Set when the session was started from a tracker issue.
+    /// The tracker issue the session works on: the one it was started from,
+    /// or one linked later (see `issue_work.link`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue: Option<IssueRef>,
+    #[serde(default, skip_serializing_if = "IssueWork::is_empty")]
+    pub issue_work: IssueWork,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<AutomationRef>,
     pub title: String,
@@ -511,11 +550,21 @@ fn load_file() -> Result<IndexFile> {
     Ok(super::read_json::<IndexFile>(&file_path()?)?.unwrap_or_default())
 }
 
+/// Counts the index's writes in this process, so a watcher (the work status
+/// publisher, #441) can tell something changed without reading the file.
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn save_file(file: &mut IndexFile) -> Result<()> {
     // A closed tab goes with its session: there is nothing left to reopen it into.
     let IndexFile { sessions, closed_tabs, .. } = file;
     closed_tabs.retain(|closed| sessions.iter().any(|session| session.id == closed.session_id));
-    super::write_json(&file_path()?, &*file)
+    super::write_json(&file_path()?, &*file)?;
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 fn update_file<R>(f: impl FnOnce(&mut IndexFile) -> Result<R>) -> Result<R> {
@@ -761,6 +810,7 @@ mod tests {
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
+            issue_work: Default::default(),
             automation: None,
             title: "t".into(),
             created: now(),

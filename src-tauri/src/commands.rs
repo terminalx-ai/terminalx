@@ -107,6 +107,9 @@ pub async fn account_sign_out(
     state: tauri::State<'_, crate::AppState>,
 ) -> CmdResult<crate::account::AccountStatus> {
     state.pairing.sign_out().await;
+    // Withdrawn while the token still works: this Mac's issues stop showing as worked on.
+    let claims = state.work_claims.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || claims.sign_out()).await;
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || account.sign_out(&app)).await.map_err(err)
 }
@@ -2170,6 +2173,7 @@ pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) ->
             worktree_removed: false,
             removed_workspace: None,
             issue: src.issue.clone(),
+            issue_work: src.issue_work.clone(),
             automation: src.automation.clone(),
             title: format!("{} (fork)", src.title),
             created: now.clone(),
@@ -3846,6 +3850,7 @@ mod command_tests {
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
+            issue_work: Default::default(),
             automation: None,
             title: "Removed".into(),
             created: "now".into(),
@@ -4083,6 +4088,83 @@ pub fn set_merged_cleanup_settings(app: AppHandle, patch: MergedCleanupPatch) ->
     store::settings::save(&settings).map_err(err)?;
     let _ = app.emit(MERGED_CLEANUP_SETTINGS_EVENT, &settings.merged_cleanup);
     Ok(settings.merged_cleanup)
+}
+
+// ---------------------------------------------------------------- work status (#441)
+
+/// The claims the reader may see on the issues the Issues list shows, or why
+/// only this machine's sessions can be shown.
+#[tauri::command]
+pub async fn work_claims_list(project_path: String, provider: String, issue_urls: Vec<String>, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::work_claims::WorkClaimsAnswer> {
+    let service = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || service.list(&project_path, &provider, &issue_urls)).await.map_err(err)
+}
+
+/// The cloud sessions the window knows about, for their work status.
+#[tauri::command]
+pub fn work_claims_set_cloud(sessions: Vec<crate::work_claims::claims::CloudSession>, state: tauri::State<'_, crate::AppState>) {
+    state.work_claims.set_cloud(sessions);
+}
+
+#[tauri::command]
+pub fn work_status_settings() -> crate::store::settings::WorkStatusSettings {
+    store::settings::load().work_status
+}
+
+#[tauri::command]
+pub fn set_work_status_settings(share_with_team: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<crate::store::settings::WorkStatusSettings> {
+    let mut settings = store::settings::load();
+    settings.work_status.share_with_team = share_with_team;
+    store::settings::save(&settings).map_err(err)?;
+    state.work_claims.nudge();
+    Ok(settings.work_status)
+}
+
+type OrgWorkStatusResult = Result<crate::work_claims::client::OrganizationWorkStatus, crate::work_claims::client::WorkClaimsError>;
+
+#[tauri::command]
+pub async fn organization_work_status(org_id: String, state: tauri::State<'_, crate::AppState>) -> OrgWorkStatusResult {
+    let service = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || service.organization(&org_id))
+        .await
+        .map_err(|_| crate::work_claims::client::WorkClaimsError::local("work_claims_unavailable"))?
+}
+
+#[tauri::command]
+pub async fn set_organization_work_status(org_id: String, share: bool, state: tauri::State<'_, crate::AppState>) -> OrgWorkStatusResult {
+    let service = state.work_claims.clone();
+    tauri::async_runtime::spawn_blocking(move || service.set_organization(&org_id, share))
+        .await
+        .map_err(|_| crate::work_claims::client::WorkClaimsError::local("work_claims_unavailable"))?
+}
+
+fn work_link_changed(app: &AppHandle, state: &crate::AppState, session: &SessionEntry) {
+    let _ = app.emit("session_updated", session);
+    state.work_claims.nudge();
+}
+
+/// "Link to issue…" on a session.
+#[tauri::command]
+pub fn session_link_issue(app: AppHandle, session_id: String, issue: index::IssueRef, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let session = crate::work_claims::link_issue(&session_id, issue).map_err(err)?;
+    work_link_changed(&app, &state, &session);
+    Ok(session)
+}
+
+/// "Unlink" on a session: its issue, and never that one again by itself.
+#[tauri::command]
+pub fn session_unlink_issue(app: AppHandle, session_id: String, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let session = crate::work_claims::unlink_issue(&session_id).map_err(err)?;
+    work_link_changed(&app, &state, &session);
+    Ok(session)
+}
+
+/// "Don't share this session".
+#[tauri::command]
+pub fn session_set_work_private(app: AppHandle, session_id: String, private: bool, state: tauri::State<'_, crate::AppState>) -> CmdResult<SessionEntry> {
+    let session = crate::work_claims::set_private(&session_id, private).map_err(err)?;
+    work_link_changed(&app, &state, &session);
+    Ok(session)
 }
 
 /// One pass over the projects the setting is on for: what merged, what
