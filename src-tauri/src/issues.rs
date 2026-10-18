@@ -432,24 +432,41 @@ pub enum LinearReviewMove {
     NoReviewState,
 }
 
+/// Where the pipeline's move to review takes the issue, read from its state
+/// and its team's states; `Err` is the issue left where it is. Never
+/// backwards: an issue someone already closed stays closed, and one moved by
+/// hand to a started state past review (a "QA" after "In Review") stays there.
+pub fn linear_review_step(data: &Value) -> std::result::Result<(String, String), LinearReviewMove> {
+    let Some((state_id, state_name)) = linear_review_state(data) else {
+        return Err(LinearReviewMove::NoReviewState);
+    };
+    let state = &data["issue"]["state"];
+    let current = state["name"].as_str().unwrap_or("").to_string();
+    let state_type = state["type"].as_str().unwrap_or("");
+    let review_position = data["issue"]["team"]["states"]["nodes"]
+        .as_array()
+        .and_then(|states| states.iter().find(|each| each["id"].as_str() == Some(state_id.as_str())))
+        .and_then(|review| review["position"].as_f64());
+    let past_review = state_type == "started" && matches!((state["position"].as_f64(), review_position), (Some(at), Some(review)) if at > review);
+    if state["id"].as_str() == Some(state_id.as_str()) || linear_closed(state_type) || past_review {
+        return Err(LinearReviewMove::Unchanged(current));
+    }
+    Ok((state_id, state_name))
+}
+
 /// Move a Linear issue to its team's review state. `id` is the issue's UUID
 /// or its identifier (`ENG-42`); Linear takes either.
 pub fn linear_move_to_review(key: &str, id: &str) -> Result<LinearReviewMove> {
     let data = graphql(
         key,
-        "query($id: String!) { issue(id: $id) { id state { id name type } team { states(first: 100) { nodes { id name type } } } } }",
+        "query($id: String!) { issue(id: $id) { id state { id name type position } team { states(first: 100) { nodes { id name type position } } } } }",
         json!({"id": id}),
     )?;
-    let issue = &data["issue"];
-    let issue_id = issue["id"].as_str().ok_or_else(|| anyhow!("Linear did not return that issue."))?;
-    let Some((state_id, state_name)) = linear_review_state(&data) else {
-        return Ok(LinearReviewMove::NoReviewState);
+    let issue_id = data["issue"]["id"].as_str().ok_or_else(|| anyhow!("Linear did not return that issue."))?;
+    let (state_id, state_name) = match linear_review_step(&data) {
+        Ok(step) => step,
+        Err(left) => return Ok(left),
     };
-    let current = issue["state"]["name"].as_str().unwrap_or("").to_string();
-    // Never backwards: an issue someone already closed stays closed.
-    if issue["state"]["id"].as_str() == Some(state_id.as_str()) || linear_closed(issue["state"]["type"].as_str().unwrap_or("")) {
-        return Ok(LinearReviewMove::Unchanged(current));
-    }
     let updated = graphql(
         key,
         "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
@@ -486,6 +503,37 @@ mod tests {
         let closed = team(json!([{"id": "s9", "name": "Reviewed", "type": "completed"}, {"id": "s2", "name": "In Progress", "type": "started"}]));
         assert_eq!(linear_review_state(&closed), None);
         assert_eq!(linear_review_state(&json!({"issue": null})), None);
+    }
+
+    #[test]
+    fn a_state_chosen_by_hand_while_a_pipeline_runs_is_never_moved_backwards() {
+        let states = json!([
+            {"id": "s0", "name": "Backlog", "type": "backlog", "position": 0.0},
+            {"id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0},
+            {"id": "s2", "name": "In Progress", "type": "started", "position": 2.0},
+            {"id": "s4", "name": "In Review", "type": "started", "position": 3.0},
+            {"id": "s8", "name": "QA", "type": "started", "position": 4.0},
+            {"id": "s5", "name": "Done", "type": "completed", "position": 5.0},
+            {"id": "s7", "name": "Canceled", "type": "canceled", "position": 6.0}
+        ]);
+        // The issue as the pipeline reads it when its pull request opens, after someone picked `id` in the status picker.
+        let picked = |id: &str| {
+            let state = states.as_array().unwrap().iter().find(|each| each["id"] == id).unwrap().clone();
+            json!({"issue": {"id": "issue-1", "state": state, "team": {"states": {"nodes": states.clone()}}}})
+        };
+        let to_review = Ok(("s4".to_string(), "In Review".to_string()));
+        // Before review: the pipeline still moves it forward.
+        for id in ["s0", "s1", "s2"] {
+            assert_eq!(linear_review_step(&picked(id)), to_review, "{id}");
+        }
+        // At review, past it, or closed: left where the person put it.
+        for (id, name) in [("s4", "In Review"), ("s8", "QA"), ("s5", "Done"), ("s7", "Canceled")] {
+            assert_eq!(linear_review_step(&picked(id)), Err(LinearReviewMove::Unchanged(name.into())), "{id}");
+        }
+        // A team that reports no positions keeps the older rule.
+        let mut unordered = picked("s8");
+        unordered["issue"]["state"]["position"] = Value::Null;
+        assert_eq!(linear_review_step(&unordered), to_review);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
-import { bindingText, useKeymap } from "@/lib/shortcuts";
+import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -10,6 +10,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
+import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -20,6 +21,7 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
+import { issueOps } from "@/lib/issueOps";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -40,6 +42,15 @@ const AFTER_MERGE_MS = 3000;
 function issueOfPipeline(pipeline: IssuePipeline): Issue {
   const { provider, id, identifier, title, url } = pipeline.issue;
   return { provider: provider === "linear" ? "linear" : "github", id, identifier, number: Number(id) || 0, title, url, state: "", stateType: "completed", labels: [], updatedAt: pipeline.modified };
+}
+
+/**
+ * The issue as read, unless the page already shows a later version of it: a
+ * read that started before a status change must not put the old state back.
+ */
+function newer(shown: Issue | null, read: Issue): Issue {
+  const same = shown && shown.provider === read.provider && shown.id === read.id;
+  return same && shown.updatedAt && read.updatedAt && shown.updatedAt > read.updatedAt ? shown : read;
 }
 
 /**
@@ -83,6 +94,7 @@ export function IssuesView({
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
+  const [statusOpen, setStatusOpen] = useState(false);
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
@@ -218,16 +230,23 @@ export function IssuesView({
       selectedAtTick.current = tick;
     }
     if (!selected || !project) return;
+    let live = true;
     // A Linear row carries its body, and is as fresh as the list it came with.
+    // The whole issue still follows, for what the status picker needs.
     if (selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick) {
       setDetail(selected);
-      return;
+      issueOps
+        .details(project.path, selected.provider, selected.id)
+        .then((d) => live && d && setDetail((shown) => newer(shown, d)))
+        .catch(() => {});
+      return () => {
+        live = false;
+      };
     }
-    let live = true;
     if (!again) setDetailLoading(true);
-    issuesApi
+    issueOps
       .details(project.path, selected.provider, selected.id)
-      .then((d) => live && setDetail(d))
+      .then((d) => live && setDetail((shown) => newer(shown, d)))
       .catch((e) => live && setError(errorMessage(e)))
       .finally(() => live && setDetailLoading(false));
     return () => {
@@ -294,6 +313,12 @@ export function IssuesView({
     setAutoMerge(pipelineDefaults.autoMerge);
   };
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
+  // A status change, as it shows while on its way and then as the tracker answers: the page and its row together.
+  const changed = (issue: Issue) => {
+    const same = (each: Issue) => each.id === issue.id && each.provider === issue.provider;
+    setDetail((d) => (d && same(d) ? { ...d, ...issue } : d));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, state: issue.state, stateType: issue.stateType, updatedAt: issue.updatedAt } : row)));
+  };
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
   // The session working on the issue: the pipeline's author, never its reviewer.
@@ -467,7 +492,16 @@ export function IssuesView({
         </div>
       </div>
 
-      <div className="flex w-[46%] min-w-[20rem] max-w-[40rem] flex-col">
+      <div
+        className="flex w-[46%] min-w-[20rem] max-w-[40rem] flex-col outline-none"
+        tabIndex={-1}
+        data-testid="issue-detail"
+        onKeyDown={(e) => {
+          if (!selected || !matchesShortcut(e.nativeEvent, "issues.status")) return;
+          e.preventDefault();
+          setStatusOpen(true);
+        }}
+      >
         {!selected ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-faint">Pick an issue to read it and start a session on it.</div>
         ) : (
@@ -478,7 +512,17 @@ export function IssuesView({
                 <h2 className="min-w-0 flex-1 text-[15px] font-semibold leading-snug">{selected.title}</h2>
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                {current?.state && <span>{current.state}</span>}
+                {current && project && (
+                  <IssueStatusPicker
+                    key={`${current.provider}:${current.id}`}
+                    projectPath={project.path}
+                    issue={current}
+                    pipeline={pipeline}
+                    open={statusOpen}
+                    onOpenChange={setStatusOpen}
+                    onChange={changed}
+                  />
+                )}
                 {current?.team && <span>{current.team.name}</span>}
                 {current?.assignee && <span>Assigned to {current.assignee.name}</span>}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
