@@ -249,19 +249,6 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
     Ok(output.trim().lines().last().unwrap_or("").to_string())
 }
 
-pub fn github_edit_labels(cwd: &Path, repo: &str, number: i64, add: &[String], remove: &[String]) -> Result<()> {
-    let number = number.to_string();
-    if !add.is_empty() {
-        let labels = add.join(",");
-        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--add-label", &labels])?;
-    }
-    if !remove.is_empty() {
-        let labels = remove.join(",");
-        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--remove-label", &labels])?;
-    }
-    Ok(())
-}
-
 // ------------------------------------------------------------------ Linear
 
 fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {

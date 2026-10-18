@@ -47,7 +47,7 @@ vi.mock("@/components/chat/Dictation", () => ({
 }));
 vi.mock("@/components/raccoon/Raccoon", () => ({ RaccoonScene: () => null }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
-vi.mock("@/lib/hotkeys", () => ({ useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
+vi.mock("@/lib/hotkeys", () => ({ hasEscapeOverlay: () => false, useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
 vi.mock("@/lib/models", async (original) => ({
   // The pure helpers stay real; only the list and its loading are stubbed.
   ...(await original<typeof import("@/lib/models")>()),
@@ -163,7 +163,7 @@ function mockBackend() {
         modified: "2026-09-04T00:00:00Z",
       };
     }
-    if (command === "issue_details") return issues.find((issue) => issue.id === args?.id);
+    if (command === "issue_details") return [...issues, ...linearIssues].find((issue) => issue.id === args?.id);
     if (command === "create_session") {
       const req = (args as { req: Record<string, unknown> }).req;
       return {
