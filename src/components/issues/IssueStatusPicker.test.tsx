@@ -205,6 +205,8 @@ describe("a status change still on its way", () => {
       if (name !== command || held) return handle(name, args);
       held = true;
       const answer = handle(name, args)!;
+      // A refusal is held too; it is not unhandled while it waits.
+      answer.catch(() => {});
       return gate.then(() => answer);
     };
     return () => release();
