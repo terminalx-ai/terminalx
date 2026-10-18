@@ -38,6 +38,9 @@ use links::{BranchPull, Linker, Lookup};
 pub const CAPABILITY: &str = "account.work-claims.v1";
 /// How long a change settles before it is sent.
 const DEBOUNCE: Duration = Duration::from_secs(3);
+/// The server takes one publish per device this often; a change that comes
+/// sooner waits for it.
+const MIN_GAP: Duration = Duration::from_secs(2);
 /// How often the loop looks at the index.
 const TICK: Duration = Duration::from_secs(1);
 /// The heartbeat when the server names none, and its bounds.
@@ -104,6 +107,8 @@ struct State {
     /// names it was looked for under and whether the trackers' answer was final.
     cloud_issues: HashMap<String, CloudIssue>,
     sent: Option<Sent>,
+    /// When the last publish was sent, answered or not.
+    last_put: Option<Instant>,
     failures: u32,
     retry_at: Option<Instant>,
     remotes: HashMap<String, (Instant, Option<String>)>,
@@ -206,8 +211,7 @@ impl WorkClaims {
                 let state = self.state.lock().unwrap();
                 (state.sent.as_ref().is_some_and(|sent| sent.at.elapsed() >= sent.refresh_after), state.retry_at.is_some_and(|at| Instant::now() >= at))
             };
-            if settled || heartbeat || retry || link_due {
-                self.publish(&linker);
+            if (settled || heartbeat || retry || link_due) && self.publish(&linker) {
                 dirty_since = None;
             }
         }
@@ -257,16 +261,18 @@ impl WorkClaims {
         remote
     }
 
-    fn publish(&self, linker: &Linker) {
+    /// Send this device's claims if they changed or the heartbeat is due.
+    /// False when a change has to wait for [`MIN_GAP`]: call again soon.
+    fn publish(&self, linker: &Linker) -> bool {
         let Some(context) = self.account.context() else {
             // The token is gone with the session; sign-out withdrew what it could.
             self.state.lock().unwrap().sent = None;
-            return;
+            return true;
         };
         if !self.account.has_capability(CAPABILITY) {
-            return;
+            return true;
         }
-        let Some(device_id) = self.device_id() else { return };
+        let Some(device_id) = self.device_id() else { return true };
         let label = crate::pairing::PairingManager::host_name(&context.user_id);
         let sessions = index::load().unwrap_or_default();
         let settings = crate::store::settings::load();
@@ -289,12 +295,16 @@ impl WorkClaims {
             let state = self.state.lock().unwrap();
             let unchanged = state.sent.as_ref().is_some_and(|sent| sent.user_id == context.user_id && sent.device_id == device_id && sent.label == label && sent.shape == shape && sent.at.elapsed() < sent.refresh_after);
             if unchanged && state.retry_at.is_none() {
-                return;
+                return true;
             }
             if state.retry_at.is_some_and(|at| Instant::now() < at) {
-                return;
+                return true;
+            }
+            if state.last_put.is_some_and(|at| at.elapsed() < MIN_GAP) {
+                return false;
             }
         }
+        self.state.lock().unwrap().last_put = Some(Instant::now());
         let result = self.client.publish(&context.access_token, &device_id, &label, &claims);
         let mut state = self.state.lock().unwrap();
         match result {
@@ -315,6 +325,7 @@ impl WorkClaims {
                 state.retry_at = Some(Instant::now() + backoff(state.failures).max(asked));
             }
         }
+        true
     }
 
     /// Withdraw this Mac's claims before the account's token goes.

@@ -1,7 +1,7 @@
 From 6c864147a70d4b4b1b44cf9d6bbf56f688dd5d14 Mon Sep 17 00:00:00 2001
 From: Paresh Dudhat <129591319+dudhatparesh@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 19:21:27 +0400
-Subject: [PATCH] feat(desktop): work claims, who is working on an issue
+Subject: [PATCH 1/2] feat(desktop): work claims, who is working on an issue
  (terminalx#441)
 
 A desktop publishes the sessions it has linked to tracker issues, per
@@ -3809,6 +3809,2757 @@ index 768bb54..a98c2a4 100644
      "private": true,
      "type": "module",
      "scripts": {
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 1615d7c4fc9f86548cbe0af001fbd1cfee25f013 Mon Sep 17 00:00:00 2001
+From: Paresh Dudhat <129591319+dudhatparesh@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 20:18:08 +0400
+Subject: [PATCH 2/2] fix(desktop): work claims follow the issue's
+ organization, with limits (terminalx#441)
+
+Review of 6c86414.
+
+- Visibility follows where the issue lives. GitHub: the claim's scope (the
+  issue's repository) must be connected to the shared organization, so work
+  in a personal fork on an organization issue shows and an organization
+  repository is no longer a way to show an unrelated issue. Linear: the
+  scope's workspace must be one the organization's admins declared, and the
+  claim's repository must be connected, so a personal project never shows.
+- organization_work_status_settings.linear_workspaces (text[], default {});
+  GET /orgs/:orgId/work-status answers linearWorkspaces, and POST takes
+  shareWorkStatus and/or linearWorkspaces (at most 10, lower-cased,
+  deduplicated), keeping what is not sent.
+- Device ids are bounded: a non-empty PUT for a new device while 10 others
+  have live claims answers 409 work_claims_device_limit, under a per-person
+  lock taken only by a joining device. PUT is limited to one per device
+  every 2 s (429 work_claims_rate_limited with Retry-After), on the
+  rate_limits lanes the Host binding heartbeat uses. A read returns at most
+  50 claims per person.
+- Every claim carries an opaque key, sha256(user id + session id), equal for
+  one person's cloud session published from two Macs.
+- The replace transaction no longer deletes other devices' expired rows; the
+  prune after the commit does.
+
+Migration 0095 is edited in place (not merged anywhere).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ apps/api/docs/work-claims.md                  |  177 ++-
+ apps/api/drizzle/0095_issue_work_claims.sql   |    4 +-
+ .../controllers/desktop/workClaims.test.ts    |  105 +-
+ .../api/src/controllers/desktop/workClaims.ts |    9 +-
+ .../schema/organizationWorkStatusSettings.ts  |    7 +-
+ apps/api/src/lib/constants/workClaims.ts      |   15 +-
+ .../services/workClaims/WorkClaimsError.ts    |    8 +-
+ apps/api/src/services/workClaims/index.ts     |    2 +
+ .../services/workClaims/limitDevicePublish.ts |   36 +
+ .../services/workClaims/listVisibleClaims.ts  |   99 +-
+ .../workClaims/publishDeviceClaims.ts         |   17 +
+ .../workClaims/replaceDeviceClaims.ts         |   62 +-
+ .../services/workClaims/validation.test.ts    |   65 +-
+ .../api/src/services/workClaims/validation.ts |   29 +-
+ .../workClaims/workClaims.integration.test.ts | 1245 +++++++++++------
+ .../services/workClaims/workStatusSettings.ts |   24 +-
+ apps/api/src/ts/Interfaces.ts                 |    5 +-
+ apps/api/src/ts/Types.ts                      |    4 +-
+ 18 files changed, 1351 insertions(+), 562 deletions(-)
+ create mode 100644 apps/api/src/services/workClaims/limitDevicePublish.ts
+ create mode 100644 apps/api/src/services/workClaims/publishDeviceClaims.ts
+
+diff --git a/apps/api/docs/work-claims.md b/apps/api/docs/work-claims.md
+index 2785df7..e2de5dc 100644
+--- a/apps/api/docs/work-claims.md
++++ b/apps/api/docs/work-claims.md
+@@ -39,7 +39,7 @@ A desktop that does not see the flag never calls the routes below and shows
+ - `repository`: the normalised remote of the project the session runs in,
+   lower case, no scheme, no user info, no `.git`: `github.com/acme/widgets`.
+   Null when the project has no remote. Used only to decide whether teammates
+-  may see the claim; never returned.
++  may see a Linear claim; never returned.
+ 
+ ## Routes
+ 
+@@ -108,21 +108,39 @@ JSON, a bad `deviceId` and an unknown key anywhere):
+   person) | `idle` | `pull_request` (idle, with an open pull request).
+ - `cloud`, `shareWithTeam`: booleans. `idleSeconds`: integer 0–2592000.
+ 
++Limits, checked after validation:
++
++- **Rate**: one PUT per (person, device) every 2 seconds. A sooner one answers
++  429 `work_claims_rate_limited` with `Retry-After: <whole seconds>` (1 or 2)
++  and changes nothing. It uses the `rate_limits` lanes of the Host binding
++  heartbeat (`checkAccountPairingRateLimit`, subject hashed, operation
++  `work-claims-publish`). DELETE is not limited.
++- **Devices**: a non-empty PUT for a device with no unexpired claim, while the
++  person has unexpired claims on 10 other device ids, answers 409
++  `work_claims_device_limit` and changes nothing. An empty PUT
++  (`"claims": []`) is never refused by this limit; for a new device it stores
++  nothing. A device that already has unexpired claims may always refresh
++  them. The check runs under a per-person lock taken after the device's,
++  only by a joining device, so devices joining at once cannot pass it
++  together.
++
+ Semantics, in one transaction, serialized per (user, device) with a
+ transaction advisory lock so two concurrent publishes from one device can never
+ leave the union of both:
+ 
+ - Rows of this (user, device) whose `sessionId` is not in the body are deleted
+   (withdrawal: archive, delete, unlink, private session, closed issue, merged
+-  pull request all arrive as "not in the set").
++  pull request all arrive as "not in the set"), expired or not.
+ - Each claim is upserted on (user, device, sessionId), with the label of the
+   body: `last_active_at = now - idleSeconds`, `refreshed_at = now`,
+   `expires_at = now + 24 h`. `since` is kept from the existing row when its
+   (provider, scope, identifier) is the same, else `now`.
+-- The caller's expired rows (any device) are deleted.
+ 
+-After the commit, every expired row (anyone's) is deleted too, best effort;
+-expired rows are never returned, so this only keeps the table small.
++Afterwards the device holds exactly the set, all unexpired, so none of its
++rows is expired. The transaction touches no other device's rows. After the
++commit, every expired row (the caller's other devices and anyone else's) is
++deleted, best effort and without the device lock; expired rows are never
++returned, so this only keeps the table small.
+ 
+ Response 200:
+ 
+@@ -144,7 +162,8 @@ Sent on sign-out. Response 200 `{ "claims": 0 }`. A bad `deviceId` answers 400
+ and validated against the provider as above (duplicates after lower-casing
+ are read once). Any other query parameter is ignored. A failure answers 400
+ `work_claims_invalid_request`. Returns the claims visible to the caller,
+-newest activity first (`last_active_at` descending), at most 500:
++newest activity first (`last_active_at` descending), at most 50 per person
++(each person's newest) and at most 500 in all:
+ 
+ ```json
+ {
+@@ -152,6 +171,7 @@ newest activity first (`last_active_at` descending), at most 500:
+     "liveForSeconds": 300,
+     "claims": [
+         {
++            "key": "3f9c0a1b2c3d4e5f60718293a4b5c6d7",
+             "scope": "github.com/acme/widgets",
+             "issue": {
+                 "provider": "github",
+@@ -180,6 +200,11 @@ newest activity first (`last_active_at` descending), at most 500:
+ - Only rows with `expires_at > now` and `last_active_at > now - 24 h`.
+ - `person.name`: `users.name` (trimmed), else the part of the email before
+   `@`. Never the email itself, never the user id.
++- `key`: the first 32 hex characters of `sha256("<user id>\n<session id>")`.
++  Opaque: it reveals neither. It is the same for one person's session
++  published by two devices (each of a person's Macs publishes their cloud
++  session as `cloud:<workspace>:<session>`), so a reader shows it once; it
++  differs between people and between sessions.
+ - `device` (`{ "id", "label" }`) and `sessionId` are filled only on the
+   caller's own claims (`you: true`). Machine names are shown only to their
+   owner. `repository` and `shareWithTeam` are never returned.
+@@ -188,41 +213,83 @@ Visibility:
+ 
+ 1. The caller's own claims, from every device: always.
+ 2. Another person's claim, only when **all** hold:
+-    - the claim has `share_with_team = true` and a non-null `repository`;
++    - the claim has `share_with_team = true`;
+     - there is an organization O with `is_personal = false` of which both the
+       caller and the claim's owner are members (read in the same query on
+       every request, never cached);
+     - O's work status sharing is on
+       (`organization_work_status_settings.share_work_status`, true when no
+       row);
+-    - the claim's repository belongs to O:
+-      `repository = 'github.com/' || lower(full_name)` of an
+-      `organization_github_repositories` row of O in state `accessible`, or
+-      its host (first segment) is `github.com` and its
+-      owner (second segment) equals `lower(account_login)` of a `connected`
+-      `organization_github_installations` row of O with
+-      `repository_selection = 'all'`.
+-
+-Someone outside every such organization sees nothing; a personal project (a
+-repository no shared organization connected) is never shown to anyone else.
++    - the claim's issue belongs to O, by provider:
++        - **github**: the claim's `scope` (the issue's repository) is
++          connected to O. `repository` is not consulted and may be null, so
++          work in a personal fork on O's issue shows, and work in O's
++          repository on an issue elsewhere does not.
++        - **linear**: the scope's workspace is one O's admins declared
++          (`split_part(scope, '/', 2) = ANY(linear_workspaces)`), **and** the
++          claim's `repository` is non-null and connected to O.
++
++A GitHub repository `R` (`github.com/<owner>/<repo>`) is connected to O when
++`R = 'github.com/' || lower(full_name)` of an `organization_github_repositories`
++row of O in state `accessible`, or `split_part(R, '/', 1) = 'github.com'` and
++`split_part(R, '/', 2) = lower(account_login)` of a `connected`
++`organization_github_installations` row of O with `repository_selection =
++'all'`.
++
++Someone outside every such organization sees nothing; a personal project (an
++issue, or for Linear a repository, that no shared organization connected) is
++never shown to anyone else.
+ 
+ ### `GET /orgs/:orgId/work-status` and `POST /orgs/:orgId/work-status`
+ 
+-The organization switch for admins. `desktopAuth`; not a `member`-middleware
+-route: the service reads the caller's membership itself on every request,
+-like `orgMembers.ts`. A non-member (or an unknown organization) answers 404
+-`not_found`.
+-
+-- GET → `{ "shareWorkStatus": true, "canManage": true, "personal": false }`.
+-  `canManage` is true for an owner or admin of a non-personal organization. A
+-  personal organization never shares, so it answers
+-  `{ "shareWorkStatus": false, "canManage": false, "personal": true }`.
+-- POST `{ "shareWorkStatus": false }` (exactly that key, a boolean; body at
+-  most 1 KiB). Checked in this order: non-member 404 `not_found`; not owner or
+-  admin 403 `forbidden`; personal organization 400
+-  `work_status_personal_organization`; a bad body (or one over 1 KiB) 400
+-  `work_claims_invalid_request`. Stores the switch with `updated_by` and
+-  `updated_at`, and answers like GET.
++The organization's work status settings. `desktopAuth`; not a
++`member`-middleware route: the service reads the caller's membership itself on
++every request, like `orgMembers.ts`. A non-member (or an unknown
++organization) answers 404 `not_found`.
++
++GET answers:
++
++```json
++{
++    "shareWorkStatus": true,
++    "canManage": true,
++    "personal": false,
++    "linearWorkspaces": ["acme"]
++}
++```
++
++`shareWorkStatus` defaults to true and `linearWorkspaces` to `[]` when the
++organization has no settings row. `canManage` is true for an owner or admin of
++a non-personal organization. A personal organization never shares, so it
++answers `shareWorkStatus: false`, `canManage: false`, `personal: true` and
++`linearWorkspaces: []`.
++
++POST takes a strict body with at least one of:
++
++- `shareWorkStatus`: boolean;
++- `linearWorkspaces`: an array of at most 10 strings, each lower-cased and
++  then `^[a-z0-9-]{1,64}$` (the `<workspace>` of `linear.app/<workspace>`),
++  stored deduplicated in first-seen order; `[]` clears it.
++
++A field not sent keeps its value. The body is at most 4 KiB. Checked in
++this order: non-member 404 `not_found`; not owner or admin 403
++`forbidden`; personal organization 400 `work_status_personal_organization`;
++a bad body (empty, an unknown key, a wrong type, a bad or 11th workspace,
++or over 4 KiB) 400 `work_claims_invalid_request`. Stores the change with
++`updated_by` and `updated_at`, and answers like GET.
++
++## Error codes
++
++| Status | Code                                | When                                                    |
++| ------ | ----------------------------------- | ------------------------------------------------------- |
++| 400    | `work_claims_invalid_request`       | any validation failure, bad JSON, a body over its limit |
++| 400    | `work_status_personal_organization` | POST work-status in a personal organization             |
++| 401    | `unauthorized`                      | no desktop session                                      |
++| 403    | `forbidden`                         | POST work-status by a member who is not owner or admin  |
++| 404    | `not_found`                         | work-status of an organization the caller is not in     |
++| 409    | `work_claims_device_limit`          | a new device beyond 10 with live claims                 |
++| 429    | `work_claims_rate_limited`          | a PUT within 2 s of the device's last (`Retry-After`)   |
++| 500    | `work_claims_internal_error`        | anything unexpected                                     |
+ 
+ ## Storage
+ 
+@@ -237,8 +304,9 @@ existing is rewritten or backfilled.
+   on (scope, issue_provider), (user_id) and (expires_at); CHECK constraints on
+   `state` and `issue_provider`.
+ - `organization_work_status_settings`: `organization_id` (PK, FK
+-  organizations, cascade), `share_work_status` (default true), `updated_by`
+-  (FK users, set null), `updated_at`.
++  organizations, cascade), `share_work_status` (default true),
++  `linear_workspaces` (`text[]`, default `'{}'`), `updated_by` (FK users, set
++  null), `updated_at`.
+ 
+ Deleting a user deletes their claims; deleting an organization deletes its
+ switch. Rollback: deploy the prior server first (the tables may stay); to drop
+@@ -246,9 +314,11 @@ the schema afterwards, drop `issue_work_claims` and
+ `organization_work_status_settings`. Both hold only ephemeral status, so
+ nothing of value is lost.
+ 
+-The windows are named constants in `src/lib/constants/workClaims.ts`:
+-retention 24 h (`retentionSeconds`), live window 300 s (`liveForSeconds`),
+-refresh 120 s (`refreshAfterSeconds`).
++The windows and limits are named constants in
++`src/lib/constants/workClaims.ts`: retention 24 h (`retentionSeconds`), live
++window 300 s (`liveForSeconds`), refresh 120 s (`refreshAfterSeconds`), 10
++devices per person, one publish per device per 2 s, 50 claims per person and
++500 in all per read, 10 Linear workspaces per organization.
+ 
+ ## Desktop behaviour (for reference; implemented in the terminalx repo)
+ 
+@@ -264,11 +334,13 @@ refresh 120 s (`refreshAfterSeconds`).
+ - `src/services/workClaims/validation.test.ts`: every validation rule above,
+   unknown keys (`prompt`, `transcript`, …) at the top level, per claim and in
+   the issue, scope/provider mismatch, identifier formats, limits, the list
+-  query and the switch body.
++  query, and the settings body (either field, both, none, Linear workspace
++  keys, deduplication, the 10-key cap).
+ - `src/controllers/desktop/workClaims.test.ts`: the routes through the real
+   desktop router with the service and the token resolver mocked: shapes,
+   normalised input reaching the service, `Cache-Control: no-store` on success
+-  and error, 401 without a desktop session, the 256 KiB limit, error codes.
++  and error, 401 without a desktop session, the 256 KiB and 4 KiB limits, 409
++  and 429 with `Retry-After`, error codes.
+ - `src/routes/desktop.test.ts`: the work status routes are dispatched to their
+   own controller and are not membership-marked.
+ - `src/controllers/desktop/buildDesktopSession.test.ts`: the capability flag
+@@ -276,13 +348,24 @@ refresh 120 s (`refreshAfterSeconds`).
+ - `src/services/workClaims/workClaims.integration.test.ts` (isolated Postgres,
+   `WORK_CLAIMS_TEST_DATABASE_URL`): own claims across devices with device and
+   session; a teammate through a selected accessible repository and through an
+-  `all` installation, with no device or session; a suspended installation, a
+-  `missing` repository row and unconnected repositories hidden; an outsider
+-  sees nothing; a personal organization never shares; `shareWithTeam: false`
+-  and a null repository kept to the owner; the switch off hides and on shows
++  `all` installation, with no device or session; GitHub visibility by scope
++  (work in a personal fork, with no remote or in a personal repository on an
++  organization issue is shown; an issue in a `missing`, unconnected or
++  personal-only repository is hidden even when the work is in a connected
++  one); a suspended installation hides; Linear needs a declared workspace and
++  a connected repository (null, personal-only, `missing` and fork
++  repositories hidden; a reader asking for an undeclared workspace sees
++  nothing); an outsider sees nothing; a personal organization never shares;
++  `shareWithTeam: false` kept to the owner; the switch off hides and on shows
+   again; a removed member stops seeing at once; replace withdraws missing
+-  sessions; `since` kept on refresh and reset when the issue changes;
+-  `live` false from 300 s; expiry at 24 h after refresh or of activity;
+-  expired rows pruned; DELETE; concurrent publishes from one device; the
+-  500-row cap; the switch's 404/403/400 answers and its personal case.
++  sessions; `since` kept on refresh and reset when the issue changes; `live`
++  false from 300 s; expiry at 24 h after refresh or of activity; expired rows
++  pruned after the commit; DELETE; concurrent publishes from one device; the
++  device limit (409, the empty-PUT allowance, refresh of a known device,
++  expired devices not counted, 14 devices joining at once leave 10); the rate
++  limit (429 with `retryAfterSeconds`, other devices and people unaffected,
++  `Retry-After` through the route, DELETE never limited); 50 per person and
++  500 in all; keys equal across one person's two devices and different across
++  people and sessions; the settings' 404/403/400 answers, Linear workspaces
++  set, kept when not sent and cleared, and the personal case.
+ - `src/db/migrationJournal.test.ts`: the journal entry is applied after 0094.
+diff --git a/apps/api/drizzle/0095_issue_work_claims.sql b/apps/api/drizzle/0095_issue_work_claims.sql
+index 56ca7b2..8179a1e 100644
+--- a/apps/api/drizzle/0095_issue_work_claims.sql
++++ b/apps/api/drizzle/0095_issue_work_claims.sql
+@@ -1,6 +1,7 @@
+ -- terminalx#441: who is working on an issue, across a person's machines and
+ -- their teammates. Two new tables; nothing existing is rewritten or
+--- backfilled. A missing work status row means sharing is on.
++-- backfilled. A missing work status row means sharing is on and no Linear
++-- workspace is declared.
+ CREATE TABLE "issue_work_claims" (
+ 	"id" text PRIMARY KEY NOT NULL,
+ 	"user_id" text NOT NULL,
+@@ -30,6 +31,7 @@ CREATE TABLE "issue_work_claims" (
+ CREATE TABLE "organization_work_status_settings" (
+ 	"organization_id" text PRIMARY KEY NOT NULL,
+ 	"share_work_status" boolean DEFAULT true NOT NULL,
++	"linear_workspaces" text[] DEFAULT '{}' NOT NULL,
+ 	"updated_by" text,
+ 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+ );
+diff --git a/apps/api/src/controllers/desktop/workClaims.test.ts b/apps/api/src/controllers/desktop/workClaims.test.ts
+index 1b0d0d8..b02e715 100644
+--- a/apps/api/src/controllers/desktop/workClaims.test.ts
++++ b/apps/api/src/controllers/desktop/workClaims.test.ts
+@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ const mocks = vi.hoisted(() => ({
+     resolveDesktop: vi.fn(),
+-    replaceDeviceClaims: vi.fn(),
++    publishDeviceClaims: vi.fn(),
+     withdrawDeviceClaims: vi.fn(),
+     listVisibleClaims: vi.fn(),
+     getWorkStatus: vi.fn(),
+@@ -17,7 +17,7 @@ vi.mock('@/services/desktopTokens', async (importOriginal) => ({
+ // The real validation and error type; only the database work is replaced.
+ vi.mock('@/services/workClaims', async (importOriginal) => ({
+     ...(await importOriginal<Record<string, unknown>>()),
+-    replaceDeviceClaims: mocks.replaceDeviceClaims,
++    publishDeviceClaims: mocks.publishDeviceClaims,
+     withdrawDeviceClaims: mocks.withdrawDeviceClaims,
+     listVisibleClaims: mocks.listVisibleClaims,
+     workStatusSettings: {
+@@ -45,22 +45,31 @@ const claim = (overrides: Record<string, unknown> = {}) => ({
+     ...overrides
+ })
+ 
++// A desktop sends Content-Length, which the body limits read first.
+ const call = (
+     method: string,
+     path: string,
+     body?: unknown,
+     token: string | null = 'desktop-token'
+-) =>
+-    desktop.request(path, {
++) => {
++    const text =
++        body === undefined
++            ? undefined
++            : typeof body === 'string'
++              ? body
++              : JSON.stringify(body)
++    return desktop.request(path, {
+         method,
+         headers: {
+             ...(token ? { Authorization: `Bearer ${token}` } : {}),
+-            'content-type': 'application/json'
++            'content-type': 'application/json',
++            ...(text === undefined
++                ? {}
++                : { 'content-length': String(Buffer.byteLength(text)) })
+         },
+-        ...(body === undefined
+-            ? {}
+-            : { body: typeof body === 'string' ? body : JSON.stringify(body) })
++        ...(text === undefined ? {} : { body: text })
+     })
++}
+ 
+ const put = (body: unknown, device = DEVICE) =>
+     call('PUT', `/work-claims/devices/${device}`, body)
+@@ -80,7 +89,7 @@ beforeEach(() => {
+             ? { userId: 'user-1', cloudProfileId: 'profile-1' }
+             : null
+     )
+-    mocks.replaceDeviceClaims.mockImplementation(
++    mocks.publishDeviceClaims.mockImplementation(
+         async (_userId: string, _deviceId: string, input: { claims: [] }) => ({
+             claims: input.claims.length,
+             refreshAfterSeconds: 120,
+@@ -96,12 +105,14 @@ beforeEach(() => {
+     mocks.getWorkStatus.mockResolvedValue({
+         shareWorkStatus: true,
+         canManage: true,
+-        personal: false
++        personal: false,
++        linearWorkspaces: ['acme']
+     })
+     mocks.updateWorkStatus.mockResolvedValue({
+         shareWorkStatus: false,
+         canManage: true,
+-        personal: false
++        personal: false,
++        linearWorkspaces: ['acme']
+     })
+ })
+ 
+@@ -136,7 +147,7 @@ describe('PUT /work-claims/devices/:deviceId', () => {
+             refreshAfterSeconds: 120,
+             liveForSeconds: 300
+         })
+-        expect(mocks.replaceDeviceClaims).toHaveBeenCalledWith(
++        expect(mocks.publishDeviceClaims).toHaveBeenCalledWith(
+             'user-1',
+             DEVICE,
+             {
+@@ -185,7 +196,7 @@ describe('PUT /work-claims/devices/:deviceId', () => {
+                 })
+             )
+         }
+-        expect(mocks.replaceDeviceClaims).not.toHaveBeenCalled()
++        expect(mocks.publishDeviceClaims).not.toHaveBeenCalled()
+     })
+ 
+     it('refuses a bad device id, a mismatched scope, bad JSON and no body', async () => {
+@@ -200,16 +211,16 @@ describe('PUT /work-claims/devices/:deviceId', () => {
+         )
+         await expectInvalid(await put('{"deviceLabel":'))
+         await expectInvalid(await put(undefined))
+-        expect(mocks.replaceDeviceClaims).not.toHaveBeenCalled()
++        expect(mocks.publishDeviceClaims).not.toHaveBeenCalled()
+     })
+ 
+     it('refuses a body over 256 KiB before reading it as JSON', async () => {
+         // Valid JSON once parsed: only the whitespace makes it too large.
+         const valid = JSON.stringify({ deviceLabel: 'Studio Mac', claims: [] })
+         expect((await put(`${valid}${' '.repeat(1024)}`)).status).toBe(200)
+-        mocks.replaceDeviceClaims.mockClear()
++        mocks.publishDeviceClaims.mockClear()
+         await expectInvalid(await put(`${valid}${' '.repeat(256 * 1024)}`))
+-        expect(mocks.replaceDeviceClaims).not.toHaveBeenCalled()
++        expect(mocks.publishDeviceClaims).not.toHaveBeenCalled()
+     })
+ 
+     it('needs a desktop session, and says so uncached', async () => {
+@@ -224,12 +235,41 @@ describe('PUT /work-claims/devices/:deviceId', () => {
+             expect(response.headers.get('cache-control')).toBe('no-store')
+             expect(await response.json()).toEqual({ error: 'unauthorized' })
+         }
+-        expect(mocks.replaceDeviceClaims).not.toHaveBeenCalled()
++        expect(mocks.publishDeviceClaims).not.toHaveBeenCalled()
++    })
++
++    it('answers a person with ten other devices with 409 work_claims_device_limit', async () => {
++        mocks.publishDeviceClaims.mockRejectedValue(
++            new WorkClaimsError('work_claims_device_limit', 409)
++        )
++        const response = await put({
++            deviceLabel: 'Studio Mac',
++            claims: [claim()]
++        })
++        expect(response.status).toBe(409)
++        expect(response.headers.get('cache-control')).toBe('no-store')
++        expect(response.headers.get('retry-after')).toBeNull()
++        expect(await response.json()).toEqual({
++            error: 'work_claims_device_limit'
++        })
++    })
++
++    it('answers a publish too soon after the last with 429 and Retry-After in seconds', async () => {
++        mocks.publishDeviceClaims.mockRejectedValue(
++            new WorkClaimsError('work_claims_rate_limited', 429, 2)
++        )
++        const response = await put({ deviceLabel: 'Studio Mac', claims: [] })
++        expect(response.status).toBe(429)
++        expect(response.headers.get('retry-after')).toBe('2')
++        expect(response.headers.get('cache-control')).toBe('no-store')
++        expect(await response.json()).toEqual({
++            error: 'work_claims_rate_limited'
++        })
+     })
+ 
+     it('answers an unexpected failure with a code and never the request', async () => {
+         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+-        mocks.replaceDeviceClaims.mockRejectedValue(new Error('database down'))
++        mocks.publishDeviceClaims.mockRejectedValue(new Error('database down'))
+         const response = await put({ deviceLabel: 'Studio Mac', claims: [] })
+         expect(response.status).toBe(500)
+         expect(response.headers.get('cache-control')).toBe('no-store')
+@@ -268,6 +308,7 @@ describe('GET /work-claims', () => {
+             liveForSeconds: 300,
+             claims: [
+                 {
++                    key: '0123456789abcdef0123456789abcdef',
+                     scope: 'github.com/acme/widgets',
+                     issue: {
+                         provider: 'github',
+@@ -344,7 +385,8 @@ describe('/orgs/:orgId/work-status', () => {
+         expect(await response.json()).toEqual({
+             shareWorkStatus: true,
+             canManage: true,
+-            personal: false
++            personal: false,
++            linearWorkspaces: ['acme']
+         })
+         expect(mocks.getWorkStatus).toHaveBeenCalledWith('user-1', 'org-1')
+     })
+@@ -357,13 +399,36 @@ describe('/orgs/:orgId/work-status', () => {
+         expect(await response.json()).toEqual({
+             shareWorkStatus: false,
+             canManage: true,
+-            personal: false
++            personal: false,
++            linearWorkspaces: ['acme']
+         })
+         expect(mocks.updateWorkStatus).toHaveBeenCalledWith('user-1', 'org-1', {
+             shareWorkStatus: false
+         })
+     })
+ 
++    it('passes Linear workspaces through untouched for the service to validate', async () => {
++        const body = { linearWorkspaces: ['Acme', 'acme-hq'] }
++        expect(
++            (await call('POST', '/orgs/org-1/work-status', body)).status
++        ).toBe(200)
++        expect(mocks.updateWorkStatus).toHaveBeenCalledWith(
++            'user-1',
++            'org-1',
++            body
++        )
++    })
++
++    it('refuses a body over 4 KiB', async () => {
++        const response = await call(
++            'POST',
++            '/orgs/org-1/work-status',
++            `{"shareWorkStatus":false}${' '.repeat(4 * 1024)}`
++        )
++        await expectInvalid(response)
++        expect(mocks.updateWorkStatus).not.toHaveBeenCalled()
++    })
++
+     it.each([
+         ['not_found', 404],
+         ['forbidden', 403],
+diff --git a/apps/api/src/controllers/desktop/workClaims.ts b/apps/api/src/controllers/desktop/workClaims.ts
+index ea0b9ae..73875e1 100644
+--- a/apps/api/src/controllers/desktop/workClaims.ts
++++ b/apps/api/src/controllers/desktop/workClaims.ts
+@@ -5,7 +5,7 @@ import { workClaims } from '@/lib/constants'
+ import {
+     WorkClaimsError,
+     listVisibleClaims,
+-    replaceDeviceClaims,
++    publishDeviceClaims,
+     withdrawDeviceClaims,
+     workClaimsValidation,
+     workStatusSettings
+@@ -22,8 +22,11 @@ const respond = async (
+     try {
+         return desktopJson(c, await operation())
+     } catch (error) {
+-        if (error instanceof WorkClaimsError)
++        if (error instanceof WorkClaimsError) {
++            if (error.retryAfterSeconds !== undefined)
++                c.header('Retry-After', String(error.retryAfterSeconds))
+             return desktopError(c, error.message, error.status)
++        }
+         console.error('workClaimsResponse', error)
+         return desktopError(c, workClaims.errors.internal, 500)
+     }
+@@ -33,7 +36,7 @@ const replace = (c: Context) =>
+     respond(c, async () => {
+         const deviceId = workClaimsValidation.deviceId(c.req.param('deviceId'))
+         const input = workClaimsValidation.parseReplace(await bodyOf(c))
+-        return replaceDeviceClaims(userIdOf(c), deviceId, input)
++        return publishDeviceClaims(userIdOf(c), deviceId, input)
+     })
+ 
+ const withdraw = (c: Context) =>
+diff --git a/apps/api/src/db/schema/organizationWorkStatusSettings.ts b/apps/api/src/db/schema/organizationWorkStatusSettings.ts
+index 5667cbb..7cf4a3e 100644
+--- a/apps/api/src/db/schema/organizationWorkStatusSettings.ts
++++ b/apps/api/src/db/schema/organizationWorkStatusSettings.ts
+@@ -3,7 +3,8 @@ import organizations from '@/db/schema/organizations'
+ import users from '@/db/schema/users'
+ 
+ // terminalx#441: whether members of an organization see each other's work
+-// claims. No row means on.
++// claims (no row means on), and the Linear workspaces its admins declared as
++// the organization's own.
+ const organizationWorkStatusSettings = pgTable(
+     'organization_work_status_settings',
+     {
+@@ -11,6 +12,10 @@ const organizationWorkStatusSettings = pgTable(
+             .primaryKey()
+             .references(() => organizations.id, { onDelete: 'cascade' }),
+         shareWorkStatus: boolean('share_work_status').notNull().default(true),
++        linearWorkspaces: text('linear_workspaces')
++            .array()
++            .notNull()
++            .default([]),
+         updatedBy: text('updated_by').references(() => users.id, {
+             onDelete: 'set null'
+         }),
+diff --git a/apps/api/src/lib/constants/workClaims.ts b/apps/api/src/lib/constants/workClaims.ts
+index 57cfa53..2f953ef 100644
+--- a/apps/api/src/lib/constants/workClaims.ts
++++ b/apps/api/src/lib/constants/workClaims.ts
+@@ -6,13 +6,22 @@ const workClaims = {
+         workStatus: '/orgs/:orgId/work-status'
+     },
+     requestBodyMaxBytes: 256 * 1024,
+-    workStatusBodyMaxBytes: 1024,
++    workStatusBodyMaxBytes: 4 * 1024,
+     retentionSeconds: 24 * 60 * 60,
+     liveForSeconds: 300,
+     refreshAfterSeconds: 120,
+     maxClaimsPerDevice: 100,
+     maxScopesPerRead: 10,
+     maxClaimsPerRead: 500,
++    maxClaimsPerPersonPerRead: 50,
++    maxDevicesPerPerson: 10,
++    maxLinearWorkspaces: 10,
++    keyHexChars: 32,
++    publishRateLimit: {
++        operation: 'work-claims-publish',
++        maxRequests: 1,
++        windowMs: 2 * 1000
++    },
+     maxIdleSeconds: 30 * 24 * 60 * 60,
+     limits: {
+         deviceLabelChars: 80,
+@@ -40,7 +49,9 @@ const workClaims = {
+         internal: 'work_claims_internal_error',
+         notFound: 'not_found',
+         forbidden: 'forbidden',
+-        personalOrganization: 'work_status_personal_organization'
++        personalOrganization: 'work_status_personal_organization',
++        deviceLimit: 'work_claims_device_limit',
++        rateLimited: 'work_claims_rate_limited'
+     }
+ } as const
+ 
+diff --git a/apps/api/src/services/workClaims/WorkClaimsError.ts b/apps/api/src/services/workClaims/WorkClaimsError.ts
+index 28d7c6b..ad0dc08 100644
+--- a/apps/api/src/services/workClaims/WorkClaimsError.ts
++++ b/apps/api/src/services/workClaims/WorkClaimsError.ts
+@@ -2,10 +2,16 @@ import type { WorkClaimsErrorStatus } from '@/ts/Types'
+ 
+ class WorkClaimsError extends Error {
+     readonly status: WorkClaimsErrorStatus
++    readonly retryAfterSeconds?: number
+ 
+-    constructor(code: string, status: WorkClaimsErrorStatus) {
++    constructor(
++        code: string,
++        status: WorkClaimsErrorStatus,
++        retryAfterSeconds?: number
++    ) {
+         super(code)
+         this.status = status
++        this.retryAfterSeconds = retryAfterSeconds
+     }
+ }
+ 
+diff --git a/apps/api/src/services/workClaims/index.ts b/apps/api/src/services/workClaims/index.ts
+index 207cc71..4a7d384 100644
+--- a/apps/api/src/services/workClaims/index.ts
++++ b/apps/api/src/services/workClaims/index.ts
+@@ -1,6 +1,7 @@
+ import WorkClaimsError from '@/services/workClaims/WorkClaimsError'
+ import workClaimsValidation from '@/services/workClaims/validation'
+ import replaceDeviceClaims from '@/services/workClaims/replaceDeviceClaims'
++import publishDeviceClaims from '@/services/workClaims/publishDeviceClaims'
+ import withdrawDeviceClaims from '@/services/workClaims/withdrawDeviceClaims'
+ import listVisibleClaims from '@/services/workClaims/listVisibleClaims'
+ import workStatusSettings from '@/services/workClaims/workStatusSettings'
+@@ -9,6 +10,7 @@ export {
+     WorkClaimsError,
+     workClaimsValidation,
+     replaceDeviceClaims,
++    publishDeviceClaims,
+     withdrawDeviceClaims,
+     listVisibleClaims,
+     workStatusSettings
+diff --git a/apps/api/src/services/workClaims/limitDevicePublish.ts b/apps/api/src/services/workClaims/limitDevicePublish.ts
+new file mode 100644
+index 0000000..bb6b04d
+--- /dev/null
++++ b/apps/api/src/services/workClaims/limitDevicePublish.ts
+@@ -0,0 +1,36 @@
++import { workClaims } from '@/lib/constants'
++import { AccountPairingError } from '@/services/accountPairing'
++import checkAccountPairingRateLimit from '@/services/accountPairing/rateLimit'
++import WorkClaimsError from '@/services/workClaims/WorkClaimsError'
++
++const { publishRateLimit } = workClaims
++
++/**
++ * One publish per (person, device) every two seconds, on the same
++ * `rate_limits` lanes as the Host binding heartbeat (subjects stored hashed).
++ */
++const limitDevicePublish = async (
++    userId: string,
++    deviceId: string,
++    now: Date = new Date()
++): Promise<void> => {
++    try {
++        await checkAccountPairingRateLimit({
++            operation: publishRateLimit.operation,
++            subjects: [`${userId}\n${deviceId}`],
++            maxRequests: publishRateLimit.maxRequests,
++            windowMs: publishRateLimit.windowMs,
++            now
++        })
++    } catch (error) {
++        if (error instanceof AccountPairingError && error.status === 429)
++            throw new WorkClaimsError(
++                workClaims.errors.rateLimited,
++                429,
++                error.retryAfterSeconds
++            )
++        throw error
++    }
++}
++
++export default limitDevicePublish
+\ No newline at end of file
+diff --git a/apps/api/src/services/workClaims/listVisibleClaims.ts b/apps/api/src/services/workClaims/listVisibleClaims.ts
+index 10e07c2..6495bdf 100644
+--- a/apps/api/src/services/workClaims/listVisibleClaims.ts
++++ b/apps/api/src/services/workClaims/listVisibleClaims.ts
+@@ -4,8 +4,10 @@ import type {
+     WorkClaimState,
+     WorkClaimsListResult
+ } from '@/ts/Types'
++import type { PgColumn } from 'drizzle-orm/pg-core'
+ 
+-import { and, desc, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
++import { createHash } from 'node:crypto'
++import { and, desc, eq, exists, gt, inArray, lte, or, sql } from 'drizzle-orm'
+ import { alias } from 'drizzle-orm/pg-core'
+ import { db } from '@/db'
+ import {
+@@ -23,11 +25,11 @@ const SECOND_MS = 1000
+ const { github } = workClaims
+ 
+ /**
+- * The repository of a claim belongs to the organization in scope: a selected
+- * repository it can reach, or any repository of an account whose
+- * installation covers all of them.
++ * The GitHub repository named by `column` (`github.com/<owner>/<repo>`)
++ * belongs to the organization in scope: a selected repository it can reach,
++ * or any repository of an account whose installation covers all of them.
+  */
+-const repositoryConnected = () =>
++const connectedTo = (column: PgColumn) =>
+     or(
+         exists(
+             db
+@@ -43,7 +45,7 @@ const repositoryConnected = () =>
+                             organizationGithubRepositories.state,
+                             github.repositoryAccessible
+                         ),
+-                        sql`${issueWorkClaims.repository} = ${`${github.host}/`}::text || lower(${organizationGithubRepositories.fullName})`
++                        sql`${column} = ${`${github.host}/`}::text || lower(${organizationGithubRepositories.fullName})`
+                     )
+                 )
+         ),
+@@ -65,25 +67,41 @@ const repositoryConnected = () =>
+                             organizationGithubInstallations.repositorySelection,
+                             github.allRepositories
+                         ),
+-                        sql`split_part(${issueWorkClaims.repository}, '/', 1) = ${github.host}::text`,
+-                        sql`split_part(${issueWorkClaims.repository}, '/', 2) = lower(${organizationGithubInstallations.accountLogin})`
++                        sql`split_part(${column}, '/', 1) = ${github.host}::text`,
++                        sql`split_part(${column}, '/', 2) = lower(${organizationGithubInstallations.accountLogin})`
+                     )
+                 )
+         )
+     )
+ 
++/**
++ * What ties a claim to the organization, by where its issue lives. A GitHub
++ * issue's repository (the scope) must be connected, whatever repository the
++ * work happens in, so work in a fork on the organization's issue shows. A
++ * Linear issue must be in a workspace the organization's admins declared,
++ * and the work must happen in a repository the organization connected, so a
++ * personal project is never shown.
++ */
++const belongsToOrganization = (provider: WorkClaimProvider) =>
++    provider === workClaims.providers.github
++        ? connectedTo(issueWorkClaims.scope)
++        : and(
++              sql`${issueWorkClaims.repository} IS NOT NULL`,
++              sql`split_part(${issueWorkClaims.scope}, '/', 2) = ANY(${organizationWorkStatusSettings.linearWorkspaces})`,
++              connectedTo(issueWorkClaims.repository)
++          )
++
+ /**
+  * Another person's claim is shown only through an organization both belong
+- * to that is not personal, has work status on, and connected the claim's
+- * repository. Membership is read here on every request, so someone removed
+- * from the organization stops seeing its claims at once.
++ * to that is not personal, has work status on, and owns the claim's issue.
++ * Membership is read here on every request, so someone removed from the
++ * organization stops seeing its claims at once.
+  */
+-const sharedWithCaller = (userId: string) => {
++const sharedWithCaller = (userId: string, provider: WorkClaimProvider) => {
+     const callerMembership = alias(memberships, 'caller_membership')
+     const ownerMembership = alias(memberships, 'owner_membership')
+     return and(
+         eq(issueWorkClaims.shareWithTeam, true),
+-        sql`${issueWorkClaims.repository} IS NOT NULL`,
+         exists(
+             db
+                 .select({ one: sql`1` })
+@@ -116,13 +134,20 @@ const sharedWithCaller = (userId: string) => {
+                     and(
+                         eq(callerMembership.userId, userId),
+                         sql`coalesce(${organizationWorkStatusSettings.shareWorkStatus}, true)`,
+-                        repositoryConnected()
++                        belongsToOrganization(provider)
+                     )
+                 )
+         )
+     )
+ }
+ 
++/** Opaque and stable per person and session, whichever device sent it. */
++const keyOf = (userId: string, sessionId: string): string =>
++    createHash('sha256')
++        .update(`${userId}\n${sessionId}`)
++        .digest('hex')
++        .slice(0, workClaims.keyHexChars)
++
+ const listVisibleClaims = async (
+     userId: string,
+     query: WorkClaimsListQuery,
+@@ -130,8 +155,9 @@ const listVisibleClaims = async (
+ ): Promise<WorkClaimsListResult> => {
+     const nowMs = now.getTime()
+     const liveAfter = nowMs - workClaims.liveForSeconds * SECOND_MS
+-    const rows = await db
++    const ranked = db
+         .select({
++            id: issueWorkClaims.id,
+             userId: issueWorkClaims.userId,
+             deviceId: issueWorkClaims.deviceId,
+             deviceLabel: issueWorkClaims.deviceLabel,
+@@ -147,7 +173,14 @@ const listVisibleClaims = async (
+             since: issueWorkClaims.since,
+             lastActiveAt: issueWorkClaims.lastActiveAt,
+             refreshedAt: issueWorkClaims.refreshedAt,
+-            personName: sql<string>`coalesce(nullif(btrim(${users.name}), ''), split_part(${users.email}, '@', 1))`
++            personName:
++                sql<string>`coalesce(nullif(btrim(${users.name}), ''), split_part(${users.email}, '@', 1))`.as(
++                    'person_name'
++                ),
++            personRank:
++                sql<number>`row_number() OVER (PARTITION BY ${issueWorkClaims.userId} ORDER BY ${issueWorkClaims.lastActiveAt} DESC, ${issueWorkClaims.refreshedAt} DESC, ${issueWorkClaims.id})`.as(
++                    'person_rank'
++                )
+         })
+         .from(issueWorkClaims)
+         .innerJoin(users, eq(users.id, issueWorkClaims.userId))
+@@ -160,14 +193,35 @@ const listVisibleClaims = async (
+                     issueWorkClaims.lastActiveAt,
+                     new Date(nowMs - workClaims.retentionSeconds * SECOND_MS)
+                 ),
+-                or(eq(issueWorkClaims.userId, userId), sharedWithCaller(userId))
++                or(
++                    eq(issueWorkClaims.userId, userId),
++                    sharedWithCaller(userId, query.provider)
++                )
+             )
+         )
+-        .orderBy(
+-            desc(issueWorkClaims.lastActiveAt),
+-            desc(issueWorkClaims.refreshedAt),
+-            issueWorkClaims.id
+-        )
++        .as('ranked_claims')
++    const rows = await db
++        .select({
++            userId: ranked.userId,
++            deviceId: ranked.deviceId,
++            deviceLabel: ranked.deviceLabel,
++            sessionId: ranked.sessionId,
++            scope: ranked.scope,
++            issueProvider: ranked.issueProvider,
++            issueId: ranked.issueId,
++            issueIdentifier: ranked.issueIdentifier,
++            title: ranked.title,
++            branch: ranked.branch,
++            state: ranked.state,
++            cloud: ranked.cloud,
++            since: ranked.since,
++            lastActiveAt: ranked.lastActiveAt,
++            refreshedAt: ranked.refreshedAt,
++            personName: ranked.personName
++        })
++        .from(ranked)
++        .where(lte(ranked.personRank, workClaims.maxClaimsPerPersonPerRead))
++        .orderBy(desc(ranked.lastActiveAt), desc(ranked.refreshedAt), ranked.id)
+         .limit(workClaims.maxClaimsPerRead)
+     return {
+         now: nowMs,
+@@ -175,6 +229,7 @@ const listVisibleClaims = async (
+         claims: rows.map((row) => {
+             const you = row.userId === userId
+             return {
++                key: keyOf(row.userId, row.sessionId),
+                 scope: row.scope,
+                 issue: {
+                     provider: row.issueProvider as WorkClaimProvider,
+diff --git a/apps/api/src/services/workClaims/publishDeviceClaims.ts b/apps/api/src/services/workClaims/publishDeviceClaims.ts
+new file mode 100644
+index 0000000..1b8c8e2
+--- /dev/null
++++ b/apps/api/src/services/workClaims/publishDeviceClaims.ts
+@@ -0,0 +1,17 @@
++import type { WorkClaimsReplaceInput } from '@/ts/Interfaces'
++import type { WorkClaimsReplaceResult } from '@/ts/Types'
++
++import limitDevicePublish from '@/services/workClaims/limitDevicePublish'
++import replaceDeviceClaims from '@/services/workClaims/replaceDeviceClaims'
++
++const publishDeviceClaims = async (
++    userId: string,
++    deviceId: string,
++    input: WorkClaimsReplaceInput,
++    now: Date = new Date()
++): Promise<WorkClaimsReplaceResult> => {
++    await limitDevicePublish(userId, deviceId, now)
++    return replaceDeviceClaims(userId, deviceId, input, now)
++}
++
++export default publishDeviceClaims
+\ No newline at end of file
+diff --git a/apps/api/src/services/workClaims/replaceDeviceClaims.ts b/apps/api/src/services/workClaims/replaceDeviceClaims.ts
+index 26107dd..9ede532 100644
+--- a/apps/api/src/services/workClaims/replaceDeviceClaims.ts
++++ b/apps/api/src/services/workClaims/replaceDeviceClaims.ts
+@@ -1,22 +1,67 @@
+ import type { WorkClaimsReplaceInput } from '@/ts/Interfaces'
+-import type { WorkClaimsReplaceResult } from '@/ts/Types'
++import type { WorkClaimsReplaceResult, WorkClaimsTransaction } from '@/ts/Types'
+ 
+ import { randomUUID } from 'node:crypto'
+-import { and, eq, lte, notInArray, sql } from 'drizzle-orm'
++import {
++    and,
++    countDistinct,
++    eq,
++    gt,
++    lte,
++    ne,
++    notInArray,
++    sql
++} from 'drizzle-orm'
+ import { db } from '@/db'
+ import { issueWorkClaims } from '@/db/schema'
+ import { workClaims } from '@/lib/constants'
++import WorkClaimsError from '@/services/workClaims/WorkClaimsError'
+ import deviceLock from '@/services/workClaims/deviceLock'
+ 
+ const SECOND_MS = 1000
+ 
+ const excluded = (column: string) => sql.raw(`excluded."${column}"`)
+ 
++/**
++ * A device with no live claim may join only while the person has fewer than
++ * ten other devices with one. Checked under a per-person lock, taken after
++ * the device's own and only by a joining device, so two joining at once
++ * cannot both pass.
++ */
++const admitDevice = async (
++    tx: WorkClaimsTransaction,
++    userId: string,
++    deviceId: string,
++    now: Date
++): Promise<void> => {
++    const live = and(
++        eq(issueWorkClaims.userId, userId),
++        gt(issueWorkClaims.expiresAt, now)
++    )
++    const [known] = await tx
++        .select({ id: issueWorkClaims.id })
++        .from(issueWorkClaims)
++        .where(and(live, eq(issueWorkClaims.deviceId, deviceId)))
++        .limit(1)
++    if (known) return
++    await tx.execute(
++        sql`SELECT pg_advisory_xact_lock(hashtextextended(${`work-claims-person:${userId}`}, 0))`
++    )
++    const [others] = await tx
++        .select({ devices: countDistinct(issueWorkClaims.deviceId) })
++        .from(issueWorkClaims)
++        .where(and(live, ne(issueWorkClaims.deviceId, deviceId)))
++    if ((others?.devices ?? 0) >= workClaims.maxDevicesPerPerson)
++        throw new WorkClaimsError(workClaims.errors.deviceLimit, 409)
++}
++
+ /**
+  * Replaces one device's claim set in one transaction, serialized per device
+  * so two publishes from it cannot leave the union of both. A session that is
+- * not in the set is withdrawn. `since` survives a refresh of the same issue
+- * and restarts when the session moves to another one.
++ * not in the set is withdrawn, so afterwards the device holds exactly the
++ * set, all unexpired. `since` survives a refresh of the same issue and
++ * restarts when the session moves to another one. Expired rows of other
++ * devices are left to the prune after the commit, which takes no lock.
+  */
+ const replaceDeviceClaims = async (
+     userId: string,
+@@ -30,6 +75,7 @@ const replaceDeviceClaims = async (
+     const sessionIds = input.claims.map((claim) => claim.sessionId)
+     await db.transaction(async (tx) => {
+         await deviceLock(tx, userId, deviceId)
++        if (input.claims.length) await admitDevice(tx, userId, deviceId, now)
+         await tx
+             .delete(issueWorkClaims)
+             .where(
+@@ -96,14 +142,6 @@ const replaceDeviceClaims = async (
+                         updatedAt: excluded('updated_at')
+                     }
+                 })
+-        await tx
+-            .delete(issueWorkClaims)
+-            .where(
+-                and(
+-                    eq(issueWorkClaims.userId, userId),
+-                    lte(issueWorkClaims.expiresAt, now)
+-                )
+-            )
+     })
+     try {
+         await db
+diff --git a/apps/api/src/services/workClaims/validation.test.ts b/apps/api/src/services/workClaims/validation.test.ts
+index 091896b..19e9653 100644
+--- a/apps/api/src/services/workClaims/validation.test.ts
++++ b/apps/api/src/services/workClaims/validation.test.ts
+@@ -642,26 +642,65 @@ describe('the list query', () => {
+     })
+ })
+ 
+-describe('the organization switch', () => {
+-    it('takes exactly { shareWorkStatus: boolean }', () => {
+-        expect(
+-            workClaimsValidation.parseWorkStatusUpdate({
+-                shareWorkStatus: false
+-            })
+-        ).toEqual({ shareWorkStatus: false })
++describe('the organization settings', () => {
++    const update = (value: unknown) =>
++        workClaimsValidation.parseWorkStatusUpdate(value)
++
++    it('takes shareWorkStatus, linearWorkspaces, or both, and nothing else', () => {
++        expect(update({ shareWorkStatus: false })).toEqual({
++            shareWorkStatus: false
++        })
++        expect(update({ shareWorkStatus: true })).toEqual({
++            shareWorkStatus: true
++        })
++        expect(update({ linearWorkspaces: ['acme'] })).toEqual({
++            linearWorkspaces: ['acme']
++        })
+         expect(
+-            workClaimsValidation.parseWorkStatusUpdate({
+-                shareWorkStatus: true
+-            })
+-        ).toEqual({ shareWorkStatus: true })
++            update({ shareWorkStatus: false, linearWorkspaces: [] })
++        ).toEqual({ shareWorkStatus: false, linearWorkspaces: [] })
+         for (const value of [
+             null,
+             {},
+             [],
++            'acme',
+             { shareWorkStatus: 'false' },
+             { shareWorkStatus: 0 },
+-            { shareWorkStatus: false, organizationId: 'org-1' }
++            { shareWorkStatus: null },
++            { shareWorkStatus: false, organizationId: 'org-1' },
++            { linearWorkspaces: ['acme'], prompt: 'x' }
++        ])
++            refused(() => update(value))
++    })
++
++    it('lower-cases and deduplicates Linear workspace keys', () => {
++        expect(
++            update({
++                linearWorkspaces: ['Acme', 'acme', 'ACME-HQ', 'a'.repeat(64)]
++            })
++        ).toEqual({ linearWorkspaces: ['acme', 'acme-hq', 'a'.repeat(64)] })
++    })
++
++    it('takes at most 10 workspace keys of [a-z0-9-]{1,64}', () => {
++        const keys = (count: number) =>
++            Array.from({ length: count }, (_, index) => `team-${index}`)
++        expect(update({ linearWorkspaces: keys(10) }).linearWorkspaces).toEqual(
++            keys(10)
++        )
++        refused(() => update({ linearWorkspaces: keys(11) }))
++        for (const entry of [
++            '',
++            'a'.repeat(65),
++            'linear.app/acme',
++            'ac_me',
++            'ac me',
++            'acme.hq',
++            1,
++            null,
++            ['acme']
+         ])
+-            refused(() => workClaimsValidation.parseWorkStatusUpdate(value))
++            refused(() => update({ linearWorkspaces: [entry] }))
++        for (const linearWorkspaces of [null, 'acme', { acme: true }])
++            refused(() => update({ linearWorkspaces }))
+     })
+ })
+\ No newline at end of file
+diff --git a/apps/api/src/services/workClaims/validation.ts b/apps/api/src/services/workClaims/validation.ts
+index 03e7342..bbe7f0c 100644
+--- a/apps/api/src/services/workClaims/validation.ts
++++ b/apps/api/src/services/workClaims/validation.ts
+@@ -27,6 +27,7 @@ const IDENTIFIER: Record<WorkClaimProvider, RegExp> = {
+ const REPOSITORY =
+     /^[a-z0-9.-]{1,253}(:[0-9]{1,5})?(\/[a-z0-9._~-]{1,100}){1,8}$/
+ const BRANCH = /^[^\s\p{Cc}]{1,255}$/u
++const LINEAR_WORKSPACE = /^[a-z0-9-]{1,64}$/
+ const CONTROL_CHARACTER = /\p{Cc}/u
+ const PROVIDERS: readonly string[] = Object.values(workClaims.providers)
+ const STATES: readonly string[] = Object.values(workClaims.states)
+@@ -201,10 +202,34 @@ const parseListQuery = (
+     }
+ }
+ 
++const linearWorkspaces = (value: unknown): string[] => {
++    if (!Array.isArray(value) || value.length > workClaims.maxLinearWorkspaces)
++        invalid()
++    return [
++        ...new Set(
++            (value as unknown[]).map((entry) =>
++                lowerMatching(entry, LINEAR_WORKSPACE)
++            )
++        )
++    ]
++}
++
++/**
++ * The organization's settings: `shareWorkStatus`, `linearWorkspaces`, or
++ * both. A field left out keeps its value.
++ */
+ const parseWorkStatusUpdate = (value: unknown): WorkStatusUpdateInput => {
+     const body = record(value)
+-    onlyKeys(body, ['shareWorkStatus'])
+-    return { shareWorkStatus: boolean(body.shareWorkStatus) }
++    onlyKeys(body, [], ['shareWorkStatus', 'linearWorkspaces'])
++    if (!Object.keys(body).length) invalid()
++    return {
++        ...(Object.hasOwn(body, 'shareWorkStatus')
++            ? { shareWorkStatus: boolean(body.shareWorkStatus) }
++            : {}),
++        ...(Object.hasOwn(body, 'linearWorkspaces')
++            ? { linearWorkspaces: linearWorkspaces(body.linearWorkspaces) }
++            : {})
++    }
+ }
+ 
+ const workClaimsValidation = {
+diff --git a/apps/api/src/services/workClaims/workClaims.integration.test.ts b/apps/api/src/services/workClaims/workClaims.integration.test.ts
+index 87b3b6c..abd092e 100644
+--- a/apps/api/src/services/workClaims/workClaims.integration.test.ts
++++ b/apps/api/src/services/workClaims/workClaims.integration.test.ts
+@@ -1,4 +1,4 @@
+-import { randomInt, randomUUID } from 'node:crypto'
++import { createHash, randomInt, randomUUID } from 'node:crypto'
+ import { Hono } from 'hono'
+ import { and, eq, inArray, like } from 'drizzle-orm'
+ import {
+@@ -33,8 +33,10 @@ const testClient = Reflect.get(databaseModule, 'testClient')
+ const schema = await import('@/db/schema')
+ const {
+     listVisibleClaims,
++    publishDeviceClaims,
+     replaceDeviceClaims,
+     withdrawDeviceClaims,
++    workStatusSettings,
+     WorkClaimsError
+ } = await import('@/services/workClaims')
+ const { default: workClaimsController } =
+@@ -69,6 +71,10 @@ const WIDGETS = 'github.com/acme/widgets'
+ const GADGETS = 'github.com/acme/gadgets'
+ const ROCKET = 'github.com/globex/rocket'
+ const DOTFILES = 'github.com/alice/dotfiles'
++const FORK = 'github.com/alice/widgets-fork'
++const INITECH = 'github.com/initech/widgets'
++const LINEAR_ACME = 'linear.app/acme'
++const LINEAR_INITECH = 'linear.app/initech'
+ const DEVICE_A = 'alice-device-aaaa'
+ const DEVICE_B = 'alice-device-bbbb'
+ const BOB_DEVICE = 'bob-device-11111'
+@@ -78,7 +84,7 @@ const claim = (sessionId: string, overrides: Record<string, unknown> = {}) => ({
+     scope: WIDGETS,
+     repository: WIDGETS as string | null,
+     issue: {
+-        provider: 'github' as const,
++        provider: 'github' as 'github' | 'linear',
+         id: '441',
+         identifier: '#441'
+     },
+@@ -91,6 +97,17 @@ const claim = (sessionId: string, overrides: Record<string, unknown> = {}) => ({
+     ...overrides
+ })
+ 
++const linearClaim = (
++    sessionId: string,
++    overrides: Record<string, unknown> = {}
++) =>
++    claim(sessionId, {
++        scope: LINEAR_ACME,
++        issue: { provider: 'linear', id: 'lin_42', identifier: 'ENG-42' },
++        title: 'ENG-42 Ship the work status',
++        ...overrides
++    })
++
+ const publish = (
+     who: { id: string },
+     deviceId: string,
+@@ -102,17 +119,25 @@ const publish = (
+ const list = (
+     who: { id: string },
+     now: Date,
+-    scopes: string[] = [WIDGETS, GADGETS, ROCKET, DOTFILES],
++    scopes: string[] = [WIDGETS, GADGETS, ROCKET, DOTFILES, INITECH],
+     provider: 'github' | 'linear' = 'github'
+ ) => listVisibleClaims(who.id, { provider, scopes }, now)
+ 
+-const sessionsSeenBy = async (who: { id: string }, now: Date) =>
+-    (await list(who, now)).claims.map((entry) =>
++const sessionsSeenBy = async (
++    who: { id: string },
++    now: Date,
++    scopes?: string[],
++    provider?: 'github' | 'linear'
++) =>
++    (await list(who, now, scopes, provider)).claims.map((entry) =>
+         entry.person.you
+             ? entry.sessionId
+             : `${entry.person.name}:${entry.title}`
+     )
+ 
++const linearSeenBy = (who: { id: string }, now: Date, scopes = [LINEAR_ACME]) =>
++    sessionsSeenBy(who, now, scopes, 'linear')
++
+ const rowsOf = (who: { id: string }) =>
+     db
+         .select()
+@@ -164,11 +189,22 @@ const repository = (
+     state
+ })
+ 
++const declareLinear = (workspaces: string[]) =>
++    db
++        .insert(schema.organizationWorkStatusSettings)
++        .values({ organizationId: teamOrg, linearWorkspaces: workspaces })
++        .onConflictDoUpdate({
++            target: schema.organizationWorkStatusSettings.organizationId,
++            set: { linearWorkspaces: workspaces }
++        })
++
+ const app = new Hono()
+ app.use('*', async (c, next) => {
+     c.set('desktopUserId', c.req.header('X-Test-User') ?? alice.id)
+     await next()
+ })
++app.put('/work-claims/devices/:deviceId', workClaimsController.replace)
++app.delete('/work-claims/devices/:deviceId', workClaimsController.withdraw)
+ app.get('/work-claims', workClaimsController.list)
+ app.get('/orgs/:orgId/work-status', workClaimsController.workStatus)
+ app.post('/orgs/:orgId/work-status', workClaimsController.updateWorkStatus)
+@@ -186,6 +222,27 @@ const workStatus = async (
+     return { status: response.status, body: await response.json() }
+ }
+ 
++const keyOf = (who: { id: string }, sessionId: string) =>
++    createHash('sha256')
++        .update(`${who.id}\n${sessionId}`)
++        .digest('hex')
++        .slice(0, 32)
++
++const refusedWith = async (
++    run: () => Promise<unknown>,
++    code: string,
++    status: number
++) => {
++    const error = await run().then(
++        () => null,
++        (caught: unknown) => caught
++    )
++    expect(error).toBeInstanceOf(WorkClaimsError)
++    expect((error as InstanceType<typeof WorkClaimsError>).message).toBe(code)
++    expect((error as InstanceType<typeof WorkClaimsError>).status).toBe(status)
++    return error as InstanceType<typeof WorkClaimsError>
++}
++
+ const cleanup = async () => {
+     await db
+         .delete(schema.organizations)
+@@ -245,419 +302,711 @@ integration('work claims (terminalx#441)', () => {
+             ])
+     })
+ 
+-    it('shows a person their own claims from every device, with device and session', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-1'), claim('a-2', { idleSeconds: 30 })],
+-            T0
+-        )
+-        await publish(
+-            alice,
+-            DEVICE_B,
+-            [claim('b-1', { cloud: true, state: 'waiting' })],
+-            at(SECOND),
+-            'Laptop'
+-        )
+-        const result = await list(alice, at(2 * SECOND))
+-        expect(result.now).toBe(at(2 * SECOND).getTime())
+-        expect(result.liveForSeconds).toBe(300)
+-        expect(result.claims).toEqual([
+-            {
+-                scope: WIDGETS,
+-                issue: { provider: 'github', id: '441', identifier: '#441' },
+-                person: { name: 'Alice Example', you: true },
+-                device: { id: DEVICE_B, label: 'Laptop' },
+-                sessionId: 'b-1',
+-                title: '#441 Show who is working on an issue',
+-                branch: 'alice/441-work-status',
+-                state: 'waiting',
+-                cloud: true,
+-                live: true,
+-                since: at(SECOND).getTime(),
+-                lastActiveAt: at(SECOND).getTime(),
+-                refreshedAt: at(SECOND).getTime()
+-            },
+-            expect.objectContaining({
+-                sessionId: 'a-1',
+-                device: { id: DEVICE_A, label: 'Studio Mac' },
+-                lastActiveAt: T0.getTime()
+-            }),
+-            expect.objectContaining({
+-                sessionId: 'a-2',
+-                device: { id: DEVICE_A, label: 'Studio Mac' },
+-                lastActiveAt: T0.getTime() - 30 * SECOND
+-            })
+-        ])
+-    })
++    describe('who sees what', () => {
++        it('shows a person their own claims from every device, with device and session', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-1'), claim('a-2', { idleSeconds: 30 })],
++                T0
++            )
++            await publish(
++                alice,
++                DEVICE_B,
++                [claim('b-1', { cloud: true, state: 'waiting' })],
++                at(SECOND),
++                'Laptop'
++            )
++            const result = await list(alice, at(2 * SECOND))
++            expect(result.now).toBe(at(2 * SECOND).getTime())
++            expect(result.liveForSeconds).toBe(300)
++            expect(result.claims).toEqual([
++                {
++                    key: keyOf(alice, 'b-1'),
++                    scope: WIDGETS,
++                    issue: {
++                        provider: 'github',
++                        id: '441',
++                        identifier: '#441'
++                    },
++                    person: { name: 'Alice Example', you: true },
++                    device: { id: DEVICE_B, label: 'Laptop' },
++                    sessionId: 'b-1',
++                    title: '#441 Show who is working on an issue',
++                    branch: 'alice/441-work-status',
++                    state: 'waiting',
++                    cloud: true,
++                    live: true,
++                    since: at(SECOND).getTime(),
++                    lastActiveAt: at(SECOND).getTime(),
++                    refreshedAt: at(SECOND).getTime()
++                },
++                expect.objectContaining({
++                    sessionId: 'a-1',
++                    device: { id: DEVICE_A, label: 'Studio Mac' },
++                    lastActiveAt: T0.getTime()
++                }),
++                expect.objectContaining({
++                    sessionId: 'a-2',
++                    device: { id: DEVICE_A, label: 'Studio Mac' },
++                    lastActiveAt: T0.getTime() - 30 * SECOND
++                })
++            ])
++        })
+ 
+-    it('shows a teammate the claim on a repository the organization selected, with no device or session', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect((await list(bob, at(SECOND))).claims).toEqual([
+-            {
+-                scope: WIDGETS,
+-                issue: { provider: 'github', id: '441', identifier: '#441' },
+-                person: { name: 'Alice Example', you: false },
+-                device: null,
+-                sessionId: null,
+-                title: '#441 Show who is working on an issue',
+-                branch: 'alice/441-work-status',
+-                state: 'working',
+-                cloud: false,
+-                live: true,
+-                since: T0.getTime(),
+-                lastActiveAt: T0.getTime(),
+-                refreshedAt: T0.getTime()
+-            }
+-        ])
+-    })
++        it('shows a teammate the claim on an issue of a repository the organization selected, with no device or session', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect((await list(bob, at(SECOND))).claims).toEqual([
++                {
++                    key: keyOf(alice, 'a-1'),
++                    scope: WIDGETS,
++                    issue: {
++                        provider: 'github',
++                        id: '441',
++                        identifier: '#441'
++                    },
++                    person: { name: 'Alice Example', you: false },
++                    device: null,
++                    sessionId: null,
++                    title: '#441 Show who is working on an issue',
++                    branch: 'alice/441-work-status',
++                    state: 'working',
++                    cloud: false,
++                    live: true,
++                    since: T0.getTime(),
++                    lastActiveAt: T0.getTime(),
++                    refreshedAt: T0.getTime()
++                }
++            ])
++        })
+ 
+-    it('names a person without a display name by the part of their email before @, never the email', async () => {
+-        await publish(bob, BOB_DEVICE, [claim('bob-1')], T0)
+-        await publish(dave, 'dave-device-1111', [claim('dave-1')], at(-SECOND))
+-        const { claims } = await list(alice, at(SECOND))
+-        expect(claims.map((entry) => entry.person)).toEqual([
+-            { name: 'bob.builder', you: false },
+-            { name: 'dave.admin', you: false }
+-        ])
+-        expect(JSON.stringify(claims)).not.toContain('@')
+-        expect(JSON.stringify(claims)).not.toContain(prefix)
+-    })
++        it('names a person without a display name by the part of their email before @, never the email', async () => {
++            await publish(bob, BOB_DEVICE, [claim('bob-1')], T0)
++            await publish(
++                dave,
++                'dave-device-1111',
++                [claim('dave-1')],
++                at(-SECOND)
++            )
++            const { claims } = await list(alice, at(SECOND))
++            expect(claims.map((entry) => entry.person)).toEqual([
++                { name: 'bob.builder', you: false },
++                { name: 'dave.admin', you: false }
++            ])
++            expect(JSON.stringify(claims)).not.toContain('@')
++            expect(JSON.stringify(claims)).not.toContain(prefix)
++        })
+ 
+-    it('shows a teammate a claim on any repository of an account whose installation covers all of them', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-rocket', { scope: ROCKET, repository: ROCKET })],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([
+-            'Alice Example:#441 Show who is working on an issue'
+-        ])
+-        await db
+-            .update(schema.organizationGithubInstallations)
+-            .set({ state: 'suspended' })
+-            .where(
+-                eq(
+-                    schema.organizationGithubInstallations.id,
+-                    `${prefix}-installation-globex`
++        it('shows a GitHub claim by the issue’s repository, whatever repository the work is in', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [
++                    claim('a-fork', { repository: FORK }),
++                    claim('a-no-remote', { repository: null }),
++                    claim('a-personal', { repository: DOTFILES })
++                ],
++                T0
++            )
++            expect((await sessionsSeenBy(bob, at(SECOND))).sort()).toEqual([
++                'Alice Example:#441 Show who is working on an issue',
++                'Alice Example:#441 Show who is working on an issue',
++                'Alice Example:#441 Show who is working on an issue'
++            ])
++        })
++
++        it('hides a GitHub claim whose issue’s repository the organization did not connect, even when the work is in one it did', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [
++                    claim('a-missing', { scope: GADGETS }),
++                    claim('a-initech', { scope: INITECH }),
++                    claim('a-dotfiles', { scope: DOTFILES })
++                ],
++                T0
++            )
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++            expect((await sessionsSeenBy(alice, at(SECOND))).sort()).toEqual([
++                'a-dotfiles',
++                'a-initech',
++                'a-missing'
++            ])
++        })
++
++        it('shows a teammate a claim on any repository of an account whose installation covers all of them', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-rocket', { scope: ROCKET, repository: null })],
++                T0
++            )
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([
++                'Alice Example:#441 Show who is working on an issue'
++            ])
++            await db
++                .update(schema.organizationGithubInstallations)
++                .set({ state: 'suspended' })
++                .where(
++                    eq(
++                        schema.organizationGithubInstallations.id,
++                        `${prefix}-installation-globex`
++                    )
+                 )
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual([
++                'a-rocket'
++            ])
++        })
++
++        it('shows nothing to someone outside every shared organization, even one that connected the same repository', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect((await list(carol, at(SECOND))).claims).toEqual([])
++        })
++
++        it('never shares through a personal organization', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [
++                    claim('a-dotfiles', {
++                        scope: DOTFILES,
++                        repository: DOTFILES
++                    })
++                ],
++                T0
+             )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-rocket'])
+-    })
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual([
++                'a-dotfiles'
++            ])
++        })
+ 
+-    it('hides a claim whose repository row is not accessible, or that the organization never connected', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [
+-                claim('a-gadgets', { scope: GADGETS, repository: GADGETS }),
+-                claim('a-elsewhere', { repository: 'gitlab.com/acme/widgets' }),
+-                claim('a-other-owner', {
+-                    repository: 'github.com/initech/widgets'
+-                })
+-            ],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        expect((await sessionsSeenBy(alice, at(SECOND))).sort()).toEqual([
+-            'a-elsewhere',
+-            'a-gadgets',
+-            'a-other-owner'
+-        ])
+-    })
++        it('keeps a claim not shared with the team to its owner, on every device', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-private', { shareWithTeam: false })],
++                T0
++            )
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++            await publish(alice, DEVICE_B, [], at(SECOND))
++            expect(await sessionsSeenBy(alice, at(2 * SECOND))).toEqual([
++                'a-private'
++            ])
++        })
+ 
+-    it('shows nothing to someone outside every shared organization, even one that connected the same repository', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect((await list(carol, at(SECOND))).claims).toEqual([])
+-    })
++        it('hides teammates’ claims while the organization switch is off', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
++            expect(
++                (await workStatus(dave, teamOrg, { shareWorkStatus: false }))
++                    .status
++            ).toBe(200)
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-1'])
++            await workStatus(alice, teamOrg, { shareWorkStatus: true })
++            expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
++        })
+ 
+-    it('never shares through a personal organization', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-dotfiles', { repository: DOTFILES })],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-dotfiles'])
+-    })
++        it('stops showing a teammate’s claims at once when they leave the organization', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
++            await db
++                .delete(schema.memberships)
++                .where(
++                    and(
++                        eq(schema.memberships.organizationId, teamOrg),
++                        eq(schema.memberships.userId, bob.id)
++                    )
++                )
++            expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
++        })
+ 
+-    it('keeps a claim not shared with the team to its owner, on every device', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-private', { shareWithTeam: false })],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        await publish(alice, DEVICE_B, [], at(SECOND))
+-        expect(await sessionsSeenBy(alice, at(2 * SECOND))).toEqual([
+-            'a-private'
+-        ])
++        it('reads only the asked provider and scopes', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [
++                    claim('a-widgets'),
++                    claim('a-gadgets', { scope: GADGETS }),
++                    linearClaim('a-linear')
++                ],
++                T0
++            )
++            expect(await sessionsSeenBy(alice, at(SECOND), [GADGETS])).toEqual([
++                'a-gadgets'
++            ])
++            expect(await linearSeenBy(alice, at(SECOND))).toEqual(['a-linear'])
++            expect(
++                await sessionsSeenBy(alice, at(SECOND), [LINEAR_ACME], 'github')
++            ).toEqual([])
++        })
+     })
+ 
+-    it('keeps a claim with no repository to its owner', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-local', { repository: null })],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-local'])
+-    })
++    describe('Linear claims', () => {
++        it('are shown only in a workspace the organization declared, worked on in a repository it connected', async () => {
++            await publish(
++                alice,
++                DEVICE_A,
++                [
++                    linearClaim('a-widgets'),
++                    linearClaim('a-rocket', { repository: ROCKET }),
++                    linearClaim('a-no-remote', { repository: null }),
++                    linearClaim('a-dotfiles', { repository: DOTFILES }),
++                    linearClaim('a-gadgets', { repository: GADGETS }),
++                    linearClaim('a-fork', { repository: FORK })
++                ],
++                T0
++            )
++            expect(await linearSeenBy(bob, at(SECOND))).toEqual([])
++            await declareLinear(['acme'])
++            expect(await linearSeenBy(bob, at(SECOND))).toEqual([
++                'Alice Example:ENG-42 Ship the work status',
++                'Alice Example:ENG-42 Ship the work status'
++            ])
++            expect(
++                (
++                    await list(bob, at(SECOND), [LINEAR_ACME], 'linear')
++                ).claims.map((entry) => entry.key)
++            ).toEqual(
++                expect.arrayContaining([
++                    keyOf(alice, 'a-widgets'),
++                    keyOf(alice, 'a-rocket')
++                ])
++            )
++            expect((await linearSeenBy(alice, at(SECOND))).sort()).toEqual([
++                'a-dotfiles',
++                'a-fork',
++                'a-gadgets',
++                'a-no-remote',
++                'a-rocket',
++                'a-widgets'
++            ])
++        })
++
++        it('in a workspace nobody declared are kept to their owner', async () => {
++            await declareLinear(['acme'])
++            await publish(
++                alice,
++                DEVICE_A,
++                [linearClaim('a-initech', { scope: LINEAR_INITECH })],
++                T0
++            )
++            expect(
++                await linearSeenBy(bob, at(SECOND), [LINEAR_INITECH])
++            ).toEqual([])
++            expect(
++                await linearSeenBy(alice, at(SECOND), [LINEAR_INITECH])
++            ).toEqual(['a-initech'])
++        })
+ 
+-    it('hides teammates’ claims while the organization switch is off', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
+-        expect(
+-            (await workStatus(dave, teamOrg, { shareWorkStatus: false })).status
+-        ).toBe(200)
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-1'])
+-        await workStatus(alice, teamOrg, { shareWorkStatus: true })
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
++        it('follow the organization switch like GitHub ones', async () => {
++            await declareLinear(['acme'])
++            await publish(alice, DEVICE_A, [linearClaim('a-1')], T0)
++            expect(await linearSeenBy(bob, at(SECOND))).toHaveLength(1)
++            await workStatus(dave, teamOrg, { shareWorkStatus: false })
++            expect(await linearSeenBy(bob, at(SECOND))).toEqual([])
++            expect(
++                (
++                    await db
++                        .select()
++                        .from(schema.organizationWorkStatusSettings)
++                        .where(
++                            eq(
++                                schema.organizationWorkStatusSettings
++                                    .organizationId,
++                                teamOrg
++                            )
++                        )
++                )[0]?.linearWorkspaces
++            ).toEqual(['acme'])
++        })
+     })
+ 
+-    it('stops showing a teammate’s claims at once when they leave the organization', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toHaveLength(1)
+-        await db
+-            .delete(schema.memberships)
+-            .where(
+-                and(
+-                    eq(schema.memberships.organizationId, teamOrg),
+-                    eq(schema.memberships.userId, bob.id)
++    describe('publishing', () => {
++        it('replaces the device’s set: a session left out is withdrawn, other devices are untouched', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
++            await publish(alice, DEVICE_B, [claim('b-1')], T0)
++            const result = await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-2')],
++                at(SECOND)
++            )
++            expect(result).toEqual({
++                claims: 1,
++                refreshAfterSeconds: 120,
++                liveForSeconds: 300
++            })
++            expect(
++                (await sessionsSeenBy(alice, at(2 * SECOND))).sort()
++            ).toEqual(['a-2', 'b-1'])
++            await publish(alice, DEVICE_A, [], at(2 * SECOND))
++            expect(await sessionsSeenBy(alice, at(3 * SECOND))).toEqual(['b-1'])
++        })
++
++        it('renames the device on every claim it keeps', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-1'), claim('a-2')],
++                at(SECOND),
++                'Renamed Mac'
++            )
++            expect(
++                (await list(alice, at(2 * SECOND))).claims.map(
++                    (entry) => entry.device
+                 )
++            ).toEqual([
++                { id: DEVICE_A, label: 'Renamed Mac' },
++                { id: DEVICE_A, label: 'Renamed Mac' }
++            ])
++        })
++
++        it('keeps `since` across refreshes of the same issue and restarts it when the issue changes', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-1', { state: 'idle', idleSeconds: 10 })],
++                at(60 * SECOND)
+             )
+-        expect(await sessionsSeenBy(bob, at(SECOND))).toEqual([])
+-    })
++            let [seen] = (await list(alice, at(61 * SECOND))).claims
++            expect(seen).toMatchObject({
++                state: 'idle',
++                since: T0.getTime(),
++                lastActiveAt: at(50 * SECOND).getTime(),
++                refreshedAt: at(60 * SECOND).getTime()
++            })
++            const issue442 = {
++                provider: 'github',
++                id: '442',
++                identifier: '#442'
++            }
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-1', { issue: issue442 })],
++                at(120 * SECOND)
++            )
++            ;[seen] = (await list(alice, at(121 * SECOND))).claims
++            expect(seen).toMatchObject({
++                issue: issue442,
++                since: at(120 * SECOND).getTime()
++            })
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim('a-1', { scope: GADGETS, issue: issue442 })],
++                at(180 * SECOND)
++            )
++            ;[seen] = (await list(alice, at(181 * SECOND))).claims
++            expect(seen?.since).toBe(at(180 * SECOND).getTime())
++        })
+ 
+-    it('reads only the asked provider and scopes', async () => {
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [
+-                claim('a-widgets'),
+-                claim('a-gadgets', { scope: GADGETS }),
+-                claim('a-linear', {
+-                    scope: 'linear.app/acme',
+-                    issue: {
+-                        provider: 'linear',
+-                        id: 'lin_1',
+-                        identifier: 'ENG-42'
+-                    }
+-                })
+-            ],
+-            T0
+-        )
+-        expect(
+-            (await list(alice, at(SECOND), [GADGETS])).claims.map(
+-                (entry) => entry.sessionId
+-            )
+-        ).toEqual(['a-gadgets'])
+-        expect(
+-            (
+-                await list(alice, at(SECOND), ['linear.app/acme'], 'linear')
+-            ).claims.map((entry) => entry.sessionId)
+-        ).toEqual(['a-linear'])
+-        expect(
+-            (await list(alice, at(SECOND), ['linear.app/acme'], 'github'))
+-                .claims
+-        ).toEqual([])
+-    })
++        it('marks a claim live only while it was refreshed in the last 300 s', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect((await list(bob, at(299 * SECOND))).claims[0]?.live).toBe(
++                true
++            )
++            expect((await list(bob, at(300 * SECOND))).claims[0]?.live).toBe(
++                false
++            )
++            expect((await list(bob, at(301 * SECOND))).claims[0]).toMatchObject(
++                { live: false, refreshedAt: T0.getTime() }
++            )
++        })
+ 
+-    it('replaces the device’s set: a session left out is withdrawn, other devices are untouched', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
+-        await publish(alice, DEVICE_B, [claim('b-1')], T0)
+-        const result = await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-2')],
+-            at(SECOND)
+-        )
+-        expect(result).toEqual({
+-            claims: 1,
+-            refreshAfterSeconds: 120,
+-            liveForSeconds: 300
+-        })
+-        expect((await sessionsSeenBy(alice, at(2 * SECOND))).sort()).toEqual([
+-            'a-2',
+-            'b-1'
+-        ])
+-        await publish(alice, DEVICE_A, [], at(2 * SECOND))
+-        expect(await sessionsSeenBy(alice, at(3 * SECOND))).toEqual(['b-1'])
+-    })
++        it('stops returning a claim 24 h after its last refresh, or after 24 h without activity', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            expect(await sessionsSeenBy(alice, at(24 * HOUR - SECOND))).toEqual(
++                ['a-1']
++            )
++            expect(await sessionsSeenBy(alice, at(24 * HOUR))).toEqual([])
++            await publish(
++                alice,
++                DEVICE_B,
++                [claim('b-idle', { idleSeconds: 24 * 60 * 60 })],
++                T0
++            )
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-1'])
++        })
+ 
+-    it('renames the device on every claim it keeps', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-1'), claim('a-2')],
+-            at(SECOND),
+-            'Renamed Mac'
+-        )
+-        expect(
+-            (await list(alice, at(2 * SECOND))).claims.map(
+-                (entry) => entry.device
++        it('prunes expired claims of every device and person after a publish commits', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1')], T0)
++            await publish(alice, DEVICE_B, [claim('b-1')], at(10 * HOUR))
++            await publish(bob, BOB_DEVICE, [claim('bob-1')], T0)
++            await publish(alice, DEVICE_B, [claim('b-1')], at(25 * HOUR))
++            expect((await rowsOf(alice)).map((row) => row.sessionId)).toEqual([
++                'b-1'
++            ])
++            expect(await rowsOf(bob)).toEqual([])
++        })
++
++        it('withdraws every claim of one device on DELETE', async () => {
++            await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
++            await publish(alice, DEVICE_B, [claim('b-1')], T0)
++            await withdrawDeviceClaims(alice.id, DEVICE_A)
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['b-1'])
++            await withdrawDeviceClaims(bob.id, DEVICE_B)
++            expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['b-1'])
++        })
++
++        it('keeps one device’s concurrent publishes from leaving the union of both', async () => {
++            const first = Array.from({ length: 50 }, (_, index) =>
++                claim(`first-${index}`)
+             )
+-        ).toEqual([
+-            { id: DEVICE_A, label: 'Renamed Mac' },
+-            { id: DEVICE_A, label: 'Renamed Mac' }
+-        ])
+-    })
++            const second = Array.from({ length: 50 }, (_, index) =>
++                claim(`second-${index}`)
++            )
++            await Promise.all([
++                publish(alice, DEVICE_A, first, T0),
++                publish(alice, DEVICE_A, second, T0)
++            ])
++            const sessions = (await rowsOf(alice)).map((row) => row.sessionId)
++            expect(sessions).toHaveLength(50)
++            expect(new Set(sessions.map((id) => id.split('-')[0])).size).toBe(1)
++        })
+ 
+-    it('keeps `since` across refreshes of the same issue and restarts it when the issue changes', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [claim('a-1', { state: 'idle', idleSeconds: 10 })],
+-            at(60 * SECOND)
+-        )
+-        let [seen] = (await list(alice, at(61 * SECOND))).claims
+-        expect(seen).toMatchObject({
+-            state: 'idle',
+-            since: T0.getTime(),
+-            lastActiveAt: at(50 * SECOND).getTime(),
+-            refreshedAt: at(60 * SECOND).getTime()
+-        })
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [
+-                claim('a-1', {
+-                    issue: { provider: 'github', id: '442', identifier: '#442' }
+-                })
+-            ],
+-            at(120 * SECOND)
+-        )
+-        ;[seen] = (await list(alice, at(121 * SECOND))).claims
+-        expect(seen).toMatchObject({
+-            issue: { provider: 'github', id: '442', identifier: '#442' },
+-            since: at(120 * SECOND).getTime()
+-        })
+-        await publish(
+-            alice,
+-            DEVICE_A,
+-            [
+-                claim('a-1', {
+-                    scope: GADGETS,
+-                    issue: { provider: 'github', id: '442', identifier: '#442' }
++        it('rejects a row the schema forbids', async () => {
++            await expect(
++                db.insert(schema.issueWorkClaims).values({
++                    id: randomUUID(),
++                    userId: alice.id,
++                    deviceId: DEVICE_A,
++                    deviceLabel: 'x',
++                    sessionId: 's',
++                    scope: WIDGETS,
++                    issueProvider: 'jira',
++                    issueId: '1',
++                    issueIdentifier: '#1',
++                    title: 't',
++                    state: 'working',
++                    since: T0,
++                    lastActiveAt: T0,
++                    refreshedAt: T0,
++                    expiresAt: T0
+                 })
+-            ],
+-            at(180 * SECOND)
+-        )
+-        ;[seen] = (await list(alice, at(181 * SECOND))).claims
+-        expect(seen?.since).toBe(at(180 * SECOND).getTime())
++            ).rejects.toThrow()
++        })
+     })
+ 
+-    it('marks a claim live only while it was refreshed in the last 300 s', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect((await list(bob, at(299 * SECOND))).claims[0]?.live).toBe(true)
+-        expect((await list(bob, at(300 * SECOND))).claims[0]?.live).toBe(false)
+-        expect((await list(bob, at(301 * SECOND))).claims[0]).toMatchObject({
+-            live: false,
+-            refreshedAt: T0.getTime()
++    describe('limits', () => {
++        const device = (index: number) =>
++            `alice-device-${index}`.padEnd(16, 'x')
++
++        it('refuses an 11th device with live claims, but lets it publish an empty set', async () => {
++            for (let index = 0; index < 10; index += 1)
++                await publish(alice, device(index), [claim(`s-${index}`)], T0)
++            await publish(bob, BOB_DEVICE, [claim('bob-1')], T0)
++            await refusedWith(
++                () => publish(alice, device(10), [claim('s-10')], at(SECOND)),
++                'work_claims_device_limit',
++                409
++            )
++            expect(
++                await publish(alice, device(10), [], at(SECOND))
++            ).toMatchObject({ claims: 0 })
++            const rows = await rowsOf(alice)
++            expect(rows).toHaveLength(10)
++            expect(rows.some((row) => row.deviceId === device(10))).toBe(false)
++            expect(
++                (
++                    await publish(
++                        alice,
++                        device(3),
++                        [claim('s-3'), claim('s-3b')],
++                        at(SECOND)
++                    )
++                ).claims
++            ).toBe(2)
++            await withdrawDeviceClaims(alice.id, device(0))
++            expect(
++                (await publish(alice, device(10), [claim('s-10')], at(SECOND)))
++                    .claims
++            ).toBe(1)
+         })
+-    })
+ 
+-    it('stops returning a claim 24 h after its last refresh, or after 24 h without activity', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        expect(await sessionsSeenBy(alice, at(24 * HOUR - SECOND))).toEqual([
+-            'a-1'
+-        ])
+-        expect(await sessionsSeenBy(alice, at(24 * HOUR))).toEqual([])
+-        await publish(
+-            alice,
+-            DEVICE_B,
+-            [claim('b-idle', { idleSeconds: 24 * 60 * 60 })],
+-            T0
+-        )
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['a-1'])
+-    })
++        it('counts only devices whose claims have not expired', async () => {
++            for (let index = 0; index < 10; index += 1)
++                await publish(alice, device(index), [claim(`s-${index}`)], T0)
++            expect(
++                (
++                    await publish(
++                        alice,
++                        device(10),
++                        [claim('s-10')],
++                        at(24 * HOUR)
++                    )
++                ).claims
++            ).toBe(1)
++        })
+ 
+-    it('prunes the caller’s expired claims on any device when it publishes, and others’ after', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1')], T0)
+-        await publish(alice, DEVICE_B, [claim('b-1')], at(10 * HOUR))
+-        await publish(bob, BOB_DEVICE, [claim('bob-1')], T0)
+-        await publish(alice, DEVICE_B, [claim('b-1')], at(25 * HOUR))
+-        expect((await rowsOf(alice)).map((row) => row.sessionId)).toEqual([
+-            'b-1'
+-        ])
+-        expect(await rowsOf(bob)).toEqual([])
+-    })
++        it('admits at most ten devices when new ones publish at once', async () => {
++            await Promise.all(
++                Array.from({ length: 14 }, (_, index) =>
++                    publish(
++                        alice,
++                        device(index),
++                        [claim(`s-${index}`)],
++                        T0
++                    ).catch((error: unknown) => error)
++                )
++            )
++            expect(
++                new Set((await rowsOf(alice)).map((row) => row.deviceId)).size
++            ).toBe(10)
++        })
+ 
+-    it('withdraws every claim of one device on DELETE', async () => {
+-        await publish(alice, DEVICE_A, [claim('a-1'), claim('a-2')], T0)
+-        await publish(alice, DEVICE_B, [claim('b-1')], T0)
+-        await withdrawDeviceClaims(alice.id, DEVICE_A)
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['b-1'])
+-        await withdrawDeviceClaims(bob.id, DEVICE_B)
+-        expect(await sessionsSeenBy(alice, at(SECOND))).toEqual(['b-1'])
+-    })
++        it('takes one publish per device every two seconds', async () => {
++            const deviceId = `rate-${randomUUID().slice(0, 8)}`
++            const otherDevice = `rate-${randomUUID().slice(0, 8)}`
++            const body = { deviceLabel: 'Studio Mac', claims: [claim('r-1')] }
++            await publishDeviceClaims(alice.id, deviceId, body, T0)
++            const refused = await refusedWith(
++                () => publishDeviceClaims(alice.id, deviceId, body, at(SECOND)),
++                'work_claims_rate_limited',
++                429
++            )
++            expect(refused.retryAfterSeconds).toBe(1)
++            await publishDeviceClaims(alice.id, otherDevice, body, at(SECOND))
++            await publishDeviceClaims(bob.id, deviceId, body, at(SECOND))
++            await publishDeviceClaims(alice.id, deviceId, body, at(2 * SECOND))
++        })
+ 
+-    it('keeps one device’s concurrent publishes from leaving the union of both', async () => {
+-        const first = Array.from({ length: 50 }, (_, index) =>
+-            claim(`first-${index}`)
+-        )
+-        const second = Array.from({ length: 50 }, (_, index) =>
+-            claim(`second-${index}`)
+-        )
+-        await Promise.all([
+-            publish(alice, DEVICE_A, first, T0),
+-            publish(alice, DEVICE_A, second, T0)
+-        ])
+-        const sessions = (await rowsOf(alice)).map((row) => row.sessionId)
+-        expect(sessions).toHaveLength(50)
+-        expect(new Set(sessions.map((id) => id.split('-')[0])).size).toBe(1)
+-    })
++        it('answers 429 with Retry-After through the route, and never limits DELETE', async () => {
++            const deviceId = `rate-${randomUUID().slice(0, 8)}`
++            const call = (method: 'PUT' | 'DELETE') =>
++                app.request(`/work-claims/devices/${deviceId}`, {
++                    method,
++                    headers: {
++                        'content-type': 'application/json',
++                        'X-Test-User': alice.id
++                    },
++                    ...(method === 'PUT'
++                        ? {
++                              body: JSON.stringify({
++                                  deviceLabel: 'Studio Mac',
++                                  claims: [claim('r-1')]
++                              })
++                          }
++                        : {})
++                })
++            expect((await call('PUT')).status).toBe(200)
++            const limited = await call('PUT')
++            expect(limited.status).toBe(429)
++            expect(['1', '2']).toContain(limited.headers.get('retry-after'))
++            expect(await limited.json()).toEqual({
++                error: 'work_claims_rate_limited'
++            })
++            for (let attempt = 0; attempt < 3; attempt += 1) {
++                const withdrawn = await call('DELETE')
++                expect(withdrawn.status).toBe(200)
++                expect(await withdrawn.json()).toEqual({ claims: 0 })
++            }
++        })
+ 
+-    it('returns at most 500 claims, newest activity first', async () => {
+-        for (const device of [1, 2, 3, 4, 5, 6])
++        it('reads at most 50 claims per person, newest activity first', async () => {
++            for (const index of [1, 2])
++                await publish(
++                    alice,
++                    device(index),
++                    Array.from({ length: 100 }, (_, claimIndex) =>
++                        claim(`d${index}-${claimIndex}`, {
++                            idleSeconds: index * 1000 + claimIndex
++                        })
++                    ),
++                    T0
++                )
+             await publish(
+-                alice,
+-                `alice-device-${device}000`,
+-                Array.from({ length: 100 }, (_, index) =>
+-                    claim(`d${device}-${index}`, {
+-                        idleSeconds: device * 1000 + index
+-                    })
++                bob,
++                BOB_DEVICE,
++                Array.from({ length: 10 }, (_, index) =>
++                    claim(`bob-${index}`, { idleSeconds: 5000 + index })
+                 ),
+                 T0
+             )
+-        const { claims } = await list(alice, at(SECOND))
+-        expect(claims).toHaveLength(500)
+-        expect(claims[0]?.sessionId).toBe('d1-0')
+-        const times = claims.map((entry) => entry.lastActiveAt)
+-        expect(times).toEqual([...times].sort((a, b) => b - a))
+-        expect(claims.some((entry) => entry.sessionId?.startsWith('d6-'))).toBe(
+-            false
+-        )
++            const { claims } = await list(alice, at(SECOND))
++            const own = claims.filter((entry) => entry.person.you)
++            expect(own).toHaveLength(50)
++            expect(own.map((entry) => entry.sessionId)).toEqual(
++                Array.from({ length: 50 }, (_, index) => `d1-${index}`)
++            )
++            expect(claims.filter((entry) => !entry.person.you)).toHaveLength(10)
++            const times = claims.map((entry) => entry.lastActiveAt)
++            expect(times).toEqual([...times].sort((a, b) => b - a))
++        })
++
++        it('reads at most 500 claims in all', async () => {
++            const teammates = Array.from({ length: 11 }, (_, index) =>
++                user(`mate-${index}`, `Mate ${index}`)
++            )
++            await db.insert(schema.users).values(teammates)
++            await db
++                .insert(schema.memberships)
++                .values(
++                    teammates.map((mate) => membership(teamOrg, mate, 'member'))
++                )
++            for (const mate of teammates)
++                await publish(
++                    mate,
++                    'mate-device-0000',
++                    Array.from({ length: 60 }, (_, index) =>
++                        claim(`m-${index}`, { idleSeconds: index })
++                    ),
++                    T0
++                )
++            const { claims } = await list(bob, at(SECOND))
++            expect(claims).toHaveLength(500)
++            const perPerson = new Map<string, number>()
++            for (const entry of claims)
++                perPerson.set(
++                    entry.person.name,
++                    (perPerson.get(entry.person.name) ?? 0) + 1
++                )
++            expect(Math.max(...perPerson.values())).toBeLessThanOrEqual(50)
++        })
+     })
+ 
+-    it('rejects a row the schema forbids', async () => {
+-        await expect(
+-            db.insert(schema.issueWorkClaims).values({
+-                id: randomUUID(),
+-                userId: alice.id,
+-                deviceId: DEVICE_A,
+-                deviceLabel: 'x',
+-                sessionId: 's',
+-                scope: WIDGETS,
+-                issueProvider: 'jira',
+-                issueId: '1',
+-                issueIdentifier: '#1',
+-                title: 't',
+-                state: 'working',
+-                since: T0,
+-                lastActiveAt: T0,
+-                refreshedAt: T0,
+-                expiresAt: T0
+-            })
+-        ).rejects.toThrow()
++    describe('claim keys', () => {
++        it('are equal for one person’s session from two devices, and differ across people and sessions', async () => {
++            const cloudSession = 'cloud:workspace-1:tab-1'
++            await publish(
++                alice,
++                DEVICE_A,
++                [claim(cloudSession), claim('a-2')],
++                T0
++            )
++            await publish(alice, DEVICE_B, [claim(cloudSession)], T0)
++            await publish(bob, BOB_DEVICE, [claim(cloudSession)], T0)
++            const seenByDave = (await list(dave, at(SECOND))).claims
++            const keys = seenByDave.map((entry) => entry.key)
++            expect(keys).toHaveLength(4)
++            expect(new Set(keys).size).toBe(3)
++            expect(
++                keys.filter((key) => key === keyOf(alice, cloudSession))
++            ).toHaveLength(2)
++            expect(keys).toContain(keyOf(bob, cloudSession))
++            expect(keys).toContain(keyOf(alice, 'a-2'))
++            for (const key of keys) {
++                expect(key).toMatch(/^[0-9a-f]{32}$/)
++                expect(key).not.toContain(alice.id)
++                expect(key).not.toContain('cloud')
++            }
++            const own = (await list(alice, at(SECOND))).claims.filter(
++                (entry) => entry.sessionId === cloudSession && entry.person.you
++            )
++            expect(own.map((entry) => entry.key)).toEqual([
++                keyOf(alice, cloudSession),
++                keyOf(alice, cloudSession)
++            ])
++            expect(own.map((entry) => entry.device?.id).sort()).toEqual([
++                DEVICE_A,
++                DEVICE_B
++            ])
++        })
+     })
+ 
+     it('lists through the controller with the server clock', async () => {
+@@ -674,6 +1023,7 @@ integration('work claims (terminalx#441)', () => {
+         expect(Math.abs(body.now - Date.now())).toBeLessThan(60 * SECOND)
+         expect(body.claims).toEqual([
+             expect.objectContaining({
++                key: keyOf(alice, 'a-1'),
+                 person: { name: 'Alice Example', you: false },
+                 device: null,
+                 sessionId: null,
+@@ -682,25 +1032,31 @@ integration('work claims (terminalx#441)', () => {
+         ])
+     })
+ 
+-    describe('the organization switch', () => {
++    describe('the organization settings', () => {
++        const settings = (
++            overrides: Record<string, unknown> = {}
++        ): Record<string, unknown> => ({
++            shareWorkStatus: true,
++            canManage: false,
++            personal: false,
++            linearWorkspaces: [],
++            ...overrides
++        })
++
+         it('answers members and refuses everyone else as not found', async () => {
+             expect(await workStatus(bob, teamOrg)).toEqual({
+                 status: 200,
+-                body: {
+-                    shareWorkStatus: true,
+-                    canManage: false,
+-                    personal: false
+-                }
++                body: settings()
+             })
+             expect(await workStatus(dave, teamOrg)).toEqual({
+                 status: 200,
+-                body: {
+-                    shareWorkStatus: true,
+-                    canManage: true,
+-                    personal: false
+-                }
++                body: settings({ canManage: true })
+             })
+-            for (const body of [undefined, { shareWorkStatus: false }])
++            for (const body of [
++                undefined,
++                { shareWorkStatus: false },
++                { linearWorkspaces: ['acme'] }
++            ])
+                 expect(await workStatus(carol, teamOrg, body)).toEqual({
+                     status: 404,
+                     body: { error: 'not_found' }
+@@ -711,22 +1067,15 @@ integration('work claims (terminalx#441)', () => {
+             })
+         })
+ 
+-        it('lets owners and admins change it, and nobody else', async () => {
++        it('lets owners and admins change the switch, and nobody else', async () => {
+             expect(
+                 await workStatus(bob, teamOrg, { shareWorkStatus: false })
+-            ).toEqual({
+-                status: 403,
+-                body: { error: 'forbidden' }
+-            })
++            ).toEqual({ status: 403, body: { error: 'forbidden' } })
+             expect(
+                 await workStatus(dave, teamOrg, { shareWorkStatus: false })
+             ).toEqual({
+                 status: 200,
+-                body: {
+-                    shareWorkStatus: false,
+-                    canManage: true,
+-                    personal: false
+-                }
++                body: settings({ shareWorkStatus: false, canManage: true })
+             })
+             const [setting] = await db
+                 .select()
+@@ -739,61 +1088,101 @@ integration('work claims (terminalx#441)', () => {
+                 )
+             expect(setting).toMatchObject({
+                 shareWorkStatus: false,
++                linearWorkspaces: [],
+                 updatedBy: dave.id
+             })
+-            expect((await workStatus(bob, teamOrg)).body).toEqual({
+-                shareWorkStatus: false,
+-                canManage: false,
+-                personal: false
+-            })
++            expect((await workStatus(bob, teamOrg)).body).toEqual(
++                settings({ shareWorkStatus: false })
++            )
+             expect(
+                 await workStatus(alice, teamOrg, { shareWorkStatus: true })
++            ).toEqual({ status: 200, body: settings({ canManage: true }) })
++        })
++
++        it('lets owners and admins declare Linear workspaces, keeping what they did not send', async () => {
++            expect(
++                await workStatus(bob, teamOrg, { linearWorkspaces: ['acme'] })
++            ).toEqual({ status: 403, body: { error: 'forbidden' } })
++            expect(
++                await workStatus(dave, teamOrg, {
++                    linearWorkspaces: ['Acme', 'acme', 'acme-hq']
++                })
+             ).toEqual({
+                 status: 200,
+-                body: {
+-                    shareWorkStatus: true,
++                body: settings({
+                     canManage: true,
+-                    personal: false
+-                }
++                    linearWorkspaces: ['acme', 'acme-hq']
++                })
+             })
++            expect(
++                await workStatus(alice, teamOrg, { shareWorkStatus: false })
++            ).toEqual({
++                status: 200,
++                body: settings({
++                    shareWorkStatus: false,
++                    canManage: true,
++                    linearWorkspaces: ['acme', 'acme-hq']
++                })
++            })
++            expect(
++                await workStatus(dave, teamOrg, {
++                    shareWorkStatus: true,
++                    linearWorkspaces: []
++                })
++            ).toEqual({ status: 200, body: settings({ canManage: true }) })
++            expect((await workStatus(bob, teamOrg)).body).toEqual(settings())
+         })
+ 
+-        it('takes exactly { shareWorkStatus: boolean }', async () => {
++        it('takes a strict body with at least one valid field', async () => {
+             for (const body of [
+                 {},
+                 { shareWorkStatus: 'no' },
+-                { shareWorkStatus: false, extra: 1 }
++                { shareWorkStatus: false, extra: 1 },
++                { linearWorkspaces: 'acme' },
++                { linearWorkspaces: ['linear.app/acme'] },
++                { linearWorkspaces: ['ac_me'] },
++                {
++                    linearWorkspaces: Array.from(
++                        { length: 11 },
++                        (_, index) => `team-${index}`
++                    )
++                }
+             ])
+                 expect(await workStatus(dave, teamOrg, body)).toEqual({
+                     status: 400,
+                     body: { error: 'work_claims_invalid_request' }
+                 })
++            expect((await workStatus(dave, teamOrg)).body).toEqual(
++                settings({ canManage: true })
++            )
+         })
+ 
+-        it('has no switch in a personal organization', async () => {
++        it('has no settings in a personal organization', async () => {
+             expect(await workStatus(alice, alicePersonal)).toEqual({
+                 status: 200,
+                 body: {
+                     shareWorkStatus: false,
+                     canManage: false,
+-                    personal: true
++                    personal: true,
++                    linearWorkspaces: []
+                 }
+             })
+-            expect(
+-                await workStatus(alice, alicePersonal, {
+-                    shareWorkStatus: true
++            for (const body of [
++                { shareWorkStatus: true },
++                { linearWorkspaces: ['acme'] }
++            ])
++                expect(await workStatus(alice, alicePersonal, body)).toEqual({
++                    status: 400,
++                    body: { error: 'work_status_personal_organization' }
+                 })
+-            ).toEqual({
+-                status: 400,
+-                body: { error: 'work_status_personal_organization' }
+-            })
+         })
+ 
+         it('fails with a typed error from the service', async () => {
+-            const { workStatusSettings } = await import('@/services/workClaims')
+-            await expect(
+-                workStatusSettings.get(carol.id, teamOrg)
+-            ).rejects.toBeInstanceOf(WorkClaimsError)
++            await refusedWith(
++                () => workStatusSettings.get(carol.id, teamOrg),
++                'not_found',
++                404
++            )
+         })
+     })
+ })
+\ No newline at end of file
+diff --git a/apps/api/src/services/workClaims/workStatusSettings.ts b/apps/api/src/services/workClaims/workStatusSettings.ts
+index 7f6aeab..a5feb0f 100644
+--- a/apps/api/src/services/workClaims/workStatusSettings.ts
++++ b/apps/api/src/services/workClaims/workStatusSettings.ts
+@@ -27,7 +27,10 @@ const viewerFor = async (
+         .select({
+             role: memberships.role,
+             isPersonal: organizations.isPersonal,
+-            shareWorkStatus: sql<boolean>`coalesce(${organizationWorkStatusSettings.shareWorkStatus}, true)`
++            shareWorkStatus: sql<boolean>`coalesce(${organizationWorkStatusSettings.shareWorkStatus}, true)`,
++            linearWorkspaces: sql<
++                string[]
++            >`coalesce(${organizationWorkStatusSettings.linearWorkspaces}, '{}'::text[])`
+         })
+         .from(memberships)
+         .innerJoin(
+@@ -49,11 +52,12 @@ const viewerFor = async (
+     return { userId, organizationId, ...viewer }
+ }
+ 
+-/** A personal organization never shares, so it has no switch to offer. */
++/** A personal organization never shares, so it has no settings to offer. */
+ const viewOf = (viewer: WorkStatusViewer): WorkStatusSettingsView => ({
+     shareWorkStatus: !viewer.isPersonal && viewer.shareWorkStatus,
+     canManage: !viewer.isPersonal && MANAGE_ROLES.includes(viewer.role),
+-    personal: viewer.isPersonal
++    personal: viewer.isPersonal,
++    linearWorkspaces: viewer.isPersonal ? [] : viewer.linearWorkspaces
+ })
+ 
+ const get = async (
+@@ -73,20 +77,24 @@ const update = async (
+         throw new WorkClaimsError(workClaims.errors.forbidden, 403)
+     if (viewer.isPersonal)
+         throw new WorkClaimsError(workClaims.errors.personalOrganization, 400)
+-    const { shareWorkStatus } = workClaimsValidation.parseWorkStatusUpdate(body)
+-    await db
++    const changes = workClaimsValidation.parseWorkStatusUpdate(body)
++    const [stored] = await db
+         .insert(organizationWorkStatusSettings)
+         .values({
+             organizationId,
+-            shareWorkStatus,
++            ...changes,
+             updatedBy: userId,
+             updatedAt: now
+         })
+         .onConflictDoUpdate({
+             target: organizationWorkStatusSettings.organizationId,
+-            set: { shareWorkStatus, updatedBy: userId, updatedAt: now }
++            set: { ...changes, updatedBy: userId, updatedAt: now }
+         })
+-    return viewOf({ ...viewer, shareWorkStatus })
++        .returning({
++            shareWorkStatus: organizationWorkStatusSettings.shareWorkStatus,
++            linearWorkspaces: organizationWorkStatusSettings.linearWorkspaces
++        })
++    return viewOf({ ...viewer, ...stored })
+ }
+ 
+ const workStatusSettings = { get, update }
+diff --git a/apps/api/src/ts/Interfaces.ts b/apps/api/src/ts/Interfaces.ts
+index 6c81bb0..bde89e9 100644
+--- a/apps/api/src/ts/Interfaces.ts
++++ b/apps/api/src/ts/Interfaces.ts
+@@ -2987,8 +2987,10 @@ export interface WorkClaimsListQuery {
+     scopes: string[]
+ }
+ 
++/** Only the fields sent change; at least one is. */
+ export interface WorkStatusUpdateInput {
+-    shareWorkStatus: boolean
++    shareWorkStatus?: boolean
++    linearWorkspaces?: string[]
+ }
+ 
+ /** The caller's membership in the path organization, with its switch. */
+@@ -2998,4 +3000,5 @@ export interface WorkStatusViewer {
+     role: string
+     isPersonal: boolean
+     shareWorkStatus: boolean
++    linearWorkspaces: string[]
+ }
+\ No newline at end of file
+diff --git a/apps/api/src/ts/Types.ts b/apps/api/src/ts/Types.ts
+index 0a18f7f..4225c5a 100644
+--- a/apps/api/src/ts/Types.ts
++++ b/apps/api/src/ts/Types.ts
+@@ -782,7 +782,7 @@ export type WorkClaimProvider =
+ export type WorkClaimState =
+     (typeof workClaims.states)[keyof typeof workClaims.states]
+ 
+-export type WorkClaimsErrorStatus = 400 | 403 | 404
++export type WorkClaimsErrorStatus = 400 | 403 | 404 | 409 | 429
+ 
+ export type WorkClaimIssue = {
+     provider: WorkClaimProvider
+@@ -809,6 +809,7 @@ export type WorkClaimDevice = {
+ 
+ /** One claim as `GET /v1/desktop/work-claims` shows it; times in epoch ms. */
+ export type WorkClaimView = {
++    key: string
+     scope: string
+     issue: WorkClaimIssue
+     person: WorkClaimPerson
+@@ -835,4 +836,5 @@ export type WorkStatusSettingsView = {
+     shareWorkStatus: boolean
+     canManage: boolean
+     personal: boolean
++    linearWorkspaces: string[]
+ }
+\ No newline at end of file
 -- 
 2.50.1 (Apple Git-155)
 

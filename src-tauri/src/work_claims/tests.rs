@@ -127,16 +127,19 @@ fn an_unchanged_set_waits_for_the_heartbeat_and_a_withdrawal_is_sent_at_once() {
     let (base, requests) = serve(r#"{"claims":1,"refreshAfterSeconds":120}"#);
     let claims = service(&base);
     let linker = Linker::default();
-    claims.publish(&linker);
-    claims.publish(&linker);
+    assert!(claims.publish(&linker));
+    assert!(claims.publish(&linker));
     assert_eq!(requests.lock().unwrap().len(), 1, "nothing changed");
-    // Archiving the session is publishing without its claim.
+    // Archiving the session is publishing without its claim, as soon as the server takes another publish.
     index::update(|sessions| {
         sessions[0].archived = true;
         Ok(())
     })
     .unwrap();
-    claims.publish(&linker);
+    assert!(!claims.publish(&linker), "within the server's gap the change waits");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    claims.state.lock().unwrap().last_put = Instant::now().checked_sub(MIN_GAP);
+    assert!(claims.publish(&linker));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(body(&requests[1])["claims"], json!([]));

@@ -166,12 +166,16 @@ chip's tooltip and the menu), and every link can be removed:
 
 The account service side is in terminalx-saas (branch
 `raccoon/441-work-claims`, contract `apps/api/docs/work-claims.md`). A
-snapshot is in [patches/441-terminalx-server.patch](patches/441-terminalx-server.patch),
+snapshot of its two commits (`6c86414`, `1615d7c`) is in
+[patches/441-terminalx-server.patch](patches/441-terminalx-server.patch),
 based on server commit `3bb4d26`. It adds migration 0095
-(`issue_work_claims`, `organization_work_status_settings`), the routes
+(`issue_work_claims`, and `organization_work_status_settings` with the
+switch and the organization's Linear workspaces), the routes
 `PUT`/`DELETE /v1/desktop/work-claims/devices/:deviceId`,
 `GET /v1/desktop/work-claims` and `GET`/`POST /v1/desktop/orgs/:orgId/work-status`,
-and the `account.work-claims.v1` capability flag. Deploy it before
+the `account.work-claims.v1` capability flag, and the limits above (409
+`work_claims_device_limit`, 429 `work_claims_rate_limited` with
+`Retry-After`). Deploy it before
 releasing the desktop feature; until then the desktop shows this Mac only.
 
 ## Not done
