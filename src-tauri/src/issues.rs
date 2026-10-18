@@ -294,44 +294,144 @@ pub fn parse_github_issues(v: &Value) -> Vec<Issue> {
     v.as_array().map(|a| a.iter().map(parse_github_issue).collect()).unwrap_or_default()
 }
 
-/// What `gh issue list` is run with for `filter`. Always a search, which is
-/// what sorts it and what finds unassigned issues, as the website's own
-/// issue search does.
-pub fn github_list_args(repo: &str, filter: &IssueFilter) -> Result<Vec<String>> {
+/// How a GitHub list is read for a filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GithubList {
+    /// `GET /repos/{repo}/issues` with these parameters: the repository's own
+    /// list, which shows an issue's new state the moment it changes.
+    Rest(Vec<(&'static str, String)>),
+    /// `gh issue list` with these arguments, for free text: only GitHub's
+    /// search finds words, and its index lags a change by a few seconds.
+    Search(Vec<String>),
+}
+
+/// How `filter` is read, as the website's list shows it: labels all
+/// present, the sort and direction it names. `me` is the reader's login,
+/// asked for only when the list is the reader's.
+pub fn github_list_query(repo: &str, filter: &IssueFilter, me: impl FnOnce() -> Result<String>) -> Result<GithubList> {
     let state = match filter.state() {
         state @ ("open" | "closed" | "all") => state,
         other => bail!("GitHub issues are open or closed, not {other}."),
     };
-    let sort = match filter.sort() {
-        "updated" => "sort:updated-desc",
-        "created" => "sort:created-desc",
-        "created_asc" => "sort:created-asc",
+    let (sort, direction) = match filter.sort() {
+        "updated" => ("updated", "desc"),
+        "created" => ("created", "desc"),
+        "created_asc" => ("created", "asc"),
         "priority" => bail!("GitHub issues have no priority to sort by."),
         other => bail!("Unknown sort {other}."),
     };
+    let labels: Vec<&str> = filter.labels.iter().map(|label| label.trim()).filter(|label| !label.is_empty()).collect();
+    let assignee = filter.assignee();
+    let Some(text) = filter.search() else {
+        let mut params = vec![("state", state.to_string()), ("sort", sort.to_string()), ("direction", direction.to_string())];
+        match assignee {
+            Some(AssigneeFilter::Me) => params.push(("assignee", me()?)),
+            Some(AssigneeFilter::Unassigned) => params.push(("assignee", "none".into())),
+            Some(AssigneeFilter::Person { id }) => params.push(("assignee", id)),
+            None => {}
+        }
+        if !labels.is_empty() {
+            params.push(("labels", labels.join(",")));
+        }
+        return Ok(GithubList::Rest(params));
+    };
     let mut args: Vec<String> = ["issue", "list", "--repo", repo, "--state", state, "--limit", &LIMIT.to_string(), "--json", GH_LIST_FIELDS].map(String::from).into();
     let mut search = Vec::new();
-    match filter.assignee() {
+    match assignee {
         Some(AssigneeFilter::Me) => args.extend(["--assignee".into(), "@me".into()]),
         Some(AssigneeFilter::Unassigned) => search.push("no:assignee".to_string()),
         Some(AssigneeFilter::Person { id }) => args.extend(["--assignee".into(), id]),
         None => {}
     }
-    for label in filter.labels.iter().map(|label| label.trim()).filter(|label| !label.is_empty()) {
+    for label in labels {
         args.extend(["--label".into(), label.into()]);
     }
-    search.extend(filter.search().map(String::from));
-    search.push(sort.into());
+    search.push(text.to_string());
+    search.push(format!("sort:{sort}-{direction}"));
     args.extend(["--search".into(), search.join(" ")]);
-    Ok(args)
+    Ok(GithubList::Search(args))
 }
+
+/// A row of `GET /repos/{repo}/issues`, or `None` for a pull request, which that list also holds.
+pub fn parse_github_rest_issue(v: &Value) -> Option<Issue> {
+    if !v["pull_request"].is_null() {
+        return None;
+    }
+    let number = v["number"].as_i64()?;
+    let closed = v["state"].as_str() == Some("closed");
+    let labels = v["labels"]
+        .as_array()
+        .map(|all| all.iter().filter_map(|l| Some(IssueLabel { id: None, name: l["name"].as_str()?.into(), color: l["color"].as_str().unwrap_or("").trim_start_matches('#').into() })).collect())
+        .unwrap_or_default();
+    // This list names people by login only.
+    let assignees: Vec<IssueUser> = v["assignees"]
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter_map(|a| {
+                    let login = a["login"].as_str()?;
+                    Some(IssueUser { id: login.into(), name: login.into(), login: Some(login.into()), avatar_url: a["avatar_url"].as_str().map(String::from) })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Issue {
+        provider: "github".into(),
+        id: number.to_string(),
+        node_id: v["node_id"].as_str().map(String::from),
+        identifier: format!("#{number}"),
+        number,
+        title: v["title"].as_str().unwrap_or("").into(),
+        url: v["html_url"].as_str().unwrap_or("").into(),
+        state: if closed { "Closed" } else { "Open" }.into(),
+        state_type: match (closed, v["state_reason"].as_str()) {
+            (true, Some("not_planned")) => "canceled",
+            (true, _) => "completed",
+            _ => "open",
+        }
+        .into(),
+        workflow_state_type: None,
+        labels,
+        assignee: assignees.first().map(|first| IssueAssignee { name: first.name.clone(), avatar_url: first.avatar_url.clone() }),
+        assignees,
+        updated_at: v["updated_at"].as_str().unwrap_or("").into(),
+        body: None,
+        team: None,
+    })
+}
+
+/// The most pages of 100 read to fill a list that pull requests share.
+const REST_PAGES: usize = 3;
 
 pub fn github_list(cwd: &Path, filter: &IssueFilter) -> Result<Vec<Issue>> {
     let repo = github_repo(cwd).ok_or_else(|| anyhow!("This project has no GitHub remote. Add one named origin to see its issues."))?;
-    let args = github_list_args(&repo, filter)?;
-    let out = run_gh(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    let v: Value = serde_json::from_str(&out).context("parse gh issue list")?;
-    Ok(parse_github_issues(&v))
+    let me = || Ok(run_gh(cwd, &["api", "user", "--jq", ".login"])?.trim().to_string());
+    match github_list_query(&repo, filter, me)? {
+        GithubList::Search(args) => {
+            let out = run_gh(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+            let v: Value = serde_json::from_str(&out).context("parse gh issue list")?;
+            Ok(parse_github_issues(&v))
+        }
+        GithubList::Rest(params) => {
+            let path = format!("repos/{repo}/issues");
+            let mut issues = Vec::new();
+            for page in 1..=REST_PAGES {
+                let mut args = vec!["api".to_string(), "-X".into(), "GET".into(), path.clone(), "-f".into(), "per_page=100".into(), "-f".into(), format!("page={page}")];
+                for (name, value) in &params {
+                    args.extend(["-f".into(), format!("{name}={value}")]);
+                }
+                let out = run_gh(cwd, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+                let v: Value = serde_json::from_str(&out).context("parse the issue list")?;
+                let rows = v.as_array().map(Vec::as_slice).unwrap_or_default();
+                issues.extend(rows.iter().filter_map(parse_github_rest_issue));
+                if rows.len() < 100 || issues.len() >= LIMIT {
+                    break;
+                }
+            }
+            issues.truncate(LIMIT);
+            Ok(issues)
+        }
+    }
 }
 
 pub fn github_details(cwd: &Path, number: &str) -> Result<Issue> {
@@ -770,49 +870,72 @@ mod tests {
     }
 
     #[test]
-    fn github_lists_are_searched_and_sorted_as_the_website_filters() {
+    fn github_lists_are_read_as_the_website_filters() {
         let filter = |value: Value| serde_json::from_value::<IssueFilter>(value).unwrap();
-        let args = |value: Value| github_list_args("acme/widgets", &filter(value)).unwrap();
-        let after = |args: &[String], flag: &str| args.iter().position(|arg| arg == flag).map(|at| args[at + 1].clone());
-        let all = |args: &[String], flag: &str| args.windows(2).filter(|pair| pair[0] == flag).map(|pair| pair[1].clone()).collect::<Vec<_>>();
+        let query = |value: Value| github_list_query("acme/widgets", &filter(value), || Ok("kim".into())).unwrap();
+        let rest = |value: Value| match query(value) {
+            GithubList::Rest(params) => params.into_iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
 
-        // What the list always asked for, now recently updated first.
-        let plain = args(json!({}));
-        assert_eq!(after(&plain, "--repo").as_deref(), Some("acme/widgets"));
-        assert_eq!(after(&plain, "--state").as_deref(), Some("open"));
-        assert_eq!(after(&plain, "--search").as_deref(), Some("sort:updated-desc"));
-        assert_eq!(after(&plain, "--assignee"), None);
-        assert!(after(&plain, "--json").unwrap().contains("stateReason"));
+        // The repository's own list, so a change shows at once: open, recently updated first.
+        assert_eq!(rest(json!({})), ["state=open", "sort=updated", "direction=desc"]);
+        assert_eq!(
+            rest(json!({"state": "closed", "sort": "created_asc", "labels": ["bug", " ", "help wanted"], "assignee": {"kind": "person", "id": "sam"}})),
+            ["state=closed", "sort=created", "direction=asc", "assignee=sam", "labels=bug,help wanted"]
+        );
+        assert_eq!(rest(json!({"state": "all", "sort": "created", "assignee": {"kind": "unassigned"}})), ["state=all", "sort=created", "direction=desc", "assignee=none"]);
+        // The reader, by login; asked for only then. The older "Assigned to me" switch still works.
+        assert_eq!(rest(json!({"assignedToMe": true})), ["state=open", "sort=updated", "direction=desc", "assignee=kim"]);
+        assert_eq!(rest(json!({"assignedToMe": true, "assignee": {"kind": "person", "id": "alex"}}))[3], "assignee=alex");
+        assert!(matches!(github_list_query("acme/widgets", &filter(json!({})), || bail!("not asked")), Ok(GithubList::Rest(_))));
 
-        let closed = args(json!({"state": "closed", "sort": "created_asc", "search": " login ", "labels": ["bug", " ", "help wanted"], "assignee": {"kind": "person", "id": "sam"}}));
-        assert_eq!(after(&closed, "--state").as_deref(), Some("closed"));
-        assert_eq!(after(&closed, "--assignee").as_deref(), Some("sam"));
-        assert_eq!(all(&closed, "--label"), ["bug", "help wanted"]);
-        assert_eq!(after(&closed, "--search").as_deref(), Some("login sort:created-asc"));
-
-        let unassigned = args(json!({"state": "all", "sort": "created", "assignee": {"kind": "unassigned"}}));
-        assert_eq!(after(&unassigned, "--state").as_deref(), Some("all"));
-        assert_eq!(after(&unassigned, "--search").as_deref(), Some("no:assignee sort:created-desc"));
-        assert_eq!(after(&unassigned, "--assignee"), None);
-
-        // The older "Assigned to me" switch still works, and the newer filter wins over it.
-        assert_eq!(after(&args(json!({"assignedToMe": true})), "--assignee").as_deref(), Some("@me"));
-        assert_eq!(after(&args(json!({"assignee": {"kind": "me"}})), "--assignee").as_deref(), Some("@me"));
-        assert_eq!(after(&args(json!({"assignedToMe": true, "assignee": {"kind": "person", "id": "kim"}})), "--assignee").as_deref(), Some("kim"));
+        // Words need GitHub's search.
+        let GithubList::Search(args) = query(json!({"state": "closed", "search": " login ", "labels": ["bug"], "assignee": {"kind": "unassigned"}, "sort": "created"})) else { panic!() };
+        let after = |flag: &str| args.iter().position(|arg| arg == flag).map(|at| args[at + 1].clone());
+        assert_eq!(after("--repo").as_deref(), Some("acme/widgets"));
+        assert_eq!(after("--state").as_deref(), Some("closed"));
+        assert_eq!(after("--label").as_deref(), Some("bug"));
+        assert_eq!(after("--search").as_deref(), Some("no:assignee login sort:created-desc"));
+        assert!(after("--json").unwrap().contains("stateReason"));
+        let GithubList::Search(mine) = query(json!({"search": "x", "assignee": {"kind": "me"}})) else { panic!() };
+        assert!(mine.windows(2).any(|pair| pair[0] == "--assignee" && pair[1] == "@me"));
 
         for refused in [json!({"state": "started"}), json!({"sort": "priority"}), json!({"sort": "sideways"})] {
-            assert!(github_list_args("acme/widgets", &filter(refused.clone())).is_err(), "{refused}");
+            assert!(github_list_query("acme/widgets", &filter(refused.clone()), || Ok("kim".into())).is_err(), "{refused}");
         }
+    }
+
+    #[test]
+    fn the_repositorys_list_leaves_out_pull_requests() {
+        let rows = json!([
+            {"number": 5, "node_id": "I_5", "title": "Crash", "state": "closed", "state_reason": "not_planned", "html_url": "https://github.com/acme/widgets/issues/5", "updated_at": "2026-10-01T00:00:00Z",
+             "labels": [{"name": "bug", "color": "d73a4a"}], "assignees": [{"login": "sam", "avatar_url": "https://avatars/sam"}], "body": "long"},
+            {"number": 6, "title": "A pull request", "state": "open", "pull_request": {"url": "u"}, "labels": [], "assignees": []},
+            {"number": 7, "title": "Open one", "state": "open", "state_reason": null, "labels": [], "assignees": []}
+        ]);
+        let issues: Vec<Issue> = rows.as_array().unwrap().iter().filter_map(parse_github_rest_issue).collect();
+        assert_eq!(issues.iter().map(|issue| issue.number).collect::<Vec<_>>(), [5, 7]);
+        let crash = &issues[0];
+        assert_eq!((crash.state.as_str(), crash.state_type.as_str(), crash.identifier.as_str()), ("Closed", "canceled", "#5"));
+        assert_eq!(crash.labels[0].color, "d73a4a");
+        assert_eq!(crash.assignees[0].id, "sam");
+        assert_eq!(crash.assignee.as_ref().unwrap().name, "sam");
+        assert_eq!(crash.url, "https://github.com/acme/widgets/issues/5");
+        // Lists leave the body to the detail read.
+        assert!(crash.body.is_none());
+        assert_eq!(issues[1].state_type, "open");
     }
 
     /// Live, opt-in (`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test live_list_filters -- --ignored --nocapture`):
     /// the list's filters against the real `gh` login and Linear key. GitHub's
     /// lists are compared with the website's own issue search for the same
-    /// query; Linear's are checked against what each filter means. The only
+    /// query (a few seconds behind any change, so nothing here changes first); Linear's are checked against what each filter means. The only
     /// writes are to the two sandbox issues (#527, PRO-101): each is closed or
     /// finished, found in the closed list, and put back where it was.
     #[test]
     #[ignore]
+    #[cfg(feature = "desktop")]
     fn live_list_filters_match_the_websites() {
         use crate::issue_ops::{details, options, set_state, Provider, StateChange, Target};
         if std::env::var("TERMINALX_LIVE_ISSUE_SANDBOX").as_deref() != Ok("1") {
@@ -822,10 +945,10 @@ mod tests {
         let repo = github_repo(&repo_dir).unwrap();
         let filter = |value: Value| serde_json::from_value::<IssueFilter>(value).unwrap();
         let numbers = |issues: &[Issue]| issues.iter().map(|issue| issue.number).collect::<Vec<_>>();
-        // What github.com/<repo>/issues?q=… shows: the search API, a page of the list's size.
-        let website = |query: &str| -> Vec<i64> {
-            let out = run_gh(&repo_dir, &["api", "-X", "GET", "search/issues", "-f", &format!("q=repo:{repo} is:issue {query}"), "-f", &format!("per_page={LIMIT}"), "--jq", "[.items[].number]"]).unwrap();
-            serde_json::from_str(&out).unwrap()
+        // What github.com/<repo>/issues?q=… shows: the search API, a page of the list's size, with the times it sorts by.
+        let website = |query: &str| -> Vec<(i64, String, String)> {
+            let out = run_gh(&repo_dir, &["api", "-X", "GET", "search/issues", "-f", &format!("q=repo:{repo} is:issue {query}"), "-f", &format!("per_page={LIMIT}"), "--jq", "[.items[] | [.number, .created_at, .updated_at]]"]).unwrap();
+            serde_json::from_value::<Vec<(i64, String, String)>>(serde_json::from_str(&out).unwrap()).unwrap()
         };
         let any_label = github_list(&repo_dir, &filter(json!({"state": "all"}))).unwrap().into_iter().find_map(|issue| issue.labels.first().map(|label| label.name.clone()));
         let mut cases = vec![
@@ -841,7 +964,18 @@ mod tests {
         }
         for (asked, query) in cases {
             let listed = numbers(&github_list(&repo_dir, &filter(asked.clone())).unwrap());
-            assert_eq!(listed, website(&query), "{asked} against {query}");
+            let shown = website(&query);
+            // The same issues, in the same order of the time sorted by; issues made in the same second may come either way round.
+            let mut same = listed.clone();
+            same.sort();
+            let mut theirs: Vec<i64> = shown.iter().map(|each| each.0).collect();
+            theirs.sort();
+            assert_eq!(same, theirs, "{asked} against {query}");
+            let by_created = query.contains("sort:created");
+            let time = |number: i64| shown.iter().find(|each| each.0 == number).map(|each| if by_created { each.1.clone() } else { each.2.clone() });
+            let times: Vec<_> = listed.iter().map(|number| time(*number)).collect();
+            let expected: Vec<_> = shown.iter().map(|each| Some(if by_created { each.1.clone() } else { each.2.clone() })).collect();
+            assert_eq!(times, expected, "{asked} against {query}: order");
             println!("GitHub {asked}: {} issues, the same as the website's \"{query}\"", listed.len());
         }
 
@@ -878,20 +1012,29 @@ mod tests {
         let github = Target::resolve(&repo_dir, Provider::Github).unwrap();
         let before = details(&github, "527").unwrap();
         assert!(before.issue.title.starts_with("[TerminalX test]") && before.issue.state_type == "open", "only the open sandbox issue");
-        // GitHub's search takes a few seconds to see a change, so the closed list is read until it does.
-        // The sandbox is reopened before anything is asserted.
-        let eventually = |found: &dyn Fn() -> bool| (0..10).any(|attempt| {
-            if attempt > 0 {
-                std::thread::sleep(Duration::from_secs(3));
-            }
-            found()
-        });
+        // Every GitHub list lags a change by a second or two (the search index the most); the lag is measured and the
+        // sandbox is reopened before anything is asserted.
+        let lag = |state: &str| {
+            let started = std::time::Instant::now();
+            (0..15).find_map(|attempt| {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                let issues = github_list(&repo_dir, &filter(json!({"state": state}))).ok()?;
+                issues.iter().find(|issue| issue.number == 527).map(|issue| (issue.state_type.clone(), started.elapsed().as_secs()))
+            })
+        };
         set_state(&github, "527", &StateChange::Close { reason: crate::issue_ops::CloseReason::NotPlanned }).unwrap();
-        let listed_closed = eventually(&|| github_list(&repo_dir, &filter(json!({"state": "closed", "search": "sandbox"}))).is_ok_and(|closed| closed.iter().any(|issue| issue.number == 527 && issue.state_type == "canceled")));
+        let closed_at = lag("closed");
         let reopened = set_state(&github, "527", &StateChange::Reopen).unwrap();
-        assert!(listed_closed, "#527 was not listed under Closed");
+        let open_at = lag("open");
+        println!("GitHub #527 under Closed after closing: {closed_at:?}; under Open after reopening: {open_at:?} (state type, seconds)");
+        let listed_closed = matches!(&closed_at, Some((kind, _)) if kind == "canceled");
+        let listed_open = open_at.is_some();
+        assert!(listed_closed, "#527 was not under Closed right after closing");
+        assert!(listed_open, "#527 was not under Open right after reopening");
         assert_eq!(reopened.issue.state_type, "open");
-        println!("GitHub #527: closed as not planned, listed under Closed as canceled, reopened");
+        println!("GitHub #527: closed as not planned, listed under Closed as canceled, reopened, listed under Open");
 
         let linear = Target::resolve(&repo_dir, Provider::Linear).unwrap();
         let before = details(&linear, "PRO-101").unwrap();

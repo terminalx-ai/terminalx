@@ -38,9 +38,10 @@ type Provider = "github" | "linear";
 
 /**
  * GitHub closes an issue a moment after the pull request that closes it is
- * merged. The list is read again once that has had time to happen.
+ * merged, and its lists show that some seconds later still. The list is read
+ * again once that has had time to happen, and once more after.
  */
-const AFTER_MERGE_MS = 3000;
+const AFTER_MERGE_MS = [3000, 12000];
 
 /**
  * A row for an issue the tracker's list no longer holds, from what its
@@ -58,9 +59,21 @@ function typingIn(target: EventTarget | null): boolean {
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || !!target.closest('[contenteditable]:not([contenteditable="false"])');
 }
 
-/** A row as read, with the state a later write gave it kept when the read is older than that write. */
-const keepState = (read: Issue, shown: Issue | undefined): Issue =>
-  shown ? { ...read, state: shown.state, stateType: shown.stateType, updatedAt: shown.updatedAt } : read;
+/** A row as read, with what a later change made here kept: its status, assignees, labels and title. */
+const keepEdits = (read: Issue, shown: Issue): Issue => ({
+  ...read,
+  title: shown.title,
+  state: shown.state,
+  stateType: shown.stateType,
+  workflowStateType: shown.workflowStateType,
+  labels: shown.labels,
+  assignee: shown.assignee,
+  assignees: shown.assignees,
+  updatedAt: shown.updatedAt,
+});
+
+/** True when the row shown holds a change the provider made after the row read: its lists lag a write by a few seconds. */
+const newerHere = (read: Issue, shown: Issue | undefined) => !!shown && Date.parse(shown.updatedAt) > Date.parse(read.updatedAt);
 
 /**
  * `next`, unless `now` is the same issue read later: an answer that was
@@ -85,7 +98,8 @@ function arrowsTaken(target: EventTarget | null): boolean {
  * no longer matches the filter stays, dimmed, until the next refresh.
  *
  * Keys, while the focus is in the view and not in a text field: Up and Down
- * move through the list; the `issues.*` shortcuts open the open issue's
+ * move through the list (from the list's side; in the detail pane they
+ * scroll); the `issues.*` shortcuts open the open issue's
  * status, assignee and label pickers and go to its comment box.
  */
 export function IssuesView({
@@ -106,6 +120,8 @@ export function IssuesView({
   const [teams, setTeams] = useState<IssueTeam[]>([]);
   const [search, setSearch] = useState("");
   const [list, setList] = useState<Issue[]>([]);
+  const listNow = useRef(list);
+  listNow.current = list;
   // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
   const [listOf, setListOf] = useState<string | null>(null);
   // The issues changed here since the list was read, by `provider:id`. One that no longer matches the filter stays
@@ -129,6 +145,7 @@ export function IssuesView({
   const [labelsOpen, setLabelsOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const detailPane = useRef<HTMLDivElement>(null);
+  const listColumn = useRef<HTMLDivElement>(null);
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
@@ -179,8 +196,8 @@ export function IssuesView({
     mergedSeen.current = { project: project?.path, count: mergedHere };
     // Another project's count is not a merge that happened in this one.
     if (before.project !== project?.path || mergedHere <= before.count) return;
-    const timer = window.setTimeout(() => setTick((t) => t + 1), AFTER_MERGE_MS);
-    return () => window.clearTimeout(timer);
+    const timers = AFTER_MERGE_MS.map((ms) => window.setTimeout(() => setTick((t) => t + 1), ms));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [mergedHere, project?.path]);
 
   useEffect(() => {
@@ -242,11 +259,20 @@ export function IssuesView({
       try {
         const r = await issuesApi.list(project.path, provider, wireFilter(filter, search));
         if (live) {
-          // A row written to since the read started keeps the state the write gave it.
-          setList((rows) => r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row)));
+          // A row changed here since the read started, or whose change the read doesn't hold yet, keeps the change;
+          // it stays marked as changed until a read that has it.
+          const shown = new Map(listNow.current.map((row) => [writeKey(row), row]));
+          const kept = new Set<string>();
+          const rows = r.map((row) => {
+            const key = writeKey(row);
+            const here = shown.get(key);
+            if (!here || !(writes.outdated(key, started) || newerHere(row, here))) return row;
+            kept.add(key);
+            return keepEdits(row, here);
+          });
+          setList(rows);
           setListOf(`${project.path}\n${provider}`);
-          // What the tracker said is the list now, but for a change made after the read began.
-          setChangedHere((keys) => new Set([...keys].filter((key) => writes.outdated(key, started))));
+          setChangedHere(kept);
         }
       } catch (e) {
         if (live) {
@@ -375,6 +401,7 @@ export function IssuesView({
     const same = (each: Issue) => each.id === issue.id && each.provider === issue.provider;
     setDetail((d) => (d && same(d) ? { ...d, ...issue } : d));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, state: issue.state, stateType: issue.stateType, workflowStateType: issue.workflowStateType, updatedAt: issue.updatedAt } : row)));
+    writes.touch(writeKey(issue));
     setChangedHere((keys) => new Set(keys).add(writeKey(issue)));
   };
   // An issue as a write answered with it: the open one shows it (even before its details came), and its row shows who has it now.
@@ -384,6 +411,7 @@ export function IssuesView({
     const same = (issue: Issue) => issue.provider === changed.provider && issue.id === changed.id;
     setDetail((now) => (selectedNow.current && same(selectedNow.current) ? newer(now, changed) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, assignee: changed.assignee, assignees: changed.assignees, updatedAt: changed.updatedAt } : row)));
+    writes.touch(writeKey(changed));
     setChangedHere((keys) => new Set(keys).add(writeKey(changed)));
   };
   const outOfFilter = (issue: Issue) => (changedHere.has(writeKey(issue)) ? filterMiss(issue, filter, provider, viewer?.id ?? null) : null);
@@ -394,8 +422,9 @@ export function IssuesView({
     const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
     setDetail((now) => (same(now) ? newer(now, next) : now));
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, workflowStateType: next.workflowStateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
+    writes.touch(writeKey(next));
     setChangedHere((keys) => new Set(keys).add(writeKey(next)));
-  }, []);
+  }, [writes.touch]);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
@@ -422,7 +451,8 @@ export function IssuesView({
     // opened out of the view (its keys reach here through React, though it is elsewhere on the page).
     if (e.defaultPrevented || e.nativeEvent.isComposing || typingIn(e.target) || !(e.target instanceof Node) || !root.current?.contains(e.target)) return;
     if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) {
-      if (arrowsTaken(e.target)) return;
+      // The list's own keys: in the detail pane they scroll the issue, as anywhere else.
+      if (arrowsTaken(e.target) || !(e.target === root.current || listColumn.current?.contains(e.target))) return;
       e.preventDefault();
       move(e.key === "ArrowDown" ? 1 : -1);
       return;
@@ -474,7 +504,7 @@ export function IssuesView({
 
   return (
     <div ref={root} className="flex h-full min-h-0 outline-none" tabIndex={-1} onKeyDown={onViewKeyDown} data-testid="issues-view">
-      <div className="flex min-w-0 flex-1 flex-col border-r border-hairline">
+      <div ref={listColumn} className="flex min-w-0 flex-1 flex-col border-r border-hairline">
         <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2 pt-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

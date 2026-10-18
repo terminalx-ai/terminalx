@@ -243,6 +243,72 @@ describe("the issue list's filters", () => {
   });
 });
 
+describe("a list read that is older than a change made here", () => {
+  /** Holds the next `issues_list` until the returned function is called; its answer is what the tracker held when it was asked. */
+  function holdNextList() {
+    const answer = invoke.getMockImplementation()!;
+    let release = () => {};
+    let held = false;
+    invoke.mockImplementation((name: string, args?: Record<string, unknown>) => {
+      if (name !== "issues_list" || held) return answer(name, args);
+      held = true;
+      const then = answer(name, args);
+      return new Promise((resolve) => (release = () => resolve(then)));
+    });
+    return {
+      /** Once the read is out (the list's GitHub read waits a moment first). */
+      asked: () => waitFor(() => expect(held).toBe(true)),
+      release: () => act(async () => release()),
+    };
+  }
+
+  async function removeBug() {
+    fireEvent.click(await screen.findByRole("button", { name: "Edit labels" }));
+    fireEvent.click(await screen.findByRole("option", { name: "bug" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Search labels" }), { key: "Escape" });
+    await waitFor(() => expect(tracker.issue("github", "41").labels).toEqual([]));
+  }
+
+  it("does not put back a label removed while it was on its way", async () => {
+    setPrefs({ issueFilters: { "/repo\ngithub": { labels: ["bug"] } } });
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    await screen.findByRole("button", { name: "Edit labels" });
+    const read = holdNextList();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await read.asked();
+    await removeBug();
+    await read.release();
+    const listedRow = row("Repair the login timeout");
+    expect(within(listedRow).queryByText("bug")).toBeNull();
+    expect(within(listedRow).getByText("Labels changed")).toBeTruthy();
+  });
+
+  it("keeps a change the provider's list doesn't show yet, until a read that does", async () => {
+    setPrefs({ issueFilters: { "/repo\ngithub": { labels: ["bug"] } } });
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    await screen.findByRole("button", { name: "Edit labels" });
+    // GitHub's lists lag a write by a few seconds: a read made just after it still has the label.
+    const before = structuredClone(tracker.issue("github", "41"));
+    await removeBug();
+    const answer = invoke.getMockImplementation()!;
+    invoke.mockImplementation((name: string, args?: Record<string, unknown>) =>
+      name === "issues_list" ? Promise.resolve(answer(name, args)).then((rows) => (rows as Issue[]).concat(rows && !(rows as Issue[]).some((each) => each.id === "41") ? [{ ...before, body: null }] : [])) : answer(name, args));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "issues_list").length).toBeGreaterThan(1));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 300)));
+    const listedRow = row("Repair the login timeout");
+    expect(within(listedRow).queryByText("bug")).toBeNull();
+    expect(within(listedRow).getByText("Labels changed")).toBeTruthy();
+
+    // Once the list has caught up, the issue is no longer in it.
+    invoke.mockImplementation(answer);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(listed("Repair the login timeout")).toBe(false));
+  });
+});
+
 describe("the issue list's keys", () => {
   const view = () => screen.getByTestId("issues-view");
   const current = () => screen.getAllByRole("button").find((button) => button.getAttribute("aria-current") === "true")?.textContent ?? "";
@@ -268,6 +334,19 @@ describe("the issue list's keys", () => {
     fireEvent.keyDown(search, { key: "s" });
     expect(current()).toContain("Repair the login timeout");
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("leave Up and Down to the detail pane while it has the focus, where they scroll the issue", async () => {
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Repair the login timeout"));
+    await screen.findByRole("button", { name: "Status: Open" });
+    const pane = screen.getByTestId("issue-detail");
+    pane.focus();
+    // Not taken: the browser scrolls the pane.
+    expect(fireEvent.keyDown(pane, { key: "ArrowDown" })).toBe(true);
+    expect(fireEvent.keyDown(pane, { key: "ArrowUp" })).toBe(true);
+    expect(current()).toContain("Repair the login timeout");
+    expect(document.activeElement).toBe(pane);
   });
 
   it("open the status, assignee and label pickers and go to the comment box, but not mid-composition", async () => {

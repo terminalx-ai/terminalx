@@ -51,9 +51,18 @@ the Issues view's list, 60 at a time. `filter` takes:
 | `search` | GitHub's issue search | the title, or the number (`42`, `ENG-42`) |
 | `teamId` | | the team |
 
-Each matches what the provider's website shows for the same filter: GitHub
-lists go through `gh issue list --search` with a `sort:` qualifier (so
-`no:assignee` works), Linear's through `issues(filter, sort)`.
+Each matches what the provider's website shows for the same filter. GitHub
+lists are the repository's own (`GET /repos/{repo}/issues` with `state`,
+`assignee` (`none` for unassigned), `labels`, `sort` and `direction`, pull
+requests left out); only free text goes through `gh issue list --search`,
+whose index is the slowest to see a change. Linear's go through
+`issues(filter, sort)`. `terminalx issues list` keeps its order: GitHub's
+newest first, Linear's recently updated first.
+
+Every GitHub list lags a write by a few seconds (2–7 s measured, the
+repository's list included). The view keeps what was
+changed here over a read that started before the change, or whose row is
+older (by the provider's `updatedAt`) than the one the change answered with.
 `assignedToMe` is the older spelling of `assignee: {kind: "me"}`. Rows carry
 `workflowStateType` on Linear (the type `stateType` folds together), and a
 GitHub issue closed as not planned is `canceled`.
