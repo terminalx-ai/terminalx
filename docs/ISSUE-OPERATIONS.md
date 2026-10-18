@@ -53,10 +53,29 @@ A failure rejects with `{kind, message}`. `kind` is one of `not_signed_in`,
 never holds a token, a key or the provider's reply. `errorMessage` reads it
 like any other error.
 
+## GitHub
+
+Every command goes through `gh api` REST (`issue_ops/github.rs`).
+
+* `issue_comments` pages 50 at a time; the cursor is the page number. A
+  comment can be changed by its author or anyone with write access.
+* Assignable users, labels and the reader's access are kept per repository
+  for the session; `issue_options(refresh)` reads them again.
+* Labels are named as the repository spells them, and a name it doesn't
+  have is refused (`invalid`): GitHub would quietly create it.
+* Assignees are set by removing the logins no longer wanted, then adding
+  the new ones. GitHub quietly skips a login that can't be assigned; the
+  answer shows who is.
+* A description edit compares `expectedUpdatedAt` with a fresh read just
+  before writing, since GitHub has no conditional write.
+* Every write reads the issue first and refuses a pull request's number.
+* Recorded replies: `src-tauri/src/fixtures/github_issue_ops.json`, replayed
+  by `issue_ops/github_tests.rs`.
+
 ## Not built yet
 
-The contract is final; the follow-up tickets fill it in. Today
-`issue_details` works for both providers and every other command answers
-`not_implemented`. On Linear `body` still carries the first 20 comments
+The contract is final; the follow-up tickets fill it in. Today GitHub
+answers every command; on Linear `issue_details` works and every other
+command answers `not_implemented`. On Linear `body` still carries the first 20 comments
 pasted under the description, for the agent prompt; `description` is the
 description alone.
