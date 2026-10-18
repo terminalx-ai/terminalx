@@ -10,6 +10,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
+import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -19,7 +20,8 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
-import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
+import { issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
+import type { IssueDetails } from "@/lib/issueOps";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -258,7 +260,7 @@ export function IssuesView({
       upsertSession(s);
       // The pipeline starts with the session, and tells the author how to hand
       // its work over. A session it cannot serve still starts, as it always did.
-      let prompt = issuePrompt(issue);
+      let prompt = await issuePromptWithComments(project.path, issue);
       if (pipelineOffered) {
         try {
           const started = await startPipeline(s.id, s.tabs[0].id, mergeChoice && !pipelineDefaults.requirePerson);
@@ -293,6 +295,8 @@ export function IssuesView({
     setUseWorktree(prefs.useWorktree);
     setAutoMerge(pipelineDefaults.autoMerge);
   };
+  // The description alone: a Linear issue read whole carries its first comments pasted under its body, and the thread shows them.
+  const detailText = detail ? ((detail as Partial<IssueDetails>).description ?? detail.body ?? "") : null;
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
@@ -562,8 +566,13 @@ export function IssuesView({
               {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
-                {detail && (detail.body?.trim() ? <Markdown text={detail.body} /> : <div className="text-sm text-faint">No description.</div>)}
+                {detailText != null && (detailText.trim() ? <Markdown text={detailText} /> : <div className="text-sm text-faint">No description.</div>)}
               </div>
+              {project && (
+                <div className="border-t border-hairline px-5 pb-5 pt-3">
+                  <IssueCommentThread projectPath={project.path} provider={selected.provider} issueId={selected.id} refreshKey={tick} />
+                </div>
+              )}
             </div>
           </>
         )}

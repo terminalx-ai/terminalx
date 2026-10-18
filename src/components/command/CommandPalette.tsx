@@ -60,7 +60,7 @@ import {
 import { api, errorMessage, files, gh, issues, type FileHit, type Issue, type PullRequest } from "@/lib/api";
 import { openFile } from "@/lib/editors";
 import { runShortcut, useHotkey } from "@/lib/hotkeys";
-import { issuePrompt, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
+import { issuePromptWithComments, issueWorktreeName, pullRequestPrompt } from "@/lib/issueSession";
 import { pipelineSettings, startPipeline } from "@/lib/issuePipeline";
 import { getPrefs } from "@/lib/prefs";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
@@ -575,7 +575,7 @@ export function CommandPalette({
       setOpen(false);
       const tab = session.tabs[0];
       if (tab) {
-        let prompt = item.issue ? issuePrompt(item.issue) : pullRequestPrompt(item.pullRequest!);
+        let prompt = item.issue ? await issuePromptWithComments(item.project.path, item.issue) : pullRequestPrompt(item.pullRequest!);
         // An issue is carried on to a pull request and a review, with the
         // project's default for the merge. A pull request already is one.
         if (item.issue && pipelineSettings(item.project).enabled) {
