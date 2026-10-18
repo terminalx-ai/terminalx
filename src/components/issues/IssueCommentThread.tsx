@@ -170,8 +170,7 @@ export interface IssueThreadControls {
  * cursor pages from the oldest), the most recent `THREAD_WINDOW` are shown,
  * and "Show earlier comments" uncovers older ones a window at a time.
  * `refreshKey` reads it again, keeping what is on screen until the answer
- * comes. `footer` is rendered under the comments once they are read (or
- * failed to be), and
+ * comes. `footer` is rendered under the comments, read or not, and
  * `onComments` hears the thread whenever it changes (for the agent's prompt).
  * Render one per issue (`key` it by provider and id), so nothing in flight
  * for one issue lands on another.
@@ -283,8 +282,8 @@ export function IssueCommentThread({
           </ol>
         </>
       )}
-      {/* Under a thread that couldn't be read as well: a comment can still be written, and its draft is there. */}
-      {(comments || error) && footer?.({ append, reload })}
+      {/* Always there, so a reload never takes the box (and its focus) away, and a thread that couldn't be read still takes a comment. */}
+      {footer?.({ append, reload })}
     </section>
   );
 }

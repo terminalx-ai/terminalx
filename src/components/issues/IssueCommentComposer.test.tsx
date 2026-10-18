@@ -1,12 +1,12 @@
 import "@testing-library/dom";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createIssueOpsMock, githubIssueFixture, linearIssueFixture, type IssueOpsMock } from "@/test/issueOpsMock";
 import type { IssueDetails, IssueProvider } from "@/lib/issueOps";
 
 const { invoke, dictation } = vi.hoisted(() => ({
   invoke: vi.fn(),
-  dictation: { target: "", change: (_: string) => {} },
+  dictation: { target: "", change: (_: string) => {}, keys: true },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
@@ -18,7 +18,9 @@ vi.mock("@/components/chat/Dictation", () => ({
     dictation.change = change;
     return { dictating: false, toggle: vi.fn() };
   },
-  useDictationShortcuts: vi.fn(),
+  useDictationShortcuts: (_: unknown, enabled = true) => {
+    dictation.keys = enabled;
+  },
 }));
 vi.mock("@/lib/dictation", () => ({ stopDictation: vi.fn() }));
 
@@ -39,7 +41,7 @@ async function load() {
 }
 let modules: Awaited<ReturnType<typeof load>>;
 
-function renderIssue(provider: IssueProvider, extra: { id?: string; onIssue?: (issue: IssueDetails) => void; stateType?: IssueDetails["stateType"] } = {}) {
+function renderIssue(provider: IssueProvider, extra: { id?: string; onIssue?: (issue: IssueDetails) => void; stateType?: IssueDetails["stateType"]; refreshKey?: number } = {}) {
   const { IssueCommentThread, IssueCommentComposer } = modules;
   const issue = { ...fixtures[provider], id: extra.id ?? fixtures[provider].id, stateType: extra.stateType ?? fixtures[provider].stateType };
   return render(
@@ -48,6 +50,7 @@ function renderIssue(provider: IssueProvider, extra: { id?: string; onIssue?: (i
       projectPath="/repo"
       provider={provider}
       issueId={issue.id}
+      refreshKey={extra.refreshKey}
       footer={(controls) => <IssueCommentComposer projectPath="/repo" issue={issue} controls={controls} hooks={{ onIssue: extra.onIssue }} />}
     />,
   );
@@ -244,10 +247,12 @@ describe("Close with comment", () => {
     issues.fail("issue_set_state", "forbidden");
     type("Closing");
     fireEvent.click(screen.getByRole("button", { name: "Close with comment" }));
-    const failed = await screen.findByRole("listitem", { name: "Comment not posted" });
+    const failed = await screen.findByRole("listitem", { name: "Comment posted, issue not closed" });
     expect(within(failed).getByRole("alert")?.textContent).toContain("The comment is posted, but the issue couldn’t be closed.");
-    fireEvent.click(within(failed).getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(screen.queryByRole("listitem", { name: "Comment not posted" })).toBeNull());
+    expect(failed.textContent).toContain("posted · issue not closed");
+    expect(within(failed).queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.click(within(failed).getByRole("button", { name: "Try closing again" }));
+    await waitFor(() => expect(screen.queryByRole("listitem", { name: "Comment posted, issue not closed" })).toBeNull());
     expect(issues.calls.filter((call) => call.command === "issue_comment_add")).toHaveLength(1);
     expect(issues.issue("github", fixtures.github.id).stateType).toBe("completed");
   });
@@ -260,6 +265,107 @@ describe("Close with comment", () => {
     renderIssue("github", { stateType: "completed" });
     await screen.findByRole("textbox", { name: "Comment" });
     expect(screen.queryByRole("button", { name: "Close with comment" })).toBeNull();
+  });
+  it("keeps the comment in the thread when the close failed and the notice is dismissed, and reads the issue again", async () => {
+    const onIssue = vi.fn();
+    renderIssue("github", { onIssue });
+    await screen.findByRole("textbox", { name: "Comment" });
+    issues.fail("issue_set_state", "network");
+    type("Closing, maybe");
+    fireEvent.click(screen.getByRole("button", { name: "Close with comment" }));
+    const failed = await screen.findByRole("listitem", { name: "Comment posted, issue not closed" });
+    // The failed write is followed by a fresh read of the issue, which the view is handed.
+    await waitFor(() => expect(onIssue).toHaveBeenCalledWith(expect.objectContaining({ id: fixtures.github.id, stateType: "open" })));
+    fireEvent.click(within(failed).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("listitem", { name: "Comment posted, issue not closed" })).toBeNull();
+    await waitFor(() => expect(Array.from(document.querySelectorAll("[data-comment-id]")).filter((item) => item.textContent?.includes("Closing, maybe"))).toHaveLength(1));
+    expect(issues.calls.filter((call) => call.command === "issue_comment_add")).toHaveLength(1);
+  });
+});
+
+describe.each(["github", "linear"] as const)("a %s post whose answer was lost", (provider) => {
+  it("is known in the thread read again, so it shows as posted and is never offered for a second post", async () => {
+    // The provider's clock: the mock dates comments from 2026-10-01.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.parse("2026-10-01T00:00:00Z") });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    // The reader is the one the mock posts as.
+    issues.viewer[provider] = issues.options[provider].members[0];
+    const onIssue = vi.fn();
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "issue_comment_add") {
+        await issues.handle(command, args);
+        throw { kind: "network", message: "Couldn't reach the provider." };
+      }
+      return issues.handle(command, args) ?? undefined;
+    });
+    renderIssue(provider, { onIssue });
+    await screen.findByRole("textbox", { name: "Comment" });
+    type("Went in after all");
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(Array.from(document.querySelectorAll("[data-comment-id]")).filter((item) => item.textContent?.includes("Went in after all"))).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole("listitem", { name: /Comment (sending|not posted)/ })).toBeNull());
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(issues.calls.filter((call) => call.command === "issue_comment_add")).toHaveLength(1);
+    expect(issues.calls.some((call) => call.command === "issue_details")).toBe(true);
+    expect(onIssue).toHaveBeenCalled();
+  });
+
+  it("is offered for Retry when the thread read again doesn't have it", async () => {
+    issues.viewer[provider] = issues.options[provider].members[0];
+    renderIssue(provider);
+    await screen.findByRole("textbox", { name: "Comment" });
+    // The same text posted earlier by the reader is not this post.
+    type("Same words");
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(screen.queryByRole("listitem", { name: "Comment sending" })).toBeNull());
+    issues.fail("issue_comment_add", "network");
+    type("Same words");
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    const failed = await screen.findByRole("listitem", { name: "Comment not posted" });
+    expect(within(failed).getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+});
+
+describe("the comment box around the thread", () => {
+  it("stays, with the focus, while a thread that couldn't be read is read again", async () => {
+    issues.fail("issue_comments", "network");
+    const view = renderIssue("github");
+    await screen.findByText(/Couldn’t load the comments/);
+    const before = box();
+    before.focus();
+    type("Still here");
+    view.rerender(
+      <modules.IssueCommentThread
+        key="github:41"
+        projectPath="/repo"
+        provider="github"
+        issueId={fixtures.github.id}
+        refreshKey={1}
+        footer={(controls) => <modules.IssueCommentComposer projectPath="/repo" issue={fixtures.github} controls={controls} />}
+      />,
+    );
+    expect(box()).toBe(before);
+    expect(document.activeElement).toBe(before);
+    await waitFor(() => expect(document.querySelectorAll("[data-comment-id]").length).toBeGreaterThan(0));
+    expect(box()).toBe(before);
+    expect(document.activeElement).toBe(before);
+    expect(before.value).toBe("Still here");
+  });
+
+  it("takes the dictation keys only while it, or nothing that takes text, has the focus", async () => {
+    renderIssue("github");
+    await screen.findByRole("textbox", { name: "Comment" });
+    const title = document.createElement("input");
+    document.body.append(title);
+    act(() => title.focus());
+    expect(dictation.keys).toBe(false);
+    act(() => box().focus());
+    expect(dictation.keys).toBe(true);
+    act(() => box().blur());
+    expect(dictation.keys).toBe(true);
+    title.remove();
   });
 });
 
@@ -275,6 +381,17 @@ describe("@ mentions", () => {
     expect(box().value).toBe("Thanks @alex ");
     expect(issues.calls.some((call) => call.command === "issue_comment_add")).toBe(false);
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("offers a Linear team's members and inserts a link to their profile, which Linear shows as a mention", async () => {
+    renderIssue("linear");
+    await screen.findByRole("textbox", { name: "Comment" });
+    box().focus();
+    fireEvent.change(box(), { target: { value: "cc @ki", selectionStart: 6, selectionEnd: 6 } });
+    const list = await screen.findByRole("listbox", { name: "Mention someone" });
+    expect(within(list).getAllByRole("option").map((option) => option.querySelector(".font-medium")?.textContent)).toEqual(["Kim"]);
+    fireEvent.keyDown(box(), { key: "Tab" });
+    expect(box().value).toBe("cc https://linear.app/acme/profiles/Kim ");
   });
 
   it("finds the word being typed after an @", async () => {

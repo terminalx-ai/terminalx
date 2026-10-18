@@ -1,7 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { errorMessage } from "@/lib/api";
 import { getDraft, setDraft, subscribeDrafts } from "@/lib/drafts";
+import { readAllComments } from "@/lib/issueComments";
 import { issueOps, type IssueComment, type IssueDetails, type IssueProvider } from "@/lib/issueOps";
+import { issueViewer } from "@/lib/issueViewer";
 
 /**
  * What the reader is writing under an issue, and the comments on their way
@@ -34,6 +36,8 @@ export interface OutgoingComment {
   error?: string | null;
   /** The comment as the provider took it; once set, a retry only closes. */
   posted?: IssueComment | null;
+  /** When the comment was last sent (ms), to know it again in the thread if the answer was lost. */
+  sentAt?: number;
   /** The issue as closing it answered. */
   closed?: IssueDetails | null;
 }
@@ -146,19 +150,62 @@ export function useIssueOutbox(key: string): OutgoingComment[] {
   );
 }
 
+/** How far the provider's clock may be behind ours when a post that seemed to fail is looked for. */
+const CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
+ * The comment a post that was answered with a failure (a timeout, a dropped
+ * connection) made after all: the reader's, with this text, made since it
+ * was sent, and not one another post here already stands for.
+ */
+async function landed(issue: IssueRef, key: string, post: OutgoingComment): Promise<IssueComment | null> {
+  try {
+    const [me, thread] = await Promise.all([issueViewer(issue.projectPath, issue.provider), readAllComments(issue.projectPath, issue.provider, issue.id)]);
+    const taken = new Set((outboxes.get(key) ?? []).flatMap((each) => (each.posted ? [each.posted.id] : [])));
+    const since = (post.sentAt ?? 0) - CLOCK_SKEW_MS;
+    return (
+      [...thread.comments]
+        .reverse()
+        .find(
+          (comment) =>
+            !taken.has(comment.id) &&
+            comment.body.trim() === post.body.trim() &&
+            comment.author?.id.toLowerCase() === me.id.toLowerCase() &&
+            Date.parse(comment.createdAt) >= since,
+        ) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function run(issue: IssueRef, key: string, id: string, hooks: PostHooks) {
   update(key, id, { status: "sending", error: null });
   let post = outboxes.get(key)?.find((each) => each.id === id);
   if (!post) return;
-  try {
-    if (!post.posted) {
+  // After a failed write the issue is read again, so what is shown is what the provider has.
+  const reread = () =>
+    issueOps
+      .details(issue.projectPath, issue.provider, issue.id)
+      .then((value) => hooks.onIssue?.(value))
+      .catch(() => {});
+  if (!post.posted) {
+    const sentAt = Date.now();
+    update(key, id, { sentAt });
+    post = { ...post, sentAt };
+    try {
       const posted = await issueOps.commentAdd(issue.projectPath, issue.provider, issue.id, post.body);
       update(key, id, { posted });
       post = { ...post, posted };
+    } catch (e) {
+      const error = errorMessage(e);
+      void reread();
+      // A post can fail on the way back after the provider took it; a retry would then post it twice.
+      const found = await landed(issue, key, post);
+      if (!found) return update(key, id, { status: "failed", error });
+      update(key, id, { posted: found });
+      post = { ...post, posted: found };
     }
-  } catch (e) {
-    update(key, id, { status: "failed", error: errorMessage(e) });
-    return;
   }
   if (post.close) {
     const writeKey = `${issue.provider}:${issue.id}`;
@@ -169,6 +216,7 @@ async function run(issue: IssueRef, key: string, id: string, hooks: PostHooks) {
       hooks.onIssue?.(closed);
     } catch (e) {
       update(key, id, { status: "failed", error: `The comment is posted, but the issue couldn’t be closed. ${errorMessage(e)}` });
+      await reread();
       return;
     } finally {
       hooks.end?.(writeKey);
@@ -185,14 +233,18 @@ export function postIssueComment(issue: IssueRef, body: string, close: boolean, 
   return run(issue, key, id, hooks);
 }
 
-/** Tries a failed post again: the comment, or only the close when the comment is already in. */
+/** Tries a failed post again: the comment, or only the close when the comment is already in (and found again). */
 export function retryIssueComment(issue: IssueRef, id: string, hooks: PostHooks = {}): Promise<void> {
   const key = issueDraftKey(issue);
   if (outboxes.get(key)?.find((post) => post.id === id)?.status !== "failed") return Promise.resolve();
   return run(issue, key, id, hooks);
 }
 
-/** Drops a post from the outbox: a failed one given up on, or a sent one now in the thread. */
+/**
+ * Drops a post from the outbox: a failed one given up on, or a sent one now
+ * in the thread. A comment the provider has (a close that failed after it)
+ * is the caller's to put in the thread.
+ */
 export function settleIssuePost(issue: IssueRef, id: string) {
   const key = issueDraftKey(issue);
   const now = outboxes.get(key);

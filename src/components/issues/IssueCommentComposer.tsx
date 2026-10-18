@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Markdown } from "@/components/chat/Markdown";
@@ -32,24 +32,71 @@ export function mentionAt(text: string, caret: number): { start: number; query: 
   return match ? { start: caret - match[2].length - 1, query: match[2] } : null;
 }
 
-/** A comment on its way: "Sending…" until the provider has it, or why it isn't there with Retry and Discard. */
+/**
+ * How the provider writes a mention, or null where it has none: `@login` on
+ * GitHub; on Linear the member's profile link, from the workspace in the
+ * issue's address and the member's display name (what `IssueUser.name` is).
+ */
+export function mentionFor(provider: Issue["provider"], issueUrl: string | undefined): ((person: IssueUser) => string | null) | null {
+  if (provider === "github") return (person) => (person.login ? `@${person.login}` : null);
+  const workspace = /^https:\/\/linear\.app\/([^/]+)\//.exec(issueUrl ?? "")?.[1];
+  if (!workspace) return null;
+  return (person) => (person.name ? `https://linear.app/${workspace}/profiles/${encodeURIComponent(person.name)}` : null);
+}
+
+/** True when the text is typed somewhere: an input, a text box, editable content. */
+function editable(target: Element | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+/**
+ * Whether the dictation keys are this box's: while it has the focus, or
+ * nothing else that takes text does (so words never land here while the
+ * title or description is being edited).
+ */
+function useDictationHere(area: RefObject<HTMLTextAreaElement | null>): boolean {
+  const [here, setHere] = useState(true);
+  useEffect(() => {
+    const follow = () => setHere(document.activeElement === area.current || !editable(document.activeElement));
+    follow();
+    document.addEventListener("focusin", follow);
+    document.addEventListener("focusout", follow);
+    return () => {
+      document.removeEventListener("focusin", follow);
+      document.removeEventListener("focusout", follow);
+    };
+  }, [area]);
+  return here;
+}
+
+/**
+ * A comment on its way: "Sending…" until the provider has it, or why it isn't
+ * there with Retry and Discard. One that went in while closing the issue
+ * did not says so, with "Try closing again" and Dismiss (which keeps it).
+ */
 function OutgoingItem({ post, author, onRetry, onDiscard }: { post: OutgoingComment; author?: IssueUser | null; onRetry: () => void; onDiscard: () => void }) {
   const failed = post.status === "failed";
+  const posted = failed && !!post.posted;
   return (
-    <li className="flex min-w-0 gap-2.5 py-2.5" aria-label={failed ? "Comment not posted" : "Comment sending"} data-outgoing={post.status}>
+    <li
+      className="flex min-w-0 gap-2.5 py-2.5"
+      aria-label={posted ? "Comment posted, issue not closed" : failed ? "Comment not posted" : "Comment sending"}
+      data-outgoing={post.status}
+    >
       <UserAvatar user={author} className={cn("mt-0.5", !failed && "opacity-60")} />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <span className="truncate font-medium text-foreground">{author?.name || author?.login || "You"}</span>
           {failed ? (
-            <span className="shrink-0 text-destructive">not posted</span>
+            <span className="shrink-0 text-destructive">{posted ? "posted · issue not closed" : "not posted"}</span>
           ) : (
             <span className="flex shrink-0 items-center gap-1">
               <Loader2 className="size-3 animate-spin" /> {post.posted && post.close ? "Closing…" : "Sending…"}
             </span>
           )}
         </div>
-        <div className={cn("mt-0.5 text-[13px]", !failed && "opacity-60")}>
+        <div className={cn("mt-0.5 text-[13px]", !failed && !post.posted && "opacity-60")}>
           <Markdown text={post.body} />
         </div>
         {failed && (
@@ -57,10 +104,10 @@ function OutgoingItem({ post, author, onRetry, onDiscard }: { post: OutgoingComm
             <span className="min-w-0 flex-1 basis-40">{post.error || "The comment couldn’t be posted."}</span>
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               <Button variant="ghost" size="xs" onClick={onDiscard}>
-                Discard
+                {posted ? "Dismiss" : "Discard"}
               </Button>
               <Button variant="secondary" size="xs" onClick={onRetry}>
-                Retry
+                {posted ? "Try closing again" : "Retry"}
               </Button>
             </div>
           </div>
@@ -89,7 +136,7 @@ export function IssueCommentComposer({
   hooks,
 }: {
   projectPath: string;
-  issue: Pick<Issue, "provider" | "id" | "stateType">;
+  issue: Pick<Issue, "provider" | "id" | "stateType" | "url">;
   controls: IssueThreadControls;
   /** Who the reader is, shown on their comments while they are on their way. */
   viewer?: IssueUser | null;
@@ -104,19 +151,29 @@ export function IssueCommentComposer({
   const area = useRef<HTMLTextAreaElement>(null);
   const onText = useCallback((value: string) => setDraft(key, value), [key]);
   const dictation = useDictationInto(key, text, onText, area);
-  useDictationShortcuts(dictation);
+  useDictationShortcuts(dictation, useDictationHere(area));
   const latestHooks = useRef(hooks);
   latestHooks.current = hooks;
 
   // Posts the provider has are the thread's now.
-  const { append } = controls;
+  const { append, reload } = controls;
+  const failedSeen = useRef(new Set<string>());
   useEffect(() => {
     for (const post of outbox) {
       if (post.status !== "sent") continue;
       if (post.posted) append(post.posted);
       settleIssuePost(ref, post.id);
     }
-  }, [outbox, append, ref]);
+    // A post that failed is read again with the thread, so it shows what the provider has.
+    const failed = outbox.filter((post) => post.status === "failed" && !failedSeen.current.has(post.id));
+    for (const post of failed) failedSeen.current.add(post.id);
+    if (failed.length) reload();
+  }, [outbox, append, reload, ref]);
+  const dismiss = (post: OutgoingComment) => {
+    // The comment the provider took stays in the thread.
+    if (post.posted) append(post.posted);
+    settleIssuePost(ref, post.id);
+  };
 
   const sending = outbox.some((post) => post.status === "sending");
   const canClose = issue.provider === "github" && issue.stateType !== "completed" && issue.stateType !== "canceled";
@@ -139,12 +196,14 @@ export function IssueCommentComposer({
     onIssue: (value) => latestHooks.current?.onIssue?.(value),
   });
 
-  // `@` mentions, from the people the assignee picker offers. Linear's
-  // mentions are links to profiles the options don't name, so GitHub only.
+  // `@` mentions, from the people the assignee picker offers: `@login` on
+  // GitHub, and on Linear a link to the member's profile, which Linear shows
+  // as a mention of them.
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [people, setPeople] = useState<IssueUser[] | null>(null);
   const [active, setActive] = useState(0);
-  const mentions = issue.provider === "github";
+  const mentionOf = useMemo(() => mentionFor(issue.provider, issue.url), [issue.provider, issue.url]);
+  const mentions = !!mentionOf;
   useEffect(() => {
     if (!mentions || !mention || people) return;
     let live = true;
@@ -156,7 +215,7 @@ export function IssueCommentComposer({
       live = false;
     };
   }, [mentions, mention, people, projectPath, issue.provider, issue.id]);
-  const offered = mention && people ? people.filter((person) => person.login && matchesPerson(person, mention.query)).slice(0, MENTIONS_SHOWN) : [];
+  const offered = mention && people && mentionOf ? people.filter((person) => mentionOf(person) && matchesPerson(person, mention.query)).slice(0, MENTIONS_SHOWN) : [];
   const follow = () => {
     const el = area.current;
     if (!mentions || !el) return;
@@ -166,9 +225,10 @@ export function IssueCommentComposer({
   };
   const pick = (person: IssueUser) => {
     const el = area.current;
-    if (!mention || !person.login) return;
+    const said = mentionOf?.(person);
+    if (!mention || !said) return;
     const caret = el?.selectionStart ?? text.length;
-    const inserted = `@${person.login} `;
+    const inserted = `${said} `;
     setDraft(key, `${text.slice(0, mention.start)}${inserted}${text.slice(caret)}`);
     setMention(null);
     const at = mention.start + inserted.length;
@@ -215,7 +275,7 @@ export function IssueCommentComposer({
                   post={each}
                   author={viewer}
                   onRetry={() => void retryIssueComment(ref, each.id, hooksNow())}
-                  onDiscard={() => settleIssuePost(ref, each.id)}
+                  onDiscard={() => dismiss(each)}
                 />
               ),
           )}
@@ -263,8 +323,8 @@ export function IssueCommentComposer({
                 className={cn("flex min-w-0 cursor-default items-center gap-2 px-2 py-1 text-xs", index === active && "bg-veil-strong")}
               >
                 <Avatar person={person} className="size-4" />
-                <span className="truncate font-medium">{person.login}</span>
-                {person.name && person.name !== person.login && <span className="truncate text-faint">{person.name}</span>}
+                <span className="truncate font-medium">{person.login ?? person.name}</span>
+                {person.login && person.name && person.name !== person.login && <span className="truncate text-faint">{person.name}</span>}
               </li>
             ))}
           </ul>
