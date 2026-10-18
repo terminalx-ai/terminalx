@@ -80,7 +80,7 @@ fn details_read_the_recorded_issue_and_refuse_pull_requests() {
     let details = details_with(&mut replay.api(), REPO, SANDBOX).unwrap();
     replay.done();
     assert_eq!(details.issue.identifier, "#527");
-    assert_eq!(details.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam"]);
+    assert_eq!(details.issue.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam"]);
     assert_eq!(details.author.unwrap().login.as_deref(), Some("sam"));
     assert_eq!(details.issue.url, "https://github.com/acme/widgets/issues/527");
 
@@ -232,12 +232,12 @@ fn state_closes_with_a_reason_and_reopens() {
 #[test]
 fn assignees_are_set_as_a_whole() {
     let mut replay = Replay::step("assignees_none");
-    assert!(set_assignees_with(&mut replay.api(), REPO, SANDBOX, &[]).unwrap().assignees.is_empty());
+    assert!(set_assignees_with(&mut replay.api(), REPO, SANDBOX, &[]).unwrap().issue.assignees.is_empty());
     replay.done();
     let mut replay = Replay::step("assignees_me");
     let details = set_assignees_with(&mut replay.api(), REPO, SANDBOX, &["@sam".into()]).unwrap();
     replay.done();
-    assert_eq!(details.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam"]);
+    assert_eq!(details.issue.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam"]);
 
     // Only the difference is sent: removals first, so ten never becomes eleven.
     let mut issue = reply("details", 0);
@@ -251,7 +251,7 @@ fn assignees_are_set_as_a_whole() {
     ]);
     let details = set_assignees_with(&mut replay.api(), REPO, SANDBOX, &["Alex".into(), "robin".into(), "robin".into()]).unwrap();
     replay.done();
-    assert_eq!(details.assignees.len(), 2);
+    assert_eq!(details.issue.assignees.len(), 2);
     // When adding fails, the removed logins are put back and the error stands.
     let mut replay = Replay::of(vec![
         call("GET", "repos/acme/widgets/issues/527", None, issue.clone()),
@@ -346,7 +346,7 @@ fn an_issue_is_created_with_assignees_and_labels() {
     let created = create_with(&mut replay.api(), &session, REPO, &input).unwrap();
     replay.done();
     assert_eq!((created.issue.identifier.as_str(), created.issue.state_type.as_str()), ("#530", "open"));
-    assert_eq!(created.assignees[0].id, "sam");
+    assert_eq!(created.issue.assignees[0].id, "sam");
     assert_eq!(created.issue.labels[0].name, "question");
     let mut replay = Replay::step("create_close");
     assert_eq!(set_state_with(&mut replay.api(), REPO, "530", &StateChange::Close { reason: CloseReason::NotPlanned }).unwrap().close_reason, Some(CloseReason::NotPlanned));

@@ -14,6 +14,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::issue_ops::IssueUser;
+
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 const LIMIT: usize = 60;
 
@@ -66,8 +68,12 @@ pub struct Issue {
     /// A coarse kind across providers: `open`, `started`, `completed`, `canceled`.
     pub state_type: String,
     pub labels: Vec<IssueLabel>,
+    /// The first of `assignees`, for what reads one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<IssueAssignee>,
+    /// Every assignee, so a list row can show who has the issue.
+    #[serde(default)]
+    pub assignees: Vec<IssueUser>,
     pub updated_at: String,
     /// Markdown; GitHub lists omit it and it is fetched on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,10 +184,24 @@ pub fn parse_github_issue(v: &Value) -> Issue {
                 .collect()
         })
         .unwrap_or_default();
-    let assignee = v["assignees"].as_array().and_then(|a| a.first()).and_then(|a| {
-        let login = a["login"].as_str()?;
-        Some(IssueAssignee { name: a["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login).into(), avatar_url: None })
-    });
+    // `gh issue list` gives no avatar; GitHub serves one at the login's own address.
+    let assignees: Vec<IssueUser> = v["assignees"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|a| {
+                    let login = a["login"].as_str()?;
+                    Some(IssueUser {
+                        id: login.into(),
+                        name: a["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login).into(),
+                        login: Some(login.into()),
+                        avatar_url: Some(format!("https://github.com/{login}.png?size=64")),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let assignee = assignees.first().map(|first| IssueAssignee { name: first.name.clone(), avatar_url: None });
     Issue {
         provider: "github".into(),
         id: number.to_string(),
@@ -200,6 +220,7 @@ pub fn parse_github_issue(v: &Value) -> Issue {
         state_type: state_type.into(),
         labels,
         assignee,
+        assignees,
         updated_at: v["updatedAt"].as_str().unwrap_or("").into(),
         body: v["body"].as_str().map(String::from),
         team: None,
@@ -247,19 +268,6 @@ pub fn github_search(cwd: &Path, repo: &str, query: &str, limit: usize) -> Resul
 pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result<String> {
     let output = run_gh(cwd, &["issue", "comment", &number.to_string(), "--repo", repo, "--body", body])?;
     Ok(output.trim().lines().last().unwrap_or("").to_string())
-}
-
-pub fn github_edit_labels(cwd: &Path, repo: &str, number: i64, add: &[String], remove: &[String]) -> Result<()> {
-    let number = number.to_string();
-    if !add.is_empty() {
-        let labels = add.join(",");
-        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--add-label", &labels])?;
-    }
-    if !remove.is_empty() {
-        let labels = remove.join(",");
-        run_gh(cwd, &["issue", "edit", &number, "--repo", repo, "--remove-label", &labels])?;
-    }
-    Ok(())
 }
 
 // ------------------------------------------------------------------ Linear
@@ -320,7 +328,7 @@ pub fn parse_linear_teams(data: &Value) -> Vec<IssueTeam> {
         .unwrap_or_default()
 }
 
-const ISSUE_FIELDS: &str = "id identifier number title description url updatedAt priority state { name type color } labels { nodes { name color } } assignee { name displayName avatarUrl } team { id key name }";
+const ISSUE_FIELDS: &str = "id identifier number title description url updatedAt priority state { name type color } labels { nodes { name color } } assignee { id name displayName avatarUrl } team { id key name }";
 
 pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
     let id = n["id"].as_str()?;
@@ -336,6 +344,11 @@ pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
         name: a.get("displayName").and_then(|d| d.as_str()).or_else(|| a.get("name").and_then(|d| d.as_str())).unwrap_or("").into(),
         avatar_url: a.get("avatarUrl").and_then(|u| u.as_str()).map(String::from),
     });
+    // Linear has one assignee or none.
+    let assignees = match (n["assignee"]["id"].as_str(), &assignee) {
+        (Some(user), Some(a)) => vec![IssueUser { id: user.into(), name: a.name.clone(), login: None, avatar_url: a.avatar_url.clone() }],
+        _ => Vec::new(),
+    };
     let team = n["team"].as_object().map(|t| IssueTeam {
         id: t.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
         key: t.get("key").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -359,6 +372,7 @@ pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
         .into(),
         labels,
         assignee,
+        assignees,
         updated_at: n["updatedAt"].as_str().unwrap_or("").into(),
         body: n["description"].as_str().map(String::from),
         team,
@@ -477,24 +491,41 @@ pub enum LinearReviewMove {
     NoReviewState,
 }
 
+/// Where the pipeline's move to review takes the issue, read from its state
+/// and its team's states; `Err` is the issue left where it is. Never
+/// backwards: an issue someone already closed stays closed, and one moved by
+/// hand to a started state past review (a "QA" after "In Review") stays there.
+pub fn linear_review_step(data: &Value) -> std::result::Result<(String, String), LinearReviewMove> {
+    let Some((state_id, state_name)) = linear_review_state(data) else {
+        return Err(LinearReviewMove::NoReviewState);
+    };
+    let state = &data["issue"]["state"];
+    let current = state["name"].as_str().unwrap_or("").to_string();
+    let state_type = state["type"].as_str().unwrap_or("");
+    let review_position = data["issue"]["team"]["states"]["nodes"]
+        .as_array()
+        .and_then(|states| states.iter().find(|each| each["id"].as_str() == Some(state_id.as_str())))
+        .and_then(|review| review["position"].as_f64());
+    let past_review = state_type == "started" && matches!((state["position"].as_f64(), review_position), (Some(at), Some(review)) if at > review);
+    if state["id"].as_str() == Some(state_id.as_str()) || linear_closed(state_type) || past_review {
+        return Err(LinearReviewMove::Unchanged(current));
+    }
+    Ok((state_id, state_name))
+}
+
 /// Move a Linear issue to its team's review state. `id` is the issue's UUID
 /// or its identifier (`ENG-42`); Linear takes either.
 pub fn linear_move_to_review(key: &str, id: &str) -> Result<LinearReviewMove> {
     let data = graphql(
         key,
-        "query($id: String!) { issue(id: $id) { id state { id name type } team { states(first: 100) { nodes { id name type } } } } }",
+        "query($id: String!) { issue(id: $id) { id state { id name type position } team { states(first: 100) { nodes { id name type position } } } } }",
         json!({"id": id}),
     )?;
-    let issue = &data["issue"];
-    let issue_id = issue["id"].as_str().ok_or_else(|| anyhow!("Linear did not return that issue."))?;
-    let Some((state_id, state_name)) = linear_review_state(&data) else {
-        return Ok(LinearReviewMove::NoReviewState);
+    let issue_id = data["issue"]["id"].as_str().ok_or_else(|| anyhow!("Linear did not return that issue."))?;
+    let (state_id, state_name) = match linear_review_step(&data) {
+        Ok(step) => step,
+        Err(left) => return Ok(left),
     };
-    let current = issue["state"]["name"].as_str().unwrap_or("").to_string();
-    // Never backwards: an issue someone already closed stays closed.
-    if issue["state"]["id"].as_str() == Some(state_id.as_str()) || linear_closed(issue["state"]["type"].as_str().unwrap_or("")) {
-        return Ok(LinearReviewMove::Unchanged(current));
-    }
     let updated = graphql(
         key,
         "mutation($id: String!, $stateId: String!) { issueUpdate(id: $id, input: { stateId: $stateId }) { success } }",
@@ -531,6 +562,37 @@ mod tests {
         let closed = team(json!([{"id": "s9", "name": "Reviewed", "type": "completed"}, {"id": "s2", "name": "In Progress", "type": "started"}]));
         assert_eq!(linear_review_state(&closed), None);
         assert_eq!(linear_review_state(&json!({"issue": null})), None);
+    }
+
+    #[test]
+    fn a_state_chosen_by_hand_while_a_pipeline_runs_is_never_moved_backwards() {
+        let states = json!([
+            {"id": "s0", "name": "Backlog", "type": "backlog", "position": 0.0},
+            {"id": "s1", "name": "Todo", "type": "unstarted", "position": 1.0},
+            {"id": "s2", "name": "In Progress", "type": "started", "position": 2.0},
+            {"id": "s4", "name": "In Review", "type": "started", "position": 3.0},
+            {"id": "s8", "name": "QA", "type": "started", "position": 4.0},
+            {"id": "s5", "name": "Done", "type": "completed", "position": 5.0},
+            {"id": "s7", "name": "Canceled", "type": "canceled", "position": 6.0}
+        ]);
+        // The issue as the pipeline reads it when its pull request opens, after someone picked `id` in the status picker.
+        let picked = |id: &str| {
+            let state = states.as_array().unwrap().iter().find(|each| each["id"] == id).unwrap().clone();
+            json!({"issue": {"id": "issue-1", "state": state, "team": {"states": {"nodes": states.clone()}}}})
+        };
+        let to_review = Ok(("s4".to_string(), "In Review".to_string()));
+        // Before review: the pipeline still moves it forward.
+        for id in ["s0", "s1", "s2"] {
+            assert_eq!(linear_review_step(&picked(id)), to_review, "{id}");
+        }
+        // At review, past it, or closed: left where the person put it.
+        for (id, name) in [("s4", "In Review"), ("s8", "QA"), ("s5", "Done"), ("s7", "Canceled")] {
+            assert_eq!(linear_review_step(&picked(id)), Err(LinearReviewMove::Unchanged(name.into())), "{id}");
+        }
+        // A team that reports no positions keeps the older rule.
+        let mut unordered = picked("s8");
+        unordered["issue"]["state"]["position"] = Value::Null;
+        assert_eq!(linear_review_step(&unordered), to_review);
     }
 
     #[test]
@@ -581,6 +643,20 @@ mod tests {
         assert_eq!(issues[0].assignee.as_ref().unwrap().name, "Sam");
         assert!(issues[0].body.is_none());
         assert_eq!(issues[1].state_type, "completed");
+        assert!(issues[1].assignees.is_empty());
+    }
+
+    #[test]
+    fn github_list_keeps_every_assignee() {
+        let v: Value = serde_json::from_str(r#"[{"number":9,"title":"Shared","state":"OPEN","labels":[],"assignees":[{"login":"sam","name":"Sam"},{"login":"alex","name":""},{"login":"robin"},{"name":"no login"}],"updatedAt":"2026-09-01T10:00:00Z","url":"u"}]"#).unwrap();
+        let issue = &parse_github_issues(&v)[0];
+        assert_eq!(issue.assignees.iter().map(|user| (user.id.as_str(), user.name.as_str())).collect::<Vec<_>>(), [("sam", "Sam"), ("alex", "alex"), ("robin", "robin")]);
+        assert_eq!(issue.assignees[1].login.as_deref(), Some("alex"));
+        assert_eq!(issue.assignees[2].avatar_url.as_deref(), Some("https://github.com/robin.png?size=64"));
+        assert_eq!(issue.assignee.as_ref().unwrap().name, "Sam");
+        let wire = serde_json::to_value(issue).unwrap();
+        assert_eq!(wire["assignees"].as_array().unwrap().len(), 3);
+        assert_eq!(wire["assignees"][0]["avatarUrl"], "https://github.com/sam.png?size=64");
     }
 
     #[test]
@@ -629,6 +705,8 @@ mod tests {
         assert_eq!(i.state_type, "started");
         assert_eq!(i.labels[0].color, "eb5757");
         assert_eq!(i.assignee.as_ref().unwrap().name, "Sam");
+        // An assignee read without an id (an older query) cannot be named to Linear, so is not listed as one.
+        assert!(i.assignees.is_empty());
         assert_eq!(i.team.as_ref().unwrap().key, "ENG");
         assert_eq!(i.body.as_deref(), Some("Users get logged out."));
         let teams = parse_linear_teams(&serde_json::from_str::<Value>(r#"{"teams":{"nodes":[{"id":"t1","key":"ENG","name":"Engineering"}]}}"#).unwrap());

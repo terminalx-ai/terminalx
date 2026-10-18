@@ -101,7 +101,6 @@ pub fn parse_issue(node: &Value) -> Option<IssueDetails> {
         state_id: node["state"]["id"].as_str().map(String::from),
         state_color: node["state"]["color"].as_str().map(|color| color.trim_start_matches('#').to_string()),
         close_reason: None,
-        assignees: user(&node["assignee"]).into_iter().collect(),
         priority: node["priority"].as_u64().map(|priority| priority.min(4) as u8),
         author: user(&node["creator"]),
         created_at: node["createdAt"].as_str().unwrap_or("").into(),

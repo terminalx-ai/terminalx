@@ -2,15 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
-import { bindingText, useKeymap } from "@/lib/shortcuts";
+import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
+import { AssigneePicker } from "@/components/issues/AssigneePicker";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
+import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
+import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
+import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
@@ -23,6 +27,7 @@ import { cn } from "@/lib/cn";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
+import { useIssueViewer } from "@/lib/issueViewer";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -43,6 +48,25 @@ const AFTER_MERGE_MS = 3000;
 function issueOfPipeline(pipeline: IssuePipeline): Issue {
   const { provider, id, identifier, title, url } = pipeline.issue;
   return { provider: provider === "linear" ? "linear" : "github", id, identifier, number: Number(id) || 0, title, url, state: "", stateType: "completed", labels: [], updatedAt: pipeline.modified };
+}
+
+/** True when the target of a key is somewhere text is typed. */
+function typingIn(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || !!target.closest('[contenteditable]:not([contenteditable="false"])');
+}
+
+/** A row as read, with the state a later write gave it kept when the read is older than that write. */
+const keepState = (read: Issue, shown: Issue | undefined): Issue =>
+  shown ? { ...read, state: shown.state, stateType: shown.stateType, updatedAt: shown.updatedAt } : read;
+
+/**
+ * `next`, unless `now` is the same issue read later: an answer that was
+ * slower than a write must not put back what the write changed.
+ */
+function newer(now: Issue | null, next: Issue): Issue {
+  const same = now && now.provider === next.provider && now.id === next.id;
+  return same && Date.parse(now.updatedAt) > Date.parse(next.updatedAt) ? now : next;
 }
 
 /**
@@ -73,6 +97,9 @@ export function IssuesView({
   const [list, setList] = useState<Issue[]>([]);
   // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
   const [listOf, setListOf] = useState<string | null>(null);
+  // Who has each issue whose assignees changed here since the list was read, by `provider:id`. A row of the
+  // "Assigned to me" list assigned away from the reader stays until the next read, marked, rather than vanish under the pointer.
+  const [assignedHere, setAssignedHere] = useState<ReadonlyMap<string, string[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
@@ -86,6 +113,8 @@ export function IssuesView({
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
   const project = store.projects.find((p) => p.path === prefs.lastProject) ?? store.projects[0] ?? null;
@@ -101,6 +130,8 @@ export function IssuesView({
   // Once an issue has a pipeline its switch is the pipeline's, on the panel
   // below; a session started on it again keeps what was chosen there.
   const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
+  // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
+  const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   const agentSelection = useSessionAgent(store.harnesses);
   const { harness, modelId, effort } = agentSelection;
   const linkedIssueUrls = useMemo(
@@ -185,11 +216,14 @@ export function IssuesView({
     const t = window.setTimeout(async () => {
       setLoading(true);
       setError(null);
+      const started = writes.readStarted();
       try {
         const r = await issuesApi.list(project.path, provider, { assignedToMe, teamId, search });
         if (live) {
-          setList(r);
+          // A row written to since the read started keeps the state the write gave it.
+          setList((rows) => r.map((row) => (writes.outdated(writeKey(row), started) ? keepState(row, rows.find((each) => writeKey(each) === writeKey(row))) : row)));
           setListOf(`${project.path}\n${provider}`);
+          setAssignedHere(new Map());
         }
       } catch (e) {
         if (live) {
@@ -221,16 +255,17 @@ export function IssuesView({
       selectedAtTick.current = tick;
     }
     if (!selected || !project) return;
-    // A Linear row carries its body, and is as fresh as the list it came with.
-    if (selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick) {
-      setDetail(selected);
-      return;
-    }
+    // A Linear row carries its body, so it is shown while the issue is read
+    // whole: what editing it needs comes only with that.
+    const rowFirst = !again && selected.body != null && selected.provider === "linear" && selectedAtTick.current === tick;
+    if (rowFirst) setDetail(selected);
     let live = true;
-    if (!again) setDetailLoading(true);
+    const started = writes.readStarted();
+    if (!again && !rowFirst) setDetailLoading(true);
     issuesApi
       .details(project.path, selected.provider, selected.id)
-      .then((d) => live && setDetail(d))
+      // Not over a status change that began or ended since the read started.
+      .then((d) => live && setDetail((now) => (now && writeKey(now) === writeKey(d) && writes.outdated(writeKey(d), started) ? now : newer(now, d))))
       .catch((e) => live && setError(errorMessage(e)))
       .finally(() => live && setDetailLoading(false));
     return () => {
@@ -303,14 +338,43 @@ export function IssuesView({
   const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
     setSelected(issue);
+    setStatusOpen(false);
     setUseWorktree(prefs.useWorktree);
     setAutoMerge(pipelineDefaults.autoMerge);
   };
   // The description alone: a Linear issue read whole carries its first comments pasted under its body, and the thread shows them.
   const detailText = detail ? ((detail as Partial<IssueDetails>).description ?? detail.body ?? "") : null;
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
+  // A status change, as it shows while on its way and then as the tracker answers: the page and its row together.
+  const statusChanged = (issue: Issue) => {
+    const same = (each: Issue) => each.id === issue.id && each.provider === issue.provider;
+    setDetail((d) => (d && same(d) ? { ...d, ...issue } : d));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, state: issue.state, stateType: issue.stateType, updatedAt: issue.updatedAt } : row)));
+  };
+  // An issue as a write answered with it: the open one shows it (even before its details came), and its row shows who has it now.
+  const selectedNow = useRef(selected);
+  selectedNow.current = selected;
+  const assigned = (changed: IssueDetails) => {
+    const same = (issue: Issue) => issue.provider === changed.provider && issue.id === changed.id;
+    setDetail((now) => (selectedNow.current && same(selectedNow.current) ? newer(now, changed) : now));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, assignee: changed.assignee, assignees: changed.assignees, updatedAt: changed.updatedAt } : row)));
+    setAssignedHere((map) => new Map(map).set(`${changed.provider}:${changed.id}`, changed.assignees.map((person) => person.id)));
+  };
+  const notMine = (issue: Issue) => {
+    const who = assignedHere.get(`${issue.provider}:${issue.id}`);
+    return assignedToMe && !!viewer && !!who && !who.includes(viewer.id);
+  };
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
+  // A write answers with the issue as the provider has it now: the page and its row follow.
+  const changed = useCallback((next: IssueDetails) => {
+    const same = (issue: Issue | null) => !!issue && issue.provider === next.provider && issue.id === next.id;
+    setDetail((now) => (same(now) ? newer(now, next) : now));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
+  }, []);
+  const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  // The editors are the open issue's own: a switch starts them afresh.
+  const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
   // The session working on the issue: the pipeline's author, never its reviewer.
   const linkedSession = selected
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
@@ -443,6 +507,7 @@ export function IssuesView({
                         issue={i}
                         selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
+                        notMine={notMine(i)}
                         pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
                         onSelect={() => open(i)}
                       />
@@ -482,7 +547,19 @@ export function IssuesView({
         </div>
       </div>
 
-      <div className="flex w-[46%] min-w-[20rem] max-w-[40rem] flex-col">
+      <div
+        className="flex w-[46%] min-w-[20rem] max-w-[40rem] flex-col outline-none"
+        tabIndex={-1}
+        data-testid="issue-detail"
+        onKeyDown={(e) => {
+          if (!current || typingIn(e.target) || !matchesShortcut(e.nativeEvent, "issues.status")) return;
+          // Only an issue read whole has a picker to open, and not while a change to it is on its way.
+          const capabilities = (current as Partial<IssueDetails>).capabilities;
+          if (!capabilities || !(capabilities.workflowStates || capabilities.closeReasons) || writes.writing.has(writeKey(current))) return;
+          e.preventDefault();
+          setStatusOpen(true);
+        }}
+      >
         {!selected ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-faint">Pick an issue to read it and start a session on it.</div>
         ) : (
@@ -490,16 +567,41 @@ export function IssuesView({
             <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
                 <span className="font-mono text-xs text-faint">{selected.identifier}</span>
-                <h2 className="min-w-0 flex-1 text-[15px] font-semibold leading-snug">{selected.title}</h2>
+                <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                {current?.state && <span>{current.state}</span>}
+                {current && project && (
+                  <IssueStatusPicker
+                    key={`status:${writeKey(current)}`}
+                    projectPath={project.path}
+                    issue={current}
+                    pipeline={pipeline}
+                    open={statusOpen}
+                    onOpenChange={setStatusOpen}
+                    busy={writes.writing.has(writeKey(current))}
+                    onWriting={(on) => {
+                      // The menu is closed by the choice; it never comes back on its own once the answer is in.
+                      if (on) setStatusOpen(false);
+                      (on ? writes.begin : writes.end)(writeKey(current));
+                    }}
+                    onChange={statusChanged}
+                  />
+                )}
                 {current?.team && <span>{current.team.name}</span>}
-                {current?.assignee && <span>Assigned to {current.assignee.name}</span>}
+                {project && current && (current.assignees || current.assignee || !detailLoading) && (
+                  <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />
+                )}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
                 </button>
               </div>
+              {(edits.issue || (current?.labels.length ?? 0) > 0) && (
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <IssuePriority key={issueKey} edits={edits} />
+                  <IssueLabels key={issueKey} edits={edits} labels={current?.labels ?? []} />
+                </div>
+              )}
+              {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} />
                 <DropdownMenu>
@@ -577,7 +679,11 @@ export function IssuesView({
               {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
-                {detailText != null && (detailText.trim() ? <Markdown text={detailText} /> : <div className="text-sm text-faint">No description.</div>)}
+                {detailText != null && (
+                  <IssueDescription key={issueKey} edits={edits}>
+                    {detailText.trim() ? <Markdown text={detailText} /> : <div className="text-sm text-faint">No description.</div>}
+                  </IssueDescription>
+                )}
               </div>
               {project && (
                 <div className="border-t border-hairline px-5 pb-5 pt-3">

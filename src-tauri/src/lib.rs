@@ -667,6 +667,7 @@ pub fn run() {
             commands::issue_details,
             commands::issue_comments,
             commands::issue_options,
+            commands::issue_viewer,
             commands::issue_comment_add,
             commands::issue_comment_edit,
             commands::issue_comment_delete,

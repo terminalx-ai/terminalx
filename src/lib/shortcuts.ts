@@ -19,7 +19,7 @@ import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
-export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Composer";
+export type ShortcutGroup = "App" | "Session" | "Panel" | "Files" | "Issues" | "Composer";
 
 interface ActionDef {
   id: string;
@@ -89,6 +89,8 @@ const ACTIONS = [
   { id: "files.save", label: "Save the open file", group: "Files", keys: ["mod+s"] },
   { id: "files.togglePreview", label: "Preview or source for a markdown file", group: "Files", keys: ["mod+shift+p"] },
   { id: "files.closeAll", label: "Close all open files", group: "Files", keys: ["mod+alt+w"] },
+  // Handled by the Issues view's detail pane, while the focus is in it.
+  { id: "issues.status", label: "Change the open issue's status", group: "Issues", keys: ["mod+shift+s"], scope: "context" },
   // Right Option is AltGr on many Windows and Linux layouts, so holding it to dictate is a macOS default only.
   { id: "composer.dictate", label: "Start or stop dictation", group: "Composer", keys: ["mod+shift+d"], macKeys: ["hold:AltRight", "mod+shift+d"], hold: true },
   { id: "composer.send", label: "Send", group: "Composer", keys: ["enter"], scope: "context" },
@@ -105,7 +107,7 @@ export interface ShortcutAction extends ActionDef {
 }
 
 export const SHORTCUT_ACTIONS: readonly ShortcutAction[] = ACTIONS;
-export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Session", "Panel", "Files", "Composer"];
+export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["App", "Session", "Panel", "Files", "Issues", "Composer"];
 const BY_ID = new Map<string, ShortcutAction>(SHORTCUT_ACTIONS.map((action) => [action.id, action]));
 
 export function shortcutAction(id: ShortcutId): ShortcutAction {

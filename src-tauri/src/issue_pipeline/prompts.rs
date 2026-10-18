@@ -288,6 +288,7 @@ mod tests {
             state_type: "open".into(),
             labels: Vec::new(),
             assignee: None,
+            assignees: Vec::new(),
             updated_at: String::new(),
             body: Some("  Users get logged out.  ".into()),
             team: None,
