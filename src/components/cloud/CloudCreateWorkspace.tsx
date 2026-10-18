@@ -392,7 +392,7 @@ export function CloudCreateWorkspace({
       {error && (
         <div className="flex items-center gap-2 text-xs" role="alert" data-testid="cloud-create-error">
           <span className="text-red-500">{error.message}</span>
-          <AgentLoginsLink message={error.message} />
+          <AgentLoginsLink message={error.message} organizationId={organizationId} />
           {error.retry && pending && (
             <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void submit(true)}>
               <RotateCcw className="size-3" /> Retry
@@ -558,7 +558,7 @@ export function CreationProgress({
       )}
       {phase === "failed" && (
         <p className="text-xs text-red-500">
-          {failureMessage(snapshot)} <AgentLoginsLink message={failureMessage(snapshot)} className="ml-1 align-baseline text-foreground" />
+          {failureMessage(snapshot)} <AgentLoginsLink message={failureMessage(snapshot)} organizationId={snapshot.workspace.orgId} className="ml-1 align-baseline text-foreground" />
         </p>
       )}
       {phase === "canceled" && <p className="text-xs text-muted-foreground">Canceled. Its compute is released and the first prompt was not sent.</p>}

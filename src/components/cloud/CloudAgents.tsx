@@ -194,7 +194,7 @@ export function CloudAgentsView({
       {error && <p className="px-4 py-1 text-xs text-red-500">Agent: {error}</p>}
       {active?.info.signIn && (
         <p className="border-b border-hairline px-4 py-1.5 text-xs text-amber-600 dark:text-amber-400" role="status" data-testid="cloud-agent-sign-in">
-          {signInMessage(active.info, mayManage)} <AgentLoginsLink message={signInMessage(active.info, mayManage)} className="ml-1 align-baseline" />
+          {signInMessage(active.info, mayManage)} <AgentLoginsLink message={signInMessage(active.info, mayManage)} organizationId={scope.organizationId} className="ml-1 align-baseline" />
         </p>
       )}
       {active ? (

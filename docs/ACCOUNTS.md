@@ -421,8 +421,8 @@ session's location chip in the session header both offer **Cloud
 diagnostics…**, which opens the report of that project's or session's
 organization in a dialog and marks the workspace it was opened from. The entry
 is hidden from someone the account already reports as a member of that
-organization. Settings → Account keeps the same view for the default
-organization. With a server that authorizes by membership
+organization. The default organization's page in Settings → Organizations
+keeps the same view for it (PRO-107; it was in Settings → Account before). With a server that authorizes by membership
 (`cloud.desktop.multi-org.v1`) the request and the export name the
 organization; otherwise they use the default one, as before.
 
@@ -430,7 +430,7 @@ organization; otherwise they use the default one, as before.
 in against (`login.terminalx.ai`, or the debug-only
 `TERMINALX_DEV_API_BASE_URL`). No new third-party host. It is made only while
 signed in with an organization, when the diagnostics view is open (the dialog
-or Settings → Account) or an export is requested; opening it never attaches to
+or the organization's page in Settings) or an export is requested; opening it never attaches to
 a workspace or resumes one. Signed out, nothing is fetched and every local
 workflow is unchanged. The desktop skips the request when the role in that
 organization is `member`; in Settings a member still sees this Mac's own relay

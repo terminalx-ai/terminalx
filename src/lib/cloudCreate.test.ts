@@ -153,11 +153,11 @@ describe("createWorkspace", () => {
     const message = createErrorMessage(refused.code, refused.detail);
     // #450: the refusal is the same for no login and for one limited to managers; the text says which it can be, and where to look.
     expect(message).toBe(
-      "Claude Code has no login your workspaces can use, so it can't run a first prompt: either none is connected for this organization, or the one stored is limited to workspaces only owners and admins can drive. An owner or admin can see which in Settings → Account → Agent logins. Or create the workspace without a prompt.",
+      "Claude Code has no login your workspaces can use, so it can't run a first prompt: either none is connected for this organization, or the one stored is limited to workspaces only owners and admins can drive. An owner or admin can see which in Settings → Organizations → Agent logins. Or create the workspace without a prompt.",
     );
     // An owner or admin is never held back by that limit: for them it is the missing login.
     expect(createErrorMessage(refused.code, refused.detail, true)).toBe(
-      "Claude Code has no working login for this organization (none is connected, or it was revoked), so it can't run a first prompt. Connect one in Settings → Account → Agent logins, or create the workspace without a prompt.",
+      "Claude Code has no working login for this organization (none is connected, or it was revoked), so it can't run a first prompt. Connect one in Settings → Organizations → Agent logins, or create the workspace without a prompt.",
     );
     expect(createErrorMessage(refused.code, refused.detail, false)).toBe(message);
     expect(message).not.toContain("web console");

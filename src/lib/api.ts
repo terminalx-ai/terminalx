@@ -316,19 +316,23 @@ export const api = {
   /** Check the saved key against the provider again, without entering it. */
   cloudProviderRevalidate: (provider: CloudWorkspaceProviderId, contextRevision: string) =>
     invoke<CloudProviderConnection>("cloud_provider_revalidate", { provider, contextRevision }),
-  // Agent logins for the organization's cloud workspaces (PRO-79). The login itself is collected in Rust
+  // Agent logins for an organization's cloud workspaces (PRO-79). The login itself is collected in Rust
   // (a native secure dialog, or this computer's own login) and never passes through the webview.
-  cloudAgentLogins: () => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins"),
+  // Each organization has its own (PRO-107): `orgId` (and a consent's `organizationId`) names any member
+  // organization, whatever the active one is; null is the active one.
+  cloudAgentLogins: (orgId?: string | null) => invoke<{ credentials: AgentLogin[] }>("cloud_agent_logins", { orgId: orgId ?? null }),
   cloudAgentLoginConnect: (provider: AgentLoginProvider, source: AgentLoginSource, consent: AgentLoginConsent) =>
     invoke<AgentLogin>("cloud_agent_login_connect", { provider, source, consent }),
-  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string) => invoke<void>("cloud_agent_login_remove", { provider, contextRevision }),
+  cloudAgentLoginRemove: (provider: AgentLoginProvider, contextRevision: string, orgId?: string | null) =>
+    invoke<void>("cloud_agent_login_remove", { provider, contextRevision, orgId: orgId ?? null }),
   // "Log in with Claude" (PRO-82): the account service runs the sign-in and keeps a login it can renew.
   // The page opens in the browser; the code it shows is entered in a native dialog, never here.
   cloudAgentClaudeLoginStart: (consent: AgentLoginConsent) => invoke<ClaudeLoginStarted>("cloud_agent_claude_login_start", { consent }),
   cloudAgentClaudeLoginOpen: (url: string) => invoke<void>("cloud_agent_claude_login_open", { url }),
   cloudAgentClaudeLoginComplete: (attemptId: string, consent: AgentLoginConsent) =>
     invoke<ClaudeLoginOutcome>("cloud_agent_claude_login_complete", { attemptId, consent }),
-  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string) => invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision }),
+  cloudAgentClaudeLoginCancel: (attemptId: string, contextRevision: string, orgId?: string | null) =>
+    invoke<void>("cloud_agent_claude_login_cancel", { attemptId, contextRevision, orgId: orgId ?? null }),
   // "Log in with ChatGPT" for Codex: Codex's own device-code login runs on this Mac in a throwaway home. The code
   // comes back to be shown in the sign-in dialog only; the login the CLI writes is stored by Rust and never comes here.
   cloudAgentCodexLoginStart: (consent: AgentLoginConsent) => invoke<CodexLoginStarted>("cloud_agent_codex_login_start", { consent }),
@@ -794,11 +798,14 @@ export interface CodexLoginStatus {
 }
 
 export interface AgentLoginConsent {
+  /** The page's account context (`status.context.revision`), whichever organization the login is for. */
   contextRevision: string;
   organizationSharing: boolean;
   machineInstallation: boolean;
   /** The login now stored for the agent may be replaced; required when there is one. */
   replaceExisting: boolean;
+  /** The organization the login is for (PRO-107); absent or null is the active one. */
+  organizationId?: string | null;
 }
 
 export interface CloudProviderSummaryResponse {

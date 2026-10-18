@@ -445,8 +445,11 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_launch_invalid: "Choose a valid agent, model and effort.",
 };
 
-/** Where an organization's agent logins are listed. Only an owner or admin can change them. */
-export const AGENT_LOGIN_PLACE = "Settings → Account → Agent logins";
+/**
+ * Where an organization's agent logins are listed: on that organization's own
+ * page (PRO-107). Only an owner or admin can change them.
+ */
+export const AGENT_LOGIN_PLACE = "Settings → Organizations → Agent logins";
 
 /** A message that sends its reader to the agent logins, so the page can offer the way there. */
 export function mentionsAgentLogins(message: string | null | undefined): boolean {

@@ -665,8 +665,9 @@ fn agent_label(provider: crate::cloud_workspaces::AgentLoginProvider) -> &'stati
 #[tauri::command]
 pub async fn cloud_agent_logins(
     state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
 ) -> Result<crate::cloud_workspaces::AgentLoginList, crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins())
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.agent_logins(org_id.as_deref()))
 }
 
 /// Store an agent's login for the organization's cloud workspaces. The
@@ -691,11 +692,11 @@ pub async fn cloud_agent_login_connect(
     let authorization = tauri::async_runtime::spawn_blocking(move || service.authorize_agent_login(provider, &consent))
         .await
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
-    // The organization by name when it is the active one; its id otherwise, as the provider dialog shows it.
+    // The organization by name, the active one or another the person belongs to; its id when no name is known.
     // It is put into a native dialog: text from the account service, cleaned like any other.
     let organization = state
         .account
-        .active_organization_name(authorization.organization_id())
+        .organization_name(authorization.organization_id())
         .map(|name| dialog_text(&name))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| authorization.organization_id().to_owned());
@@ -893,8 +894,8 @@ pub struct ClaudeLoginStarted {
 }
 
 /// Begin a sign-in and open the provider's page in the browser. Consent,
-/// the active organization, the owner-or-admin check and the explicit choice
-/// to replace a stored login all come first, as for any other way to connect.
+/// the organization it names, the owner-or-admin check there and the explicit
+/// choice to replace a stored login all come first, as for any other way to connect.
 #[tauri::command]
 pub async fn cloud_agent_claude_login_start(
     app: AppHandle,
@@ -944,7 +945,7 @@ pub async fn cloud_agent_claude_login_complete(
         .map_err(|_| CloudWorkspaceClientError::task_failed(RequestRisk::Read))??;
     let organization = state
         .account
-        .active_organization_name(authorization.organization_id())
+        .organization_name(authorization.organization_id())
         .map(|name| dialog_text(&name))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| authorization.organization_id().to_owned());
@@ -967,9 +968,10 @@ pub async fn cloud_agent_claude_login_complete(
 pub async fn cloud_agent_claude_login_cancel(
     attempt_id: String,
     context_revision: String,
+    org_id: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_claude_login(&attempt_id, context_revision))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.cancel_claude_login(&attempt_id, context_revision, org_id.as_deref()))
 }
 
 // "Log in with ChatGPT" for Codex (PRO-79): Codex's own device-code login,
@@ -1025,9 +1027,9 @@ fn codex_sign_in_gone() -> crate::cloud_workspaces::CloudWorkspaceClientError {
     crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_agent_login_attempt_gone", false)
 }
 
-/// Begin "Log in with ChatGPT". Consent, the active organization, the
-/// owner-or-admin check and the explicit choice to replace a stored login
-/// come first, as for any other way to connect; only then does the CLI run.
+/// Begin "Log in with ChatGPT". Consent, the organization it names, the
+/// owner-or-admin check there and the explicit choice to replace a stored
+/// login come first, as for any other way to connect; only then does the CLI run.
 #[tauri::command]
 pub async fn cloud_agent_codex_login_start(
     consent: crate::cloud_workspaces::AgentLoginConsent,
@@ -1205,9 +1207,10 @@ pub fn cloud_agent_codex_login_cancel(attempt_id: String) -> Result<(), crate::c
 pub async fn cloud_agent_login_remove(
     provider: crate::cloud_workspaces::AgentLoginProvider,
     context_revision: String,
+    org_id: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), crate::cloud_workspaces::CloudWorkspaceClientError> {
-    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.remove_agent_login(provider, context_revision))
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.remove_agent_login(provider, context_revision, org_id.as_deref()))
 }
 
 #[tauri::command]

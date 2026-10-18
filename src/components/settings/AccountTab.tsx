@@ -1,19 +1,12 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "@/icons";
-import { OrganizationCompute } from "./OrganizationCompute";
-import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
-import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
-import { OrganizationEnvironment } from "./OrganizationEnvironment";
-import { OrganizationGithubApp } from "./OrganizationGithubApp";
-import { OrganizationMembers } from "./OrganizationMembers";
-import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
-import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { setPairingHostName, usePairing } from "@/lib/pairing";
+import { openOrganizationSettings } from "@/lib/settingsLinks";
 
 export function AccountTab() {
   const account = useAccount();
@@ -37,11 +30,9 @@ export function AccountTab() {
 
   if (status.state === "signed-in" && status.identity) {
     const identity = status.identity;
-    // Organization diagnostics are for owners and administrators. The server
-    // decides; a role the account already reports only skips a request it
-    // would refuse. Names are not unique, so an ambiguous match decides nothing.
+    // The active organization's page, by id; names are not unique, so an ambiguous match opens none.
     const named = (status.organizations ?? []).filter((organization) => organization.name === identity.organization);
-    const activeRole = named.length === 1 ? named[0].role : null;
+    const activeId = identity.organizationId ?? (named.length === 1 ? named[0].id : null);
     return (
       <div className="flex flex-col gap-4">
         <div className="flex items-center gap-3 rounded-lg bg-well px-3 py-3">
@@ -56,14 +47,20 @@ export function AccountTab() {
           Your TerminalX account is optional. The session refreshes automatically and its credentials are stored in macOS Keychain.
         </p>
         <OrganizationOnboarding key={identity.email} organizationName={identity.organization} organizationId={identity.organizationId ?? null} accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} organizations={status.organizations ?? []} multiOrg={isMultiOrg(status)} />
-        {identity.organization && <OrganizationMembers accountEmail={identity.email} contextRevision={status.context?.revision ?? ""} />}
-        {identity.organization && <OrganizationCompute contextRevision={status.context?.revision ?? ""} />}
-        {identity.organization && <OrganizationAgentLogins contextRevision={status.context?.revision ?? ""} organizationName={identity.organization} />}
-        {identity.organization && <OrganizationGithubApp contextRevision={status.context?.revision ?? ""} />}
-        {identity.organization && <OrganizationWorkspaceConfig contextRevision={status.context?.revision ?? ""} />}
-        {identity.organization && <OrganizationEnvironment contextRevision={status.context?.revision ?? ""} organizationId={identity.organizationId ?? null} />}
-        {identity.organization && <OrganizationDiagnostics contextRevision={status.context?.revision ?? ""} member={activeRole === "member"} />}
-        {identity.organization && <OrganizationCloudTeardown contextRevision={status.context?.revision ?? ""} organizationId={identity.organizationId ?? null} organizationName={identity.organization} member={activeRole === "member"} />}
+        {/* An organization's own settings, agent logins among them, are on its page (PRO-107). */}
+        {identity.organization && activeId && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-hairline p-3" data-testid="account-organization-settings">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-medium">{identity.organization} settings</div>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                Members, compute, agent logins, GitHub and the other settings of {identity.organization} are on its own page in Settings → Organizations, with each organization you belong to.
+              </p>
+            </div>
+            <Button size="sm" variant="outline" className="shrink-0" onClick={() => openOrganizationSettings(activeId)}>
+              Open
+            </Button>
+          </div>
+        )}
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>

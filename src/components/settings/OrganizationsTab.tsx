@@ -1,12 +1,39 @@
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
-import { useCloudCatalog } from "@/lib/cloudCatalog";
+import { useAccount } from "@/lib/account";
+import { defaultOrgId, useCloudCatalog } from "@/lib/cloudCatalog";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { onOpenOrganizationSettings, takeOrganizationRequest } from "@/lib/settingsLinks";
+import { OrganizationSettings } from "./OrganizationSettings";
 
 export function OrganizationsTab() {
   const prefs = usePrefs();
+  const { status } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();
   const catalog = useCloudCatalog();
+  // The organization whose page is open (PRO-107), chosen here or asked for by a message elsewhere.
+  const [page, setPage] = useState<string | null>(null);
+  const activeId = defaultOrgId(status);
+  useEffect(() => {
+    const open = () => {
+      const wanted = takeOrganizationRequest();
+      if (wanted !== undefined) setPage(wanted ?? activeId);
+    };
+    open();
+    return onOpenOrganizationSettings(open);
+  }, [activeId]);
+  // Every organization the person belongs to has a page, cloud-enabled or not.
+  const memberships = status.state === "signed-in" ? (status.organizations ?? []) : [];
+  const organization = page ? memberships.find((org) => org.id === page) : undefined;
+  if (organization) return <OrganizationSettings key={organization.id} organization={organization} onBack={() => setPage(null)} />;
+  const settingsButton = (org: (typeof memberships)[number]) => (
+    // Its own page: agent logins and the organization's other settings (PRO-107).
+    <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => setPage(org.id)}>
+      Settings
+    </Button>
+  );
   return (
     <div className="flex flex-col">
       <SettingRow
@@ -29,12 +56,19 @@ export function OrganizationsTab() {
       {all.map((org) => {
         const running = organizationRunningCount(org.id, catalog);
         return <SettingRow key={org.id} label={organizationName(org)} description={`${org.role} · ${running ? `${running} running workspace${running === 1 ? "" : "s"}` : "No running workspaces"}${temporaryOrganization === org.id ? " · Shown while selected" : ""}`} control={
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            Show in sidebar
-            <Switch aria-label={`Show ${organizationName(org)} in sidebar`} checked={!prefs.hiddenOrganizations.includes(org.id)} disabled={prefs.organizationDisplay === "one"} onCheckedChange={(shown) => void setOrganizationHidden(org.id, !shown)} />
-          </label>
+          <div className="flex items-center gap-3">
+            {settingsButton(org)}
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              Show in sidebar
+              <Switch aria-label={`Show ${organizationName(org)} in sidebar`} checked={!prefs.hiddenOrganizations.includes(org.id)} disabled={prefs.organizationDisplay === "one"} onCheckedChange={(shown) => void setOrganizationHidden(org.id, !shown)} />
+            </label>
+          </div>
         } />;
       })}
+      {/* Organizations the sidebar does not list (no cloud there, or a server that does not say) still have their page. */}
+      {memberships.filter((org) => !all.some((listed) => listed.id === org.id)).map((org) => (
+        <SettingRow key={org.id} label={organizationName(org)} description={org.role} control={settingsButton(org)} />
+      ))}
     </div>
   );
 }

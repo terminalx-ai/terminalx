@@ -144,7 +144,7 @@ export function OrganizationOnboarding({
     <div className="rounded-lg border border-hairline p-3">
       <div className="text-sm font-medium">Organization setup</div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Organization details → Compute connection → Setup completion
+        Organization details → Compute connection → Agent logins → Setup completion
       </p>
       {organizations.length > 1 && (
         <label className="mt-2 block text-xs text-muted-foreground">
@@ -187,6 +187,8 @@ export function OrganizationOnboarding({
               key={`${accountEmail}:${contextRevision}:${activeId}`}
               record={setup}
               organizationId={activeId}
+              organizationName={organizationName}
+              contextRevision={contextRevision}
               onRecord={persist}
             />
           )}

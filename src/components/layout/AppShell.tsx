@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { onOpenAgentLogins } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings } from "@/lib/settingsLinks";
 import { PanelLeft, PanelRight } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -137,8 +137,14 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
-  // A message that names Settings → Account → Agent logins offers the way there; the section scrolls itself into view.
-  useEffect(() => onOpenAgentLogins(openAccountSettings), [openAccountSettings]);
+  // An organization's page (PRO-107): a message that names its Agent logins offers the way there, with the
+  // organization it is about. The Organizations section opens that page, and the logins scroll themselves into view.
+  const openOrganizationsSettings = useCallback(() => {
+    setSettingsTab("organizations");
+    setSettingsOpen(true);
+    setSettingsRequest((count) => count + 1);
+  }, []);
+  useEffect(() => onOpenOrganizationSettings(openOrganizationsSettings), [openOrganizationsSettings]);
   const openAgentSettings = useCallback(() => {
     setSettingsTab("agents");
     setSettingsOpen(true);

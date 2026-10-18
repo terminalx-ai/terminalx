@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -25,6 +25,7 @@ vi.mock("./OrganizationWorkspaceConfig", () => ({ OrganizationWorkspaceConfig: (
 vi.mock("./OrganizationEnvironment", () => ({ OrganizationEnvironment: () => null }));
 
 const { AccountTab } = await import("./AccountTab");
+const { onOpenOrganizationSettings, takeOrganizationRequest } = await import("@/lib/settingsLinks");
 
 const signedIn = (role: string) => ({
   state: "signed-in",
@@ -53,17 +54,21 @@ it("signed out: local workflows only, no diagnostics section and no cloud reques
   expect(mocks.api.cloudConnectionDiagnostics).not.toHaveBeenCalled();
 });
 
-it("a member of the active organization gets this Mac's closes but no organization request", async () => {
-  mocks.status = signedIn("member");
-  render(<AccountTab />);
-  expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
-  expect(mocks.api.cloudConnectionDiagnostics).toHaveBeenCalled();
-  expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
-});
-
-it("an administrator sees the diagnostics section", async () => {
+// PRO-107: the organization's own settings moved to its page; the account links there.
+it("signed in: the account names the active organization's page instead of its sections", async () => {
+  const opened = vi.fn();
+  const stop = onOpenOrganizationSettings(opened);
   mocks.status = signedIn("admin");
   render(<AccountTab />);
-  expect(screen.getByText("Cloud diagnostics")).toBeTruthy();
-  await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, null));
+  const link = screen.getByTestId("account-organization-settings");
+  expect(link.textContent).toContain("Team settings");
+  expect(link.textContent).toContain("Members, compute, agent logins, GitHub and the other settings of Team are on its own page in Settings → Organizations");
+  expect(screen.queryByText("Cloud diagnostics")).toBeNull();
+  expect(screen.queryByTestId("agent-logins")).toBeNull();
+  fireEvent.click(within(link).getByRole("button", { name: "Open" }));
+  expect(opened).toHaveBeenCalledTimes(1);
+  expect(takeOrganizationRequest()).toBe("org_1");
+  await Promise.resolve();
+  expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
+  stop();
 });

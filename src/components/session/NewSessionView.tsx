@@ -73,6 +73,8 @@ export function NewSessionView({
   const [error, setError] = useState<string | null>(null);
   /** The organization whose running limit refused the last cloud start, to offer stopping a workspace. */
   const [limitOrg, setLimitOrg] = useState<string | null>(null);
+  /** The organization the last cloud start's error is about, so a missing login opens that organization's page. */
+  const [errorOrg, setErrorOrg] = useState<string | null>(null);
   const [status, setStatus] = useState<WorkStatus | null>(null);
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
@@ -182,6 +184,7 @@ export function NewSessionView({
     const code = e && typeof e === "object" && "code" in e ? String((e as { code: unknown }).code) : null;
     const atRunningLimit = code === RUNNING_LIMIT_CODE || (code === "cloud_workspace_quota_exceeded" && runningLimitReached(orgId));
     setLimitOrg(atRunningLimit ? orgId : null);
+    setErrorOrg(orgId);
     setError(atRunningLimit ? runningLimitMessage(orgId) : cloudStartError(e, orgId));
     // Refused for lack of role: read the roles again, so the form and the menus stop offering it.
     if (isRoleRefusal(e)) void refreshAccountRoles(true);
@@ -574,7 +577,7 @@ export function NewSessionView({
           )}
           {error && (
             <div className="mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error} <AgentLoginsLink message={error} className="ml-1 align-baseline text-foreground" />
+              {error} <AgentLoginsLink message={error} organizationId={errorOrg} className="ml-1 align-baseline text-foreground" />
             </div>
           )}
           {cloud && error && limitOrg && <RunningLimitNotice orgId={limitOrg} />}

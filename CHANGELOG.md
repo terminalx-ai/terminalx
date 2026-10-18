@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Organizations
+
+- Agent logins are a setting of each organization. Settings → Organizations
+  gives every organization you belong to its own page, opened with
+  **Settings** on its row; the page names the organization it changes and
+  holds its agent logins with its members, compute and other settings. An
+  owner or admin sets or replaces another organization's agent logins there
+  without switching the active one, and members see each organization's
+  status read-only. Settings → Account links to the active organization's
+  page instead of holding the section. (PRO-107)
+- Organization setup has an **Agent logins** step right after the compute
+  connection: Log in with Claude or an API key for Claude Code, Log in with
+  ChatGPT or an API key for Codex, an API key for Cursor, or this Mac's
+  sign-in lent. **Set up later** skips it, and setup completion then says
+  which agents have no login, with the way to the organization's page.
+- Every "sign in required" message opens the Agent logins of the
+  workspace's own organization, not the active one's.
+
 ### Workspaces
 
 - Deleting a workspace once its pull request merges now works for a workspace
