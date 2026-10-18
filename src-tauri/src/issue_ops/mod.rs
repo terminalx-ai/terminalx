@@ -26,6 +26,7 @@
 
 pub mod github;
 pub mod linear;
+pub mod viewer;
 
 use std::path::Path;
 
@@ -109,8 +110,6 @@ pub struct IssueDetails {
     /// Why a closed GitHub issue was closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_reason: Option<CloseReason>,
-    /// Every assignee; `issue.assignee` is only the first.
-    pub assignees: Vec<IssueUser>,
     /// Linear's 0 (none) to 4 (low); GitHub has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u8>,

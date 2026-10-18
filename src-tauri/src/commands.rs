@@ -3204,6 +3204,12 @@ pub async fn issue_options(project_path: String, provider: crate::issue_ops::Pro
     issue_op(project_path, provider, move |target| crate::issue_ops::options(target, id.as_deref(), team_id.as_deref(), refresh.unwrap_or(false))).await
 }
 
+/// Who the reader is to the provider, named as `issue_set_assignees` takes people.
+#[tauri::command]
+pub async fn issue_viewer(project_path: String, provider: crate::issue_ops::Provider) -> IssueOpResult<crate::issue_ops::IssueUser> {
+    issue_op(project_path, provider, crate::issue_ops::viewer::viewer).await
+}
+
 #[tauri::command]
 pub async fn issue_comment_add(project_path: String, provider: crate::issue_ops::Provider, id: String, body: String) -> IssueOpResult<crate::issue_ops::IssueComment> {
     issue_op(project_path, provider, move |target| crate::issue_ops::comment_add(target, &id, &body)).await

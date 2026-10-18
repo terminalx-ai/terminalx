@@ -3,6 +3,7 @@ import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { Issue } from "@/lib/api";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
+import { AvatarStack } from "@/components/issues/People";
 import type { IssuePipeline } from "@/types/issuePipeline";
 
 /** The compact issue rendering shared by the Issues view and trigger preview. */
@@ -10,16 +11,20 @@ export function IssueListItem({
   issue,
   selected = false,
   linked = false,
+  notMine = false,
   pipeline = null,
   onSelect,
 }: {
   issue: Issue;
   selected?: boolean;
   linked?: boolean;
+  /** Listed as assigned to the reader, and assigned away since. */
+  notMine?: boolean;
   /** The issue's pipeline, when a session was started from it. */
   pipeline?: IssuePipeline | null;
   onSelect?: () => void;
 }) {
+  const assignees = issue.assignees ?? (issue.assignee ? [issue.assignee] : []);
   return (
     <button
       type="button"
@@ -34,7 +39,8 @@ export function IssueListItem({
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="shrink-0 font-mono text-[11px] text-faint">{issue.identifier}</span>
-          <span className="truncate text-[13px] text-foreground">{issue.title}</span>
+          <span className={cn("min-w-0 flex-1 truncate text-[13px]", notMine ? "text-muted-foreground" : "text-foreground")}>{issue.title}</span>
+          <AvatarStack people={assignees} avatarClassName="size-4" className="self-center" />
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-faint">
           {issue.state && <span>{issue.state}</span>}
@@ -44,7 +50,7 @@ export function IssueListItem({
               {label.name}
             </span>
           ))}
-          {issue.assignee && <span>· {issue.assignee.name}</span>}
+          {notMine && <span className="text-warning">No longer assigned to you</span>}
           {issue.updatedAt && <span>{issue.state ? "· " : ""}{relativeTime(issue.updatedAt)}</span>}
           {pipeline ? <PipelineStatus pipeline={pipeline} /> : linked && <span className="flex items-center gap-1 text-info"><Link2 className="size-3" /> Session</span>}
         </div>

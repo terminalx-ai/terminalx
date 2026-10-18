@@ -7,6 +7,9 @@ import type { ModelInfo } from "@/lib/api";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
 import type { IssuePipeline, IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project } from "@/types/session";
+import type { IssueDetails } from "@/lib/issueOps";
+import { forgetIssueViewers } from "@/lib/issueViewer";
+import { createIssueOpsMock, type IssueOpsMock } from "@/test/issueOpsMock";
 
 const { invoke, openAutomation, catalog, sessionStore, pipelineStore, startPipeline } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -772,5 +775,70 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     expect(screen.queryByTitle("Model")).toBeNull();
     expect(screen.queryByTitle("Effort")).toBeNull();
     expect((await startIssue()).tab).toMatchObject({ harness: "codex", model: "", effort: null });
+  });
+});
+
+describe("assignees", () => {
+  let tracker: IssueOpsMock;
+  const kim = () => tracker.viewer.github;
+  // A list row as `issues_list` gives it: the issue without its details.
+  const row = (issue: IssueDetails) => {
+    const { provider, id, identifier, number, title, url, state, stateType, labels, assignee, assignees, updatedAt } = issue;
+    return { provider, id, identifier, number, title, url, state, stateType, labels, assignee, assignees, updatedAt };
+  };
+
+  beforeEach(() => {
+    forgetIssueViewers();
+    tracker = createIssueOpsMock();
+    const others = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "issues_list") {
+        const all = [...tracker.issues.values()].map((entry) => entry.issue).filter((issue) => issue.provider === args?.provider);
+        const filter = args?.filter as { assignedToMe?: boolean };
+        return all.filter((issue) => !filter.assignedToMe || issue.assignees.some((person) => person.id === tracker.viewer[issue.provider].id)).map(row);
+      }
+      return tracker.handle(command, args) ?? others(command, args);
+    });
+  });
+
+  it("shows every assignee on the row and in the header, and a change on both", async () => {
+    render(<IssuesView />);
+    const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
+    expect(within(listed).getByRole("img", { name: "sam, alex" })).toBeTruthy();
+
+    fireEvent.click(listed);
+    const header = await screen.findByRole("button", { name: "Assignees: sam, alex" });
+    fireEvent.click(header);
+    fireEvent.click(await screen.findByRole("option", { name: "kim" }));
+    await screen.findByRole("button", { name: "Assignees: sam, alex, kim" });
+    expect(within(listed).getByRole("img", { name: "sam, alex, kim" })).toBeTruthy();
+    expect(tracker.issue("github", "41").assignees.map((person) => person.id)).toEqual(["sam", "alex", "kim"]);
+  });
+
+  it("keeps a row assigned away from the reader in the Assigned to me list, marked, until the list is read again", async () => {
+    tracker.issue("github", "41").assignees = [tracker.options.github.members[0], kim()];
+    render(<IssuesView />);
+    fireEvent.click(screen.getByRole("button", { name: "Assigned to me" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([command, args]) => command === "issues_list" && (args as { filter: { assignedToMe: boolean } }).filter.assignedToMe)).toBe(true));
+    const listed = (await screen.findByText("Repair the login timeout")).closest("button")!;
+    fireEvent.click(listed);
+    fireEvent.click(await screen.findByRole("button", { name: "Assignees: sam, kim" }));
+
+    fireEvent.click(await screen.findByRole("option", { name: "kim" }));
+    await screen.findByRole("button", { name: "Assignees: sam" });
+    expect(within(listed).getByText("No longer assigned to you")).toBeTruthy();
+
+    // Taking it back unmarks it.
+    fireEvent.click(screen.getByRole("button", { name: "Assign to me" }));
+    await screen.findByRole("button", { name: "Assignees: sam, kim" });
+    expect(within(listed).queryByText("No longer assigned to you")).toBeNull();
+
+    fireEvent.click(screen.getByRole("option", { name: "kim" }));
+    await within(listed).findByText("No longer assigned to you");
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    // The open issue stays on the right; its row has left the list.
+    await waitFor(() => expect(listed.isConnected).toBe(false));
+    expect(screen.queryByText("No longer assigned to you")).toBeNull();
   });
 });

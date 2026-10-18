@@ -8,6 +8,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/menu";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
+import { AssigneePicker } from "@/components/issues/AssigneePicker";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
@@ -20,6 +21,8 @@ import { PERMISSION_MODES } from "@/lib/models";
 import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issueWorktreeName } from "@/lib/issueSession";
+import type { IssueDetails } from "@/lib/issueOps";
+import { useIssueViewer } from "@/lib/issueViewer";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -70,6 +73,8 @@ export function IssuesView({
   const [list, setList] = useState<Issue[]>([]);
   // Which project and tracker `list` was read for. Until it is this one, nothing can be said to be missing from it.
   const [listOf, setListOf] = useState<string | null>(null);
+  // Rows of the "Assigned to me" list that were assigned away since it was read. They stay until the next read, marked, rather than vanish under the pointer.
+  const [notMine, setNotMine] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
@@ -98,6 +103,7 @@ export function IssuesView({
   // Once an issue has a pipeline its switch is the pipeline's, on the panel
   // below; a session started on it again keeps what was chosen there.
   const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
+  const viewer = useIssueViewer(project?.path, provider);
   const agentSelection = useSessionAgent(store.harnesses);
   const { harness, modelId, effort } = agentSelection;
   const linkedIssueUrls = useMemo(
@@ -187,6 +193,7 @@ export function IssuesView({
         if (live) {
           setList(r);
           setListOf(`${project.path}\n${provider}`);
+          setNotMine(new Set());
         }
       } catch (e) {
         if (live) {
@@ -294,6 +301,22 @@ export function IssuesView({
     setAutoMerge(pipelineDefaults.autoMerge);
   };
   const isOpen = (issue: Issue) => selected?.id === issue.id && selected.provider === issue.provider;
+  // An issue as a write answered with it: the open one shows it, and its row shows who has it now.
+  const assigned = (changed: IssueDetails) => {
+    const same = (issue: Issue) => issue.provider === changed.provider && issue.id === changed.id;
+    setDetail((now) => (now && same(now) ? changed : now));
+    setList((rows) => rows.map((row) => (same(row) ? { ...row, assignee: changed.assignee, assignees: changed.assignees, updatedAt: changed.updatedAt } : row)));
+    if (!assignedToMe || !viewer) return;
+    const key = `${changed.provider}:${changed.id}`;
+    const mine = changed.assignees.some((person) => person.id === viewer.id);
+    setNotMine((keys) => {
+      if (mine === !keys.has(key)) return keys;
+      const next = new Set(keys);
+      if (mine) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
   // What the tracker says of the open issue now, once that has been read; the row it was opened from until then.
   const current = detail && isOpen(detail) ? detail : selected;
   // The session working on the issue: the pipeline's author, never its reviewer.
@@ -428,6 +451,7 @@ export function IssuesView({
                         issue={i}
                         selected={isOpen(i)}
                         linked={linkedIssueUrls.has(i.url)}
+                        notMine={notMine.has(`${i.provider}:${i.id}`)}
                         pipeline={project ? pipelineForIssue(pipelines, project.path, i.url) : null}
                         onSelect={() => open(i)}
                       />
@@ -480,7 +504,7 @@ export function IssuesView({
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                 {current?.state && <span>{current.state}</span>}
                 {current?.team && <span>{current.team.name}</span>}
-                {current?.assignee && <span>Assigned to {current.assignee.name}</span>}
+                {project && current?.assignees && <AssigneePicker projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} />}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
                   Open in browser <ExternalLink className="size-3" />
                 </button>

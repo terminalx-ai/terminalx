@@ -20,9 +20,10 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 
 | Command | Answers |
 | -- | -- |
-| `issue_details(id)` | `IssueDetails`: every field of the list's `Issue`, plus all assignees, author, created time, priority, state id and colour, close reason, description and capabilities |
+| `issue_details(id)` | `IssueDetails`: every field of the list's `Issue` (all its assignees among them), plus author, created time, priority, state id and colour, close reason, description and capabilities |
 | `issue_comments(id, cursor)` | `CommentsPage`, oldest first; `nextCursor` for the next page |
 | `issue_options(id?, teamId?, refresh?)` | `IssueOptions`: workflow states, close reasons, members, labels, priorities |
+| `issue_viewer()` | `IssueUser`: the reader, named as `issue_set_assignees` takes people (the `gh` login, the Linear key's owner) |
 | `issue_comment_add(id, body)` / `issue_comment_edit(id, commentId, body)` | The `IssueComment` |
 | `issue_comment_delete(id, commentId)` | Nothing |
 | `issue_set_state(id, change)` | `IssueDetails`. `change` is `{kind: "workflow_state", stateId}` (Linear), `{kind: "close", reason}` or `{kind: "reopen"}` (GitHub) |

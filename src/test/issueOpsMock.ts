@@ -154,6 +154,8 @@ export interface IssueOpsMock {
   /** The issues by `${provider}:${id}`; edit them freely between steps. */
   issues: Map<string, Stored>;
   options: Record<IssueProvider, IssueOptions>;
+  /** Who `issue_viewer` says the reader is. */
+  viewer: Record<IssueProvider, IssueUser>;
   /** Comments per page of `issue_comments`. */
   pageSize: number;
   calls: { command: string; args: Record<string, unknown> }[];
@@ -179,6 +181,7 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
   const mock: IssueOpsMock = {
     issues,
     options: { github: githubOptionsFixture(), linear: linearOptionsFixture() },
+    viewer: { github: kim, linear: linearKim },
     pageSize: 50,
     calls: [],
     fail(command, kind, message) {
@@ -253,6 +256,8 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
       }
       case "issue_options":
         return clone(mock.options[args.provider as IssueProvider]);
+      case "issue_viewer":
+        return clone(mock.viewer[args.provider as IssueProvider]);
       case "issue_comment_add": {
         const entry = stored(args);
         const comment: IssueComment = { id: `${args.provider}-c${entry.comments.length + 1}-${now()}`, author: mock.options[args.provider as IssueProvider].members[0], body: String(args.body), createdAt: now(), viewerCanEdit: true, viewerCanDelete: true };

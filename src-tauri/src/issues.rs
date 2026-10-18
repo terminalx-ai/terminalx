@@ -14,6 +14,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::issue_ops::IssueUser;
+
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 const LIMIT: usize = 60;
 
@@ -66,8 +68,12 @@ pub struct Issue {
     /// A coarse kind across providers: `open`, `started`, `completed`, `canceled`.
     pub state_type: String,
     pub labels: Vec<IssueLabel>,
+    /// The first of `assignees`, for what reads one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<IssueAssignee>,
+    /// Every assignee, so a list row can show who has the issue.
+    #[serde(default)]
+    pub assignees: Vec<IssueUser>,
     pub updated_at: String,
     /// Markdown; GitHub lists omit it and it is fetched on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,10 +184,24 @@ pub fn parse_github_issue(v: &Value) -> Issue {
                 .collect()
         })
         .unwrap_or_default();
-    let assignee = v["assignees"].as_array().and_then(|a| a.first()).and_then(|a| {
-        let login = a["login"].as_str()?;
-        Some(IssueAssignee { name: a["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login).into(), avatar_url: None })
-    });
+    // `gh issue list` gives no avatar; GitHub serves one at the login's own address.
+    let assignees: Vec<IssueUser> = v["assignees"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|a| {
+                    let login = a["login"].as_str()?;
+                    Some(IssueUser {
+                        id: login.into(),
+                        name: a["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login).into(),
+                        login: Some(login.into()),
+                        avatar_url: Some(format!("https://github.com/{login}.png?size=64")),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let assignee = assignees.first().map(|first| IssueAssignee { name: first.name.clone(), avatar_url: None });
     Issue {
         provider: "github".into(),
         id: number.to_string(),
@@ -200,6 +220,7 @@ pub fn parse_github_issue(v: &Value) -> Issue {
         state_type: state_type.into(),
         labels,
         assignee,
+        assignees,
         updated_at: v["updatedAt"].as_str().unwrap_or("").into(),
         body: v["body"].as_str().map(String::from),
         team: None,
@@ -314,7 +335,7 @@ pub fn parse_linear_teams(data: &Value) -> Vec<IssueTeam> {
         .unwrap_or_default()
 }
 
-const ISSUE_FIELDS: &str = "id identifier number title description url updatedAt priority state { name type color } labels { nodes { name color } } assignee { name displayName avatarUrl } team { id key name }";
+const ISSUE_FIELDS: &str = "id identifier number title description url updatedAt priority state { name type color } labels { nodes { name color } } assignee { id name displayName avatarUrl } team { id key name }";
 
 pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
     let id = n["id"].as_str()?;
@@ -330,6 +351,11 @@ pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
         name: a.get("displayName").and_then(|d| d.as_str()).or_else(|| a.get("name").and_then(|d| d.as_str())).unwrap_or("").into(),
         avatar_url: a.get("avatarUrl").and_then(|u| u.as_str()).map(String::from),
     });
+    // Linear has one assignee or none.
+    let assignees = match (n["assignee"]["id"].as_str(), &assignee) {
+        (Some(user), Some(a)) => vec![IssueUser { id: user.into(), name: a.name.clone(), login: None, avatar_url: a.avatar_url.clone() }],
+        _ => Vec::new(),
+    };
     let team = n["team"].as_object().map(|t| IssueTeam {
         id: t.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
         key: t.get("key").and_then(|v| v.as_str()).unwrap_or("").into(),
@@ -353,6 +379,7 @@ pub(crate) fn parse_linear_issue(n: &Value) -> Option<Issue> {
         .into(),
         labels,
         assignee,
+        assignees,
         updated_at: n["updatedAt"].as_str().unwrap_or("").into(),
         body: n["description"].as_str().map(String::from),
         team,
@@ -536,6 +563,20 @@ mod tests {
         assert_eq!(issues[0].assignee.as_ref().unwrap().name, "Sam");
         assert!(issues[0].body.is_none());
         assert_eq!(issues[1].state_type, "completed");
+        assert!(issues[1].assignees.is_empty());
+    }
+
+    #[test]
+    fn github_list_keeps_every_assignee() {
+        let v: Value = serde_json::from_str(r#"[{"number":9,"title":"Shared","state":"OPEN","labels":[],"assignees":[{"login":"sam","name":"Sam"},{"login":"alex","name":""},{"login":"robin"},{"name":"no login"}],"updatedAt":"2026-09-01T10:00:00Z","url":"u"}]"#).unwrap();
+        let issue = &parse_github_issues(&v)[0];
+        assert_eq!(issue.assignees.iter().map(|user| (user.id.as_str(), user.name.as_str())).collect::<Vec<_>>(), [("sam", "Sam"), ("alex", "alex"), ("robin", "robin")]);
+        assert_eq!(issue.assignees[1].login.as_deref(), Some("alex"));
+        assert_eq!(issue.assignees[2].avatar_url.as_deref(), Some("https://github.com/robin.png?size=64"));
+        assert_eq!(issue.assignee.as_ref().unwrap().name, "Sam");
+        let wire = serde_json::to_value(issue).unwrap();
+        assert_eq!(wire["assignees"].as_array().unwrap().len(), 3);
+        assert_eq!(wire["assignees"][0]["avatarUrl"], "https://github.com/sam.png?size=64");
     }
 
     #[test]
@@ -549,6 +590,8 @@ mod tests {
         assert_eq!(i.state_type, "started");
         assert_eq!(i.labels[0].color, "eb5757");
         assert_eq!(i.assignee.as_ref().unwrap().name, "Sam");
+        // An assignee read without an id (an older query) cannot be named to Linear, so is not listed as one.
+        assert!(i.assignees.is_empty());
         assert_eq!(i.team.as_ref().unwrap().key, "ENG");
         assert_eq!(i.body.as_deref(), Some("Users get logged out."));
         let teams = parse_linear_teams(&serde_json::from_str::<Value>(r#"{"teams":{"nodes":[{"id":"t1","key":"ENG","name":"Engineering"}]}}"#).unwrap());
