@@ -37,6 +37,35 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 Every write answers with the issue as re-read from the provider. After a
 failed write the UI reads the issue again: part of a write may have landed.
 
+## The list
+
+`issues_list(filter)` (`issues::github_list` / `issues::linear_list`) reads
+the Issues view's list, 60 at a time. `filter` takes:
+
+| Field | GitHub | Linear |
+| -- | -- | -- |
+| `state` | `open` (default), `closed`, `all` | `open` (default: neither completed nor canceled), `all`, or a state type: `triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled` |
+| `assignee` | `{kind: "me"}`, `{kind: "unassigned"}`, `{kind: "person", id}` (a login) | the same, `id` a user id |
+| `labels` | names; issues with **all** of them | names; issues with **any** of them |
+| `sort` | `updated` (default), `created` (newest), `created_asc` (oldest) | the same, plus `priority` (urgent first, none last) |
+| `search` | GitHub's issue search | the title, or the number (`42`, `ENG-42`) |
+| `teamId` | | the team |
+
+Each matches what the provider's website shows for the same filter: GitHub
+lists go through `gh issue list --search` with a `sort:` qualifier (so
+`no:assignee` works), Linear's through `issues(filter, sort)`.
+`assignedToMe` is the older spelling of `assignee: {kind: "me"}`. Rows carry
+`workflowStateType` on Linear (the type `stateType` folds together), and a
+GitHub issue closed as not planned is `canceled`.
+
+The view keeps the filter per project and tracker (`prefs.issueFilters`). An
+issue changed in the detail pane updates its row in place; one that no
+longer matches stays, dimmed with the reason, until the next refresh.
+
+`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test live_list_filters -- --ignored --nocapture`
+compares the GitHub lists with the website's search and checks each Linear
+filter, then closes and reopens the two sandbox issues through the closed list.
+
 ## Providers
 
 | | Linear | GitHub |

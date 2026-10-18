@@ -878,10 +878,18 @@ mod tests {
         let github = Target::resolve(&repo_dir, Provider::Github).unwrap();
         let before = details(&github, "527").unwrap();
         assert!(before.issue.title.starts_with("[TerminalX test]") && before.issue.state_type == "open", "only the open sandbox issue");
+        // GitHub's search takes a few seconds to see a change, so the closed list is read until it does.
+        // The sandbox is reopened before anything is asserted.
+        let eventually = |found: &dyn Fn() -> bool| (0..10).any(|attempt| {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            found()
+        });
         set_state(&github, "527", &StateChange::Close { reason: crate::issue_ops::CloseReason::NotPlanned }).unwrap();
-        let closed = github_list(&repo_dir, &filter(json!({"state": "closed", "search": "sandbox"}))).unwrap();
-        assert!(closed.iter().any(|issue| issue.number == 527 && issue.state_type == "canceled"));
+        let listed_closed = eventually(&|| github_list(&repo_dir, &filter(json!({"state": "closed", "search": "sandbox"}))).is_ok_and(|closed| closed.iter().any(|issue| issue.number == 527 && issue.state_type == "canceled")));
         let reopened = set_state(&github, "527", &StateChange::Reopen).unwrap();
+        assert!(listed_closed, "#527 was not listed under Closed");
         assert_eq!(reopened.issue.state_type, "open");
         println!("GitHub #527: closed as not planned, listed under Closed as canceled, reopened");
 
@@ -892,9 +900,9 @@ mod tests {
         let states = options(&linear, Some("PRO-101"), None, false).unwrap().states;
         let done = states.iter().find(|state| state.state_type == "completed").unwrap();
         set_state(&linear, "PRO-101", &StateChange::WorkflowState { state_id: done.id.clone() }).unwrap();
-        let finished = linear_list(&key, &filter(json!({"state": "completed", "search": "PRO-101"}))).unwrap();
-        assert!(finished.iter().any(|issue| issue.identifier == "PRO-101"));
+        let finished = linear_list(&key, &filter(json!({"state": "completed", "search": "PRO-101"})));
         let back = set_state(&linear, "PRO-101", &StateChange::WorkflowState { state_id: was.clone() }).unwrap();
+        assert!(finished.unwrap().iter().any(|issue| issue.identifier == "PRO-101"));
         assert_eq!(back.state_id.as_deref(), Some(was.as_str()));
         println!("Linear PRO-101: moved to {}, listed under Completed, moved back to {}", done.name, back.issue.state);
     }
