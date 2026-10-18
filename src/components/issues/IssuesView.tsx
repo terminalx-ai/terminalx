@@ -404,6 +404,8 @@ export function IssuesView({
     ? store.sessions.find((session) => session.id === pipeline?.author.sessionId) ?? store.sessions.find((session) => session.issue?.url === selected.url)
     : null;
 
+  // Who has the issue shows once that is known: from the row, or from its details.
+  const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
   // Up and Down through the rows, the listed ones and then those below them; the row moved to takes the focus.
   const move = (by: 1 | -1) => {
     const rows = [...list, ...unlisted.map((each) => each.issue)];
@@ -434,6 +436,8 @@ export function IssuesView({
       e.preventDefault();
       setStatusOpen(true);
     } else if (matchesShortcut(native, "issues.assignee")) {
+      // Only once the picker is on the page; it would otherwise open by itself when it came.
+      if (!assigneeShown) return;
       e.preventDefault();
       setAssigneeOpen(true);
     } else if (matchesShortcut(native, "issues.labels")) {
@@ -625,7 +629,7 @@ export function IssuesView({
                   />
                 )}
                 {current?.team && <span>{current.team.name}</span>}
-                {project && current && (current.assignees || current.assignee || !detailLoading) && (
+                {project && current && assigneeShown && (
                   <AssigneePicker key={`${current.provider}:${current.id}`} projectPath={project.path} issue={current} viewer={viewer} onChange={assigned} open={assigneeOpen} onOpenChange={setAssigneeOpen} />
                 )}
                 <button type="button" onClick={() => void openUrl(selected.url)} className="flex items-center gap-1 hover:text-foreground">
