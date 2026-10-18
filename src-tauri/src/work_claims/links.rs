@@ -26,8 +26,9 @@ use crate::store::index::{IssueLinkSource, IssueRef, SessionEntry};
 pub const PULL_REQUEST_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long an issue that could not be read is left before trying it again.
 const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
-/// How long the Linear team keys are kept.
+/// How long the Linear team keys, and a project's repository, are kept.
 const TEAMS_FOR: Duration = Duration::from_secs(60 * 60);
+const REPO_FOR: Duration = Duration::from_secs(10 * 60);
 /// The most candidates tried for one session in one pass.
 const MAX_TRIES: usize = 3;
 /// Older sessions are not linked: nobody would be told they work on it.
@@ -169,7 +170,7 @@ struct Checked {
     prompt: bool,
 }
 
-/// What a pass found: links to write, and each session's pull request.
+/// What a pass found: the links to write.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Pass {
     pub links: Vec<(String, IssueRef, IssueLinkSource)>,
@@ -181,6 +182,7 @@ pub struct Linker {
     checked: HashMap<String, Checked>,
     verified: HashMap<(String, Candidate), (Instant, Option<IssueRef>)>,
     teams: Option<(Instant, BTreeSet<String>)>,
+    repos: HashMap<String, (Instant, Option<String>)>,
     pulls: HashMap<String, (Instant, Option<BranchPull>)>,
 }
 
@@ -203,6 +205,18 @@ impl Linker {
         let teams = lookup.linear_teams().unwrap_or_default();
         self.teams = Some((Instant::now(), teams.clone()));
         teams
+    }
+
+    /// A project's GitHub repository, asked of its checkout at most every [`REPO_FOR`].
+    fn repo(&mut self, lookup: &dyn Lookup, project_path: &str) -> Option<String> {
+        if let Some((at, repo)) = self.repos.get(project_path) {
+            if at.elapsed() < REPO_FOR {
+                return repo.clone();
+            }
+        }
+        let repo = lookup.github_repo(project_path);
+        self.repos.insert(project_path.to_string(), (Instant::now(), repo.clone()));
+        repo
     }
 
     /// The issue a candidate names, once confirmed. `place` is the project
@@ -273,7 +287,7 @@ impl Linker {
             if session.issue.is_some() || session.archived || session.is_quick() || !recent(session) {
                 continue;
             }
-            let repo = lookup.github_repo(&session.project_path);
+            let repo = self.repo(lookup, &session.project_path);
             let teams = teams.get_or_insert_with(|| self.teams(lookup)).clone();
             let unlinked = &session.issue_work.unlinked;
             let names: Vec<String> = [session.branch.as_deref(), session.worktree_name.as_deref()].into_iter().flatten().filter(|name| !shared_branch(name)).map(String::from).collect();

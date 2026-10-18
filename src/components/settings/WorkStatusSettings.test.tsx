@@ -1,0 +1,60 @@
+import "@testing-library/dom";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
+const { WorkStatusSettings } = await import("./WorkStatusSettings");
+
+let organizationShares = true;
+
+beforeEach(() => {
+  organizationShares = true;
+  invoke.mockReset();
+  invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+    switch (command) {
+      case "work_status_settings":
+        return { shareWithTeam: true };
+      case "set_work_status_settings":
+        return { shareWithTeam: args.shareWithTeam };
+      case "organization_work_status":
+        return { shareWorkStatus: organizationShares, canManage: true, personal: false };
+      case "set_organization_work_status":
+        organizationShares = args.share as boolean;
+        return { shareWorkStatus: organizationShares, canManage: true, personal: false };
+      default:
+        throw new Error(`Unexpected command: ${command}`);
+    }
+  });
+});
+
+afterEach(cleanup);
+
+const organizations = [
+  { id: "org-admin", name: "Acme", role: "admin" },
+  { id: "org-member", name: "Other", role: "member" },
+  { id: "org-personal", name: "Me", role: "owner", isPersonal: true },
+];
+
+describe("work status settings", () => {
+  it("turns off sharing with the team, which the publisher reads", async () => {
+    render(<WorkStatusSettings organizations={organizations} />);
+    const share = await screen.findByRole("switch", { name: "Show my team what I’m working on" });
+    await waitFor(() => expect(share.getAttribute("aria-checked")).toBe("true"));
+    fireEvent.click(share);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_work_status_settings", { shareWithTeam: false }));
+    await waitFor(() => expect(share.getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("gives an admin the organization's switch, and nobody else", async () => {
+    render(<WorkStatusSettings organizations={organizations} />);
+    const org = await screen.findByRole("switch", { name: "Share work status in Acme" });
+    expect(screen.queryByRole("switch", { name: "Share work status in Other" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Share work status in Me" })).toBeNull();
+    expect(invoke.mock.calls.filter(([command]) => command === "organization_work_status")).toEqual([["organization_work_status", { orgId: "org-admin" }]]);
+    fireEvent.click(org);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_organization_work_status", { orgId: "org-admin", share: false }));
+    await waitFor(() => expect(org.getAttribute("aria-checked")).toBe("false"));
+  });
+});

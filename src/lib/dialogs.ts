@@ -27,6 +27,8 @@ interface State {
   renameSession: string | null;
   /** The quick chat being moved into a project. */
   moveToProject: string | null;
+  /** The session being linked to an issue by hand (#441). */
+  linkIssue: string | null;
   /** The bulk worktree clean-up is open. */
   worktreeCleanup: boolean;
   /** The tab being renamed. */
@@ -42,7 +44,7 @@ export interface TabRequest {
   tab: string | null;
 }
 
-let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
+let state: State = { workspaceRemove: null, bypass: null, renameSession: null, moveToProject: null, linkIssue: null, worktreeCleanup: false, renameTab: null, closeTabs: null };
 const listeners = new Set<() => void>();
 function set(patch: Partial<State>) {
   state = { ...state, ...patch };
@@ -125,6 +127,15 @@ export function openCloseTabs(sessionId: string, action: BulkClose, tab: string 
 
 export function closeCloseTabs() {
   set({ closeTabs: null });
+}
+
+/** "Link to issue…" on a session. */
+export function openLinkIssue(sessionId: string) {
+  set({ linkIssue: sessionId });
+}
+
+export function closeLinkIssue() {
+  set({ linkIssue: null });
 }
 
 /** Move a quick chat into a project. */

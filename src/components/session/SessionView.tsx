@@ -7,6 +7,8 @@ import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { SessionIssueWork } from "@/components/issues/IssueWork";
+import { linkText } from "@/lib/issueWork";
 import { TITLEBAR_INSET } from "@/components/layout/AppShell";
 import { useShortcut } from "@/lib/hotkeys";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
@@ -590,7 +592,7 @@ export function SessionView({
               </span>
             )}
             {session.issue && (
-              <WithTooltip label={session.issue.title}>
+              <WithTooltip label={session.issue.title + (session.issueWork?.link ? ` · ${linkText(session.issueWork.link)}` : "")}>
                 <button
                   type="button"
                   onClick={() => void openUrl(session.issue!.url)}
@@ -601,6 +603,8 @@ export function SessionView({
                 </button>
               </WithTooltip>
             )}
+            {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
+            {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", strip && STRIP_NARROW)} />}
             {pipelineRole && (
               // The issue pipeline this session is part of, as its author or its reviewer.
               <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${pipelineRole.pipeline.issue.identifier} · ${pipelineRole.pipeline.note ?? pipelineRole.pipeline.issue.title}`}>

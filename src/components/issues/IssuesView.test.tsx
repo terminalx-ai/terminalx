@@ -40,7 +40,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({
+  WithTooltip: ({ children }: { children: ReactNode }) => children,
+  Tooltip: ({ children }: { children: ReactNode }) => children,
+  TooltipTrigger: ({ children }: { children: ReactNode }) => children,
+  TooltipContent: () => null,
+}));
 vi.mock("@/components/chat/Dictation", () => ({
   NEW_SESSION_TARGET: "new",
   DictationStatus: () => null,
@@ -941,5 +946,132 @@ describe("assignees", () => {
 
     await release();
     expect(await within(listed).findByText("No longer assigned to you")).toBeTruthy();
+  });
+});
+
+describe("who is working on an issue (#441)", () => {
+  const NOW = Date.now();
+  const claim = (patch: Record<string, unknown>) => ({
+    scope: "github.com/terminalx-ai/raccoon",
+    issue: { provider: "github", id: "11", identifier: "#11" },
+    person: { name: "Alice", you: false },
+    title: "Alice's session",
+    branch: "alice/11-login",
+    state: "working",
+    cloud: false,
+    live: true,
+    since: NOW - 60 * 60 * 1000,
+    lastActiveAt: NOW - 60 * 1000,
+    refreshedAt: NOW - 10 * 1000,
+    ...patch,
+  });
+  const localSession = (patch: Record<string, unknown> = {}) => ({
+    id: "local-12",
+    projectPath: "/repo",
+    cwd: "/repo/.raccoon/worktrees/12-repair",
+    branch: "raccoon/12-repair",
+    worktreeRemoved: false,
+    issue: { provider: "github", id: "12", identifier: "#12", title: "Repair session target", url: "https://example.test/issues/12" },
+    title: "#12 Repair session target",
+    created: new Date(NOW - 30 * 60 * 1000).toISOString(),
+    modified: new Date(NOW - 60 * 1000).toISOString(),
+    archived: false,
+    pinned: false,
+    tabs: [],
+    ...patch,
+  });
+  let claims: unknown = { available: true, now: NOW, liveForSeconds: 300, claims: [] };
+  beforeEach(() => {
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [] };
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "work_claims_list" ? claims : base(command, args)));
+  });
+  afterEach(() => {
+    (sessionStore as { sessions: unknown[] }).sessions = [];
+    vi.useRealTimers();
+  });
+  const row = async (title: string) => (await screen.findByText(title)).closest("button")!;
+
+  it("shows a teammate, the reader's other machine and this Mac on their rows", async () => {
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({}), claim({ issue: { provider: "github", id: "12", identifier: "#12" }, person: { name: "Me", you: true }, device: { id: "studio", label: "Studio" }, sessionId: "s9" })] };
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession()];
+    render(<IssuesView />);
+    expect(await within(await row("Fix login timeout")).findByText("Alice · working")).toBeTruthy();
+    const second = await row("Repair session target");
+    // Another of the reader's machines comes first, and this Mac is the "+1".
+    expect(await within(second).findByText("You · on Studio")).toBeTruthy();
+    expect(within(second).getByText("+1")).toBeTruthy();
+    const [, args] = invoke.mock.calls.find(([command]) => command === "work_claims_list") as [string, { projectPath: string; provider: string; issueUrls: string[] }];
+    expect(args).toEqual({ projectPath: "/repo", provider: "github", issueUrls: ["https://example.test/issues/11", "https://example.test/issues/12"] });
+  });
+
+  it("shows work that starts elsewhere without a refresh", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<IssuesView />);
+    const listed = await row("Fix login timeout");
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "work_claims_list")).toBe(true));
+    expect(within(listed).queryByText("Alice · working")).toBeNull();
+    claims = { available: true, now: Date.now(), liveForSeconds: 300, claims: [claim({})] };
+    await act(async () => void (await vi.advanceTimersByTimeAsync(21 * 1000)));
+    expect(await within(listed).findByText("Alice · working")).toBeTruthy();
+  });
+
+  it("warns before a session starts on an issue someone works on, and starts it anyway when asked", async () => {
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({})] };
+    render(<IssuesView />);
+    fireEvent.click(await row("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    expect(await screen.findByTestId("issue-work-panel")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    const warning = await screen.findByTestId("taken-issue-warning");
+    expect(warning.textContent).toMatch(/^Alice has been working on this since .+, on branch alice\/11-login\.$/);
+    // Not on this Mac: there is no session here to open.
+    expect(screen.queryByRole("button", { name: "Open the existing session" })).toBeNull();
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Start anyway" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+  });
+
+  it("offers this Mac's session instead, and starts nothing on Cancel", async () => {
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession({ tabs: [{ id: "t", harness: "claude", status: "in_progress", created: "", modified: "" }] })];
+    render(<IssuesView />);
+    fireEvent.click(await row("Repair session target"));
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    expect((await screen.findByTestId("taken-issue-warning")).textContent).toMatch(/^You have been working on this on this Mac since .+, on branch raccoon\/12-repair\.$/);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByTestId("taken-issue-warning")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open the existing session" }));
+    expect(vi.mocked(selectSession)).toHaveBeenCalledWith("local-12");
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+  });
+
+  it("hides the issues someone works on, or shows only the reader's", async () => {
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({})] };
+    // The reader's own session on #12 was a while ago: theirs, but nobody works on it now.
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession({ modified: new Date(NOW - 3 * 60 * 60 * 1000).toISOString() })];
+    render(<IssuesView />);
+    await within(await row("Fix login timeout")).findByText("Alice · working");
+    const choose = async (label: string) => {
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Filter by who is working" }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: label }));
+    };
+    await choose("Hide issues someone is working on");
+    await waitFor(() => expect(screen.queryByText("Fix login timeout")).toBeNull());
+    expect(screen.getByText("Repair session target")).toBeTruthy();
+    await choose("Only mine");
+    expect(screen.queryByText("Fix login timeout")).toBeNull();
+    expect(screen.getByText("Repair session target")).toBeTruthy();
+    await choose("All issues");
+    expect(await screen.findByText("Fix login timeout")).toBeTruthy();
+  });
+
+  it("shows this Mac only, and says so, while signed out", async () => {
+    claims = { available: false, reason: "signed_out", now: NOW, liveForSeconds: 300, claims: [] };
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession()];
+    render(<IssuesView />);
+    expect(await within(await row("Repair session target")).findByText("You · this Mac")).toBeTruthy();
+    expect((await screen.findByTestId("issues-work-note")).textContent).toMatch(/^Sign in to see work on your other machines/);
   });
 });

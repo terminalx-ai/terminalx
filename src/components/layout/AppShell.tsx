@@ -22,6 +22,7 @@ import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
 import { startNotifications } from "@/lib/notify";
+import { bootCloudWorkClaims } from "@/lib/cloudWorkClaims";
 import { subscribeTabPty } from "@/lib/tabViews";
 import { MergedCleanupNotices } from "@/components/ui/MergedCleanupNotices";
 import { StarReminder } from "@/components/ui/StarReminder";
@@ -106,6 +107,8 @@ export function AppShell() {
     // from launch and whatever is on screen: hidden sidebar or Settings included (#498).
     bootCloudSessions();
     bootCloudMirrors();
+    // The reader's cloud sessions say which issues they work on, as this Mac's do (#441).
+    bootCloudWorkClaims();
     void bootPairing();
     void bootTerminalPerf();
     void bootCloudControl();

@@ -5,14 +5,16 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, errorMessage, type QuickChatScratch } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
+import { closeLinkIssue, closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
 import { moveQuickChatToProject, renameSession, useSessionStore } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
 import { TabDialogs } from "./TabDialogs";
+import { LinkIssueDialog } from "./LinkIssueDialog";
 
 /**
  * Dialogs about one session that any window can open: rename, moving a
- * quick chat into a project, and the ones about its workspace's tabs.
+ * quick chat into a project, linking it to an issue, and the ones about its
+ * workspace's tabs.
  * Mounted once per window, beside the other app-level dialogs.
  */
 export function SessionDialogs() {
@@ -20,10 +22,12 @@ export function SessionDialogs() {
   const sessions = useSessionStore().sessions;
   const renaming = sessions.find((session) => session.id === dialogs.renameSession);
   const moving = sessions.find((session) => session.id === dialogs.moveToProject);
+  const linking = sessions.find((session) => session.id === dialogs.linkIssue);
   return (
     <>
       {renaming && <RenameSessionDialog key={renaming.id} session={renaming} onClose={closeRenameSession} />}
       {moving && <MoveToProjectDialog key={moving.id} session={moving} onClose={closeMoveToProject} />}
+      {linking && <LinkIssueDialog key={linking.id} session={linking} onClose={closeLinkIssue} />}
       <TabDialogs />
     </>
   );

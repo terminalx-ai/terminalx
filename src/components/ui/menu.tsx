@@ -134,6 +134,19 @@ export const ContextMenuItem = React.forwardRef<
 ));
 ContextMenuItem.displayName = "ContextMenuItem";
 
+export const ContextMenuCheckboxItem = React.forwardRef<
+  React.ComponentRef<typeof Ctx.CheckboxItem>,
+  React.ComponentPropsWithoutRef<typeof Ctx.CheckboxItem>
+>(({ className, children, ...props }, ref) => (
+  <Ctx.CheckboxItem ref={ref} className={cn(itemClass, "pr-7", className)} {...props}>
+    {children}
+    <Ctx.ItemIndicator className="absolute right-2">
+      <Check className="size-3.5" />
+    </Ctx.ItemIndicator>
+  </Ctx.CheckboxItem>
+));
+ContextMenuCheckboxItem.displayName = "ContextMenuCheckboxItem";
+
 export function ContextMenuSeparator({ className }: { className?: string }) {
   return <Ctx.Separator className={cn("my-1 h-px bg-hairline", className)} />;
 }
