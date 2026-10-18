@@ -31,8 +31,9 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: () => [],
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
+const prefs = vi.hoisted(() => ({ autocorrect: false }));
 vi.mock("@/lib/prefs", () => ({
-  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
+  usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null, autocorrect: prefs.autocorrect }),
   getPrefs: () => ({}),
   setPrefs: vi.fn(),
 }));
@@ -132,6 +133,28 @@ describe("new session attachments", () => {
   });
 });
 
+
+describe("autocorrect in the new-session prompt (#525)", () => {
+  afterEach(() => {
+    prefs.autocorrect = false;
+  });
+
+  const attributes = () => {
+    const prompt = document.querySelector<HTMLTextAreaElement>("[data-new-session-prompt]")!;
+    return ["spellcheck", "autocorrect", "autocapitalize"].map((name) => prompt.getAttribute(name));
+  };
+
+  it("keeps the prompt exactly as typed while Autocorrect is off", () => {
+    renderView();
+    expect(attributes()).toEqual(["false", "off", "off"]);
+  });
+
+  it("leaves the prompt to the system while Autocorrect is on", () => {
+    prefs.autocorrect = true;
+    renderView();
+    expect(attributes()).toEqual([null, null, null]);
+  });
+});
 
 describe("folder projects", () => {
   it("starts in the folder despite a saved worktree preference", async () => {

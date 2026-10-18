@@ -26,6 +26,7 @@ import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { promptTextProps } from "@/lib/autocorrect";
 import { chooseMode } from "@/lib/dialogs";
 import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -507,6 +508,7 @@ export function NewSessionView({
               ref={ref}
               autoFocus
               data-new-session-prompt
+              {...promptTextProps(prefs.autocorrect)}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {

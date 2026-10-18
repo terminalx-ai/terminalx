@@ -153,6 +153,27 @@ describe("composer height", () => {
   });
 });
 
+describe("autocorrect in the composer (#525)", () => {
+  afterEach(() => setPrefs({ autocorrect: false }));
+
+  const attributes = (textarea: HTMLTextAreaElement) => ["spellcheck", "autocorrect", "autocapitalize"].map((name) => textarea.getAttribute(name));
+
+  it("keeps a prompt exactly as typed while Autocorrect is off, and leaves it to the system once it is on", () => {
+    setPrefs({ autocorrect: false });
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    const textarea = container.querySelector("textarea")!;
+    expect(attributes(textarea)).toEqual(["false", "off", "off"]);
+
+    // The open composer follows the switch at once: same field, no restart.
+    act(() => setPrefs({ autocorrect: true }));
+    expect(container.querySelector("textarea")).toBe(textarea);
+    expect(attributes(textarea)).toEqual([null, null, null]);
+
+    act(() => setPrefs({ autocorrect: false }));
+    expect(attributes(textarea)).toEqual(["false", "off", "off"]);
+  });
+});
+
 describe("composer attachments", () => {
   it("selects files from the attach icon", async () => {
     openDialog.mockResolvedValue(["/tmp/proof.png"]);

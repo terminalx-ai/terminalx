@@ -234,6 +234,11 @@ function GeneralTab() {
         control={<Switch checked={prefs.foldToolCalls} onCheckedChange={(v) => setPrefs({ foldToolCalls: v })} />}
       />
       <SettingRow
+        label="Autocorrect"
+        description="Correct spelling automatically while typing a prompt. Off leaves what you type exactly as typed, with no smart quotes, dashes or text replacements."
+        control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
+      />
+      <SettingRow
         label="New sessions use a worktree"
         description="Each session gets its own git worktree so agents never step on each other. Off runs sessions in the project's own checkout."
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}

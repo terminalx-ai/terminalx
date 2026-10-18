@@ -24,6 +24,8 @@ export interface Prefs {
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
   foldToolCalls: boolean;
+  /** Spelling correction in the fields where the reader writes to an agent (see `@/lib/autocorrect`). */
+  autocorrect: boolean;
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -105,6 +107,7 @@ const DEFAULTS: Prefs = {
   fontScale: "md",
   transcriptLayout: "wide",
   foldToolCalls: true,
+  autocorrect: false,
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},

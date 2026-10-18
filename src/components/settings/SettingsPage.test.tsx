@@ -23,6 +23,22 @@ describe("Website links", () => {
   });
 });
 
+describe("Autocorrect", () => {
+  afterEach(() => setPrefs({ autocorrect: false }));
+
+  it("is a General switch that starts off and saves the choice", () => {
+    setPrefs({ autocorrect: false });
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    const toggle = screen.getByRole("switch", { name: "Autocorrect" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(toggle);
+    expect(getPrefs().autocorrect).toBe(true);
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!)).toMatchObject({ autocorrect: true });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+});
+
 describe("Settings dismissal", () => {
   it("offers Close and keeps Back working", () => {
     const onBack = vi.fn();
