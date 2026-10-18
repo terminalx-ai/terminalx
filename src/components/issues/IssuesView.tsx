@@ -30,7 +30,7 @@ import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/i
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
 import { useIssueViewer } from "@/lib/issueViewer";
-import { issueWorkKey, mine, taken, unavailableText, useIssueWork, workToWarnAbout, type IssueWorker } from "@/lib/issueWork";
+import { mine, taken, unavailableText, useIssueWork, workKeyOf, workToWarnAbout, type IssueWorker } from "@/lib/issueWork";
 import { pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { WorkStatus } from "@/types/session";
@@ -153,7 +153,7 @@ export function IssuesView({
   );
   // Who works on each listed issue: this Mac's sessions, the reader's other machines, teammates.
   const work = useIssueWork(project?.path, provider, list, store.sessions, tick);
-  const workOf = (issue: Issue) => work.byIssue.get(issueWorkKey(issue.provider, issue.identifier));
+  const workOf = (issue: Issue) => work.byIssue.get(workKeyOf(issue));
   const shownList = workFilter === "all" ? list : list.filter((issue) => (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
   const workNote = unavailableText(work.answer);
   // Issues with a pipeline here that the list does not hold: closed by their
@@ -302,7 +302,7 @@ export function IssuesView({
     const issue = detail ?? selected;
     if (!issue || !project || !harness) return;
     // A warning, not a lock: the reader may start anyway.
-    const busy = workToWarnAbout(work.byIssue.get(issueWorkKey(issue.provider, issue.identifier)));
+    const busy = workToWarnAbout(work.byIssue.get(workKeyOf(issue)));
     if (!anyway && busy.length > 0) {
       setTakenBy(busy);
       return;

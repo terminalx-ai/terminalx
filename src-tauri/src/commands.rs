@@ -4131,9 +4131,9 @@ pub async fn organization_work_status(org_id: String, state: tauri::State<'_, cr
 }
 
 #[tauri::command]
-pub async fn set_organization_work_status(org_id: String, share: bool, state: tauri::State<'_, crate::AppState>) -> OrgWorkStatusResult {
+pub async fn set_organization_work_status(org_id: String, patch: crate::work_claims::client::OrganizationWorkStatusPatch, state: tauri::State<'_, crate::AppState>) -> OrgWorkStatusResult {
     let service = state.work_claims.clone();
-    tauri::async_runtime::spawn_blocking(move || service.set_organization(&org_id, share))
+    tauri::async_runtime::spawn_blocking(move || service.set_organization(&org_id, &patch))
         .await
         .map_err(|_| crate::work_claims::client::WorkClaimsError::local("work_claims_unavailable"))?
 }

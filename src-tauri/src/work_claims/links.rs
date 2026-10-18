@@ -24,8 +24,9 @@ use crate::store::index::{IssueLinkSource, IssueRef, SessionEntry};
 
 /// How often a session's pull request is read again.
 pub const PULL_REQUEST_EVERY: Duration = Duration::from_secs(5 * 60);
-/// How long an issue that could not be read is left before trying it again.
-const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
+/// How long a tracker that could not answer (offline, `gh` not ready, Linear
+/// down) is left before it is asked again.
+const RETRY_FAILED: Duration = Duration::from_secs(2 * 60);
 /// How long the Linear team keys, and a project's repository, are kept.
 const TEAMS_FOR: Duration = Duration::from_secs(60 * 60);
 const REPO_FOR: Duration = Duration::from_secs(10 * 60);
@@ -156,7 +157,8 @@ pub trait Lookup {
     fn github_issue_in(&self, repo: &str, number: &str) -> Result<Option<IssueRef>, String>;
     /// The Linear issue with this identifier; `Err` also when Linear is not connected.
     fn linear_issue(&self, identifier: &str) -> Result<Option<IssueRef>, String>;
-    /// The keys of the Linear teams the key can see; empty when not connected.
+    /// The keys of the Linear teams the key can see: empty when Linear is not
+    /// connected, `None` when it could not be asked.
     fn linear_teams(&self) -> Option<BTreeSet<String>>;
     /// The pull request of each branch in the checkout at `cwd`.
     fn branch_pulls(&self, cwd: &str, branches: &[String]) -> Option<HashMap<String, BranchPull>>;
@@ -164,10 +166,23 @@ pub trait Lookup {
     fn first_request(&self, session: &SessionEntry) -> Option<String>;
 }
 
+/// What was settled of a session: the names its branch candidates were
+/// answered for, and whether its first prompt was. Only an answer the
+/// trackers gave settles anything; a failed lookup is tried again.
 #[derive(Default)]
 struct Checked {
-    names: Vec<String>,
+    names: Option<Vec<String>>,
     prompt: bool,
+}
+
+/// What a tracker said of a candidate.
+#[derive(Clone)]
+enum Verified {
+    Found(IssueRef),
+    /// No such issue (or a pull request's number).
+    Missing,
+    /// The tracker could not say; asked again after [`RETRY_FAILED`].
+    Failed(Instant),
 }
 
 /// What a pass found: the links to write.
@@ -180,8 +195,9 @@ pub struct Pass {
 #[derive(Default)]
 pub struct Linker {
     checked: HashMap<String, Checked>,
-    verified: HashMap<(String, Candidate), (Instant, Option<IssueRef>)>,
-    teams: Option<(Instant, BTreeSet<String>)>,
+    verified: HashMap<(String, Candidate), Verified>,
+    /// The Linear team keys, or `None` when Linear could not be asked.
+    teams: Option<(Instant, Option<BTreeSet<String>>)>,
     repos: HashMap<String, (Instant, Option<String>)>,
     pulls: HashMap<String, (Instant, Option<BranchPull>)>,
 }
@@ -196,13 +212,15 @@ fn recent(session: &SessionEntry) -> bool {
 }
 
 impl Linker {
-    fn teams(&mut self, lookup: &dyn Lookup) -> BTreeSet<String> {
+    /// The Linear team keys; `None` while Linear cannot be asked, which is
+    /// tried again sooner than a known answer is read again.
+    fn teams(&mut self, lookup: &dyn Lookup) -> Option<BTreeSet<String>> {
         if let Some((at, teams)) = &self.teams {
-            if at.elapsed() < TEAMS_FOR {
+            if at.elapsed() < if teams.is_some() { TEAMS_FOR } else { RETRY_FAILED } {
                 return teams.clone();
             }
         }
-        let teams = lookup.linear_teams().unwrap_or_default();
+        let teams = lookup.linear_teams();
         self.teams = Some((Instant::now(), teams.clone()));
         teams
     }
@@ -219,30 +237,48 @@ impl Linker {
         repo
     }
 
-    /// The issue a candidate names, once confirmed. `place` is the project
-    /// path, or `repo:owner/name` for a cloud workspace's repository.
-    fn verify(&mut self, lookup: &dyn Lookup, place: &str, candidate: &Candidate) -> Option<IssueRef> {
+    /// The issue a candidate names: `Some(Some(issue))` once confirmed,
+    /// `Some(None)` when there is no such issue, `None` while the tracker
+    /// cannot say. `place` is the project path, or `repo:owner/name` for a
+    /// cloud workspace's repository.
+    fn verify(&mut self, lookup: &dyn Lookup, place: &str, candidate: &Candidate) -> Option<Option<IssueRef>> {
         let key = (place.to_string(), candidate.clone());
-        if let Some((at, known)) = self.verified.get(&key) {
-            if known.is_some() || at.elapsed() < RETRY_AFTER {
-                return known.clone();
-            }
+        match self.verified.get(&key) {
+            Some(Verified::Found(issue)) => return Some(Some(issue.clone())),
+            Some(Verified::Missing) => return Some(None),
+            Some(Verified::Failed(at)) if at.elapsed() < RETRY_FAILED => return None,
+            _ => {}
         }
         let found = match (candidate, place.strip_prefix("repo:")) {
             (Candidate::GitHub(number), Some(repo)) => lookup.github_issue_in(repo, number),
             (Candidate::GitHub(number), None) => lookup.github_issue(place, number),
             (Candidate::Linear(identifier), _) => lookup.linear_issue(identifier),
         };
-        let found = found.unwrap_or_else(|error| {
-            log::debug!("issue link candidate could not be read: {error}");
-            None
-        });
-        self.verified.insert(key, (Instant::now(), found.clone()));
-        found
+        let (verified, answer) = match found {
+            Ok(Some(issue)) => (Verified::Found(issue.clone()), Some(Some(issue))),
+            Ok(None) => (Verified::Missing, Some(None)),
+            Err(error) => {
+                log::debug!("issue link candidate could not be read: {error}");
+                (Verified::Failed(Instant::now()), None)
+            }
+        };
+        self.verified.insert(key, verified);
+        answer
     }
 
-    fn first_issue(&mut self, lookup: &dyn Lookup, place: &str, candidates: &[Candidate], unlinked: &[String]) -> Option<IssueRef> {
-        candidates.iter().take(MAX_TRIES).find_map(|candidate| self.verify(lookup, place, candidate).filter(|issue| !unlinked.contains(&issue.url)))
+    /// The first candidate the tracker confirms that was not unlinked by
+    /// hand, and whether that is final: not while a tracker could not say
+    /// and nothing was found.
+    fn first_issue(&mut self, lookup: &dyn Lookup, place: &str, candidates: &[Candidate], unlinked: &[String]) -> (Option<IssueRef>, bool) {
+        let mut settled = true;
+        for candidate in candidates.iter().take(MAX_TRIES) {
+            match self.verify(lookup, place, candidate) {
+                Some(Some(issue)) if !unlinked.contains(&issue.url) => return (Some(issue), true),
+                Some(_) => {}
+                None => settled = false,
+            }
+        }
+        (None, settled)
     }
 
     /// The pull request of every recent session with a branch of its own,
@@ -282,38 +318,48 @@ impl Linker {
         self.pulls.retain(|id, _| sessions.iter().any(|session| &session.id == id));
         self.pull_requests(lookup, sessions);
         let mut pass = Pass::default();
-        let mut teams: Option<BTreeSet<String>> = None;
+        let mut asked: Option<Option<BTreeSet<String>>> = None;
         for session in sessions {
             if session.issue.is_some() || session.archived || session.is_quick() || !recent(session) {
                 continue;
             }
             let repo = self.repo(lookup, &session.project_path);
-            let teams = teams.get_or_insert_with(|| self.teams(lookup)).clone();
+            let known_teams = asked.get_or_insert_with(|| self.teams(lookup)).clone();
+            // Without the team keys a Linear candidate cannot be told apart, so nothing is settled.
+            let teams_known = known_teams.is_some();
+            let teams = known_teams.unwrap_or_default();
             let unlinked = &session.issue_work.unlinked;
             let names: Vec<String> = [session.branch.as_deref(), session.worktree_name.as_deref()].into_iter().flatten().filter(|name| !shared_branch(name)).map(String::from).collect();
-            let checked = self.checked.entry(session.id.clone()).or_default();
-            let names_new = checked.names != names;
-            let prompt_new = !checked.prompt;
-            checked.names = names.clone();
+            let (names_new, prompt_new) = {
+                let checked = self.checked.entry(session.id.clone()).or_default();
+                (checked.names.as_ref() != Some(&names), !checked.prompt)
+            };
             let mut found = None;
             if names_new {
                 let refs: Vec<&str> = names.iter().map(String::as_str).collect();
                 let candidates = name_candidates(&refs, repo.is_some(), &teams);
-                found = self.first_issue(lookup, &session.project_path, &candidates, unlinked).map(|issue| (issue, IssueLinkSource::Branch));
+                let (issue, settled) = self.first_issue(lookup, &session.project_path, &candidates, unlinked);
+                if settled && (teams_known || issue.is_some()) {
+                    self.checked.get_mut(&session.id).expect("checked above").names = Some(names.clone());
+                }
+                found = issue.map(|issue| (issue, IssueLinkSource::Branch));
             }
             if found.is_none() {
                 if let Some(pull) = self.pulls.get(&session.id).and_then(|(_, pull)| pull.clone()) {
                     let candidates = pull_request_candidates(&pull, repo.as_deref(), &teams);
-                    found = self.first_issue(lookup, &session.project_path, &candidates, unlinked).map(|issue| (issue, IssueLinkSource::PullRequest));
+                    found = self.first_issue(lookup, &session.project_path, &candidates, unlinked).0.map(|issue| (issue, IssueLinkSource::PullRequest));
                 }
             }
             if found.is_none() && prompt_new {
                 // Only once there is a first request; a session not yet
                 // prompted is looked at again in the next pass.
                 if let Some(text) = lookup.first_request(session) {
-                    self.checked.get_mut(&session.id).expect("checked above").prompt = true;
                     let candidates = prompt_candidates(&text, repo.as_deref(), &teams);
-                    found = self.first_issue(lookup, &session.project_path, &candidates, unlinked).map(|issue| (issue, IssueLinkSource::Prompt));
+                    let (issue, settled) = self.first_issue(lookup, &session.project_path, &candidates, unlinked);
+                    if settled && (teams_known || issue.is_some()) {
+                        self.checked.get_mut(&session.id).expect("checked above").prompt = true;
+                    }
+                    found = issue.map(|issue| (issue, IssueLinkSource::Prompt));
                 }
             }
             if let Some((issue, source)) = found {
@@ -323,23 +369,23 @@ impl Linker {
         pass
     }
 
-    /// The issue a cloud session's branch names, in its workspace's repository.
-    pub fn cloud_issue(&mut self, lookup: &dyn Lookup, repo: Option<&str>, names: &[&str]) -> Option<IssueRef> {
+    /// The issue a cloud session's branch names, in its workspace's
+    /// repository, and whether that answer is final (as [`Self::first_issue`]).
+    pub fn cloud_issue(&mut self, lookup: &dyn Lookup, repo: Option<&str>, names: &[&str]) -> (Option<IssueRef>, bool) {
         let teams = self.teams(lookup);
+        let teams_known = teams.is_some();
         let names: Vec<&str> = names.iter().copied().filter(|name| !shared_branch(name)).collect();
-        let candidates = name_candidates(&names, repo.is_some(), &teams);
+        let candidates = name_candidates(&names, repo.is_some(), &teams.unwrap_or_default());
         let place = repo.map(|repo| format!("repo:{repo}")).unwrap_or_default();
-        candidates.iter().take(MAX_TRIES).find_map(|candidate| match candidate {
-            Candidate::GitHub(_) if repo.is_none() => None,
-            _ => self.verify(lookup, &place, candidate),
-        })
+        let (issue, settled) = self.first_issue(lookup, &place, &candidates, &[]);
+        (issue.clone(), settled && (teams_known || issue.is_some()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn teams(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
@@ -401,6 +447,10 @@ mod tests {
         pulls: HashMap<String, BranchPull>,
         prompt: Option<String>,
         asked: RefCell<Vec<String>>,
+        /// The trackers cannot be reached.
+        offline: Cell<bool>,
+        /// Linear could not be asked for its teams.
+        no_teams: Cell<bool>,
     }
 
     impl Lookup for Fake {
@@ -409,6 +459,9 @@ mod tests {
         }
         fn github_issue(&self, _: &str, number: &str) -> Result<Option<IssueRef>, String> {
             self.asked.borrow_mut().push(format!("gh:{number}"));
+            if self.offline.get() {
+                return Err("error connecting to api.github.com".into());
+            }
             Ok(self.issues.iter().find(|issue| issue.provider == "github" && issue.id == number).cloned())
         }
         fn github_issue_in(&self, repo: &str, number: &str) -> Result<Option<IssueRef>, String> {
@@ -417,10 +470,13 @@ mod tests {
         }
         fn linear_issue(&self, identifier: &str) -> Result<Option<IssueRef>, String> {
             self.asked.borrow_mut().push(format!("linear:{identifier}"));
+            if self.offline.get() {
+                return Err("Linear could not be reached".into());
+            }
             Ok(self.issues.iter().find(|issue| issue.identifier == identifier).cloned())
         }
         fn linear_teams(&self) -> Option<BTreeSet<String>> {
-            Some(teams(&["ENG"]))
+            (!self.no_teams.get()).then(|| teams(&["ENG"]))
         }
         fn branch_pulls(&self, _: &str, branches: &[String]) -> Option<HashMap<String, BranchPull>> {
             self.asked.borrow_mut().push(format!("pulls:{}", branches.join(",")));
@@ -450,6 +506,51 @@ mod tests {
         // The same names are not looked at again.
         assert!(linker.pass(&fake, &sessions).links.iter().all(|(id, ..)| id == "s1"));
         assert!(fake.asked.borrow()[asked..].iter().all(|asked| !asked.starts_with("gh:")), "{:?}", fake.asked.borrow());
+    }
+
+    /// Let every failed lookup's wait run out, as if [`RETRY_FAILED`] had passed.
+    fn age_failures(linker: &mut Linker) {
+        let long_ago = Instant::now().checked_sub(RETRY_FAILED + Duration::from_secs(1)).unwrap();
+        for verified in linker.verified.values_mut() {
+            if let Verified::Failed(at) = verified {
+                *at = long_ago;
+            }
+        }
+        if let Some((at, None)) = &mut linker.teams {
+            *at = long_ago;
+        }
+    }
+
+    #[test]
+    fn a_lookup_that_failed_is_tried_again_and_links_once_the_tracker_answers() {
+        let fake = Fake { issues: vec![issue("github", "441", "#441"), issue("linear", "uuid-42", "ENG-42")], prompt: Some("Please fix ENG-42".into()), ..Default::default() };
+        fake.offline.set(true);
+        let mut linker = Linker::default();
+        let sessions = [session("s1", Some("raccoon/441-work")), session("s2", Some("raccoon/other"))];
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        let asked = fake.asked.borrow().len();
+        // Within the wait, nobody is asked again.
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        assert_eq!(fake.asked.borrow().len(), asked);
+        // Back online, after the wait: the branch and the prompt are looked at again.
+        fake.offline.set(false);
+        age_failures(&mut linker);
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![
+            ("s1".to_string(), issue("github", "441", "#441"), IssueLinkSource::Branch),
+            ("s2".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Prompt),
+        ]);
+    }
+
+    #[test]
+    fn without_the_linear_teams_nothing_is_settled() {
+        let fake = Fake { issues: vec![issue("linear", "uuid-42", "ENG-42")], ..Default::default() };
+        fake.no_teams.set(true);
+        let mut linker = Linker::default();
+        let sessions = [session("s1", Some("me/eng-42-login"))];
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        fake.no_teams.set(false);
+        age_failures(&mut linker);
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![("s1".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Branch)]);
     }
 
     #[test]
@@ -494,8 +595,11 @@ mod tests {
     fn a_cloud_session_branch_is_confirmed_in_its_workspace_repository() {
         let fake = Fake { issues: vec![issue("github", "7", "#7")], ..Default::default() };
         let mut linker = Linker::default();
-        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["7-fix"]), Some(issue("github", "7", "#7")));
+        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["7-fix"]), (Some(issue("github", "7", "#7")), true));
         assert_eq!(fake.asked.borrow().as_slice(), ["acme/widgets:7", "gh:7"]);
-        assert_eq!(linker.cloud_issue(&fake, None, &["7-fix"]), None);
+        assert_eq!(linker.cloud_issue(&fake, None, &["7-fix"]), (None, true));
+        // A failed lookup is not an answer: the cloud session is looked at again.
+        fake.offline.set(true);
+        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["8-fix"]), (None, false));
     }
 }

@@ -50,10 +50,40 @@ export interface IssueWorker {
   link: IssueLinkSource | null;
 }
 
-/** How an issue is named across machines: provider, then `#441` or `ENG-42`. */
-export function issueWorkKey(provider: string, identifier: string): string {
+/**
+ * Where an issue lives, from its URL, as the claims name it
+ * (`work_claims::claims::issue_scope`): `github.com/<owner>/<repo>` or
+ * `linear.app/<workspace>`, lower case. Null for any other address.
+ */
+export function issueScope(provider: string, url: string): string | null {
+  const rest = url.trim().split("://")[1];
+  if (!rest) return null;
+  const [host, ...parts] = rest.split(/[/?#]/);
+  const name = (part: string | undefined, max: number, extra = "") => !!part && part.length <= max && new RegExp(`^[a-z0-9-${extra}]+$`).test(part);
+  if (provider === "github") {
+    const [owner, repo, kind] = parts.map((part) => part.toLowerCase());
+    return host.toLowerCase() === "github.com" && kind === parts[2] && kind === "issues" && name(owner, 39) && name(repo, 100, "._") ? `github.com/${owner}/${repo}` : null;
+  }
+  if (provider === "linear") {
+    const workspace = parts[0]?.toLowerCase();
+    return host.toLowerCase() === "linear.app" && parts[1] === "issue" && name(workspace, 64) ? `linear.app/${workspace}` : null;
+  }
+  return null;
+}
+
+/**
+ * How an issue is named across machines: its provider, where it lives, and
+ * `#441` or `ENG-42`. Two repositories' `#12` are two issues; an address no
+ * scope can be read from names only itself.
+ */
+export function issueWorkKey(provider: string, scope: string, identifier: string): string {
   const id = identifier.trim().toUpperCase();
-  return `${provider}:${provider === "github" && !id.startsWith("#") ? `#${id}` : id}`;
+  return `${provider}:${scope.toLowerCase()}:${provider === "github" && !id.startsWith("#") ? `#${id}` : id}`;
+}
+
+/** The key of an issue (or a session's issue reference) as its tracker lists it. */
+export function workKeyOf(issue: Pick<IssueRef, "provider" | "identifier" | "url">): string {
+  return issueWorkKey(issue.provider, issueScope(issue.provider, issue.url) ?? `url:${issue.url}`, issue.identifier);
 }
 
 function workState(state: string): WorkState {
@@ -82,9 +112,9 @@ function lastActiveOf(session: SessionEntry): number {
  * they were active, as the "Session" chip always was: they can be opened.
  */
 export function localWorkers(sessions: SessionEntry[], issue: Pick<IssueRef, "provider" | "identifier" | "url">, now = Date.now()): IssueWorker[] {
-  const key = issueWorkKey(issue.provider, issue.identifier);
+  const key = workKeyOf(issue);
   return sessions
-    .filter((session) => !session.archived && session.kind !== "quick" && session.issue && (session.issue.url === issue.url || issueWorkKey(session.issue.provider, session.issue.identifier) === key))
+    .filter((session) => !session.archived && session.kind !== "quick" && !!session.issue && workKeyOf(session.issue) === key)
     .map((session) => {
       const state = localState(session);
       const lastActive = lastActiveOf(session);
@@ -119,7 +149,7 @@ export function remoteWorkers(answer: WorkClaimsAnswer | null, receivedAt: numbe
     // Each of the reader's machines publishes the cloud sessions it knows: one is enough.
     const known = seen.get(worker.key);
     if (known && known.worker.lastActive >= worker.lastActive) continue;
-    seen.set(worker.key, { issue: issueWorkKey(claim.issue.provider, claim.issue.identifier), worker });
+    seen.set(worker.key, { issue: issueWorkKey(claim.issue.provider, claim.scope, claim.issue.identifier), worker });
   }
   for (const { issue, worker } of seen.values()) out.set(issue, [...(out.get(issue) ?? []), worker]);
   return out;
@@ -132,7 +162,14 @@ function remoteWorker(claim: WorkClaim, offset: number, now: number): IssueWorke
   if (!phase) return null;
   const you = claim.person.you;
   const place: WorkPlace = !you ? "team" : claim.cloud ? "cloud" : "machine";
-  const id = you && claim.cloud ? `cloud:${claim.sessionId}` : you ? `machine:${claim.device?.id}:${claim.sessionId}` : `team:${claim.person.name}:${claim.since}:${claim.branch ?? ""}:${claim.title}`;
+  // The server's key names a person's session, the same from each of their Macs; an older server sends none.
+  const id = claim.key
+    ? `key:${claim.key}`
+    : you && claim.cloud
+      ? `cloud:${claim.sessionId}`
+      : you
+        ? `machine:${claim.device?.id}:${claim.sessionId}`
+        : `team:${claim.person.name}:${claim.since}:${claim.branch ?? ""}:${claim.title}`;
   return {
     key: id,
     place,
@@ -163,12 +200,12 @@ export function issueClosed(issue: Pick<Issue, "stateType" | "state">): boolean 
   return !!issue.state && (issue.stateType === "completed" || issue.stateType === "canceled");
 }
 
-/** Everyone working on each issue, by `issueWorkKey`. */
+/** Everyone working on each issue, by `workKeyOf`. */
 export function workersByIssue(issues: Issue[], sessions: SessionEntry[], remote: Map<string, IssueWorker[]>, now = Date.now()): Map<string, IssueWorker[]> {
   const out = new Map<string, IssueWorker[]>();
   for (const issue of issues) {
     if (issueClosed(issue)) continue;
-    const key = issueWorkKey(issue.provider, issue.identifier);
+    const key = workKeyOf(issue);
     const workers = sortWorkers([...localWorkers(sessions, issue, now), ...(remote.get(key) ?? [])]);
     if (workers.length) out.set(key, workers);
   }
@@ -332,7 +369,7 @@ export function useOthersOnIssue(session: SessionEntry | null | undefined, sessi
   const now = receivedAt || Date.now();
   const workers = useMemo(() => {
     if (!issue || !session) return [];
-    const key = issueWorkKey(issue.provider, issue.identifier);
+    const key = workKeyOf(issue);
     const local = localWorkers(sessions, issue, now).filter((worker) => worker.sessionId !== session.id);
     return sortWorkers([...local, ...(remoteWorkers(answer, receivedAt, now).get(key) ?? [])]).filter((worker) => worker.phase === "now");
   }, [issue, session, sessions, answer, receivedAt, now]);

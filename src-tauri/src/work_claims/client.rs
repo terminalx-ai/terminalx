@@ -18,11 +18,16 @@ const RESPONSE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 pub struct WorkClaimsError {
     pub code: String,
     pub status: Option<u16>,
+    /// How long the server asked to be left alone (`Retry-After`), bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
 }
+
+const MAX_RETRY_AFTER_SECONDS: u64 = 60 * 60;
 
 impl WorkClaimsError {
     pub fn local(code: &str) -> Self {
-        Self { code: code.into(), status: None }
+        Self { code: code.into(), status: None, retry_after_seconds: None }
     }
 
     /// No answer at all: the service could not be reached.
@@ -34,7 +39,10 @@ impl WorkClaimsError {
 /// Codes the server's work-claim routes can return. Anything else is
 /// collapsed so the webview never renders arbitrary server text.
 fn known_error_code(code: &str) -> bool {
-    matches!(code, "unauthorized" | "forbidden" | "not_found" | "work_claims_invalid_request" | "work_status_personal_organization")
+    matches!(
+        code,
+        "unauthorized" | "forbidden" | "not_found" | "work_claims_invalid_request" | "work_claims_device_limit" | "work_claims_rate_limited" | "work_status_personal_organization"
+    )
 }
 
 #[derive(Deserialize)]
@@ -69,6 +77,10 @@ pub struct Device {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteClaim {
+    /// Opaque: one person's one session, the same from each of their
+    /// machines, so a reader shows a cloud session once. Older servers omit it.
+    #[serde(default)]
+    pub key: Option<String>,
     pub scope: String,
     pub issue: ClaimIssue,
     pub person: Person,
@@ -112,6 +124,20 @@ pub struct OrganizationWorkStatus {
     pub can_manage: bool,
     #[serde(default)]
     pub personal: bool,
+    /// The Linear workspaces (`linear.app/<key>`) whose issues members see
+    /// each other's work on, as the admins declared them.
+    #[serde(default)]
+    pub linear_workspaces: Vec<String>,
+}
+
+/// A change to the organization's work status settings; what is left out stays.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationWorkStatusPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_work_status: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_workspaces: Option<Vec<String>>,
 }
 
 pub struct Client {
@@ -173,9 +199,10 @@ impl Client {
         self.send("GET", url, token, None)
     }
 
-    pub fn set_organization(&self, token: &str, organization_id: &str, share: bool) -> Result<OrganizationWorkStatus, WorkClaimsError> {
+    pub fn set_organization(&self, token: &str, organization_id: &str, patch: &OrganizationWorkStatusPatch) -> Result<OrganizationWorkStatus, WorkClaimsError> {
         let url = self.url(&["orgs", organization_id, "work-status"])?;
-        self.send("POST", url, token, Some(json!({ "shareWorkStatus": share })))
+        let body = serde_json::to_value(patch).map_err(|_| WorkClaimsError::local("invalid_request"))?;
+        self.send("POST", url, token, Some(body))
     }
 }
 
@@ -189,11 +216,12 @@ fn bounded_body(response: ureq::Response) -> Result<Vec<u8>, WorkClaimsError> {
 }
 
 fn http_error(status: u16, response: ureq::Response) -> WorkClaimsError {
+    let retry_after_seconds = response.header("Retry-After").and_then(|value| value.trim().parse::<u64>().ok()).map(|seconds| seconds.min(MAX_RETRY_AFTER_SECONDS));
     let code = bounded_body(response)
         .ok()
         .and_then(|body| serde_json::from_slice::<ErrorEnvelope>(&body).ok())
         .map(|envelope| envelope.error)
         .filter(|code| known_error_code(code))
         .unwrap_or_else(|| "work_claims_unavailable".into());
-    WorkClaimsError { code, status: Some(status) }
+    WorkClaimsError { code, status: Some(status), retry_after_seconds }
 }

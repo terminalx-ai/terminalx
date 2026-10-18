@@ -951,6 +951,9 @@ describe("assignees", () => {
 
 describe("who is working on an issue (#441)", () => {
   const NOW = Date.now();
+  // Work is matched by the repository an issue lives in, so these rows have real addresses.
+  const REPO = "https://github.com/terminalx-ai/raccoon";
+  const listed = issues.map((issue) => ({ ...issue, url: `${REPO}/issues/${issue.id}` }));
   const claim = (patch: Record<string, unknown>) => ({
     scope: "github.com/terminalx-ai/raccoon",
     issue: { provider: "github", id: "11", identifier: "#11" },
@@ -971,7 +974,7 @@ describe("who is working on an issue (#441)", () => {
     cwd: "/repo/.raccoon/worktrees/12-repair",
     branch: "raccoon/12-repair",
     worktreeRemoved: false,
-    issue: { provider: "github", id: "12", identifier: "#12", title: "Repair session target", url: "https://example.test/issues/12" },
+    issue: { provider: "github", id: "12", identifier: "#12", title: "Repair session target", url: `${REPO}/issues/12` },
     title: "#12 Repair session target",
     created: new Date(NOW - 30 * 60 * 1000).toISOString(),
     modified: new Date(NOW - 60 * 1000).toISOString(),
@@ -984,7 +987,12 @@ describe("who is working on an issue (#441)", () => {
   beforeEach(() => {
     claims = { available: true, now: NOW, liveForSeconds: 300, claims: [] };
     const base = invoke.getMockImplementation()!;
-    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => (command === "work_claims_list" ? claims : base(command, args)));
+    invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "work_claims_list") return claims;
+      if (command === "issues_list" && args?.provider === "github") return listed;
+      if (command === "issue_details" && args?.provider === "github") return listed.find((issue) => issue.id === args?.id);
+      return base(command, args);
+    });
   });
   afterEach(() => {
     (sessionStore as { sessions: unknown[] }).sessions = [];
@@ -1002,7 +1010,26 @@ describe("who is working on an issue (#441)", () => {
     expect(await within(second).findByText("You · on Studio")).toBeTruthy();
     expect(within(second).getByText("+1")).toBeTruthy();
     const [, args] = invoke.mock.calls.find(([command]) => command === "work_claims_list") as [string, { projectPath: string; provider: string; issueUrls: string[] }];
-    expect(args).toEqual({ projectPath: "/repo", provider: "github", issueUrls: ["https://example.test/issues/11", "https://example.test/issues/12"] });
+    expect(args).toEqual({ projectPath: "/repo", provider: "github", issueUrls: [`${REPO}/issues/11`, `${REPO}/issues/12`] });
+  });
+
+  it("never shows another repository's issue of the same number as this one", async () => {
+    // A session of another project, on other/repo#12, working now; and a teammate on other/repo#11.
+    (sessionStore as { sessions: unknown[] }).sessions = [
+      localSession({ id: "elsewhere", projectPath: "/other", issue: { provider: "github", id: "12", identifier: "#12", title: "Theirs", url: "https://github.com/other/repo/issues/12" }, tabs: [{ id: "t", harness: "claude", status: "in_progress", created: "", modified: "" }] }),
+    ];
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({ scope: "github.com/other/repo" })] };
+    render(<IssuesView />);
+    const second = await row("Repair session target");
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "work_claims_list")).toBe(true));
+    expect(within(second).queryByTestId("issue-work-chip")).toBeNull();
+    expect(within(await row("Fix login timeout")).queryByTestId("issue-work-chip")).toBeNull();
+    // Nor does starting a session on #12 here warn about it.
+    fireEvent.click(second);
+    await screen.findByText("Second issue body.");
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+    expect(screen.queryByTestId("taken-issue-warning")).toBeNull();
   });
 
   it("shows work that starts elsewhere without a refresh", async () => {

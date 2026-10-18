@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { SettingRow, Switch } from "@/components/ui/controls";
-import { errorMessage, workStatus, type OrganizationSummary, type OrganizationWorkStatus } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { errorMessage, workStatus, type OrganizationSummary, type OrganizationWorkStatus, type OrganizationWorkStatusPatch } from "@/lib/api";
 
 /**
  * What this person's work status shares, and with whom (#441): their own
@@ -56,11 +57,23 @@ const ORGANIZATION_ERRORS: Record<string, string> = {
   work_claims_unsupported: "The account service does not offer work status yet.",
 };
 
-/** An admin's switch: members of the organization see each other's work, or nobody's. */
+/** "acme, Other-Co" as the server takes it: lower case, no duplicates, each a Linear URL key. */
+export function linearWorkspaceKeys(text: string): string[] | null {
+  const keys = [...new Set(text.split(/[\s,]+/).map((key) => key.trim().toLowerCase().replace(/^https?:\/\/linear\.app\//, "").replace(/\/.*$/, "")).filter(Boolean))];
+  return keys.every((key) => /^[a-z0-9-]{1,64}$/.test(key)) && keys.length <= 10 ? keys : null;
+}
+
+/**
+ * An admin's settings for one organization: members see each other's work,
+ * or nobody's; and the Linear workspaces that are the organization's, whose
+ * issues members see each other's work on (GitHub repositories are the ones
+ * the organization connected).
+ */
 function OrganizationSwitch({ organization }: { organization: OrganizationSummary }) {
   const [status, setStatus] = useState<OrganizationWorkStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [workspaces, setWorkspaces] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -74,11 +87,12 @@ function OrganizationSwitch({ organization }: { organization: OrganizationSummar
   }, [organization.id]);
 
   if (!status && !error) return null;
-  const change = async (on: boolean) => {
+  const save = async (patch: OrganizationWorkStatusPatch) => {
     setSaving(true);
     setError(null);
     try {
-      setStatus(await workStatus.setOrganization(organization.id, on));
+      setStatus(await workStatus.setOrganization(organization.id, patch));
+      setWorkspaces(null);
     } catch (e) {
       const code = (e as { code?: string })?.code ?? "";
       setError(ORGANIZATION_ERRORS[code] ?? errorMessage(e));
@@ -86,12 +100,46 @@ function OrganizationSwitch({ organization }: { organization: OrganizationSummar
       setSaving(false);
     }
   };
+  const declared = (status?.linearWorkspaces ?? []).join(", ");
+  const typed = workspaces ?? declared;
+  const keys = linearWorkspaceKeys(typed);
   return (
-    <SettingRow
-      label={`Work status in ${organization.name}`}
-      description={error ?? "Members see who works on the issues of the organization’s repositories. Off, nobody in it is shown anyone else’s work; each person’s own machines still are."}
-      disabled={!status?.canManage}
-      control={<Switch aria-label={`Share work status in ${organization.name}`} checked={!!status?.shareWorkStatus} disabled={!status?.canManage || saving} onCheckedChange={(on) => void change(on)} />}
-    />
+    <>
+      <SettingRow
+        label={`Work status in ${organization.name}`}
+        description={error ?? "Members see who works on the issues of the organization’s repositories. Off, nobody in it is shown anyone else’s work; each person’s own machines still are."}
+        disabled={!status?.canManage}
+        control={<Switch aria-label={`Share work status in ${organization.name}`} checked={!!status?.shareWorkStatus} disabled={!status?.canManage || saving} onCheckedChange={(on) => void save({ shareWorkStatus: on })} />}
+      />
+      {status?.canManage && status.shareWorkStatus && (
+        <SettingRow
+          stacked
+          label={`Linear workspaces of ${organization.name}`}
+          description="Members see each other’s work on Linear issues only in these workspaces: the name after linear.app/ in an issue’s address. Up to 10, separated by commas."
+          control={
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (keys) void save({ linearWorkspaces: keys });
+              }}
+            >
+              <input
+                aria-label={`Linear workspaces of ${organization.name}`}
+                value={typed}
+                placeholder="acme"
+                spellCheck={false}
+                onChange={(event) => setWorkspaces(event.target.value)}
+                className="h-7 min-w-0 flex-1 rounded-md border border-hairline bg-background px-2 font-mono text-xs outline-none focus:border-border"
+              />
+              <Button type="submit" size="sm" variant="secondary" disabled={saving || !keys || typed === declared}>
+                Save
+              </Button>
+            </form>
+          }
+        />
+      )}
+      {workspaces != null && !keys && <p role="alert" className="pb-2 text-xs text-destructive">A workspace is the name after linear.app/ in an issue’s address: letters, digits and dashes.</p>}
+    </>
   );
 }

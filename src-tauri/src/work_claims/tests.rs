@@ -24,6 +24,11 @@ type Requests = Arc<Mutex<Vec<String>>>;
 
 /// Answer every request with `body` and keep each raw request.
 fn serve(body: &'static str) -> (String, Requests) {
+    serve_with("200 OK", "", body)
+}
+
+/// Answer every request with this status, extra headers and body.
+fn serve_with(status: &'static str, headers: &'static str, body: &'static str) -> (String, Requests) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let requests: Requests = Arc::default();
@@ -55,7 +60,7 @@ fn serve(body: &'static str) -> (String, Requests) {
                 }
             }
             seen.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
-            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
             let _ = stream.write_all(response.as_bytes());
         }
     });
@@ -192,6 +197,20 @@ fn an_unreachable_service_reads_as_offline_and_is_retried_later() {
 }
 
 #[test]
+fn a_server_that_asks_for_a_wait_is_left_alone_that_long() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    index::save(&[linked_session(project.path())]).unwrap();
+    let (base, requests) = serve_with("429 Too Many Requests", "Retry-After: 120\r\n", r#"{"error":"work_claims_rate_limited"}"#);
+    let claims = service(&base);
+    claims.publish(&Linker::default());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let state = claims.state.lock().unwrap();
+    assert!(state.retry_at.unwrap() >= Instant::now() + Duration::from_secs(119));
+    assert!(state.sent.is_none());
+}
+
+#[test]
 fn lists_every_visible_claim_but_this_machines_own_local_ones() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -232,14 +251,17 @@ fn signing_out_withdraws_this_devices_claims() {
 
 #[test]
 fn the_organization_switch_is_asked_only_of_a_member_organization() {
-    let (base, requests) = serve(r#"{"shareWorkStatus":false,"canManage":true,"personal":false}"#);
+    let (base, requests) = serve(r#"{"shareWorkStatus":false,"canManage":true,"personal":false,"linearWorkspaces":["acme"]}"#);
     let claims = service(&base);
     claims.account.set_memberships_for_test(&["org-1", "org-2"], true);
-    let status = claims.set_organization("org-2", false).unwrap();
-    assert_eq!(status, OrganizationWorkStatus { share_work_status: false, can_manage: true, personal: false });
-    let request = &requests.lock().unwrap()[0];
-    assert!(request.starts_with("POST /v1/desktop/orgs/org-2/work-status "), "{request}");
-    assert_eq!(body(request), json!({"shareWorkStatus": false}));
+    let status = claims.set_organization("org-2", &OrganizationWorkStatusPatch { share_work_status: Some(false), linear_workspaces: None }).unwrap();
+    assert_eq!(status, OrganizationWorkStatus { share_work_status: false, can_manage: true, personal: false, linear_workspaces: vec!["acme".into()] });
+    // What is not changed is not sent.
+    claims.set_organization("org-2", &OrganizationWorkStatusPatch { share_work_status: None, linear_workspaces: Some(vec!["acme".into()]) }).unwrap();
+    let requests = requests.lock().unwrap();
+    assert!(requests[0].starts_with("POST /v1/desktop/orgs/org-2/work-status "), "{}", requests[0]);
+    assert_eq!(body(&requests[0]), json!({"shareWorkStatus": false}));
+    assert_eq!(body(&requests[1]), json!({"linearWorkspaces": ["acme"]}));
     assert_eq!(claims.organization("org-9").unwrap_err().code, "cloud_organization_unavailable");
     assert_eq!(claims.organization("../x").unwrap_err().code, "invalid_request");
 }

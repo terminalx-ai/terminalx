@@ -8,9 +8,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const { WorkStatusSettings } = await import("./WorkStatusSettings");
 
 let organizationShares = true;
+let linearWorkspaces: string[] = [];
 
 beforeEach(() => {
   organizationShares = true;
+  linearWorkspaces = [];
   invoke.mockReset();
   invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
     switch (command) {
@@ -19,10 +21,13 @@ beforeEach(() => {
       case "set_work_status_settings":
         return { shareWithTeam: args.shareWithTeam };
       case "organization_work_status":
-        return { shareWorkStatus: organizationShares, canManage: true, personal: false };
-      case "set_organization_work_status":
-        organizationShares = args.share as boolean;
-        return { shareWorkStatus: organizationShares, canManage: true, personal: false };
+        return { shareWorkStatus: organizationShares, canManage: true, personal: false, linearWorkspaces };
+      case "set_organization_work_status": {
+        const patch = args.patch as { shareWorkStatus?: boolean; linearWorkspaces?: string[] };
+        organizationShares = patch.shareWorkStatus ?? organizationShares;
+        linearWorkspaces = patch.linearWorkspaces ?? linearWorkspaces;
+        return { shareWorkStatus: organizationShares, canManage: true, personal: false, linearWorkspaces };
+      }
       default:
         throw new Error(`Unexpected command: ${command}`);
     }
@@ -53,8 +58,19 @@ describe("work status settings", () => {
     expect(screen.queryByRole("switch", { name: "Share work status in Other" })).toBeNull();
     expect(screen.queryByRole("switch", { name: "Share work status in Me" })).toBeNull();
     expect(invoke.mock.calls.filter(([command]) => command === "organization_work_status")).toEqual([["organization_work_status", { orgId: "org-admin" }]]);
+    // The organization's Linear workspaces, as the admin names them.
+    const field = screen.getByRole("textbox", { name: "Linear workspaces of Acme" });
+    fireEvent.change(field, { target: { value: "not a key!" } });
+    expect(screen.getByRole("alert").textContent).toMatch(/after linear.app/);
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(field, { target: { value: "Acme, https://linear.app/other-co/issue/ENG-1, acme" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_organization_work_status", { orgId: "org-admin", patch: { linearWorkspaces: ["acme", "other-co"] } }));
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Linear workspaces of Acme" }) as HTMLInputElement).value).toBe("acme, other-co"));
     fireEvent.click(org);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_organization_work_status", { orgId: "org-admin", share: false }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_organization_work_status", { orgId: "org-admin", patch: { shareWorkStatus: false } }));
     await waitFor(() => expect(org.getAttribute("aria-checked")).toBe("false"));
+    // Off, there are no workspaces to name.
+    expect(screen.queryByRole("textbox", { name: "Linear workspaces of Acme" })).toBeNull();
   });
 });

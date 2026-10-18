@@ -31,7 +31,7 @@ use url::Url;
 use crate::account::AccountManager;
 use crate::store::index::{self, IssueLinkSource, IssueRef, SessionEntry};
 use claims::{Claim, CloudSession, Inputs, PullRequestState};
-use client::{Client, OrganizationWorkStatus, RemoteClaim, WorkClaimsError};
+use client::{Client, OrganizationWorkStatus, OrganizationWorkStatusPatch, RemoteClaim, WorkClaimsError};
 use links::{BranchPull, Linker, Lookup};
 
 /// The server's capability flag for these routes.
@@ -86,14 +86,23 @@ struct Sent {
     refresh_after: Duration,
 }
 
+#[derive(Clone)]
+struct CloudIssue {
+    names: Vec<String>,
+    issue: Option<IssueRef>,
+    /// False while a tracker could not say: looked for again in the next pass.
+    settled: bool,
+}
+
 #[derive(Default)]
 struct State {
     nudged: bool,
     stopped: bool,
     /// The cloud sessions the window last handed over.
     cloud: Vec<CloudSession>,
-    /// The issue each cloud session's branch names, by its claim id, and the names it was found from.
-    cloud_issues: HashMap<String, (Vec<String>, Option<IssueRef>)>,
+    /// The issue each cloud session's branch names, by its claim id, with the
+    /// names it was looked for under and whether the trackers' answer was final.
+    cloud_issues: HashMap<String, CloudIssue>,
     sent: Option<Sent>,
     failures: u32,
     retry_at: Option<Instant>,
@@ -218,12 +227,15 @@ impl WorkClaims {
         let mut found = HashMap::new();
         for session in &cloud {
             let names: Vec<String> = [session.branch.as_deref(), session.worktree_name.as_deref()].into_iter().flatten().map(String::from).collect();
-            let known = self.state.lock().unwrap().cloud_issues.get(&session.claim_id()).filter(|(was, _)| *was == names).cloned();
-            let issue = match known {
-                Some((_, issue)) => issue,
-                None => linker.cloud_issue(lookup, session.repository.as_deref(), &names.iter().map(String::as_str).collect::<Vec<_>>()),
+            let known = self.state.lock().unwrap().cloud_issues.get(&session.claim_id()).filter(|known| known.settled && known.names == names).cloned();
+            let looked = match known {
+                Some(known) => known,
+                None => {
+                    let (issue, settled) = linker.cloud_issue(lookup, session.repository.as_deref(), &names.iter().map(String::as_str).collect::<Vec<_>>());
+                    CloudIssue { names, issue, settled }
+                }
             };
-            found.insert(session.claim_id(), (names, issue));
+            found.insert(session.claim_id(), looked);
         }
         self.state.lock().unwrap().cloud_issues = found;
     }
@@ -265,7 +277,7 @@ impl WorkClaims {
                 .cloud
                 .iter()
                 .filter(|session| session.created_by.as_deref() == Some(context.user_id.as_str()))
-                .filter_map(|session| Some((session.clone(), state.cloud_issues.get(&session.claim_id())?.1.clone()?)))
+                .filter_map(|session| Some((session.clone(), state.cloud_issues.get(&session.claim_id())?.issue.clone()?)))
                 .collect()
         };
         let remote = |path: &str| self.remote(path);
@@ -298,7 +310,9 @@ impl WorkClaims {
                     log::warn!("publish work status: {} ({:?})", error.code, error.status);
                 }
                 state.failures = state.failures.saturating_add(1);
-                state.retry_at = Some(Instant::now() + backoff(state.failures));
+                // A server that asked for a wait (too many publishes) gets at least that.
+                let asked = Duration::from_secs(error.retry_after_seconds.unwrap_or(0));
+                state.retry_at = Some(Instant::now() + backoff(state.failures).max(asked));
             }
         }
     }
@@ -385,9 +399,9 @@ impl WorkClaims {
         self.client.organization(&token, organization_id)
     }
 
-    pub fn set_organization(&self, organization_id: &str, share: bool) -> Result<OrganizationWorkStatus, WorkClaimsError> {
+    pub fn set_organization(&self, organization_id: &str, patch: &OrganizationWorkStatusPatch) -> Result<OrganizationWorkStatus, WorkClaimsError> {
         let token = self.organization_token(organization_id)?;
-        self.client.set_organization(&token, organization_id, share)
+        self.client.set_organization(&token, organization_id, patch)
     }
 }
 
@@ -498,7 +512,8 @@ impl Lookup for Desktop {
     }
 
     fn linear_teams(&self) -> Option<BTreeSet<String>> {
-        let key = linear_key()?;
+        // Not connected is an answer: there are no Linear candidates.
+        let Some(key) = linear_key() else { return Some(BTreeSet::new()) };
         crate::issues::linear_teams(&key).ok().map(|teams| teams.into_iter().map(|team| team.key.to_ascii_uppercase()).collect())
     }
 

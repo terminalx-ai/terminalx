@@ -1994,6 +1994,8 @@ export const issues = {
 
 /** One claim as the account service shows it to this reader (#441). `device` and `sessionId` come only with the reader's own. */
 export interface WorkClaim {
+  /** Opaque: one person's one session, the same from each of their machines. Absent from an older server. */
+  key?: string | null;
   scope: string;
   issue: { provider: "github" | "linear"; id: string; identifier: string };
   person: { name: string; you: boolean };
@@ -2048,6 +2050,14 @@ export interface OrganizationWorkStatus {
   shareWorkStatus: boolean;
   canManage: boolean;
   personal: boolean;
+  /** The Linear workspaces (`linear.app/<key>`) whose issues members see each other's work on. */
+  linearWorkspaces: string[];
+}
+
+/** A change to an organization's work status settings; what is left out stays. */
+export interface OrganizationWorkStatusPatch {
+  shareWorkStatus?: boolean;
+  linearWorkspaces?: string[];
 }
 
 /** Who is working on an issue, across machines and teammates (#441). */
@@ -2057,7 +2067,7 @@ export const workStatus = {
   settings: () => invoke<WorkStatusSettings>("work_status_settings"),
   setShareWithTeam: (shareWithTeam: boolean) => invoke<WorkStatusSettings>("set_work_status_settings", { shareWithTeam }),
   organization: (orgId: string) => invoke<OrganizationWorkStatus>("organization_work_status", { orgId }),
-  setOrganization: (orgId: string, share: boolean) => invoke<OrganizationWorkStatus>("set_organization_work_status", { orgId, share }),
+  setOrganization: (orgId: string, patch: OrganizationWorkStatusPatch) => invoke<OrganizationWorkStatus>("set_organization_work_status", { orgId, patch }),
   linkIssue: (sessionId: string, issue: IssueRef) => invoke<SessionEntry>("session_link_issue", { sessionId, issue }),
   unlinkIssue: (sessionId: string) => invoke<SessionEntry>("session_unlink_issue", { sessionId }),
   setPrivate: (sessionId: string, isPrivate: boolean) => invoke<SessionEntry>("session_set_work_private", { sessionId, private: isPrivate }),

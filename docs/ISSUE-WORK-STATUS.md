@@ -83,12 +83,21 @@ chip's tooltip and the menu), and every link can be removed:
 
 - **The same person on other machines**: always, once signed in on both.
 - **Teammates**: only members of a non-personal organization that both
-  belong to, that has work status on, and that connected the repository the
-  session works in: one of its repositories selected for cloud workspaces, or
-  any repository of a GitHub account its GitHub App is installed on for all
-  repositories. A personal project (a repository no shared organization
-  connected) is never shown to anyone else. Membership is read again on
-  every request, so someone who leaves stops seeing at once.
+  belong to and that has work status on, and only on issues that are the
+  organization's:
+  - a GitHub issue whose repository the organization connected (one of its
+    repositories selected for cloud workspaces, or any repository of a
+    GitHub account its GitHub App is installed on for all repositories).
+    What counts is the issue's repository, not the checkout's, so work in a
+    personal fork on the organization's issue shows;
+  - a Linear issue in a workspace the organization's admins named in
+    Settings → Account, worked on in a project whose repository the
+    organization connected.
+
+  Anything else, a personal project's work among it, is never shown to
+  anyone else: asking for another repository or workspace answers nothing.
+  Membership is read again on every request, so someone who leaves stops
+  seeing at once.
 - **What leaves the machine**: the issue (provider, id, identifier, and its
   repository or Linear workspace), the person (from the account token), a
   device id and this Mac's name, the session id and title, the branch, a
@@ -99,7 +108,7 @@ chip's tooltip and the menu), and every link can be removed:
 - **Controls**: Settings → Account → "Show my team what I'm working on"
   (own machines still see it), the per-session "Don't share this session",
   and, for an organization's owners and admins, "Work status in
-  *organization*".
+  *organization*" and its Linear workspaces.
 - **Machine names** go only to their owner; teammates see the person.
 
 ## How it works
@@ -119,9 +128,16 @@ chip's tooltip and the menu), and every link can be removed:
   the answer: the window knows them better from its own sessions.
 - **Identity across machines**: a project is matched by its normalised
   remote (`github.com/acme/widgets`, whatever the scheme, user info or
-  `.git`), never its path. An issue is matched by provider and identifier
-  (`#441`, `ENG-42`) within its scope (`github.com/<owner>/<repo>` or
-  `linear.app/<workspace>`).
+  `.git`), never its path. An issue is matched by provider, scope
+  (`github.com/<owner>/<repo>` or `linear.app/<workspace>`, read from its
+  address) and identifier (`#441`, `ENG-42`): two repositories' `#12` are
+  two issues, on this Mac as on the server. A person's session carries an
+  opaque key from the server, the same from each of their machines, so a
+  cloud session published by two Macs shows once.
+- **Limits**: the server keeps claims for at most ten of a person's devices
+  at a time, takes one publish per device every two seconds (the desktop
+  waits as long as it is asked), and shows at most 50 claims of one person
+  in a read.
 - **Device**: the pairing host id and its editable name from Settings →
   Account.
 - **Cloud sessions**: a cloud session carries no issue reference, so the
