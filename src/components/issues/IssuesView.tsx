@@ -11,6 +11,7 @@ import { AutomationEditor, type AutomationEditorPrefill } from "@/components/aut
 import { AssigneePicker } from "@/components/issues/AssigneePicker";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
+import { IssueCommentComposer } from "@/components/issues/IssueCommentComposer";
 import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
 import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
 import { IssueWorkPanel, TakenIssueDialog } from "@/components/issues/IssueWork";
@@ -747,6 +748,16 @@ export function IssuesView({
                     issueId={selected.id}
                     refreshKey={tick}
                     onComments={(value) => threadKey && onThread(threadKey, value)}
+                    footer={(controls) => (
+                      <IssueCommentComposer
+                        projectPath={project.path}
+                        issue={current ?? selected}
+                        controls={controls}
+                        viewer={viewer}
+                        busy={writes.writing.has(writeKey(selected))}
+                        hooks={{ begin: writes.begin, end: writes.end, onIssue: changed }}
+                      />
+                    )}
                   />
                 </div>
               )}
