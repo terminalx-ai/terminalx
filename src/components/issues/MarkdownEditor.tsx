@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { Markdown } from "@/components/chat/Markdown";
 import { cn } from "@/lib/cn";
 
@@ -7,7 +7,9 @@ type Pane = "write" | "preview";
 /**
  * Markdown with a Write and a Preview tab, for comments and issue text. The
  * caller owns the text and the buttons: `children` sits at the right of the
- * bar under the text. ⌘/Ctrl+Enter submits and Escape cancels, when given.
+ * bar under the text. ⌘/Ctrl+Enter submits and Escape cancels, when given;
+ * neither while an input method is composing. `onKeyDown` sees each key
+ * first, and one it prevents goes no further.
  */
 export function MarkdownEditor({
   value,
@@ -22,6 +24,8 @@ export function MarkdownEditor({
   hint,
   children,
   className,
+  textareaRef,
+  onKeyDown,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -38,9 +42,13 @@ export function MarkdownEditor({
   hint?: ReactNode;
   children?: ReactNode;
   className?: string;
+  /** The text box, for a caller that follows the caret (dictation, mentions). */
+  textareaRef?: RefObject<HTMLTextAreaElement | null>;
+  onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
 }) {
   const [pane, setPane] = useState<Pane>("write");
-  const area = useRef<HTMLTextAreaElement>(null);
+  const own = useRef<HTMLTextAreaElement>(null);
+  const area = textareaRef ?? own;
   const id = useId();
 
   useEffect(() => {
@@ -89,6 +97,8 @@ export function MarkdownEditor({
             placeholder={placeholder}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
+              onKeyDown?.(event);
+              if (event.defaultPrevented || event.nativeEvent.isComposing) return;
               if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && onSubmit) {
                 event.preventDefault();
                 onSubmit();
@@ -111,7 +121,7 @@ export function MarkdownEditor({
       {(hint || children) && (
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-hairline px-2.5 py-1.5">
           {hint && <span className="min-w-0 flex-1 basis-32 text-[11px] text-faint">{hint}</span>}
-          <div className="ml-auto flex shrink-0 items-center gap-1.5">{children}</div>
+          <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">{children}</div>
         </div>
       )}
     </div>
