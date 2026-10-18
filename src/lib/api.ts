@@ -36,6 +36,7 @@ import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, 
 import type { IssuePipeline, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { CloudDiagnostics, ConnectionClose } from "@/lib/cloudDiagnostics";
+import type { IssueUser } from "@/lib/issueOps";
 import { noteCallFailure } from "@/lib/accountRoles";
 import { assertLocal } from "@/types/target";
 
@@ -1962,7 +1963,10 @@ export interface Issue {
   state: string;
   stateType: "open" | "started" | "completed" | "canceled";
   labels: IssueLabel[];
+  /** The first of `assignees`. */
   assignee?: IssueAssignee | null;
+  /** Every assignee. Rows a pipeline remembers leave it out. */
+  assignees?: IssueUser[];
   updatedAt: string;
   body?: string | null;
   team?: IssueTeam | null;

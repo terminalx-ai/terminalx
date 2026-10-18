@@ -16,6 +16,7 @@ import { repoFile } from "@/lib/repo";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { refreshHarnesses, useSessionStore } from "@/lib/sessions";
 import { api, errorMessage, gh, issues, USAGE_REFRESH_MINUTES, type BrowserRuntimeStatus, type CliToolStatus, type LinearStatus, type SkillInstallStatus } from "@/lib/api";
+import { forgetIssueViewers } from "@/lib/issueViewer";
 import { ComputerUseRows } from "./ComputerUseSettings";
 import changelog from "../../../CHANGELOG.md?raw";
 import { TranscriptionTab } from "./TranscriptionTab";
@@ -590,6 +591,7 @@ function IntegrationsTab() {
     setError(null);
     try {
       const s = await issues.linearSetApiKey(value);
+      forgetIssueViewers("linear");
       setLinear(s);
       setKey("");
     } catch (e) {

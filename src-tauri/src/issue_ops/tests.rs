@@ -16,8 +16,8 @@ fn round_trip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::D
 #[test]
 fn a_github_issue_keeps_every_assignee_and_its_close_reason() {
     let details = github::parse_issue(&fixture(include_str!("../fixtures/github_issue_details.json")), "acme/widgets").unwrap();
-    assert_eq!(details.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam", "alex", "robin"]);
-    assert_eq!(details.assignees[1].login.as_deref(), Some("alex"));
+    assert_eq!(details.issue.assignees.iter().map(|user| user.id.as_str()).collect::<Vec<_>>(), ["sam", "alex", "robin"]);
+    assert_eq!(details.issue.assignees[1].login.as_deref(), Some("alex"));
     assert_eq!(details.issue.assignee.as_ref().unwrap().name, "sam");
     assert_eq!(details.close_reason, Some(CloseReason::NotPlanned));
     assert_eq!((details.issue.state.as_str(), details.issue.state_type.as_str()), ("Closed", "canceled"));
@@ -38,7 +38,7 @@ fn a_linear_issue_carries_its_state_priority_and_author_without_its_comments() {
     assert_eq!(details.state_id.as_deref(), Some("state-started"));
     assert_eq!(details.state_color.as_deref(), Some("f2c94c"));
     assert_eq!(details.priority, Some(2));
-    assert_eq!(details.assignees, vec![IssueUser { id: "user-sam".into(), name: "Sam".into(), login: None, avatar_url: Some("https://example.com/sam.png".into()) }]);
+    assert_eq!(details.issue.assignees, vec![IssueUser { id: "user-sam".into(), name: "Sam".into(), login: None, avatar_url: Some("https://example.com/sam.png".into()) }]);
     assert_eq!(details.author.as_ref().unwrap().name, "Kim");
     assert_eq!(details.issue.labels[0].id.as_deref(), Some("label-bug"));
     assert_eq!(details.description, "Users get logged out.");

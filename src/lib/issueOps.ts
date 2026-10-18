@@ -187,6 +187,8 @@ export const issueOps = {
   /** For an issue's repository or team (`id`), or for a new Linear issue in `teamId`. Cached; `refresh` reads again. */
   options: (projectPath: string, provider: IssueProvider, scope: { id?: string | null; teamId?: string | null }, refresh = false) =>
     invoke<IssueOptions>("issue_options", { projectPath, provider, id: scope.id ?? null, teamId: scope.teamId ?? null, refresh }),
+  /** Who the reader is to the provider, named as `setAssignees` takes people: the `gh` login, the Linear key's owner. */
+  viewer: (projectPath: string, provider: IssueProvider) => invoke<IssueUser>("issue_viewer", { projectPath, provider }),
   commentAdd: (projectPath: string, provider: IssueProvider, id: string, body: string) =>
     invoke<IssueComment>("issue_comment_add", { projectPath, provider, id, body }),
   commentEdit: (projectPath: string, provider: IssueProvider, id: string, commentId: string, body: string) =>

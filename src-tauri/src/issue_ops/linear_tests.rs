@@ -20,7 +20,7 @@ fn details_read_the_description_alone() {
     assert_eq!(details.issue.body.as_deref(), Some(details.description.as_str()));
     assert_eq!((details.issue.state.as_str(), details.state_id.as_deref(), details.state_color.as_deref()), ("Backlog", Some("884bd5ca-47eb-4eed-96f8-d44a7183b391"), Some("bec2c8")));
     assert_eq!(details.priority, Some(0));
-    assert_eq!(details.assignees.iter().map(|user| (user.id.as_str(), user.name.as_str())).collect::<Vec<_>>(), [(VIEWER, "sam")]);
+    assert_eq!(details.issue.assignees.iter().map(|user| (user.id.as_str(), user.name.as_str())).collect::<Vec<_>>(), [(VIEWER, "sam")]);
     assert_eq!(details.author.unwrap().id, VIEWER);
     assert_eq!(details.issue.team.unwrap().key, "ENG");
     assert_eq!(details.created_at, "2026-10-18T06:31:11.160Z");
@@ -164,12 +164,12 @@ fn issue_writes_answer_with_the_issue_as_linear_now_has_it() {
     assert_eq!(updated.state_id.as_deref(), Some("f093f06b-bdb5-4cc0-83a2-1ab468cf2210"));
     assert_eq!(updated.priority, Some(3));
     assert_eq!(updated.issue.labels.iter().map(|label| (label.id.as_deref(), label.name.as_str())).collect::<Vec<_>>(), [(Some("ccc19003-dd17-4f15-8a1c-791df99d854f"), "Bug")]);
-    assert!(updated.assignees.is_empty() && updated.issue.assignee.is_none());
+    assert!(updated.issue.assignees.is_empty() && updated.issue.assignee.is_none());
     assert_eq!(updated.issue.updated_at, "2026-10-18T06:55:30.290Z");
     let created = written_issue(&recorded["issueCreate"]["data"]["issueCreate"]).unwrap();
     assert_eq!(created.issue.identifier, "ENG-102");
     assert_eq!((created.issue.state.as_str(), created.priority), ("Todo", Some(4)));
-    assert_eq!(created.assignees[0].id, VIEWER);
+    assert_eq!(created.issue.assignees[0].id, VIEWER);
     assert_eq!(created.issue.labels[0].name, "Improvement");
     assert_eq!(written_issue(&json!({"success": false, "issue": null})).unwrap_err().kind, IssueOpErrorKind::Other);
 }
@@ -296,8 +296,8 @@ fn live_every_operation_on_the_sandbox_issue() {
     step("state");
 
     let viewer = request(key, "query { viewer { id } }", json!({})).unwrap()["viewer"]["id"].as_str().unwrap().to_string();
-    assert!(set_assignees(key, &id, &[]).unwrap().assignees.is_empty());
-    assert_eq!(set_assignees(key, &id, std::slice::from_ref(&viewer)).unwrap().assignees[0].id, viewer);
+    assert!(set_assignees(key, &id, &[]).unwrap().issue.assignees.is_empty());
+    assert_eq!(set_assignees(key, &id, std::slice::from_ref(&viewer)).unwrap().issue.assignees[0].id, viewer);
     step("assignee: none, the viewer");
 
     let label = options.labels.iter().find(|label| !label.is_group).unwrap();
@@ -336,7 +336,7 @@ fn live_every_operation_on_the_sandbox_issue() {
 
     // Put it back.
     set_state(key, &id, &StateChange::WorkflowState { state_id: before.state_id.clone().unwrap() }).unwrap();
-    set_assignees(key, &id, &before.assignees.iter().map(|user| user.id.clone()).collect::<Vec<_>>()).unwrap();
+    set_assignees(key, &id, &before.issue.assignees.iter().map(|user| user.id.clone()).collect::<Vec<_>>()).unwrap();
     set_labels(key, &id, &before.issue.labels.iter().filter_map(|label| label.id.clone()).collect::<Vec<_>>()).unwrap();
     set_priority(key, &id, before.priority.unwrap_or(0)).unwrap();
     set_title(key, &id, &before.issue.title).unwrap();
