@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
+import type { IssueListFilter } from "@/lib/issueListFilter";
 
 /**
  * UI preferences that the frontend can read for itself live in localStorage.
@@ -30,6 +31,8 @@ export interface Prefs {
   lastEffort: Record<string, string>;
   lastMode: string;
   issueProvider: "github" | "linear";
+  /** The Issues list's filter and sort, by project and tracker (`issueFilterKey`). */
+  issueFilters: Record<string, Partial<IssueListFilter>>;
   useWorktree: boolean;
   /** The reader ticked "don't ask again" on the bypass warning. */
   bypassConfirmed: boolean;
@@ -111,6 +114,7 @@ const DEFAULTS: Prefs = {
   lastEffort: {},
   lastMode: "bypassPermissions",
   issueProvider: "github",
+  issueFilters: {},
   useWorktree: true,
   bypassConfirmed: false,
   sidebarSections: {},
@@ -167,6 +171,8 @@ function load(): Prefs {
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
+    // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
+    if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

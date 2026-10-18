@@ -364,9 +364,27 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
 }
 
 /** The issue's labels as chips, and the picker that changes them. */
-export function IssueLabels({ edits, labels }: { edits: IssueEdits; labels: Issue["labels"] }) {
+export function IssueLabels({
+  edits,
+  labels,
+  open: openProp,
+  onOpenChange,
+}: {
+  edits: IssueEdits;
+  labels: Issue["labels"];
+  /** Open from outside, as the view's keyboard shortcut does; left out, the picker keeps its own. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const issue = edits.issue;
-  const [open, setOpen] = useState(false);
+  const [ownOpen, setOwnOpen] = useState(false);
+  const open = openProp ?? ownOpen;
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
+  const setOpen = useCallback((value: boolean) => {
+    setOwnOpen(value);
+    onOpenChangeRef.current?.(value);
+  }, []);
   const closed = useCallback(
     (change: LabelChange, of: IssueDetails) => {
       const now = edits.issue;
@@ -390,7 +408,7 @@ export function IssueLabels({ edits, labels }: { edits: IssueEdits; labels: Issu
   const closedRef = useRef(closed);
   closedRef.current = closed;
   const onClose = useCallback((change: LabelChange, of: IssueDetails) => closedRef.current(change, of), []);
-  useEffect(() => setOpen(false), [issue?.provider, issue?.id]);
+  useEffect(() => setOpen(false), [issue?.provider, issue?.id, setOpen]);
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1" data-testid="issue-labels">

@@ -66,6 +66,7 @@ export const linearIssueFixture = (): IssueDetails => ({
   url: "https://linear.app/acme/issue/ENG-42/fix-login-timeout",
   state: "In Progress",
   stateType: "started",
+  workflowStateType: "started",
   labels: [{ id: "label-bug", name: "Bug", color: "eb5757" }],
   assignee: { name: linearSam.name, avatarUrl: linearSam.avatarUrl },
   updatedAt: "2026-09-02T10:00:00.000Z",
@@ -234,7 +235,7 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
     if (change.kind === "workflow_state") {
       const state = mock.options.linear.states.find((option) => option.id === change.stateId);
       if (issue.provider !== "linear" || !state) throw issueOpError(issue.provider === "linear" ? "invalid" : "unsupported");
-      Object.assign(issue, { stateId: state.id, state: state.name, stateColor: state.color, stateType: ["completed", "canceled", "started"].includes(state.type) ? state.type : "open" });
+      Object.assign(issue, { stateId: state.id, state: state.name, stateColor: state.color, stateType: ["completed", "canceled", "started"].includes(state.type) ? state.type : "open", workflowStateType: state.type });
     } else if (issue.provider !== "github") {
       throw issueOpError("unsupported");
     } else if (change.kind === "close") {
