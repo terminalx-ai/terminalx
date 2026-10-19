@@ -12,22 +12,28 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, modelGroups, modelNote, modelOptionText } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, modelGroups, modelNote, modelOptionText } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
-/** Shared by New Session and issue starts; the parent supplies a wrapping row. */
-export function SessionAgentControls({ selection }: { selection: ReturnType<typeof useSessionAgent> }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, selectHarness, selectModel, selectEffort } = selection;
+/**
+ * Everything a new agent conversation is launched with: agent, model, effort
+ * and permissions. Shared by New Session, issue starts, and the handoffs
+ * (Continue in New Session, Link to a project); the parent supplies a
+ * wrapping row. `disabled` holds the choices once the launch has begun.
+ */
+export function SessionAgentControls({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, permissionMode, selectHarness, selectModel, selectEffort, selectMode } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
+  const modeMenu = useRowMenu();
   const pill = "min-w-0 max-w-full gap-1.5";
 
   return (
     <>
       <DropdownMenu {...agentMenu.root}>
         <DropdownMenuTrigger asChild {...agentMenu.trigger}>
-          <Button variant="secondary" size="sm" className={pill} title="Agent">
+          <Button variant="secondary" size="sm" className={pill} title="Agent" disabled={disabled}>
             {harness && <AgentMark id={harness.id} className="size-3.5" decorative brand />}
             <span className="truncate">{harness?.name ?? "Agent"}</span>
             <ChevronDown className="text-faint" />
@@ -48,7 +54,7 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
       {harness && model && (
         <DropdownMenu {...modelMenu.root}>
           <DropdownMenuTrigger asChild {...modelMenu.trigger}>
-            <Button variant="secondary" size="sm" className={pill} title="Model">
+            <Button variant="secondary" size="sm" className={pill} title="Model" disabled={disabled}>
               <span className="truncate">{modelOptionText(model, models)}</span>
               <ChevronDown className="text-faint" />
             </Button>
@@ -78,7 +84,7 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
       {harness && model && model.efforts.length > 0 && (
         <DropdownMenu {...effortMenu.root}>
           <DropdownMenuTrigger asChild {...effortMenu.trigger}>
-            <Button variant="secondary" size="sm" className={pill} title="Effort">
+            <Button variant="secondary" size="sm" className={pill} title="Effort" disabled={disabled}>
               <span className="truncate">{effort ? (EFFORT_LABEL[effort] ?? effort) : "Effort"}</span>
               <ChevronDown className="text-faint" />
             </Button>
@@ -95,6 +101,26 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+
+      <DropdownMenu {...modeMenu.root}>
+        <DropdownMenuTrigger asChild {...modeMenu.trigger}>
+          <Button variant="secondary" size="sm" className={pill} title="Permissions" disabled={disabled}>
+            <span className="truncate">{modeLabel(permissionMode)}</span>
+            <ChevronDown className="text-faint" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[14rem]">
+          <DropdownMenuLabel>Permissions</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={permissionMode} onValueChange={selectMode}>
+            {PERMISSION_MODES.map((m) => (
+              <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
+                <span>{m.label}</span>
+                <span className="text-[11px] text-faint">{m.hint}</span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </>
   );
 }

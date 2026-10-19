@@ -9,8 +9,6 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
@@ -21,12 +19,10 @@ import { RaccoonScene } from "@/components/raccoon/Raccoon";
 import { isRoleRefusal, refreshAccountRoles } from "@/lib/accountRoles";
 import { api, errorMessage, type ImageInput } from "@/lib/api";
 import { clearNewSessionPreset, createQuickChat, startCloudSessionIn, selectProject, selectProjectInSidebar, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
-import { PERMISSION_MODES } from "@/lib/models";
 import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { chooseMode } from "@/lib/dialogs";
 import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
@@ -87,7 +83,6 @@ export function NewSessionView({
   const cloudChoices = useCloudProjectChoices();
   // Opens on a click (also one sent through the accessibility tree), not only on pointerdown or Enter.
   const projectMenu = useRowMenu();
-  const modeMenu = useRowMenu();
   const [confirm, setConfirm] = useState<PreparedCreate | null>(null);
   const [starting, setStarting] = useState<string | null>(null);
 
@@ -103,11 +98,9 @@ export function NewSessionView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
-  const { harness, modelId, effort } = agentSelection;
+  const { harness, modelId, effort, permissionMode } = agentSelection;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
-  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode)
-    ?? PERMISSION_MODES.find((m) => m.id === "bypassPermissions")!;
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
 
   useEffect(() => {
@@ -168,7 +161,7 @@ export function NewSessionView({
     agent: harness!.id,
     model: modelId,
     effort,
-    mode: prefs.lastMode,
+    mode: permissionMode,
     prompt: text,
     useWorktree,
   });
@@ -249,7 +242,7 @@ export function NewSessionView({
     try {
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode } });
+      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -281,7 +274,7 @@ export function NewSessionView({
         onMain: !preset?.cwd && !useWorktree,
         worktreeName: !preset?.cwd && useWorktree ? workspaceName : null,
         cwd: preset?.cwd ?? null,
-        tab: { harness: harness.id, model: modelId, effort, permissionMode: prefs.lastMode },
+        tab: { harness: harness.id, model: modelId, effort, permissionMode },
       });
       upsertSession(s);
       setText("");
@@ -413,26 +406,6 @@ export function NewSessionView({
             )}
 
             <SessionAgentControls selection={agentSelection} />
-
-            <DropdownMenu {...modeMenu.root}>
-              <DropdownMenuTrigger asChild {...modeMenu.trigger}>
-                <Button variant="secondary" size="sm" className={pill}>
-                  {mode.label}
-                  <ChevronDown className="text-faint" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-[14rem]">
-                <DropdownMenuLabel>Permissions</DropdownMenuLabel>
-                <DropdownMenuRadioGroup value={mode.id} onValueChange={(v) => chooseMode(harness?.id ?? "", v, (m) => setPrefs({ lastMode: m }))}>
-                  {PERMISSION_MODES.map((m) => (
-                    <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
-                      <span>{m.label}</span>
-                      <span className="text-[11px] text-faint">{m.hint}</span>
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
 
             {quick ? null : cloud ? (
               <>

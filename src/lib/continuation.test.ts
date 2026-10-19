@@ -5,19 +5,16 @@ vi.mock("@/lib/api", () => ({ api: { listHarnesses: mocks.list }, agent: { ensur
 vi.mock("@/lib/sessions", () => ({ addTab: mocks.add }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: mocks.apply }));
 vi.mock("@/lib/prefs", () => ({ getPrefs: () => ({ lastModel: { codex: "codex-default" }, lastEffort: { codex: "high" }, lastMode: "default" }) }));
-import { continuationPrompt, launchContinuation, selectContinuationProvider, type ContinuationContext } from "./continuation";
+import { continuationPrompt, launchContinuation, type ContinuationContext } from "./continuation";
 import { getDraft, setDraft } from "@/lib/drafts";
+import type { LaunchSettings } from "@/lib/useSessionAgent";
+const settings = (harness: string): LaunchSettings => ({ harness, model: `${harness}-model`, effort: "medium", permissionMode: "acceptEdits" });
+const codex = settings("codex");
 const providers = [{ id: "claude", available: true }, { id: "codex", available: true }] as HarnessInfo[];
 const context: ContinuationContext = { sessionId: "workspace", tabId: "source", title: "Issue 109", cwd: "/same/cwd", provider: "claude", providerSessionId: "original", sourceActive: true, transcriptPath: "/saved/history```file.jsonl", fullUnavailableReason: null, lastPrompt: "Finish ```this```", lastUpdate: "Halfway", partialCapture: null };
 const tab = { id: "fresh", harness: "codex", providerSessionId: null } as TabEntry;
 beforeEach(() => { vi.clearAllMocks(); setDraft(tab.id, ""); mocks.list.mockResolvedValue(providers); mocks.add.mockResolvedValue(tab); mocks.start.mockResolvedValue(undefined); mocks.send.mockResolvedValue({ queued: false, events: [] }); });
-describe("context and selection", () => {
-  it("prefers source, configured default, then first available", () => {
-    expect(selectContinuationProvider(providers, "claude", "codex")).toBe("claude");
-    expect(selectContinuationProvider(providers, "missing", "codex")).toBe("codex");
-    expect(selectContinuationProvider(providers, "missing", "missing")).toBe("claude");
-    expect(selectContinuationProvider([], "claude", "codex")).toBe("");
-  });
+describe("context", () => {
   it("preserves full file references, safe fences, and historical reference rules in both modes", () => {
     for (const mode of ["focused", "full"] as const) {
       const prompt = continuationPrompt(context, mode);
@@ -40,22 +37,22 @@ describe("launch and actual send boundary", () => {
   it.each(["claude", "codex"].flatMap((source) => ["claude", "codex"].flatMap((destination) => ["focused", "full"].map((mode) => ({ source, destination, mode: mode as "focused" | "full" })))))("$source → $destination with $mode", async ({ source, destination, mode }) => {
     const sourceContext = { ...context, provider: source };
     const prompt = continuationPrompt(sourceContext, mode);
-    expect((await launchContinuation(sourceContext, destination, prompt, vi.fn())).stage).toBe("delivered");
-    expect(mocks.add).toHaveBeenCalledTimes(1);
-    expect(mocks.add.mock.calls[0][0]).toBe("workspace");
-    expect(mocks.add.mock.calls[0][1]).toBe(destination);
+    expect((await launchContinuation(sourceContext, settings(destination), prompt, vi.fn())).stage).toBe("delivered");
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith("workspace", destination, `${destination}-model`, "medium", "acceptEdits");
     expect(mocks.start).toHaveBeenCalledWith("workspace", "fresh");
     expect(mocks.send).toHaveBeenCalledExactlyOnceWith("workspace", "fresh", prompt, undefined, true);
     expect(mocks.start.mock.invocationCallOrder[0]).toBeLessThan(mocks.send.mock.invocationCallOrder[0]);
     expect(context.providerSessionId).toBe("original");
     expect(getDraft("fresh")).toBe("");
   });
-  it("uses destination defaults and waits for confirmed delivery", async () => {
+  it("starts the tab with exactly the selected settings, not the saved preferences, and waits for confirmed delivery", async () => {
     let resolve!: (value: unknown) => void;
     mocks.send.mockReturnValue(new Promise((done) => { resolve = done; }));
-    const running = launchContinuation(context, "codex", "prompt", vi.fn());
+    const onCreated = vi.fn();
+    const running = launchContinuation(context, { harness: "codex", model: "gpt-6", effort: null, permissionMode: "plan" }, "prompt", onCreated);
     await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
-    expect(mocks.add).toHaveBeenCalledWith("workspace", "codex", "codex-default", "high", "default");
+    expect(mocks.add).toHaveBeenCalledWith("workspace", "codex", "gpt-6", null, "plan");
+    expect(onCreated).toHaveBeenCalledWith({ sessionId: "workspace", tab });
     expect(getDraft("fresh")).toBe("prompt");
     resolve({ queued: false, events: [] });
     expect((await running).stage).toBe("delivered");
@@ -63,28 +60,28 @@ describe("launch and actual send boundary", () => {
   });
   it("rechecks availability before creating anything", async () => {
     mocks.list.mockResolvedValue([]);
-    expect((await launchContinuation(context, "codex", "prompt", vi.fn())).stage).toBe("launch");
+    expect((await launchContinuation(context, codex, "prompt", vi.fn())).stage).toBe("launch");
     expect(mocks.add).not.toHaveBeenCalled();
   });
   it("retries launch in the existing tab without duplicating it", async () => {
     mocks.start.mockRejectedValueOnce(new Error("spawn failed"));
-    const failed = await launchContinuation(context, "codex", "prompt", vi.fn());
+    const failed = await launchContinuation(context, codex, "prompt", vi.fn());
     expect(failed.stage).toBe("launch");
     expect(mocks.send).not.toHaveBeenCalled();
-    expect((await launchContinuation(context, "codex", "prompt", vi.fn(), failed.tab)).stage).toBe("delivered");
+    expect((await launchContinuation(context, codex, "prompt", vi.fn(), failed.launched)).stage).toBe("delivered");
     expect(mocks.add).toHaveBeenCalledTimes(1);
   });
   it("keeps the destination and prompt after delivery failure", async () => {
     mocks.send.mockRejectedValue(new Error("PTY exited"));
-    const failed = await launchContinuation(context, "codex", "prepared prompt", vi.fn());
+    const failed = await launchContinuation(context, codex, "prepared prompt", vi.fn());
     expect(failed.stage).toBe("delivery");
-    expect(failed.tab).toBe(tab);
+    expect(failed.launched).toEqual({ sessionId: "workspace", tab });
     expect(getDraft("fresh")).toBe("prepared prompt");
   });
   it("retains the prompt when the provider never confirms delivery", async () => {
     let reject!: (reason: Error) => void;
     mocks.send.mockReturnValue(new Promise((_resolve, fail) => { reject = fail; }));
-    const running = launchContinuation(context, "claude", "prepared prompt", vi.fn());
+    const running = launchContinuation(context, settings("claude"), "prepared prompt", vi.fn());
     await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
     expect(getDraft("fresh")).toBe("prepared prompt");
     reject(new Error("prompt delivery could not be confirmed"));
@@ -96,7 +93,7 @@ describe("launch and actual send boundary", () => {
     let resolve!: (value: unknown) => void;
     let reject!: (reason: Error) => void;
     mocks.send.mockReturnValue(new Promise((done, fail) => { resolve = done; reject = fail; }));
-    const running = launchContinuation(context, "codex", "prepared prompt", vi.fn());
+    const running = launchContinuation(context, codex, "prepared prompt", vi.fn());
     await vi.waitFor(() => expect(mocks.send).toHaveBeenCalled());
     setDraft("fresh", "my next prompt");
     if (stage === "delivered") resolve({ queued: false, events: [] });

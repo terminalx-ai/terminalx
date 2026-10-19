@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Sessions
+
+- **Link to a project** in a chat's menu now opens a dialog before anything
+  moves. It shows the project, lets you switch between a new worktree and the
+  main checkout, and offers the same agent, model, effort and permission
+  pickers as New Session, plus Focused or Full context. They start from the
+  chat's own settings, effort included, and any provider can be picked. The
+  chat is archived only once the new session has started. If it can't start,
+  the chat stays put, the dialog says so, and **Retry Start** reuses the
+  session already created. (#555)
+- **Continue in New Session** gets the same pickers, starting from the source
+  conversation's model, effort and permission mode instead of the last ones
+  picked anywhere. Each starting value counts only while it is valid for the
+  provider chosen; switching provider falls back to that provider's saved
+  choices. (#552)
+- New Session and issue starts share one permission picker with each mode's
+  hint. Bypass permissions asks first, the same everywhere.
+
 ## 0.2.14
 
 Issues worked from inside the app: a comment thread, status, assignees,
