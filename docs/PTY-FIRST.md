@@ -90,6 +90,31 @@ The path derived from the session id is a guess made before the CLI ran; the
 first hook to arrive carries `transcript_path`, which is authoritative, and the
 tail is re-pointed at it.
 
+#### Turns the CLI starts itself
+
+Not every turn has a prompt the reader sent (#540). The CLI starts turns of its
+own — a `/loop` wakeup or scheduled task, a background task reporting in,
+another agent's message — and writes each as a `user` record whose
+`turnOrigin` (2.1.278 on) is `scheduled`, `task_notification`, `peer` or `sdk`
+rather than `human`. A scheduled prompt is written as meta, and a notification's
+text is its `<task-notification>` markup. The decoder turns any of them into a
+`turn_started` with `startedBy` — "Scheduled check", the notification's own
+`<summary>`, "Message from another agent" — which opens the turn as a prompt
+would: the tab is working, a message sent meanwhile is queued, and `Stop` closes
+it with its own "Worked for". The chat draws the line and no message bubble.
+The `scheduled_task_fire` record ahead of a scheduled prompt opens nothing: in
+a quarter of the fires on record it lands before the previous turn's
+`turn_duration`.
+
+The CLI holds a message typed during such a turn until the turn is over, and
+takes it as the next prompt, so a queued message's echo then says where the
+next turn starts, as it does behind any turn. A message the composer sent as
+the CLI was starting a turn of its own — before the app had read a record of
+it — went out as a prompt and had that turn's work drawn under it. Any work the
+transcript holds before the CLI's record of that prompt was done before the CLI
+read it, so the record's arrival publishes a `turn_started` naming the message,
+and the chat moves it there.
+
 ### Hooks carry what the file cannot
 
 The transcript says what was said; it does not say *when a turn began or ended*,
@@ -133,7 +158,7 @@ when its holder exits, and `control.token` is written only by the holder.
 | Event | What it does |
 |---|---|
 | `SessionStart` | re-point the tail at the real `transcript_path` |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | flush the tail, open the turn, status Working |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | flush the tail, open the turn, status Working. A `UserPromptSubmit` whose `source` names a turn the CLI started itself acknowledges nothing the reader sent, and a `poll_event` one starts no turn; 2.1.304's schema has the field, but its frame for a `/loop` wakeup did not carry it |
 | `PermissionRequest` | flush, publish the permission card, **park** until it is answered |
 | `Notification` (`permission_prompt`) | status Waiting — the CLI is asking in its own TUI, which means our hook did not answer in time |
 | `Stop` | flush, close the turn with the CLI's `last_assistant_message`, status Done |

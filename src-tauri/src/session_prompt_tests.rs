@@ -1134,3 +1134,7 @@ fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
 /// rig and the same two CLIs, and a headless tab beside them.
 #[path = "session_interrupt_tests.rs"]
 mod interrupts;
+
+/// Turns the agent starts itself, and a message sent while one runs (#540).
+#[path = "session_self_started_tests.rs"]
+mod self_started;
