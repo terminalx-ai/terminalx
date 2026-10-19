@@ -8,6 +8,7 @@ import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@
 import { createAutomation, updateAutomation } from "@/lib/automations";
 import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, EFFORT_LABEL, PERMISSION_MODES, bypassEffect, modelOptionText, useModels } from "@/lib/models";
 import { usePrefs } from "@/lib/prefs";
+import { usePromptTextProps } from "@/lib/autocorrect";
 import { useSessionStore } from "@/lib/sessions";
 import type { Automation, AutomationInput, AutomationIssueReport, AutomationIssueTrigger, AutomationSchedule, AutomationWorkspace, ScheduleKind, SchedulePreset } from "@/types/automations";
 
@@ -136,6 +137,7 @@ export function AutomationEditor({
   const [preview, setPreview] = useState<Issue[]>([]);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const textProps = usePromptTextProps();
 
   useEffect(() => {
     if (open) {
@@ -291,6 +293,7 @@ export function AutomationEditor({
           <label className={`${LABEL} col-span-2`}>
             Prompt
             <textarea
+              {...textProps}
               value={input.prompt}
               onChange={(event) => patch({ prompt: event.target.value })}
               rows={5}

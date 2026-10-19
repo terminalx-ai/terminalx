@@ -40,6 +40,7 @@ import { managesOrganization } from "@/lib/multiOrg";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { quoteText } from "@/components/session/CloudNewSession";
 import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
+import { usePromptTextProps } from "@/lib/autocorrect";
 
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
@@ -92,6 +93,7 @@ export function CloudCreateWorkspace({
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
   const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
+  const textProps = usePromptTextProps();
   // The price of this form, shown before anything is created; a change to the form asks for it again.
   const [quoted, setQuoted] = useState<{ pending: PendingCreate; quote: CloudWorkspaceQuote } | null>(null);
   const [tracked, setTrackedState] = useState<CloudWorkspaceSnapshot | null>(null);
@@ -313,6 +315,7 @@ export function CloudCreateWorkspace({
         <span className="font-medium">First task</span>
         <textarea
           aria-label="Initial prompt"
+          {...textProps}
           className={`${inputClass} min-h-24 resize-y`}
           placeholder="What should the agent work on? Sent once, when the agent is ready."
           value={form.prompt}
