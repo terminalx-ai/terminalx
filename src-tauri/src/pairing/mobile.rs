@@ -730,7 +730,8 @@ struct SessionSendParams {
 
 fn send_session(manager: &PairingManager, device: &DeviceEntry, params: SessionSendParams) -> Result<Value> {
     let (session, _) = find_tab(&params.tab_id)?;
-    send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)
+    let outcome = send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)?;
+    Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
 #[derive(Deserialize)]
@@ -761,6 +762,19 @@ struct ChatNote {
     body: String,
     created_at: i64,
     author: NoteAuthor,
+    /// The agent messages this note was sent as, one per tab (#541). That
+    /// tab's transcript shows the text as its user message, so a client
+    /// leaves the note out of that tab's conversation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    promoted_to: Vec<NotePromotion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotePromotion {
+    tab_id: String,
+    /// The `seq` of the tab's `UserMessage` that carried the note.
+    seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -816,6 +830,7 @@ fn post_note(manager: &PairingManager, device: &DeviceEntry, params: ChatPostPar
         body,
         created_at: Utc::now().timestamp_millis(),
         author,
+        promoted_to: Vec::new(),
     };
     {
         let _guard = manager.mobile.notes.lock().unwrap();
@@ -863,7 +878,46 @@ fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPro
         text.push(note.body.clone());
     }
     drop(_guard);
-    send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)
+    let outcome = send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
+    let message = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. }));
+    if let Some(message) = message {
+        let promotion = NotePromotion { tab_id: params.tab_id.clone(), seq: message.seq };
+        // The agent has the message now. Failing to record that must not
+        // read as a failed send, or the phone would offer to send it again.
+        match record_promotion(manager, &params.worktree_id, &wanted, &promotion) {
+            Ok(true) => manager.mobile.broadcast(json!({
+                "method": "chat.changed",
+                "params": { "worktreeId": params.worktree_id },
+            })),
+            Ok(false) => {}
+            Err(error) => log::warn!("record note promotion for {}: {error:#}", params.worktree_id),
+        }
+    }
+    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+}
+
+fn record_promotion(manager: &PairingManager, worktree_id: &str, ids: &HashSet<&String>, promotion: &NotePromotion) -> Result<bool> {
+    let _guard = manager.mobile.notes.lock().unwrap();
+    let mut file = load_notes()?;
+    let Some(notes) = file.sessions.get_mut(worktree_id) else { return Ok(false) };
+    if !mark_promoted(notes, ids, promotion) {
+        return Ok(false);
+    }
+    save_notes(&file)?;
+    Ok(true)
+}
+
+/// Note on each of `ids` that it went to the agent as `promotion`, replacing
+/// an earlier promotion to the same tab so the list stays one per tab. A
+/// note trimmed away while the message was sent is skipped.
+fn mark_promoted(notes: &mut [ChatNote], ids: &HashSet<&String>, promotion: &NotePromotion) -> bool {
+    let mut changed = false;
+    for note in notes.iter_mut().filter(|note| ids.contains(&note.id)) {
+        note.promoted_to.retain(|earlier| earlier.tab_id != promotion.tab_id);
+        note.promoted_to.push(promotion.clone());
+        changed = true;
+    }
+    changed
 }
 
 fn send_attributed(
@@ -873,7 +927,7 @@ fn send_attributed(
     tab_id: &str,
     text: &str,
     attachments: Vec<RemoteAttachmentInput>,
-) -> Result<Value> {
+) -> Result<crate::session::SendOutcome> {
     validate_session_tab(session_id, tab_id)?;
     let text = text.trim();
     if text.is_empty() && attachments.is_empty() {
@@ -899,14 +953,13 @@ fn send_attributed(
     });
     let attributed = format!("[TerminalX Effective User v1] {envelope}\n{prompt}");
     let session_manager = sessions(manager)?;
-    let outcome = session_manager.send_with_display_text(
+    session_manager.send_with_display_text(
         session_id,
         tab_id,
         attributed,
         text.to_string(),
         images,
-    )?;
-    Ok(json!({ "status": "sent", "queued": outcome.queued }))
+    )
 }
 
 fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
@@ -1656,6 +1709,49 @@ mod tests {
         .unwrap();
         assert_eq!(with_attachment.attachments.len(), 1);
         assert!(validate_attachment_payloads(&with_attachment.attachments).is_ok());
+    }
+
+    #[test]
+    fn notes_saved_before_promotions_were_recorded_still_load_and_list_unchanged() {
+        let saved: NotesFile = serde_json::from_value(json!({ "sessions": { "worktree": [{
+            "id": "note-1",
+            "body": "hello",
+            "createdAt": 1,
+            "author": { "userId": "user-1", "displayName": "Paresh" },
+        }] } }))
+        .unwrap();
+        let note = &saved.sessions["worktree"][0];
+        assert!(note.promoted_to.is_empty());
+        // Old phones read `chat.list` too; a note never sent carries no new key.
+        assert_eq!(serde_json::to_value(note).unwrap().get("promotedTo"), None);
+    }
+
+    #[test]
+    fn promoting_notes_records_one_promotion_per_tab() {
+        let note = |id: &str| ChatNote {
+            id: id.into(),
+            body: format!("{id} body"),
+            created_at: 1,
+            author: NoteAuthor { user_id: "user-1".into(), display_name: "Paresh".into() },
+            promoted_to: Vec::new(),
+        };
+        let mut notes = vec![note("a"), note("b"), note("c")];
+        let (a, c, gone) = ("a".to_string(), "c".to_string(), "gone".to_string());
+        let promotion = |tab_id: &str, seq| NotePromotion { tab_id: tab_id.into(), seq };
+
+        assert!(mark_promoted(&mut notes, &HashSet::from([&a, &c]), &promotion("claude", 4)));
+        assert!(mark_promoted(&mut notes, &HashSet::from([&a]), &promotion("codex", 9)));
+        assert!(mark_promoted(&mut notes, &HashSet::from([&a]), &promotion("claude", 12)));
+        assert_eq!(notes[0].promoted_to, vec![promotion("codex", 9), promotion("claude", 12)]);
+        assert!(notes[1].promoted_to.is_empty());
+        assert_eq!(notes[2].promoted_to, vec![promotion("claude", 4)]);
+        assert_eq!(
+            serde_json::to_value(&notes[2]).unwrap()["promotedTo"],
+            json!([{ "tabId": "claude", "seq": 4 }]),
+        );
+
+        // A note trimmed away while its message was being sent is skipped.
+        assert!(!mark_promoted(&mut notes, &HashSet::from([&gone]), &promotion("claude", 20)));
     }
 
     #[test]

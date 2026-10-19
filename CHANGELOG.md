@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Mobile companion
+
+- A message sent to the agent from the phone shows once, as the prompt of
+  the turn it starts, rather than also as a worktree note. **Send to agent**
+  sends the text and its attachments in one request, so a send that fails
+  leaves no note behind and a retry sends the message once. **Add worktree
+  note** still adds a note and sends nothing to the agent. A note promoted
+  to an agent is marked with the tab and message it became, and the phone
+  leaves it out of that tab's conversation; the note-plus-prompt pairs saved
+  by earlier phones are hidden too (#541).
+
 ## 0.2.14
 
 Issues worked from inside the app: a comment thread, status, assignees,
