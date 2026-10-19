@@ -229,6 +229,36 @@ describe("buildTranscript", () => {
     expect(t.turns[1].prompt).toBeUndefined();
   });
 
+  // #551: the message reached the agent, and then went from the chat when the turn ended.
+  it("makes a queued message the agent took mid-turn the reader's message, where it was taken, through the end of the turn", () => {
+    const queued = ev({ type: "user_message", text: "use the staging config", queued: true, author: { userId: "u1", displayName: "Sam" } });
+    const events = [ev({ type: "user_message", text: "go", queued: false }), toolStart("a", "Bash"), toolDone("a"), queued, toolStart("b", "Read"), toolDone("b")];
+    const kinds = (t: ReturnType<typeof buildTranscript>) => t.turns[0].work.map((w) => w.kind);
+    expect(kinds(buildTranscript(events, true))).toEqual(["tool", "queued", "tool"]);
+
+    // The CLI delivered it with the next tool result.
+    events.push(ev({ type: "prompt_absorbed", promptSeq: queued.seq }), ev({ type: "assistant_text", text: "switching to staging" }));
+    let t = buildTranscript(events, true);
+    expect(kinds(t)).toEqual(["tool", "tool", "message", "text"]);
+    expect(t.turns[0].work[2]).toMatchObject({ kind: "message", text: "use the staging config", seq: queued.seq, author: { userId: "u1", displayName: "Sam" } });
+
+    events.push(toolStart("c", "Bash"), toolDone("c"), ev({ type: "assistant_text", text: "done" }), ev({ type: "turn_completed", status: "ok", authFailed: false }));
+    for (const live of [true, false]) {
+      t = buildTranscript(events, live);
+      expect(t.turns).toHaveLength(1);
+      expect(t.turns[0].completed?.status).toBe("ok");
+      expect(kinds(t)).toEqual(["tool", "tool", "message", "text", "tool", "text"]);
+    }
+  });
+
+  it("ignores a taken message it holds no queued note for", () => {
+    const prompt = ev({ type: "user_message", text: "go", queued: false });
+    const t = buildTranscript([prompt, ev({ type: "prompt_absorbed", promptSeq: prompt.seq }), ev({ type: "prompt_absorbed", promptSeq: 99_999 }), ev({ type: "assistant_text", text: "ok" })], true);
+    expect(t.turns).toHaveLength(1);
+    expect(t.turns[0].prompt?.text).toBe("go");
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["text"]);
+  });
+
   it("reads context occupancy off the latest reading", () => {
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),

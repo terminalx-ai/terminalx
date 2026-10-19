@@ -22,7 +22,10 @@ export function turnRows(turn: Turn): TurnRow[] {
   }
   for (const item of turn.work) {
     if (item.kind === "text") addMarkdown(item.key, item.text);
-    else if ("text" in item) {
+    // A message the agent took mid-turn is the reader's, drawn like the prompt.
+    else if (item.kind === "message") {
+      for (const [index, text] of (item.text ? textChunks(item.text) : [""]).entries()) rows.push({ key: `${item.key}:${index}`, kind: "prompt", text, startsTurn: false });
+    } else if ("text" in item) {
       for (const [index, text] of textChunks(item.text).entries()) rows.push({ key: `${item.key}:${index}`, kind: "work", item: { ...item, text }, startsTurn: false });
     } else rows.push({ key: item.key, kind: "work", item, startsTurn: false });
   }

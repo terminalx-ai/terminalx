@@ -134,6 +134,8 @@ export type Payload =
       queued: boolean;
       cwd?: string;
     }
+  /** The agent took the queued `user_message` at `promptSeq` while its turn was still running (#551). */
+  | { type: "prompt_absorbed"; promptSeq: number }
   | { type: "assistant_text"; block?: BlockRef; text: string }
   | { type: "reasoning"; block?: BlockRef; text: string }
   | ({ type: "delta" } & Delta)

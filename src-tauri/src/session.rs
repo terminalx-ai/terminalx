@@ -321,6 +321,14 @@ fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>
     unsent
 }
 
+/// A prompt is held while its echo is awaited, no longer. Once the echo is
+/// in, the CLI has it: sending it "now" would interrupt the turn and type it
+/// a second time (#551).
+fn forget_taken(cli: &mut CliTab) {
+    let awaited = &cli.echoed;
+    cli.held.retain(|(seq, _)| awaited.iter().any(|echo| echo.seq == *seq));
+}
+
 /// A PTY-first tab: the CLI in a pane, its transcript being followed, and the
 /// permission frames its hooks have parked here waiting for an answer.
 pub struct CliTab {
@@ -2682,7 +2690,13 @@ impl SessionManager {
             // Anything else the transcript calls a prompt was typed into the
             // terminal, and this is the only record of it (#250).
             let echoed = match &mut rt.engine {
-                Engine::Cli(p) => consume_composer_echo(&mut p.echoed, &payload),
+                Engine::Cli(p) => {
+                    let echoed = consume_composer_echo(&mut p.echoed, &payload);
+                    if echoed.is_some() {
+                        forget_taken(p);
+                    }
+                    echoed
+                }
                 _ => None,
             };
             match (&payload, &mut rt.engine) {
@@ -2716,6 +2730,11 @@ impl SessionManager {
                     // which one the new turn is the answer to.
                     self.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(echo.seq) }, None);
                     self.set_status(&mut rt, TabStatus::InProgress);
+                } else if echo.queued {
+                    // Taken within the turn it was queued behind (#551). The
+                    // chat would otherwise go on showing it as waiting, and
+                    // fold it away with the tool calls once the turn is over.
+                    self.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: echo.seq }, None);
                 }
                 continue;
             }
@@ -2871,14 +2890,6 @@ impl SessionManager {
         let paths: Vec<String> = images.iter().map(|i| i.url.clone()).collect();
         let agent = prompt.agent.clone();
         let (ev, queued) = self.record_composer_prompt(rt, &prompt, images, &entry.cwd, receipt.clone());
-        if queued {
-            if let Engine::Cli(p) = &mut rt.engine {
-                // Held while its echo is awaited, no longer.
-                let awaited: Vec<u64> = p.echoed.iter().map(|echo| echo.seq).collect();
-                p.held.retain(|(seq, _)| awaited.contains(seq));
-                p.held.push((ev.seq, HeldPrompt { text: agent.clone(), attachments: paths.clone() }));
-            }
-        }
         self.type_prompt(rt_arc, &pane, agent, paths, PromptDelivery {
             ready: Some(ready),
             seq: Some(ev.seq),
@@ -2891,12 +2902,13 @@ impl SessionManager {
 
     /// The composer's half of a prompt: publish it, open the turn if none is
     /// running, and remember that the CLI's own record of it is still to
-    /// come, so that record is not drawn as a second message. Everything
-    /// except the keystrokes.
+    /// come, so that record is not drawn as a second message; one queued
+    /// behind a turn is held until then. Everything except the keystrokes.
     fn record_composer_prompt(&self, rt: &mut TabRuntime, prompt: &PromptText, images: Vec<ImageRef>, cwd: &str, receipt: Option<DeliveryReceipt>) -> (AgentEvent, bool) {
         // Nothing is running behind a command that never ended.
         let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { git::snapshot_tree(Path::new(cwd)).ok() };
+        let held = HeldPrompt { text: prompt.agent.clone(), attachments: images.iter().map(|image| image.url.clone()).collect() };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
         let ev = self.publish(rt, message, None);
         if let Engine::Cli(p) = &mut rt.engine {
@@ -2904,7 +2916,10 @@ impl SessionManager {
             echo.seq = ev.seq;
             expire_composer_echoes(&mut p.echoed, queued, Instant::now());
             p.echoed.push_back(echo);
-            if !queued {
+            if queued {
+                forget_taken(p);
+                p.held.push((ev.seq, held));
+            } else {
                 p.turn_tail.opened();
                 p.awaiting_delivery = Some(ev.seq);
                 p.delivery_sent_at = Some(Instant::now());

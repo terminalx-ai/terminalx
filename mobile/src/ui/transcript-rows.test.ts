@@ -21,6 +21,21 @@ describe("transcript virtualization units", () => {
     expect(rows.filter((row) => row.startsTurn)).toHaveLength(1);
   });
 
+  it("draws a message the agent took mid-turn as the reader's, where it was taken (#551)", () => {
+    const rows = turnRows({ ...turn, work: [
+      { kind: "text", key: "a2", seq: 2, text: "Building." },
+      { kind: "message", key: "m3", seq: 3, text: "use the staging config" },
+      { kind: "queued", key: "q4", seq: 4, text: "and then deploy" },
+    ] });
+    expect(rows.map((row) => [row.kind, row.kind === "prompt" ? row.text : row.kind === "work" ? row.item.kind : ""])).toEqual([
+      ["prompt", "Prompt"],
+      ["markdown", ""],
+      ["prompt", "use the staging config"],
+      ["work", "queued"],
+    ]);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(rows.length);
+  });
+
   it("keeps existing keys when output streams and earlier context arrives", () => {
     const work = { kind: "text" as const, key: "a2", seq: 2, text: "First paragraph.\n\nSecond" };
     const before = turnRows({ ...turn, work: [work] });

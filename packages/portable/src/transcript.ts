@@ -23,7 +23,9 @@ export type WorkItem =
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number }
   | { kind: "reasoning"; text: string; key: string; seq: number }
-  | { kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
+  | { kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string; name?: string }[] }
+  /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
+  | { kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string; name?: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
   | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
@@ -95,23 +97,31 @@ function visibleUserText(text: string): string {
   return text;
 }
 
-/**
- * Take a queued message out of the turn it was a note in. The agent held it
- * until that turn was over and then took it as its next prompt; a
- * `turn_started` naming its seq says so (the message itself is published
- * once, when it is sent). One the agent took mid-turn has no such event and
- * stays where it is.
- */
-function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+/** Lift the queued message published under `seq` out of the turn it is a note in, and say where it was. */
+function pullQueued(turns: Turn[], seq: number): { item: Extract<WorkItem, { kind: "queued" }>; turn: Turn; at: number } | undefined {
   for (let index = turns.length - 1; index >= 0; index--) {
     const work = turns[index].work;
     const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
     if (at < 0) continue;
-    const [held] = work.splice(at, 1);
-    if (held.kind !== "queued") return undefined;
-    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+    const [item] = work.splice(at, 1);
+    return item.kind === "queued" ? { item, turn: turns[index], at } : undefined;
   }
   return undefined;
+}
+
+/**
+ * Take a queued message out of the turn it was a note in. The agent held it
+ * until that turn was over and then took it as its next prompt; a
+ * `turn_started` naming its seq says so (the message itself is published
+ * once, when it is sent). One the agent took mid-turn has a
+ * `prompt_absorbed` instead, and stays in its turn as a message; in a log
+ * from before that event it stays as it was sent.
+ */
+function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+  const found = pullQueued(turns, seq);
+  if (!found) return undefined;
+  const { item, turn } = found;
+  return { text: item.text, images: item.images, ts: item.ts ?? turn.completed?.ts ?? "", seq: item.seq };
 }
 
 /**
@@ -203,6 +213,17 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         }
         modelRequestOpen = false;
         workingSince = Date.parse(event.ts);
+        break;
+      }
+      case "prompt_absorbed": {
+        const found = pullQueued(turns, payload.promptSeq);
+        if (!found) break;
+        const { item, turn, at } = found;
+        const message: WorkItem = { ...item, kind: "message", key: `m${item.seq}` };
+        // Placed where the agent read it: what it did before then was not
+        // its answer to it.
+        if (current && !current.completed) current.work.push(message);
+        else turn.work.splice(at, 0, message);
         break;
       }
       case "assistant_text": {

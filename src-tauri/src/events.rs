@@ -266,6 +266,13 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// A queued `user_message`, `prompt_seq`, the CLI took while its turn
+    /// was still running (#551): Claude Code with the next tool result,
+    /// Codex as a steer. From here on it is a message the agent has, at this
+    /// point in the turn, and no longer one waiting behind it.
+    PromptAbsorbed {
+        prompt_seq: u64,
+    },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block: Option<BlockRef>,
