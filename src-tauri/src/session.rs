@@ -153,6 +153,10 @@ struct ComposerEcho {
     /// use for it. Its echo may be a long time coming, and may arrive after
     /// the turn it was queued behind has ended — as the prompt of the next.
     queued: bool,
+    /// Queued, and then typed again as a prompt of its own because the
+    /// reader sent it now (`send_queued_now`). The composer published it as
+    /// queued, so its record is what says it starts the turn opened for it.
+    resent: bool,
     /// A command the app typed for itself (`/model`), which the composer
     /// never published. The CLI records the name with or without what
     /// followed it; either is this command, and neither is the reader's.
@@ -173,6 +177,7 @@ struct HeldPrompt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Echoed {
     queued: bool,
+    resent: bool,
     seq: u64,
 }
 
@@ -202,7 +207,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0 }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, resent: false, command: false, seq: 0 }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -283,7 +288,7 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
     pending[at].confirm_delivery();
-    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
+    let echoed = Echoed { queued: pending[at].queued, resent: pending[at].resent, seq: pending[at].seq };
     pending.drain(..=at);
     Some(echoed)
 }
@@ -1642,8 +1647,8 @@ impl SessionManager {
     /// Send a prompt the CLI is holding behind its running turn now. The turn
     /// is interrupted; once it has ended, the prompt is typed again as a new
     /// one, and the rest of the held prompts behind it, for the CLI to hold
-    /// again. The chat keeps the message where it was: its record is the
-    /// echo of that second typing, not a second message.
+    /// again. Its record is the echo of that second typing, not a second
+    /// message, and says the new turn is its answer.
     pub fn send_queued_now(&self, session_id: &str, tab_id: &str, seq: u64) -> Result<()> {
         let rt_arc = self.runtime(session_id, tab_id)?;
         {
@@ -1658,11 +1663,22 @@ impl SessionManager {
                 return Ok(());
             }
             p.resend_after_abort = Some(seq);
-            // Every held prompt is typed again after the interruption, so each
-            // record stays what it was and its echo is awaited afresh.
+            // Every held prompt is typed again after the interruption, so its
+            // echo is awaited afresh, in the order they will be typed: this
+            // one first, as a prompt of its own, and the rest behind it,
+            // queued as they were (#551). A record out of that order would
+            // drop the echoes ahead of it as missed.
             let held: Vec<u64> = p.held.iter().map(|(seq, _)| *seq).collect();
+            if let (Some(first), Some(at)) = (p.echoed.iter().position(|echo| held.contains(&echo.seq)), p.echoed.iter().position(|echo| echo.seq == seq)) {
+                if let Some(chosen) = p.echoed.remove(at) {
+                    p.echoed.insert(first, chosen);
+                }
+            }
             for echo in p.echoed.iter_mut().filter(|echo| held.contains(&echo.seq)) {
-                echo.queued = false;
+                if echo.seq == seq {
+                    echo.queued = false;
+                    echo.resent = true;
+                }
                 echo.submitted = false;
                 echo.sent_at = Instant::now();
             }
@@ -2715,10 +2731,12 @@ impl SessionManager {
                     self.delivery_confirmed(&mut rt);
                 }
                 // A queued prompt the CLI held until its turn was over is the
-                // start of the next one. The `UserPromptSubmit` hook may have
-                // opened that turn already, but only a prompt resets the latch
-                // that lets `Stop` close it, and this record is that prompt.
-                let held = echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed()));
+                // start of the next one, and so is one typed again after
+                // "Send now" stopped that turn. The `UserPromptSubmit` hook
+                // may have opened the turn already, but only a prompt resets
+                // the latch that lets `Stop` close it, and this record is
+                // that prompt.
+                let held = echo.resent || (echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed())));
                 if held {
                     if !rt.turn_open {
                         rt.prompt_taken(false);
@@ -3870,7 +3888,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0 }));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, resent: false, seq: 0 }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");

@@ -110,18 +110,18 @@ function pullQueued(turns: Turn[], seq: number): { item: Extract<WorkItem, { kin
 }
 
 /**
- * Take a queued message out of the turn it was a note in. The agent held it
- * until that turn was over and then took it as its next prompt; a
+ * Take a queued message out of the turn it was a note in, as a prompt. The
+ * agent held it until that turn was over and then took it as its next
+ * prompt, or it was typed again as one when the reader sent it now; a
  * `turn_started` naming its seq says so (the message itself is published
  * once, when it is sent). One the agent took mid-turn has a
- * `prompt_absorbed` instead, and stays in its turn as a message; in a log
- * from before that event it stays as it was sent.
+ * `prompt_absorbed` instead, and stays in its turn as a message.
  */
-function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+function takeQueued(turns: Turn[], seq: number): { prompt: NonNullable<Turn["prompt"]>; from: Turn } | undefined {
   const found = pullQueued(turns, seq);
   if (!found) return undefined;
   const { item, turn } = found;
-  return { text: item.text, images: item.images, ts: item.ts ?? turn.completed?.ts ?? "", seq: item.seq };
+  return { prompt: { text: item.text, images: item.images, ts: item.ts ?? turn.completed?.ts ?? "", seq: item.seq }, from: turn };
 }
 
 /**
@@ -202,14 +202,20 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
       }
       case "turn_started": {
         if (payload.promptSeq == null) break;
-        const prompt = takeQueued(turns, payload.promptSeq);
-        if (!prompt) break;
+        const taken = takeQueued(turns, payload.promptSeq);
+        if (!taken) break;
         if (current && !current.completed && !current.prompt) {
-          current.prompt = prompt;
+          current.prompt = taken.prompt;
         } else {
           for (const call of calls.values()) if (!call.result) call.abandoned = true;
-          current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
+          current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, prompt: taken.prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
           turns.push(current);
+        }
+        // What else was queued behind the turn it came from waits behind
+        // this one now (#551), where it can still be sent now.
+        if (taken.from !== current) {
+          current.work.unshift(...taken.from.work.filter((item) => item.kind === "queued"));
+          taken.from.work = taken.from.work.filter((item) => item.kind !== "queued");
         }
         modelRequestOpen = false;
         workingSince = Date.parse(event.ts);
@@ -410,6 +416,14 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   if (!live) {
     modelRequestOpen = false;
     workingSince = undefined;
+  }
+
+  // A log from before `prompt_absorbed` says nothing when the agent took a
+  // queued message mid-turn (#551). One still queued in a turn that is over,
+  // with the conversation gone on past it, was taken: what still waits is
+  // carried on to the turn it waits behind.
+  for (const turn of turns.slice(0, -1)) {
+    if (turn.completed) turn.work = turn.work.map((item) => (item.kind === "queued" ? { ...item, kind: "message", key: `m${item.seq}` } : item));
   }
 
   for (const turn of turns) turn.work = groupWork(turn.work);

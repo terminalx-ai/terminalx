@@ -104,7 +104,7 @@ describe("a finished turn with tool calls folded", () => {
       toolCount: 2,
       work: [
         { kind: "tool", key: "ca", call: { callId: "a", name: "Bash", toolType: "shell", input: { command: "make build" }, seq: 2, result: { text: "built", isError: false } } },
-        { kind: "queued", key: "q3", seq: 3, text: "an older log's message, taken with no word of it" },
+        { kind: "queued", key: "q3", seq: 3, text: "held for the next turn" },
         { kind: "tool", key: "cb", call: { callId: "b", name: "Read", toolType: "read", input: { file_path: "staging.toml" }, seq: 4, result: { text: "ok", isError: false } } },
         { kind: "message", key: "m5", seq: 5, text: "use the staging config" },
         { kind: "text", key: "a6", seq: 6, text: "Switched to staging." },
@@ -116,9 +116,9 @@ describe("a finished turn with tool calls folded", () => {
       setPrefs({ foldToolCalls });
       const { container } = render(<TurnBlock turn={finished()} sessionId="s" stream={[]} working={false} />);
       expect(screen.getByText("use the staging config")).toBeDefined();
-      expect(screen.getByTestId("queued-message").textContent).toContain("an older log's message");
+      expect(screen.getByTestId("queued-message").textContent).toContain("held for the next turn");
       const text = container.textContent ?? "";
-      expect(text.indexOf("an older log's message")).toBeLessThan(text.indexOf("use the staging config"));
+      expect(text.indexOf("held for the next turn")).toBeLessThan(text.indexOf("use the staging config"));
       expect(text.indexOf("use the staging config")).toBeLessThan(text.indexOf("Switched to staging."));
       // Folded, the tool calls are behind the summary line and the reader's words are not.
       expect(screen.queryByText("make build") === null).toBe(foldToolCalls);

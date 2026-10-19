@@ -765,6 +765,53 @@ fn a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message() {
     }
 }
 
+impl Rig {
+    /// A pane that takes whatever is typed into it and draws nothing, for a
+    /// test where the tab types a prompt again.
+    fn with_pane(self) -> Self {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let spec = pty::PaneSpec { cwd: self._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'cat > /dev/null'"), env: &[] };
+        self.manager.terminals.spawn(sink, &self.pane, spec).unwrap();
+        self
+    }
+}
+
+/// "Send now" on the second of two queued prompts: the turn is stopped, that
+/// one is typed again as a prompt of its own, and the first behind it,
+/// queued. The chat is told the new turn is the chosen message's answer, and
+/// that the other was taken when the CLI takes it (#551). Neither used to be
+/// said: the chosen message stayed a queued card in the stopped turn, with a
+/// Send now that could only answer that the agent had taken it. And with the
+/// echoes awaited in the order they were first sent, the chosen one's record
+/// dropped the other's echo as missed, and drew it again when it came.
+#[test]
+fn a_queued_prompt_sent_now_starts_the_turn_it_is_typed_again_for() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "").with_pane();
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("first held", 0) && rig.compose("second held", 0), "{kind:?}");
+        let (first, second) = (rig.queued_seq("first held"), rig.queued_seq("second held"));
+
+        rig.manager.send_queued_now(SESSION, TAB, second).unwrap();
+        rig.interrupt();
+        assert!(rig.turn_open(), "{kind:?}: the chosen message opens a turn of its own");
+        assert_eq!(rig.held(), [first], "{kind:?}: the other is held behind it");
+
+        rig.cli_takes("second held");
+        assert_eq!(rig.taken_as_prompts(), ["second held"], "{kind:?}: the log says which message the new turn answers");
+        assert_eq!(rig.held(), [first], "{kind:?}");
+        rig.append(&rig.cli().steer("first held"));
+        assert!(rig.held().is_empty(), "{kind:?}");
+        rig.cli_replies("both");
+        assert_eq!(
+            rig.told(),
+            ["user: start", "queued: first held", "queued: second held", "end", "taken: first held", "reply: both", "end"],
+            "{kind:?}: each message once, and the one taken mid-turn said so"
+        );
+    }
+}
+
 /// The CLI can also hold a queued prompt until the turn is over and take it
 /// as the next turn's. Still one message, and the turn it starts closes like
 /// any other — whether the `UserPromptSubmit` hook or the record of the
