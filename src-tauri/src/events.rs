@@ -377,6 +377,12 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         post_tokens: Option<u64>,
     },
+    /// What the agent kept of the conversation a compaction just folded
+    /// away: its own memory of it, written for the model (#524). It belongs
+    /// to the `ContextCompacted` before it and is never a prompt.
+    CompactionSummary {
+        text: String,
+    },
     ApiRetry {
         attempt: u32,
         max_retries: u32,

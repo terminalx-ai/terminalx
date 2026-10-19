@@ -174,6 +174,8 @@ export type Payload =
   | ({ type: "usage_update" } & Usage)
   | { type: "context_compaction_started" }
   | { type: "context_compacted"; preTokens?: number; postTokens?: number }
+  /** What the agent kept of the conversation the compaction before it folded away; never a prompt (#524). */
+  | { type: "compaction_summary"; text: string }
   | { type: "api_retry"; attempt: number; maxRetries: number; reason?: string }
   | { type: "rate_limited"; status?: string; resetsAt?: number; window?: string; message?: string }
   | { type: "status"; text: string }

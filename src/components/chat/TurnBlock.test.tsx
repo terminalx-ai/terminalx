@@ -86,3 +86,33 @@ describe("a message queued behind the running turn", () => {
     expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
 });
+
+describe("a compaction", () => {
+  const summary = "This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent:\n   Open an issue for the banner.";
+  // Compacted while idle: the line is all the turn holds.
+  const compacted = (extra: object = {}): Turn =>
+    ({ key: "t2", seq: 2, ts: "2026-10-09T09:57:48Z", work: [{ kind: "compaction", preTokens: 219942, postTokens: 13790, key: "k2", seq: 2, ...extra }], toolCount: 0, editedFiles: 0, live: false }) as Turn;
+
+  it("folds its summary under the line, collapsed, and never as a message anybody sent (#524)", () => {
+    setPrefs({ foldToolCalls: true });
+    const { container } = render(<TurnBlock turn={compacted({ summary })} sessionId="s" stream={[]} working={false} />);
+    const line = screen.getByRole("button", { name: /Context compacted from 220k to 14k tokens/ });
+    expect(line.getAttribute("aria-expanded")).toBe("false");
+    expect(line.textContent).toContain("Show summary");
+    expect(screen.queryByTestId("compaction-summary")).toBeNull();
+    expect(container.querySelector(".shadow-card")).toBeNull();
+
+    fireEvent.click(line);
+    expect(line.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("compaction-summary").textContent).toBe(summary);
+    expect(line.textContent).toContain("Hide summary");
+    fireEvent.click(line);
+    expect(screen.queryByTestId("compaction-summary")).toBeNull();
+  });
+
+  it("is a plain line when there is no summary to show", () => {
+    render(<TurnBlock turn={compacted()} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText(/Context compacted from 220k to 14k tokens/)).toBeDefined();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+});
