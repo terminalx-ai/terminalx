@@ -31,8 +31,13 @@ pub struct IssueTemplate {
 }
 
 /// The templates in `<project>/.github/ISSUE_TEMPLATE`, by file name. None
-/// when there is no such folder.
+/// when there is no such folder, or no checkout on this computer.
 pub fn list(project: &Path) -> Vec<IssueTemplate> {
+    // A cloud project (`cloud:<orgId>:…`) is named by its key, not a path: read
+    // as one, it would be a folder under whatever directory the app runs in.
+    if !project.is_absolute() {
+        return Vec::new();
+    }
     let github = project.join(".github");
     let folder = github.join("ISSUE_TEMPLATE");
     // Only the checkout's own folder: one linked from elsewhere could be anything on disk.
@@ -186,6 +191,14 @@ mod tests {
     fn no_folder_is_no_templates() {
         let dir = tempfile::tempdir().unwrap();
         assert!(list(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_project_with_no_checkout_here_has_none() {
+        // Tests run in the crate's folder, so `..` is this repository, which has two templates: a
+        // relative name is never read against the working directory, a cloud project's key included.
+        assert!(list(Path::new("..")).is_empty());
+        assert!(list(Path::new("cloud:org_01H:github.com/acme/widgets")).is_empty());
     }
 
     #[test]
