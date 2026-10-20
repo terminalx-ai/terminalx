@@ -13,7 +13,8 @@
 //! is never linked again. Everything here is read on this machine; nothing
 //! of a branch, a prompt or a pull request is sent anywhere.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -57,10 +58,16 @@ static LEADING_HASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*#(\d{1,
 static LINEAR_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z][A-Z0-9_]{0,9}-\d{1,7})\b").unwrap());
 static CLOSING_LINEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+([A-Za-z][A-Za-z0-9_]{0,9}-\d{1,7})\b").unwrap());
 
-fn push<T: PartialEq>(found: &mut Vec<T>, value: T) {
-    if !found.contains(&value) {
-        found.push(value);
+fn push(found: &mut Vec<Candidate>, candidate: Candidate) {
+    if !found.contains(&candidate) {
+        found.push(candidate);
     }
+}
+
+/// Each value once, in the order first seen; a long prompt can name thousands.
+fn distinct<T: Eq + Hash + Clone>(values: impl Iterator<Item = T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    values.filter(|value| seen.insert(value.clone())).collect()
 }
 
 fn team_of(identifier: &str) -> &str {
@@ -97,7 +104,7 @@ pub fn name_candidates(names: &[&str], github: bool, teams: &BTreeSet<String>) -
 /// Everything a first prompt could name, read from it once: which of it is a
 /// candidate depends on the project's repository and the Linear teams, which
 /// are asked again later, and the transcript is not read again for them.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct PromptRefs {
     /// `(owner/name, number)` of each GitHub issue URL.
     github_urls: Vec<(String, String)>,
@@ -111,43 +118,22 @@ struct PromptRefs {
 
 impl PromptRefs {
     fn read(text: &str) -> Self {
-        let mut refs = Self::default();
-        for capture in GITHUB_URL.captures_iter(text) {
-            push(&mut refs.github_urls, (format!("{}/{}", &capture[1], &capture[2]), capture[3].to_string()));
+        Self {
+            github_urls: distinct(GITHUB_URL.captures_iter(text).map(|capture| (format!("{}/{}", &capture[1], &capture[2]), capture[3].to_string()))),
+            linear_urls: distinct(LINEAR_URL.captures_iter(text).map(|capture| capture[1].to_ascii_uppercase())),
+            numbers: distinct(LEADING_HASH.captures_iter(text).chain(NAMED_NUMBER.captures_iter(text)).map(|capture| capture[1].to_string())),
+            identifiers: distinct(LINEAR_ID.captures_iter(text).map(|capture| capture[1].to_string())),
         }
-        for capture in LINEAR_URL.captures_iter(text) {
-            push(&mut refs.linear_urls, capture[1].to_ascii_uppercase());
-        }
-        for capture in LEADING_HASH.captures_iter(text).chain(NAMED_NUMBER.captures_iter(text)) {
-            push(&mut refs.numbers, capture[1].to_string());
-        }
-        for capture in LINEAR_ID.captures_iter(text) {
-            push(&mut refs.identifiers, capture[1].to_string());
-        }
-        refs
     }
 
     /// What the first prompt says about its issue. `repo` is the project's GitHub
     /// `owner/name`: a URL into another repository is not this project's issue.
     fn candidates(&self, repo: Option<&str>, teams: &BTreeSet<String>) -> Vec<Candidate> {
-        let mut found = Vec::new();
-        for (owner_name, number) in &self.github_urls {
-            if repo.is_some_and(|repo| repo.eq_ignore_ascii_case(owner_name)) {
-                push(&mut found, Candidate::GitHub(number.clone()));
-            }
-        }
-        for identifier in &self.linear_urls {
-            push(&mut found, Candidate::Linear(identifier.clone()));
-        }
-        if repo.is_some() {
-            for number in &self.numbers {
-                push(&mut found, Candidate::GitHub(number.clone()));
-            }
-        }
-        for identifier in self.identifiers.iter().filter(|identifier| teams.contains(team_of(identifier))) {
-            push(&mut found, Candidate::Linear(identifier.clone()));
-        }
-        found
+        let urls = self.github_urls.iter().filter(|(owner_name, _)| repo.is_some_and(|repo| repo.eq_ignore_ascii_case(owner_name))).map(|(_, number)| Candidate::GitHub(number.clone()));
+        let linear_urls = self.linear_urls.iter().map(|identifier| Candidate::Linear(identifier.clone()));
+        let numbers = self.numbers.iter().filter(|_| repo.is_some()).map(|number| Candidate::GitHub(number.clone()));
+        let identifiers = self.identifiers.iter().filter(|identifier| teams.contains(team_of(identifier))).map(|identifier| Candidate::Linear(identifier.clone()));
+        distinct(urls.chain(linear_urls).chain(numbers).chain(identifiers))
     }
 }
 
@@ -209,6 +195,7 @@ struct Checked {
     names: Option<(Vec<String>, u64)>,
     /// What its first request names, once there is one.
     prompt: Option<PromptRefs>,
+    /// The teams answer its first prompt's candidates were answered under.
     prompt_settled: Option<u64>,
 }
 
@@ -269,10 +256,21 @@ impl Linker {
         teams
     }
 
-    /// Which teams answer is the latest: an answer settled under another one
-    /// is to be looked for again.
-    pub fn teams_answer(&self) -> u64 {
+    /// Which teams answer is the latest, read again first when it is due: an
+    /// answer settled under another one is to be looked for again. Asked
+    /// before reusing a settled answer, so that one is never kept under a
+    /// stale teams answer only because nothing else read the teams since.
+    pub fn teams_answer(&mut self, lookup: &dyn Lookup) -> u64 {
+        self.teams(lookup);
         self.teams_answer
+    }
+
+    /// Tests: let the teams answer run out, as if [`TEAMS_FOR`] had passed.
+    #[cfg(test)]
+    pub(super) fn age_teams(&mut self) {
+        if let Some((at, _)) = &mut self.teams {
+            *at = Instant::now().checked_sub(TEAMS_FOR + Duration::from_secs(1)).unwrap();
+        }
     }
 
     /// A project's GitHub repository, asked of its checkout at most every [`REPO_FOR`].
@@ -580,12 +578,6 @@ mod tests {
         }
     }
 
-    /// Let the Linear teams answer run out, as if [`TEAMS_FOR`] had passed.
-    fn age_teams(linker: &mut Linker) {
-        if let Some((at, _)) = &mut linker.teams {
-            *at = Instant::now().checked_sub(TEAMS_FOR + Duration::from_secs(1)).unwrap();
-        }
-    }
 
     #[test]
     fn a_lookup_that_failed_is_tried_again_and_links_once_the_tracker_answers() {
@@ -624,7 +616,7 @@ mod tests {
         assert_eq!((fake.prompts_read.get(), fake.teams_asked.get()), (2, 1));
         // Once Linear answers, both are looked at again: the branch, and the prompt as it was read.
         fake.no_teams.set(false);
-        age_teams(&mut linker);
+        linker.age_teams();
         assert_eq!(linker.pass(&fake, &sessions).links, vec![
             ("s1".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Branch),
             ("s2".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Prompt),
@@ -638,16 +630,17 @@ mod tests {
         fake.no_teams.set(true);
         let mut linker = Linker::default();
         assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["eng-42-login"]), (None, true));
-        let unknown = linker.teams_answer();
+        let unknown = linker.teams_answer(&fake);
         // The same answer read again an hour on: what was settled under it stands.
-        age_teams(&mut linker);
-        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["other"]), (None, true));
-        assert_eq!(linker.teams_answer(), unknown);
-        // A new answer: looked for again, the branch names the issue.
+        linker.age_teams();
+        assert_eq!(linker.teams_answer(&fake), unknown);
+        assert_eq!(fake.teams_asked.get(), 2);
+        // Linear answers: asking for the latest answer reads it, before any cloud session is looked at again.
         fake.no_teams.set(false);
-        age_teams(&mut linker);
+        linker.age_teams();
+        assert_ne!(linker.teams_answer(&fake), unknown);
         assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["eng-42-login"]), (Some(issue("linear", "uuid-42", "ENG-42")), true));
-        assert_ne!(linker.teams_answer(), unknown);
+        assert_eq!(fake.teams_asked.get(), 3);
     }
 
     #[test]

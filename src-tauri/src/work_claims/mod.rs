@@ -233,12 +233,13 @@ impl WorkClaims {
         let mut found = HashMap::new();
         for session in &cloud {
             let names: Vec<String> = [session.branch.as_deref(), session.worktree_name.as_deref()].into_iter().flatten().map(String::from).collect();
-            let known = self.state.lock().unwrap().cloud_issues.get(&session.claim_id()).filter(|known| known.settled && known.names == names && known.teams == linker.teams_answer()).cloned();
+            let teams = linker.teams_answer(lookup);
+            let known = self.state.lock().unwrap().cloud_issues.get(&session.claim_id()).filter(|known| known.settled && known.names == names && known.teams == teams).cloned();
             let looked = match known {
                 Some(known) => known,
                 None => {
                     let (issue, settled) = linker.cloud_issue(lookup, session.repository.as_deref(), &names.iter().map(String::as_str).collect::<Vec<_>>());
-                    CloudIssue { names, issue, settled, teams: linker.teams_answer() }
+                    CloudIssue { names, issue, settled, teams }
                 }
             };
             found.insert(session.claim_id(), looked);

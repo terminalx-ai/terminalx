@@ -149,6 +149,7 @@ describe("an organization's settings page (PRO-107)", () => {
     render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
     const share = await screen.findByRole("switch", { name: "Share work status in Beta" });
     expect(mocks.workStatus.organization).toHaveBeenCalledWith("b");
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins and work status above are changed as it is.");
     fireEvent.click(share);
     await waitFor(() => expect(mocks.workStatus.setOrganization).toHaveBeenCalledWith("b", { shareWorkStatus: false }));
     expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
@@ -164,6 +165,7 @@ describe("an organization's settings page (PRO-107)", () => {
     expect(screen.getByTestId("organization-settings").dataset.organization).toBe("b");
     expect(screen.queryByTestId("organization-work-status")).toBeNull();
     expect(mocks.workStatus.organization).not.toHaveBeenCalled();
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins above are changed as it is.");
   });
 
   it("asks a member of the active organization for no diagnostics", async () => {

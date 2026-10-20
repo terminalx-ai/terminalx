@@ -71,10 +71,13 @@ an issue and not a pull request):
 
 Only sessions active in the last week are looked at, and each candidate is
 asked about once; a lookup that failed is asked again two minutes later.
-Linear's team keys are read once an hour. While Linear cannot say them, no
-Linear identifier is recognised, and once it can, each session is looked at
-again, its first prompt from what was read of it then. An automatic link says how it was made (in the title bar
-chip's tooltip and the menu), and every link can be removed:
+Linear's team keys are read once an hour, and so is a Linear that could not
+say them (a revoked key, or offline at launch). Until they are known no
+Linear identifier is recognised; the read that first has them looks at each
+session again, its first prompt from what was read of it then, so a
+Linear-named session can take up to an hour to be linked. An automatic link
+says how it was made (in the title bar chip's tooltip and the menu), and
+every link can be removed:
 
 - **Link to issue…** in a session's menu (sidebar, conversation list, or the
   tab's right-click menu) picks an issue of its project.

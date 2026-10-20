@@ -305,3 +305,59 @@ fn a_session_is_linked_and_unlinked_by_hand_and_an_unlinked_issue_stays_unlinked
     let stored = serde_json::to_value(index::get("s1").unwrap()).unwrap();
     assert_eq!(stored["issueWork"], json!({"link": "manual", "private": true}));
 }
+
+/// The trackers as a cloud session's branch needs them: Linear has ENG-42,
+/// once it can say its teams.
+#[derive(Default)]
+struct Trackers {
+    teams: std::cell::Cell<bool>,
+}
+
+impl Lookup for Trackers {
+    fn github_repo(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn github_issue(&self, _: &str, _: &str) -> Result<Option<IssueRef>, String> {
+        Ok(None)
+    }
+    fn github_issue_in(&self, _: &str, _: &str) -> Result<Option<IssueRef>, String> {
+        Ok(None)
+    }
+    fn linear_issue(&self, identifier: &str) -> Result<Option<IssueRef>, String> {
+        Ok((identifier == "ENG-42").then(|| IssueRef { provider: "linear".into(), id: "uuid-42".into(), identifier: "ENG-42".into(), title: "T".into(), url: "https://linear.app/acme/issue/ENG-42".into() }))
+    }
+    fn linear_teams(&self) -> Option<BTreeSet<String>> {
+        self.teams.get().then(|| BTreeSet::from(["ENG".to_string()]))
+    }
+    fn branch_pulls(&self, _: &str, _: &[String]) -> Option<HashMap<String, BranchPull>> {
+        Some(HashMap::new())
+    }
+    fn first_request(&self, _: &SessionEntry) -> Option<String> {
+        None
+    }
+}
+
+#[test]
+fn a_cloud_session_settled_while_linear_could_not_say_its_teams_is_linked_once_it_can() {
+    let _home = crate::store::temp_home();
+    let claims = service("http://127.0.0.1:9");
+    let cloud: CloudSession = serde_json::from_value(json!({
+        "orgId": "org-1", "workspaceId": "w1", "sessionId": "c1", "createdBy": "user-1", "repository": "acme/widgets",
+        "title": "t", "branch": "me/eng-42-login", "status": "in_progress", "modified": index::now(),
+    }))
+    .unwrap();
+    claims.set_cloud(vec![cloud.clone()]);
+    let found = |claims: &WorkClaims| claims.state.lock().unwrap().cloud_issues.get(&cloud.claim_id()).and_then(|known| known.issue.clone()).map(|issue| issue.identifier);
+    let trackers = Trackers::default();
+    let mut linker = Linker::default();
+    // Settled without them, and kept while Linear still cannot say them.
+    for _ in 0..2 {
+        claims.link_pass(&mut linker, &trackers);
+        assert_eq!(found(&claims), None);
+    }
+    // An hour on Linear can say them, and no local session is there to ask.
+    trackers.teams.set(true);
+    linker.age_teams();
+    claims.link_pass(&mut linker, &trackers);
+    assert_eq!(found(&claims).as_deref(), Some("ENG-42"));
+}

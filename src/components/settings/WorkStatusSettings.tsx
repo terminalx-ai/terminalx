@@ -7,7 +7,7 @@ import { errorMessage, workStatus, type OrganizationSummary, type OrganizationWo
  * What this person's work status shares, and with whom (#441): their own
  * other machines always, and teammates unless they turn it off. Whether an
  * organization shares it at all is on the organization's page
- * (OrganizationWorkStatus).
+ * (OrganizationWorkStatusSettings).
  */
 export function WorkStatusSettings() {
   const [shareWithTeam, setShareWithTeam] = useState<boolean | null>(null);
@@ -60,13 +60,18 @@ export function linearWorkspaceKeys(text: string): string[] | null {
   return keys.every((key) => /^[a-z0-9-]{1,64}$/.test(key)) && keys.length <= 10 ? keys : null;
 }
 
+/** Whether the person changes the organization's work status: its owners and administrators, not of a personal one. */
+export function managesWorkStatus(organization: OrganizationSummary): boolean {
+  return !organization.isPersonal && (organization.role === "owner" || organization.role === "admin");
+}
+
 /**
  * An organization's work status, on its page in Settings → Organizations
  * (PRO-107), for its owners and administrators. It is the organization's
  * own, so it changes whichever organization is active.
  */
-export function OrganizationWorkStatus({ organization }: { organization: OrganizationSummary }) {
-  if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return null;
+export function OrganizationWorkStatusSettings({ organization }: { organization: OrganizationSummary }) {
+  if (!managesWorkStatus(organization)) return null;
   return <OrganizationSwitch organization={organization} />;
 }
 

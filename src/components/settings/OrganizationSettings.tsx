@@ -14,7 +14,7 @@ import { OrganizationEnvironment } from "./OrganizationEnvironment";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
-import { OrganizationWorkStatus } from "./WorkStatusSettings";
+import { managesWorkStatus, OrganizationWorkStatusSettings } from "./WorkStatusSettings";
 
 const ROLE: Record<string, string> = { owner: "an owner", admin: "an administrator", member: "a member" };
 
@@ -57,7 +57,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
   };
 
   const logins = <OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
-  const workStatus = <OrganizationWorkStatus key={organization.id} organization={organization} />;
+  const workStatus = <OrganizationWorkStatusSettings key={organization.id} organization={organization} />;
 
   return (
     <div className="flex flex-col gap-4" data-testid="organization-settings" data-organization={organization.id}>
@@ -93,7 +93,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
             <div className="text-sm font-medium">Other settings of {name}</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
               Members, compute, GitHub, workspace settings, environment, diagnostics and teardown of {name} are changed while it is your {activeLabel}.
-              Its agent logins above are changed as it is.
+              Its agent logins{managesWorkStatus(organization) ? " and work status" : ""} above are changed as it is.
             </p>
             <Button className="mt-2" size="sm" variant="outline" disabled={switching || !contextRevision} onClick={() => void makeActive()}>
               {switching && <Loader2 className="animate-spin" />}

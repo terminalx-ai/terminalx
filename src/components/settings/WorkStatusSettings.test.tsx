@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const { OrganizationWorkStatus, WorkStatusSettings } = await import("./WorkStatusSettings");
+const { OrganizationWorkStatusSettings, WorkStatusSettings } = await import("./WorkStatusSettings");
 
 let organizationShares = true;
 let linearWorkspaces: string[] = [];
@@ -58,7 +58,7 @@ describe("work status settings", () => {
     render(
       <>
         {organizations.map((organization) => (
-          <OrganizationWorkStatus key={organization.id} organization={organization} />
+          <OrganizationWorkStatusSettings key={organization.id} organization={organization} />
         ))}
       </>,
     );
