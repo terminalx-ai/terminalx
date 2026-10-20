@@ -25,6 +25,12 @@ export interface Prefs {
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
   foldToolCalls: boolean;
+  /**
+   * The system's spelling correction, smart quotes and dashes, and text
+   * replacements in the fields where the reader writes to an agent (see
+   * `@/lib/autocorrect`). Off unless the reader turned it on.
+   */
+  autocorrect: boolean;
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -108,6 +114,7 @@ const DEFAULTS: Prefs = {
   fontScale: "md",
   transcriptLayout: "wide",
   foldToolCalls: true,
+  autocorrect: false,
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},
@@ -170,6 +177,7 @@ function load(): Prefs {
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
+    prefs.autocorrect = prefs.autocorrect === true;
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
     if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};

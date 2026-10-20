@@ -52,6 +52,8 @@ vi.mock("@/lib/models", async (original) => ({
 const prefs = vi.hoisted(() => ({ lastProject: "/repo", lastAgent: "claude", lastModel: {} as Record<string, string>, lastMode: "auto" }));
 vi.mock("@/lib/prefs", () => ({
   usePrefs: () => prefs,
+  getPrefs: () => prefs,
+  subscribePrefs: () => () => {},
 }));
 vi.mock("@/lib/sessions", () => ({
   selectSession,

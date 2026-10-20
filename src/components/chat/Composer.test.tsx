@@ -1056,3 +1056,25 @@ describe("sentMessages", () => {
     expect(sentMessages(transcript)).toEqual(["other", "again"]);
   });
 });
+
+describe("autocorrect in the composer (#525)", () => {
+  const CORRECTIONS = ["spellcheck", "autocorrect", "autocapitalize"];
+  const correctionsOf = (box: HTMLTextAreaElement) => Object.fromEntries(CORRECTIONS.filter((name) => box.hasAttribute(name)).map((name) => [name, box.getAttribute(name)]));
+
+  afterEach(() => act(() => setPrefs({ autocorrect: false })));
+
+  it("turns the system's corrections off while the setting is off, and follows it at once in an open composer", () => {
+    act(() => setPrefs({ autocorrect: false }));
+    render(<TestComposer onSend={vi.fn()} />);
+    const box = document.querySelector<HTMLTextAreaElement>("[data-composer]")!;
+    expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
+
+    // On sets none of them, so the browser and the system's keyboard settings decide, as for any text box.
+    act(() => setPrefs({ autocorrect: true }));
+    expect(document.querySelector("[data-composer]")).toBe(box);
+    expect(correctionsOf(box)).toEqual({});
+
+    act(() => setPrefs({ autocorrect: false }));
+    expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
+  });
+});
