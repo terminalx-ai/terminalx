@@ -417,6 +417,25 @@ describe("buildTranscript", () => {
     ], false);
     expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["Open an issue for the banner", undefined]);
     expect(t.turns[1].work).toEqual([expect.objectContaining({ kind: "compaction", summary })]);
+
+    // A recovery that was standing is cleared as the summary is taken for a prompt, between the two.
+    const cleared = buildTranscript([
+      ev({ type: "recovery", kind: "failed" }),
+      ev({ type: "context_compacted", preTokens: 219942, postTokens: 13790 }),
+      ev({ type: "recovery", kind: null }),
+      ev({ type: "user_message", text: summary, queued: false }),
+    ], false);
+    expect(cleared.turns.map((turn) => turn.prompt?.text)).toEqual([undefined]);
+    expect(cleared.turns[0].work).toEqual([expect.objectContaining({ kind: "compaction", summary })]);
+  });
+
+  it("leaves a prompt with a named sender alone even straight after a compaction", () => {
+    const author = { userId: "alice", displayName: "Alice" };
+    const t = buildTranscript([
+      ev({ type: "context_compacted", preTokens: 1 }),
+      ev({ type: "user_message", text: summary, queued: false, author }),
+    ], false);
+    expect(t.turns.map((turn) => turn.prompt)).toEqual([undefined, expect.objectContaining({ author, text: summary })]);
   });
 
   it("leaves the same words alone where the reader sent them: pasted into a prompt, or queued", () => {

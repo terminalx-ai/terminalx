@@ -1209,8 +1209,9 @@ mod tests {
         let p = s.push(MANUAL_COMPACT.as_bytes());
         assert_eq!(kinds(&p), ["user", "tool", "usage", "result", "text", "usage", "user", "compacted", "summary", "user", "user"]);
         // 2.1.304 writes the command twice, as typed before the compaction
-        // and as the command it ran after it. Both are the reader's; the
-        // summary between them is not.
+        // and as the command it ran after it, so a `/compact` typed once is
+        // read as two prompts. That is the CLI's doing and not settled here;
+        // what this asserts is that the summary between them is no prompt.
         assert_eq!(prompts(&p), ["Reply with exactly: pong", "/compact", "/compact", "/exit"]);
         assert!(matches!(&p[7], Payload::ContextCompacted { pre_tokens: Some(61848), post_tokens: Some(20261) }));
         assert!(matches!(&p[8], Payload::CompactionSummary { text } if text.starts_with("This session is being continued from a previous conversation") && text.contains("Reply with exactly: pong")));

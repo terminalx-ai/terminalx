@@ -192,10 +192,11 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
   for (const event of events) {
     const payload: Payload = event.payload;
     const followsCompaction = afterCompaction;
-    if (!event.subagent) afterCompaction = payload.type === "context_compacted";
+    // The app may clear a standing recovery between the two as the summary is taken for a prompt.
+    if (!event.subagent && payload.type !== "recovery") afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "user_message": {
-        if (followsCompaction && !payload.queued && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
+        if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           attachSummary(event, payload.text);
           break;
         }
