@@ -23,6 +23,9 @@ vi.mock("@/components/ui/menu", () => {
   const Pass = ({ children }: { children: ReactNode }) => <>{children}</>;
   return {
     ContextMenuItem: Item,
+    ContextMenuCheckboxItem: ({ children, checked, onCheckedChange, disabled }: { children: ReactNode; checked?: boolean; onCheckedChange?: (on: boolean) => void; disabled?: boolean }) => (
+      <div role="menuitemcheckbox" aria-checked={!!checked} aria-disabled={disabled || undefined} onClick={() => !disabled && onCheckedChange?.(!checked)}>{children}</div>
+    ),
     ContextMenuSubTrigger: ({ children, disabled }: { children: ReactNode; disabled?: boolean }) => <div role="menuitem" aria-haspopup="menu" aria-disabled={disabled || undefined}>{children}</div>,
     ContextMenuLabel: ({ children }: { children: ReactNode }) => <div role="note">{children}</div>,
     ContextMenuSeparator: () => <hr />,
@@ -113,6 +116,7 @@ describe("a tab's right-click menu", () => {
       "Session “Session a”",
       "Archive",
       "Share…",
+      "Link to issue…",
       "Delete…",
       "Move tab",
       "Move tab left",

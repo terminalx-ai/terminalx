@@ -25,6 +25,7 @@ import type {
   Workspace,
   WorkspaceDisposition,
   TabEntry,
+  TabStatus,
   WorkStatus,
   WorkspaceRemoveReport,
   Leftover,
@@ -71,6 +72,8 @@ const ISSUE_COMMANDS = new Set([
   "issue_set_title",
   "issue_set_description",
   "issue_create",
+  // Who works on the issues listed (#441): the claims are read by the issues' repository.
+  "work_claims_list",
 ]);
 
 /** `cloud:<orgId>:github.com/<owner>/<name>`: a cloud project with a GitHub repository. */
@@ -2041,6 +2044,87 @@ export const issues = {
   githubRepo: (projectPath: string) => invoke<string | null>("github_repo", { projectPath }),
   /** The GitHub account a project is connected to: the one its pushes land as, else the CLI's. */
   githubIdentity: (projectPath: string, refresh = false) => invoke<GithubIdentity>("github_identity", { projectPath, refresh }),
+};
+
+/** One claim as the account service shows it to this reader (#441). `device` and `sessionId` come only with the reader's own. */
+export interface WorkClaim {
+  /** Opaque: one person's one session, the same from each of their machines. Absent from an older server. */
+  key?: string | null;
+  scope: string;
+  issue: { provider: "github" | "linear"; id: string; identifier: string };
+  person: { name: string; you: boolean };
+  device?: { id: string; label: string } | null;
+  sessionId?: string | null;
+  title: string;
+  branch?: string | null;
+  /** `working`, `waiting`, `idle` or `pull_request`; anything newer reads as idle. */
+  state: string;
+  cloud: boolean;
+  /** Its machine refreshed it within `liveForSeconds`. */
+  live: boolean;
+  /** Epoch milliseconds on the server's clock. */
+  since: number;
+  lastActiveAt: number;
+  refreshedAt: number;
+}
+
+export interface WorkClaimsAnswer {
+  /** False when only this machine's sessions can be shown. */
+  available: boolean;
+  reason?: "signed_out" | "unsupported" | "offline" | "unavailable" | null;
+  /** The server's clock, epoch milliseconds. */
+  now: number;
+  liveForSeconds: number;
+  /** Every claim but this machine's own local ones. */
+  claims: WorkClaim[];
+}
+
+/** A cloud session the window knows about, handed over for its work status. */
+export interface WorkCloudSession {
+  orgId: string;
+  workspaceId: string;
+  sessionId: string;
+  createdBy: string | null;
+  /** The workspace's primary repository, `owner/name`. */
+  repository: string | null;
+  title: string;
+  branch: string | null;
+  worktreeName: string | null;
+  status: TabStatus;
+  archived: boolean;
+  modified: string;
+}
+
+export interface WorkStatusSettings {
+  /** Teammates in an organization that connected the repository see what this person works on. */
+  shareWithTeam: boolean;
+}
+
+export interface OrganizationWorkStatus {
+  shareWorkStatus: boolean;
+  canManage: boolean;
+  personal: boolean;
+  /** The Linear workspaces (`linear.app/<key>`) whose issues members see each other's work on. */
+  linearWorkspaces: string[];
+}
+
+/** A change to an organization's work status settings; what is left out stays. */
+export interface OrganizationWorkStatusPatch {
+  shareWorkStatus?: boolean;
+  linearWorkspaces?: string[];
+}
+
+/** Who is working on an issue, across machines and teammates (#441). */
+export const workStatus = {
+  claims: (projectPath: string, provider: string, issueUrls: string[]) => invoke<WorkClaimsAnswer>("work_claims_list", { projectPath, provider, issueUrls }),
+  setCloud: (sessions: WorkCloudSession[]) => invoke<void>("work_claims_set_cloud", { sessions }),
+  settings: () => invoke<WorkStatusSettings>("work_status_settings"),
+  setShareWithTeam: (shareWithTeam: boolean) => invoke<WorkStatusSettings>("set_work_status_settings", { shareWithTeam }),
+  organization: (orgId: string) => invoke<OrganizationWorkStatus>("organization_work_status", { orgId }),
+  setOrganization: (orgId: string, patch: OrganizationWorkStatusPatch) => invoke<OrganizationWorkStatus>("set_organization_work_status", { orgId, patch }),
+  linkIssue: (sessionId: string, issue: IssueRef) => invoke<SessionEntry>("session_link_issue", { sessionId, issue }),
+  unlinkIssue: (sessionId: string) => invoke<SessionEntry>("session_unlink_issue", { sessionId }),
+  setPrivate: (sessionId: string, isPrivate: boolean) => invoke<SessionEntry>("session_set_work_private", { sessionId, private: isPrivate }),
 };
 
 export interface GithubIdentity {

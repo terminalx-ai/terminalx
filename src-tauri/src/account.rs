@@ -461,6 +461,13 @@ impl AccountManager {
         inner.session.as_mut().expect("signed in").capabilities.flags.insert(MEMBER_WORKSPACES_CAPABILITY.into(), offered);
     }
 
+    /// Tests: whether the server reports a capability flag.
+    #[cfg(test)]
+    pub(crate) fn set_capability_for_test(&self, flag: &str, on: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.session.as_mut().expect("signed in").capabilities.flags.insert(flag.into(), on);
+    }
+
     /// Tests: whether the server advertises the catalog feed.
     #[cfg(test)]
     pub(crate) fn set_catalog_feed_for_test(&self, offered: bool) {
@@ -693,6 +700,11 @@ impl AccountManager {
                     })
             }
         }
+    }
+
+    /// Whether the signed-in session's server reports this capability flag.
+    pub(crate) fn has_capability(&self, flag: &str) -> bool {
+        self.inner.lock().unwrap().session.as_ref().is_some_and(|session| session.capabilities.flags.get(flag) == Some(&true))
     }
 
     /// Whether the server offers the cross-organization catalog feed (PRO-74).

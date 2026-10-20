@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronDown, Cloud, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2 } from "@/icons";
+import { Check, ChevronDown, Cloud, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -16,6 +16,7 @@ import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
 import { IssueCommentComposer } from "@/components/issues/IssueCommentComposer";
 import { IssueCommentThread } from "@/components/issues/IssueCommentThread";
 import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
+import { IssueWorkPanel, TakenIssueDialog } from "@/components/issues/IssueWork";
 import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
@@ -34,12 +35,20 @@ import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/i
 import type { IssueThread } from "@/lib/issueComments";
 import type { IssueDetails } from "@/lib/issueOps";
 import { useIssueViewer } from "@/lib/issueViewer";
+import { mine, taken, unavailableText, useIssueWork, workKeyOf, workToWarnAbout, type IssueWorker } from "@/lib/issueWork";
 import { cloudPipelineSettings, pipelineForIssue, pipelineSettings, startPipeline, unlistedPipelines, useIssuePipelines } from "@/lib/issuePipeline";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import type { Project, WorkStatus } from "@/types/session";
 import type { CloudProject } from "@/types/target";
 
 type Provider = "github" | "linear";
+/** Which issues the list shows by who works on them (#441). */
+type WorkFilter = "all" | "free" | "mine";
+const WORK_FILTERS: { value: WorkFilter; label: string }[] = [
+  { value: "all", label: "All issues" },
+  { value: "free", label: "Hide issues someone is working on" },
+  { value: "mine", label: "Only mine" },
+];
 
 /**
  * What the Issues view lists issues of and starts sessions in: a project on
@@ -168,6 +177,9 @@ export function IssuesView({
   const [tick, setTick] = useState(0);
   const [automationPrefill, setAutomationPrefill] = useState<AutomationEditorPrefill | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [workFilter, setWorkFilter] = useState<WorkFilter>("all");
+  // Work on the issue to say before a session starts on it.
+  const [takenBy, setTakenBy] = useState<IssueWorker[] | null>(null);
   const [assigneeOpen, setAssigneeOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -238,6 +250,13 @@ export function IssuesView({
     () => new Set([...store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : []), ...pipelines.filter((value) => value.projectPath === projectPath).map((value) => value.issue.url)]),
     [store.sessions, pipelines, projectPath],
   );
+  // Who works on each listed issue: this Mac's sessions, the reader's other machines, teammates.
+  const work = useIssueWork(projectPath, provider, list, store.sessions, tick);
+  const workOf = (issue: Issue) => work.byIssue.get(workKeyOf(issue));
+  // The issue just created here stays listed while it is pinned, whoever works on it (PRO-99).
+  const pinnedKey = created.current ? writeKey(created.current.issue) : null;
+  const shownList = workFilter === "all" ? list : list.filter((issue) => writeKey(issue) === pinnedKey || (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
+  const workNote = unavailableText(work.answer);
   // Issues with a pipeline here that the list does not hold: closed by their
   // merge, or outside the search. They stay below it, so the record of what
   // happened to them can still be read on their page.
@@ -404,9 +423,16 @@ export function IssuesView({
     thread.current = { key, thread: value };
   }, []);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (anyway = false) => {
     const issue = detail ?? selected;
     if (!issue || !projectPath || !harness) return;
+    // A warning, not a lock: the reader may start anyway.
+    const busy = workToWarnAbout(work.byIssue.get(workKeyOf(issue)));
+    if (!anyway && busy.length > 0) {
+      setTakenBy(busy);
+      return;
+    }
+    setTakenBy(null);
     setStarting(true);
     setError(null);
     setStartNote(null);
@@ -477,7 +503,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults]);
+  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults, work.byIssue]);
 
   const emptyReason = useMemo(() => {
     if (!projectPath) return "Add a project to see its issues.";
@@ -565,9 +591,9 @@ export function IssuesView({
 
   // Who has the issue shows once that is known: from the row, or from its details.
   const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
-  // Up and Down through the rows, the listed ones and then those below them; the row moved to takes the focus.
+  // Up and Down through the rows shown, the listed ones and then those below them; the row moved to takes the focus.
   const move = (by: 1 | -1) => {
-    const rows = [...list, ...unlisted.map((each) => each.issue)];
+    const rows = [...shownList, ...unlisted.map((each) => each.issue)];
     if (!rows.length) return;
     const at = rows.findIndex(isOpen);
     const next = at < 0 ? (by > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, at + by));
@@ -720,9 +746,28 @@ export function IssuesView({
         {!emptyReason && (
           <div className="flex flex-wrap items-center gap-1 px-4 pb-2" role="toolbar" aria-label="Filter issues">
             <IssueListFilters key={filterKey ?? ""} projectPath={projectPath} provider={provider} filter={filter} onChange={setFilter} teams={provider === "linear" ? teams : []} viewer={viewer} />
+            {/* Who works on them (#441): what this Mac, the reader's other machines and the team say, not the tracker. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label={`Working: ${WORK_FILTERS.find((option) => option.value === workFilter)?.label}`} className={cn("gap-1 text-xs", workFilter !== "all" && "bg-veil-strong text-foreground")}>
+                  <Users className="size-3.5" />
+                  {workFilter === "all" ? "Anyone working" : workFilter === "free" ? "Nobody working" : "Only mine"}
+                  <ChevronDown className="text-faint" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {WORK_FILTERS.map((option) => (
+                  <DropdownMenuItem key={option.value} onSelect={() => setWorkFilter(option.value)}>
+                    <Check className={cn("size-3.5", workFilter !== option.value && "invisible")} />
+                    {option.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
 
+        {workNote && !emptyReason && <div className="px-4 pb-1.5 text-[11px] text-faint" data-testid="issues-work-note">{workNote}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
           {error && <div className="mx-4 mb-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
           {emptyReason ? (
@@ -734,11 +779,19 @@ export function IssuesView({
                 </span>
               )}
             </div>
-          ) : list.length === 0 && !loading ? (
-            <div className="px-4 py-6 text-sm text-muted-foreground">{filter.state === "open" ? "No open issues match." : "No issues match."}</div>
+          ) : shownList.length === 0 && !loading ? (
+            <div className="px-4 py-6 text-sm text-muted-foreground">
+              {list.length > 0 && workFilter === "free"
+                ? "Someone is working on every issue listed."
+                : list.length > 0 && workFilter === "mine"
+                  ? "You are not working on any of these issues."
+                  : filter.state === "open"
+                    ? "No open issues match."
+                    : "No issues match."}
+            </div>
           ) : (
             <ul className="px-2 pb-4">
-              {list.map((i) => (
+              {shownList.map((i) => (
                 <li key={`${i.provider}:${i.id}`}>
                   <ContextMenu>
                     <ContextMenuTrigger className="block">
@@ -748,6 +801,8 @@ export function IssuesView({
                         linked={linkedIssueUrls.has(i.url)}
                         outOfFilter={outOfFilter(i)}
                         pipeline={projectPath ? pipelineForIssue(pipelines, projectPath, i.url) : null}
+                        work={workOf(i)}
+                        now={work.now}
                         onSelect={() => open(i)}
                       />
                     </ContextMenuTrigger>
@@ -858,6 +913,7 @@ export function IssuesView({
                 </div>
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
+              {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} />
               </div>
@@ -891,7 +947,7 @@ export function IssuesView({
                       Open session
                     </Button>
                   )}
-                  <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start()}>
+                  <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start(false)}>
                     {starting ? <Loader2 className="animate-spin" /> : null}
                     Start session
                   </Button>
@@ -979,6 +1035,18 @@ export function IssuesView({
           </>
         )}
       </div>
+      {takenBy && (
+        <TakenIssueDialog
+          workers={takenBy}
+          now={work.now}
+          onStart={() => void start(true)}
+          onOpen={(sessionId) => {
+            setTakenBy(null);
+            selectSession(sessionId);
+          }}
+          onCancel={() => setTakenBy(null)}
+        />
+      )}
     </div>
   );
 }

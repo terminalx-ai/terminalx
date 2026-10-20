@@ -25,6 +25,7 @@ import { AppDestinations, ProjectAppearance, ProjectGlyph, type RailProps } from
 import { DevelopmentSection } from "@/components/cloud/DevRuntime";
 import { CloudOrganizations, useHasCloudOrganizations } from "./CloudOrganizations";
 import { AgentMark } from "@/components/AgentMark";
+import { IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
@@ -703,6 +704,7 @@ function ConversationRow({
           <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
             <Archive /> {session.archived ? "Unarchive" : "Archive"}
           </DropdownMenuItem>
+          <IssueLinkMenuItems session={session} />
           <DropdownMenuSeparator />
           <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
             <Trash2 /> Delete…

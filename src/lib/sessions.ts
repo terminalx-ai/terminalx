@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { api, type WorkspaceRemoveOptions } from "@/lib/api";
+import { api, workStatus, type WorkspaceRemoveOptions } from "@/lib/api";
 import { getPrefs } from "@/lib/prefs";
 import { getAccount } from "@/lib/account";
 import { cloudKeyOrgId, mayStartCloudSessions } from "@/lib/multiOrg";
@@ -12,7 +12,7 @@ import { isFloatingWindow } from "@/lib/appWindow";
 import type { NewQuickChat, OpenTarget } from "@/lib/api";
 import type {
   ProjectPatch,
-  Workspace, HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
+  Workspace, HarnessInfo, IssueRef, Project, SessionEntry, TabEntry } from "@/types/session";
 
 /**
  * The index of sessions and projects, mirrored from ~/.raccoon and kept in a
@@ -532,6 +532,21 @@ export async function pinSession(id: string, pinned: boolean) {
 export async function renameSession(id: string, title: string) {
   await api.renameSession(id, title);
   patchSession(id, { title });
+}
+
+/** "Link to issue…": the session works on `issue` from now on, and says so to the reader's other machines and team (#441). */
+export async function linkSessionIssue(id: string, issue: IssueRef) {
+  upsertSession(await workStatus.linkIssue(id, issue));
+}
+
+/** "Unlink": the session works on no issue, and is never linked to this one again by itself. */
+export async function unlinkSessionIssue(id: string) {
+  upsertSession(await workStatus.unlinkIssue(id));
+}
+
+/** "Don't share this session": its work status stays on this Mac. */
+export async function setSessionWorkPrivate(id: string, isPrivate: boolean) {
+  upsertSession(await workStatus.setPrivate(id, isPrivate));
 }
 
 /** Delete one session. Its workspace stays, and so does every other session. */

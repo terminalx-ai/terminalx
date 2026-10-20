@@ -1544,6 +1544,7 @@ mod tests {
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
+            issue_work: Default::default(),
             automation: None,
             title: "main".into(),
             created: "now".into(),

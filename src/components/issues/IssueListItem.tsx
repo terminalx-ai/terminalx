@@ -4,6 +4,8 @@ import { relativeTime } from "@/lib/time";
 import type { Issue } from "@/lib/api";
 import { PipelineStatus } from "@/components/issues/IssuePipelinePanel";
 import { AvatarStack } from "@/components/issues/People";
+import { IssueWorkChip } from "@/components/issues/IssueWork";
+import type { IssueWorker } from "@/lib/issueWork";
 import type { IssuePipeline } from "@/types/issuePipeline";
 
 /** The compact issue rendering shared by the Issues view and trigger preview. */
@@ -13,6 +15,8 @@ export function IssueListItem({
   linked = false,
   outOfFilter = null,
   pipeline = null,
+  work = [],
+  now,
   onSelect,
 }: {
   issue: Issue;
@@ -22,9 +26,14 @@ export function IssueListItem({
   outOfFilter?: string | null;
   /** The issue's pipeline, when a session was started from it. */
   pipeline?: IssuePipeline | null;
+  /** Who is working on it, on this Mac and elsewhere, the most telling first (#441). */
+  work?: IssueWorker[];
+  now?: number;
   onSelect?: () => void;
 }) {
   const assignees = issue.assignees ?? (issue.assignee ? [issue.assignee] : []);
+  // A pipeline already says what this Mac's session is doing.
+  const workers = pipeline ? work.filter((worker) => worker.place !== "this") : work;
   return (
     <button
       type="button"
@@ -60,7 +69,8 @@ export function IssueListItem({
           ))}
           {outOfFilter && <span className="text-warning" title="It leaves the list on the next refresh.">{outOfFilter}</span>}
           {issue.updatedAt && <span>{issue.state ? "· " : ""}{relativeTime(issue.updatedAt)}</span>}
-          {pipeline ? <PipelineStatus pipeline={pipeline} /> : linked && <span className="flex items-center gap-1 text-info"><Link2 className="size-3" /> Session</span>}
+          {pipeline && <PipelineStatus pipeline={pipeline} />}
+          {workers.length > 0 ? <IssueWorkChip workers={workers} now={now} /> : !pipeline && linked && <span className="flex items-center gap-1 text-info"><Link2 className="size-3" /> Session</span>}
         </div>
       </div>
     </button>

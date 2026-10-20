@@ -14,19 +14,22 @@ import { OrganizationEnvironment } from "./OrganizationEnvironment";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
 import { OrganizationMembers } from "./OrganizationMembers";
 import { OrganizationWorkspaceConfig } from "./OrganizationWorkspaceConfig";
+import { managesWorkStatus, OrganizationWorkStatusSettings } from "./WorkStatusSettings";
 
 const ROLE: Record<string, string> = { owner: "an owner", admin: "an administrator", member: "a member" };
 
 /**
  * One organization's settings (PRO-107), chosen explicitly in Settings →
- * Organizations: its agent logins, and while it is the active organization
- * its members, compute, GitHub, workspace settings, environment, diagnostics
- * and teardown. The page names the organization it changes everywhere.
+ * Organizations: its agent logins and work status, and while it is the
+ * active organization its members, compute, GitHub, workspace settings,
+ * environment, diagnostics and teardown. The page names the organization it
+ * changes everywhere.
  *
- * Agent logins belong to each organization and are changed here for any one
- * the person belongs to, whichever is active. The other sections still act on
- * the active organization only (the service keeps them there), so another
- * organization's page offers to make it the active one for them.
+ * Agent logins and work status (#441) belong to each organization and are
+ * changed here for any one the person belongs to, whichever is active. The
+ * other sections still act on the active organization only (the service
+ * keeps them there), so another organization's page offers to make it the
+ * active one for them.
  */
 export function OrganizationSettings({ organization, onBack }: { organization: OrganizationSummary; onBack: () => void }) {
   const { status } = useAccount();
@@ -54,6 +57,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
   };
 
   const logins = <OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
+  const workStatus = <OrganizationWorkStatusSettings key={organization.id} organization={organization} />;
 
   return (
     <div className="flex flex-col gap-4" data-testid="organization-settings" data-organization={organization.id}>
@@ -75,6 +79,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           <OrganizationCompute contextRevision={contextRevision} />
           {logins}
           <OrganizationGithubApp contextRevision={contextRevision} />
+          {workStatus}
           <OrganizationWorkspaceConfig contextRevision={contextRevision} />
           <OrganizationEnvironment contextRevision={contextRevision} organizationId={organization.id} />
           <OrganizationDiagnostics contextRevision={contextRevision} member={member} />
@@ -83,11 +88,12 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
       ) : (
         <>
           {logins}
+          {workStatus}
           <div className="rounded-lg border border-hairline p-3" data-testid="organization-settings-inactive">
             <div className="text-sm font-medium">Other settings of {name}</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
               Members, compute, GitHub, workspace settings, environment, diagnostics and teardown of {name} are changed while it is your {activeLabel}.
-              Its agent logins above are changed as it is.
+              Its agent logins{managesWorkStatus(organization) ? " and work status" : ""} above are changed as it is.
             </p>
             <Button className="mt-2" size="sm" variant="outline" disabled={switching || !contextRevision} onClick={() => void makeActive()}>
               {switching && <Loader2 className="animate-spin" />}

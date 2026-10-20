@@ -85,6 +85,20 @@ fn request_title(request: &str) -> Option<String> {
 /// tab began with. That conversation may start anywhere in the log, so one
 /// that is not the first is looked for through all of it.
 fn read_title(path: &Path, conversation: Option<&str>) -> Option<String> {
+    find_request(path, conversation, request_title)
+}
+
+/// The first request of a session's first tab, in full, for what reads it on
+/// this machine (an issue it names links the session to it, #441). It is
+/// never sent anywhere.
+pub fn first_request(session: &SessionEntry) -> Option<String> {
+    let tab = session.tabs.first()?;
+    let path = super::log_path(&session.id, &tab.id).ok()?;
+    find_request(&path, tab.follow.conversation.as_deref(), |text| (!text.trim().is_empty()).then(|| text.to_string()))
+}
+
+/// The first top-level request of the conversation that `pick` accepts.
+fn find_request<T>(path: &Path, conversation: Option<&str>, pick: impl Fn(&str) -> Option<T>) -> Option<T> {
     let scan = if conversation.is_some() { u64::MAX } else { MAX_SCAN };
     let reader = BufReader::new(File::open(path).ok()?.take(scan));
     let mut under: Option<String> = None;
@@ -109,8 +123,8 @@ fn read_title(path: &Path, conversation: Option<&str>) -> Option<String> {
             continue;
         }
         if payload["type"] == "user_message" {
-            if let Some(title) = payload["text"].as_str().and_then(request_title) {
-                return Some(title);
+            if let Some(found) = payload["text"].as_str().and_then(&pick) {
+                return Some(found);
             }
         }
     }

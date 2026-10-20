@@ -21,6 +21,23 @@
   project's menu; `terminalx sessions create --project cloud:… --issue`
   starts one from the command line. A runtime that predates this starts a
   plain session, and the page says so. (#433, #461)
+- The Issues list says who already works on an issue, and where: "You · this
+  Mac", "You · on *Studio*" for another of your machines, "You · in the
+  cloud", and a teammate's name for someone in an organization that
+  connected the repository. Hovering shows the session, branch, state and
+  when it was last active; work fades after half an hour idle and is gone
+  after a day. A filter hides issues someone works on, or shows only yours,
+  and starting a session on a taken issue asks first (Start anyway, Open
+  the existing session, Cancel). Sessions are linked to their issue from
+  their branch name, the pull request they opened or their first prompt,
+  and by hand with **Link to issue…**; **Unlink** and **Don't share this
+  session** are in the session's menu. Only the issue, the session's title
+  and branch, a coarse state and times are shared; Settings → Account turns
+  sharing with the team off, and an organization's admins can turn it off
+  for everyone on its page in Settings → Organizations, where they also name
+  its Linear workspaces. Needs the account service's work-claims routes
+  (terminalx-saas `raccoon/441-work-claims`); without them, or signed out,
+  the list shows this Mac only. (#441)
 
 ## 0.2.15
 

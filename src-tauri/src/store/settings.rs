@@ -37,6 +37,24 @@ pub struct Settings {
     /// Removing a workspace once its pull request has merged. The Rust side
     /// does the removing, and reads for itself which projects it is on for.
     pub merged_cleanup: MergedCleanupSettings,
+    /// What this Mac says about the issues its sessions work on (#441,
+    /// `work_claims.rs`). The Rust side publishes it, so it lives here.
+    pub work_status: WorkStatusSettings,
+}
+
+/// Who sees which issues this person's sessions are working on. Their own
+/// other machines always do, once signed in on both.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkStatusSettings {
+    /// Teammates in an organization that connected the repository see it too.
+    pub share_with_team: bool,
+}
+
+impl Default for WorkStatusSettings {
+    fn default() -> Self {
+        Self { share_with_team: true }
+    }
 }
 
 /// Whether a workspace is removed by itself once its pull request has merged
@@ -181,6 +199,7 @@ impl Default for Settings {
             status_bar: StatusBarSettings::default(),
             floating: FloatingSettings::default(),
             merged_cleanup: MergedCleanupSettings::default(),
+            work_status: WorkStatusSettings::default(),
         }
     }
 }

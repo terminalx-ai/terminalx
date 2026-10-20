@@ -81,6 +81,7 @@ import { openBrowserTab } from "@/lib/browser";
 import { openTerminal, useTerminals } from "@/lib/terminal";
 import { TabMenuItems } from "@/components/session/TabMenu";
 import { sessionStatus, type Project, type SessionEntry, type Workspace } from "@/types/session";
+import { IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
 interface WorkspaceGroup {
   workspace: Workspace | null;
@@ -488,6 +489,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
       </DropdownMenuItem>
       <QuickChatMenuItems session={session} />
       <DropdownMenuItem onSelect={() => openSessionShare(session.id)}>Share session…</DropdownMenuItem>
+      <IssueLinkMenuItems session={session} />
       <DropdownMenuSeparator />
       <DropdownMenuItem onSelect={() => pinSession(session.id, !session.pinned)}>
         <Pin /> {session.pinned ? "Unpin" : "Pin"}

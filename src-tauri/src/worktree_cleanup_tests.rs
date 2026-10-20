@@ -119,6 +119,7 @@ impl Fixture {
             worktree_removed: false,
             removed_workspace: None,
             issue: None,
+            issue_work: Default::default(),
             automation: None,
             title: format!("in {}", cwd.file_name().unwrap().to_string_lossy()),
             created: index::now(),

@@ -17,6 +17,10 @@ const mocks = vi.hoisted(() => ({
     cloudConnectionDiagnostics: vi.fn(),
     cloudDiagnosticsExport: vi.fn(),
   },
+  workStatus: {
+    organization: vi.fn(),
+    setOrganization: vi.fn(),
+  },
 }));
 
 vi.mock("@/lib/account", () => ({
@@ -25,7 +29,7 @@ vi.mock("@/lib/account", () => ({
   useAccount: () => ({ ready: true, busy: false, status: mocks.status }),
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@/lib/api", () => ({ api: mocks.api, errorMessage: (error: unknown) => String((error as { message?: string })?.message ?? error) }));
+vi.mock("@/lib/api", () => ({ api: mocks.api, workStatus: mocks.workStatus, errorMessage: (error: unknown) => String((error as { message?: string })?.message ?? error) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), save: vi.fn() }));
 // The active organization's other sections have tests of their own; here they only show where they are.
 vi.mock("./OrganizationMembers", () => ({ OrganizationMembers: () => <div data-testid="section-members" /> }));
@@ -68,6 +72,8 @@ beforeEach(() => {
   });
   mocks.api.cloudDiagnostics.mockRejectedValue({ code: "cloud_diagnostics_not_supported" });
   mocks.api.cloudConnectionDiagnostics.mockResolvedValue([]);
+  mocks.workStatus.organization.mockImplementation(async () => ({ shareWorkStatus: true, canManage: true, personal: false, linearWorkspaces: [] }));
+  mocks.workStatus.setOrganization.mockImplementation(async (_org: string, patch: { shareWorkStatus?: boolean }) => ({ shareWorkStatus: patch.shareWorkStatus ?? true, canManage: true, personal: false, linearWorkspaces: [] }));
 });
 afterEach(cleanup);
 
@@ -137,6 +143,29 @@ describe("an organization's settings page (PRO-107)", () => {
     // Diagnostics are for owners and administrators (moved here from Settings → Account).
     expect(screen.getByText("Cloud diagnostics")).toBeTruthy();
     await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, null));
+  });
+
+  it("has the organization's work status for its owners and administrators, active or not (#441)", async () => {
+    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
+    const share = await screen.findByRole("switch", { name: "Share work status in Beta" });
+    expect(mocks.workStatus.organization).toHaveBeenCalledWith("b");
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins and work status above are changed as it is.");
+    fireEvent.click(share);
+    await waitFor(() => expect(mocks.workStatus.setOrganization).toHaveBeenCalledWith("b", { shareWorkStatus: false }));
+    expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+    cleanup();
+
+    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    expect(await screen.findByRole("switch", { name: "Share work status in Acme" })).toBeTruthy();
+    cleanup();
+
+    // A member is shown no organization switch, and nothing is asked for it.
+    mocks.workStatus.organization.mockClear();
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onBack={vi.fn()} />);
+    expect(screen.getByTestId("organization-settings").dataset.organization).toBe("b");
+    expect(screen.queryByTestId("organization-work-status")).toBeNull();
+    expect(mocks.workStatus.organization).not.toHaveBeenCalled();
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins above are changed as it is.");
   });
 
   it("asks a member of the active organization for no diagnostics", async () => {

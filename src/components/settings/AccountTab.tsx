@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Loader2, Pencil } from "@/icons";
 import { OrganizationOnboarding } from "./OrganizationOnboarding";
+import { WorkStatusSettings } from "./WorkStatusSettings";
 import { AccountAvatar } from "@/components/account/AccountAvatar";
 import { Button } from "@/components/ui/button";
 import { signIn, signOut, useAccount } from "@/lib/account";
@@ -61,11 +62,12 @@ export function AccountTab() {
             </Button>
           </div>
         )}
+        <WorkStatusSettings />
         {pairing.status.host && (
           <div className="rounded-lg border border-hairline px-3 py-3">
             <div className="text-xs font-medium">What this Mac shares</div>
             <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-              The account directory receives exactly the seven binding fields below so your signed-in phone can find this Mac. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding.
+              The account directory receives exactly the seven binding fields below so your signed-in phone can find this Mac. Sessions, projects, worktrees, transcripts, paths, scrollback, and device credentials never leave through account binding. The work status above names, for each session linked to an issue, only the issue, the session’s title and branch, its state and when it was last active.
             </p>
             <dl className="mt-3 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
               <dt className="text-faint">Host ID</dt><dd className="truncate font-mono">{pairing.status.host.hostId}</dd>

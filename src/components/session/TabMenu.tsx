@@ -48,6 +48,7 @@ import { tabViewIn } from "@/lib/tabFront";
 import { useTabState } from "@/lib/tabLayouts";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import type { SelectedSessionTab } from "@/lib/terminal";
+import { IssueLinkContextItems } from "@/components/session/IssueLinkMenuItems";
 
 const BULK: BulkClose[] = ["others", "right", "left", "idle", "all"];
 
@@ -198,6 +199,8 @@ export function TabMenuItems({
                 <Share2 /> Share…
               </ContextMenuItem>
             ) : null}
+            {/* Nor a dialog to link an issue in. */}
+            {!floating ? <IssueLinkContextItems session={owner} disabled={off} /> : null}
             <ContextMenuItem destructive disabled={off} onSelect={() => void confirmDeleteSession(owner)}>
               <Trash2 /> {isQuickChat(owner) ? "Delete quick chat…" : "Delete…"}
             </ContextMenuItem>

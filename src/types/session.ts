@@ -69,6 +69,19 @@ export interface IssueRef {
   url: string;
 }
 
+/** How a session's issue link came about, when it was not started on the issue (#441). */
+export type IssueLinkSource = "branch" | "pull_request" | "prompt" | "manual";
+
+/** What a session's work status says about its issue (#441). Absent while every field is its default. */
+export interface IssueWork {
+  /** Absent while `issue` is the one the session was started on. */
+  link?: IssueLinkSource | null;
+  /** Issue URLs unlinked by hand: never linked again automatically. */
+  unlinked?: string[];
+  /** "Don't share this session": its work status never leaves this machine. */
+  private?: boolean;
+}
+
 export interface RemovedWorkspace {
   path: string;
   name: string;
@@ -98,7 +111,9 @@ export interface SessionEntry {
   worktreeBase?: { commit: string; fetched: boolean; warning: string | null } | null;
   worktreeRemoved: boolean;
   removedWorkspace?: RemovedWorkspace | null;
+  /** The issue the session works on: the one it was started from, or one linked later (`issueWork.link`). */
   issue?: IssueRef | null;
+  issueWork?: IssueWork | null;
   automation?: AutomationRef | null;
   title: string;
   created: string;
