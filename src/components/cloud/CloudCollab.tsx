@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ACCESS_REMOVED_TITLE, type SessionLock, acquireLease, canDrive, loadNotes, postNote, releaseLease, setNotesOpen, sharingKnown, takeOverLease, useCollab } from "@/lib/cloudCollab";
 import { initials, usePeople } from "@/lib/cloudPeople";
 import { cn } from "@/lib/cn";
+import { usePromptTextProps } from "@/lib/autocorrect";
 import { LinkedText } from "@/components/chat/LinkedText";
 
 const ROLE_BADGE: Record<string, string> = { manager: "Admin", driver: "Driver", viewer: "Viewer", none: "No access" };
@@ -340,6 +341,7 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
   const nameOf = usePeople();
   const tabNotes = collab.notes[tabId];
   const [text, setText] = useState("");
+  const textProps = usePromptTextProps();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -398,6 +400,7 @@ export function NotesPanel({ collabKey, client, tabId, onClose }: { collabKey: s
       >
         <textarea
           aria-label="Note for teammates"
+          {...textProps}
           className="min-h-14 resize-none rounded-md border border-hairline bg-transparent px-2 py-1 text-xs outline-none placeholder:text-faint"
           placeholder="Add a note for teammates (not sent to the agent)"
           maxLength={4000}

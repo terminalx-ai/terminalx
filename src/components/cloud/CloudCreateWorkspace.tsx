@@ -42,6 +42,7 @@ import { quoteText } from "@/components/session/CloudNewSession";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
+import { usePromptTextProps } from "@/lib/autocorrect";
 
 /** The form's own fields; the agent's settings are the shared pickers'. */
 type FormFields = Omit<CreateForm, "agent" | "model" | "effort" | "mode">;
@@ -99,6 +100,7 @@ export function CloudCreateWorkspace({
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
   const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
+  const textProps = usePromptTextProps();
   // The price of this form, shown before anything is created; a change to the form asks for it again.
   const [quoted, setQuoted] = useState<{ pending: PendingCreate; quote: CloudWorkspaceQuote } | null>(null);
   const [tracked, setTrackedState] = useState<CloudWorkspaceSnapshot | null>(null);
@@ -317,6 +319,7 @@ export function CloudCreateWorkspace({
         <span className="font-medium">First task</span>
         <textarea
           aria-label="Initial prompt"
+          {...textProps}
           className={`${inputClass} min-h-24 resize-y`}
           placeholder="What should the agent work on? Sent once, when the agent is ready."
           value={form.prompt}

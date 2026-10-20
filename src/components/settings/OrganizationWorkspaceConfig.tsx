@@ -19,6 +19,7 @@ import {
   type SecretRuntimeAccess,
   type SecretsView,
 } from "@/lib/workspaceConfig";
+import { usePromptTextProps } from "@/lib/autocorrect";
 
 const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 const areaClass = "min-h-16 rounded-md border border-hairline bg-background px-2 py-1 font-mono text-[11px] disabled:opacity-60";
@@ -40,6 +41,7 @@ const LOCAL = "local";
 const FIELD_NAMES: Record<ConfigField, string> = { env: "Variables", prompt: "Prompts", mcpServers: "MCP servers", secrets: "Secrets" };
 
 function LayerFields({ label, draft, disabled, onChange }: { label: string; draft: LayerDraft; disabled: boolean; onChange: (draft: LayerDraft) => void }) {
+  const textProps = usePromptTextProps();
   return (
     <div className="flex flex-col gap-1.5">
       <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
@@ -48,7 +50,7 @@ function LayerFields({ label, draft, disabled, onChange }: { label: string; draf
       </label>
       <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
         Prompt
-        <textarea aria-label={`${label} prompt`} className={areaClass} value={draft.prompt} maxLength={16384} disabled={disabled} onChange={(event) => onChange({ ...draft, prompt: event.target.value })} />
+        <textarea aria-label={`${label} prompt`} {...textProps} className={areaClass} value={draft.prompt} maxLength={16384} disabled={disabled} onChange={(event) => onChange({ ...draft, prompt: event.target.value })} />
       </label>
       <label className="flex flex-col gap-1 text-[11px] text-muted-foreground">
         MCP servers (JSON array)

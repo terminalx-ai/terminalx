@@ -159,6 +159,12 @@ struct ComposerEcho {
     command: bool,
     /// The `seq` the composer's own `user_message` was published under.
     seq: u64,
+    /// The CLI wrote work of its own after this prompt was drawn as the start
+    /// of a turn and before it took the prompt (#540). It was busy when the
+    /// tab thought it idle — a turn it started itself — and that work was
+    /// drawn under a message it had not read. Its echo says where the CLI
+    /// did take it.
+    overtaken: bool,
 }
 
 /// A prompt typed behind a running turn, as it was typed: what to type again
@@ -174,6 +180,7 @@ struct HeldPrompt {
 struct Echoed {
     queued: bool,
     seq: u64,
+    overtaken: bool,
 }
 
 /// How long a composer prompt waits for its echo once no turn is running.
@@ -202,7 +209,7 @@ fn agent_name(harness: &str) -> &'static str {
 
 impl ComposerEcho {
     fn new(text: String, image_count: usize) -> Self {
-        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0 }
+        Self { text, image_count, sent_at: Instant::now(), receipt: None, submitted: false, queued: false, command: false, seq: 0, overtaken: false }
     }
 
     fn matches(&self, echoed: &str) -> bool {
@@ -283,9 +290,21 @@ fn consume_composer_echo(pending: &mut std::collections::VecDeque<ComposerEcho>,
         log::warn!("{at} composer prompt(s) never echoed by the transcript; dropping them");
     }
     pending[at].confirm_delivery();
-    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq };
+    let echoed = Echoed { queued: pending[at].queued, seq: pending[at].seq, overtaken: pending[at].overtaken };
     pending.drain(..=at);
     Some(echoed)
+}
+
+/// The transcript has work the CLI did before taking any of the composer's
+/// prompts still awaited (#540). Those the chat drew as the start of a turn
+/// were sent while it was busy — on a turn it started itself, or one the tab
+/// missed — and that work was drawn under them. Each is taken later, and its
+/// echo is where it starts a turn of its own. A queued one is a note in the
+/// turn already, and one held for "Send now" is still the note it was.
+fn overtake_composer_prompts(pending: &mut std::collections::VecDeque<ComposerEcho>, held: &[(u64, HeldPrompt)]) {
+    for prompt in pending.iter_mut().filter(|prompt| !prompt.queued && !prompt.command && !held.iter().any(|(seq, _)| *seq == prompt.seq)) {
+        prompt.overtaken = true;
+    }
 }
 
 /// Forget prompts that have waited too long. A prompt the transcript never
@@ -2704,8 +2723,10 @@ impl SessionManager {
                 // start of the next one. The `UserPromptSubmit` hook may have
                 // opened that turn already, but only a prompt resets the latch
                 // that lets `Stop` close it, and this record is that prompt.
-                let held = echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed()));
-                if held {
+                // So is one the CLI took after work it did first (#540),
+                // however the tab drew it when it was sent.
+                let starts_turn = echo.overtaken || (echo.queued && (!rt.turn_open || matches!(&rt.engine, Engine::Cli(p) if p.turn_tail.is_closed())));
+                if starts_turn {
                     if !rt.turn_open {
                         rt.prompt_taken(false);
                     }
@@ -2714,7 +2735,7 @@ impl SessionManager {
                     }
                     // The message itself is not published again; this says
                     // which one the new turn is the answer to.
-                    self.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(echo.seq) }, None);
+                    self.publish(&mut rt, Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: Some(echo.seq), started_by: None }, None);
                     self.set_status(&mut rt, TabStatus::InProgress);
                 }
                 continue;
@@ -2739,6 +2760,23 @@ impl SessionManager {
                     p.turn_tail.opened();
                 }
                 self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            // A turn the CLI started itself (#540) is a turn like any other
+            // from here: the tab is working, a message sent now is queued
+            // behind it, and `Stop` closes it. Nobody's prompt was delivered.
+            if matches!(payload, Payload::TurnStarted { started_by: Some(_), .. }) {
+                rt.prompt_taken(false);
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.turn_tail.opened();
+                }
+                self.set_status(&mut rt, TabStatus::InProgress);
+            }
+            // The CLI's own work, read before its record of a prompt the
+            // composer sent: that prompt is not what it was answering.
+            if matches!(payload, Payload::AssistantText { .. } | Payload::Reasoning { .. } | Payload::ToolCallStarted { .. } | Payload::TurnStarted { started_by: Some(_), .. }) {
+                if let Engine::Cli(p) = &mut rt.engine {
+                    overtake_composer_prompts(&mut p.echoed, &p.held);
+                }
             }
             if payload.is_turn_boundary() {
                 if let Engine::Cli(p) = &mut rt.engine {
@@ -3271,9 +3309,16 @@ impl SessionManager {
         }
         self.pump(&rt_arc, &tail);
 
+        // Claude Code fires `UserPromptSubmit` for the turns it starts itself
+        // too (#540), and says so. Those carry nothing the reader sent.
+        let source = match (kind, frame.event.as_str()) {
+            (CliKind::Claude, "UserPromptSubmit") => claude::transcript::prompt_source(&frame.payload),
+            _ => claude::transcript::PromptSource::Reader,
+        };
+
         // Codex creates its session on the first prompt; Claude announces
         // startup before accepting input, so its SessionStart proves less.
-        if matches!(frame.event.as_str(), "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PermissionRequest" | "Stop")
+        if (matches!(frame.event.as_str(), "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PermissionRequest" | "Stop") && source == claude::transcript::PromptSource::Reader)
             || (kind == CliKind::Codex && frame.event == "SessionStart") {
             let mut rt = rt_arc.lock().unwrap();
             if matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
@@ -3311,6 +3356,8 @@ impl SessionManager {
             // every tool, and again as a `PermissionRequest` when the sandbox
             // stops it. The reader answers once.
             "PreToolUse" if asks_every_tool => return self.ask_permission(&rt_arc, &frame, kind),
+            // An event the CLI is only being offered: no turn has started.
+            "UserPromptSubmit" if source == claude::transcript::PromptSource::Enqueued => {}
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
                 let mut rt = rt_arc.lock().unwrap();
                 // A settings restart/teardown may have replaced this launch
@@ -3318,7 +3365,7 @@ impl SessionManager {
                 if !matches!(&rt.engine, Engine::Cli(p) if p.origin.accepts(&frame)) {
                     return HookReply::default();
                 }
-                if frame.event == "UserPromptSubmit" {
+                if frame.event == "UserPromptSubmit" && source == claude::transcript::PromptSource::Reader {
                     if let Engine::Cli(p) = &mut rt.engine {
                         for echo in p.echoed.iter_mut().filter(|echo| echo.submitted && !echo.queued && !echo.command) {
                             // A timed-out receipt must not absorb a later
@@ -3329,7 +3376,10 @@ impl SessionManager {
                 }
                 rt.last_activity = Instant::now();
                 if frame.event == "UserPromptSubmit" {
-                    rt.prompt_taken(frame.payload["prompt"].as_str().is_some_and(tui::is_slash_command));
+                    // A slash command the CLI runs on a schedule is work, not
+                    // a command typed at it that may never end.
+                    let command = source == claude::transcript::PromptSource::Reader && frame.payload["prompt"].as_str().is_some_and(tui::is_slash_command);
+                    rt.prompt_taken(command);
                 } else {
                     if !rt.turn_open {
                         rt.open_turn();
@@ -3855,7 +3905,7 @@ mod tests {
             projected.push(composer);
 
             let rollout = Payload::UserMessage { author: None, text: "[Image #1] describe this".into(), images: Vec::new(), baseline: None, queued: false, cwd: None };
-            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0 }));
+            assert_eq!(consume_composer_echo(&mut pending, &rollout), Some(Echoed { queued: false, seq: 0, overtaken: false }));
         }
 
         assert_eq!(projected.len(), 2, "one projected record per real submission");
