@@ -18,6 +18,12 @@ export interface ToolCall {
 /** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
 const RUNTIME_RESTARTED_NOTICE = "The workspace runtime restarted";
 
+/**
+ * How Claude Code begins a compaction's summary. Logs from before #524 hold
+ * that summary as a prompt, straight after the compaction it belongs to.
+ */
+const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previous conversation that ran out of context.";
+
 export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
@@ -28,7 +34,7 @@ export type WorkItem =
   | { kind: "message"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string; name?: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
-  | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
+  | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; key: string; seq: number }
   | { kind: "retry"; attempt: number; maxRetries: number; reason?: string; key: string; seq: number }
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
   | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number };
@@ -187,11 +193,26 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     }
     return current;
   };
+  // A compaction's summary is drawn under the compaction it follows.
+  const attachSummary = (event: AgentEvent, summary: string) => {
+    const turn = ensureTurn(event);
+    const compaction = [...turn.work].reverse().find((item) => item.kind === "compaction");
+    if (compaction?.kind === "compaction" && compaction.summary === undefined) compaction.summary = summary;
+    else turn.work.push({ kind: "compaction", summary, key: `k${event.seq}`, seq: event.seq });
+  };
+  let afterCompaction = false;
 
   for (const event of events) {
     const payload: Payload = event.payload;
+    const followsCompaction = afterCompaction;
+    // The app may clear a standing recovery between the two as the summary is taken for a prompt.
+    if (!event.subagent && payload.type !== "recovery") afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "user_message": {
+        if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
+          attachSummary(event, payload.text);
+          break;
+        }
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
         if (!text.trim() && !payload.images?.length && text !== payload.text) break;
         // Queued behind the turn the agent is on, even one that has drawn
@@ -389,6 +410,9 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         turn.work.push({ kind: "compaction", preTokens: payload.preTokens, postTokens: payload.postTokens, key: `k${event.seq}`, seq: event.seq });
         break;
       }
+      case "compaction_summary":
+        attachSummary(event, payload.text);
+        break;
       case "api_retry":
         retry = { attempt: payload.attempt, maxRetries: payload.maxRetries, reason: payload.reason };
         break;

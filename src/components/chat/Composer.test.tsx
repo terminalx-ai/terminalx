@@ -1055,6 +1055,14 @@ describe("sentMessages", () => {
     const transcript = buildTranscript([user("again"), done(), user("other"), done(), user(RECOVERY_PROMPT), done(), user("again"), done()] as never, false);
     expect(sentMessages(transcript)).toEqual(["other", "again"]);
   });
+
+  it("leaves out a compaction's summary, as the agent writes it now and as an older log holds it (#524)", () => {
+    const summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+    const event = (payload: object) => ({ id: `e${++seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-10-01T10:00:00Z", payload });
+    const compacted = () => event({ type: "context_compacted", preTokens: 219942, postTokens: 13790 });
+    const transcript = buildTranscript([user("one"), done(), compacted(), event({ type: "compaction_summary", text: summary }), user("two"), done(), compacted(), user(summary)] as never, false);
+    expect(sentMessages(transcript)).toEqual(["one", "two"]);
+  });
 });
 
 describe("autocorrect in the composer (#525)", () => {

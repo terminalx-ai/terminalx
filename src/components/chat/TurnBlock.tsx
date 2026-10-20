@@ -191,13 +191,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
         </div>
       );
     case "compaction":
-      return (
-        <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-faint">
-          <Shrink className="size-3.5" />
-          Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
-          {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
-        </div>
-      );
+      return <CompactionRow item={item} linkContext={linkContext} />;
     case "retry":
       return (
         <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-warning">
@@ -261,6 +255,49 @@ function ReaderMessage({
         {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
         <LinkedText text={message.text} context={linkContext} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * The line a compaction leaves in the chat. What the agent kept of the
+ * conversation is its own memory, not anybody's message (#524): it folds
+ * under the line, as Claude Code keeps it behind ctrl+o.
+ */
+function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
+  const [open, setOpen] = useState(false);
+  const label = (
+    <>
+      Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
+      {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
+    </>
+  );
+  if (!item.summary) {
+    return (
+      <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-faint">
+        <Shrink className="size-3.5" />
+        {label}
+      </div>
+    );
+  }
+  return (
+    <div className="my-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs text-faint hover:bg-veil-raised"
+      >
+        <Shrink className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">{label}</span>
+        <span className="shrink-0">{open ? "Hide summary" : "Show summary"}</span>
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && (
+        <div data-testid="compaction-summary" className="mb-2 ml-6 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
+          <LinkedText text={item.summary} context={linkContext} />
+        </div>
+      )}
     </div>
   );
 }

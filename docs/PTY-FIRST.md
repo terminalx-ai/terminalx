@@ -115,6 +115,20 @@ transcript holds before the CLI's record of that prompt was done before the CLI
 read it, so the record's arrival publishes a `turn_started` naming the message,
 and the chat moves it there.
 
+#### A compaction's summary
+
+A compaction is two records (#524): a `compact_boundary` system record with
+the token counts before and after, then the summary the model is handed in
+place of what was folded away. The summary is a `user` record marked
+`isCompactSummary` and `isVisibleInTranscriptOnly`, and it carries the
+`turnOrigin` of the turn it was written in. It is the model's memory, not
+anybody's message, so the decoder reads it before anything else that could
+take a `user` record for a prompt or a turn the CLI started: it becomes a
+`compaction_summary`, which opens no turn, and the chat folds it, collapsed,
+under the "Context compacted" line, as the CLI keeps it behind ctrl+o. A
+compaction while idle ("Compacted while idle, before the prompt cache
+expired") therefore leaves the tab idle.
+
 ### Hooks carry what the file cannot
 
 The transcript says what was said; it does not say *when a turn began or ended*,

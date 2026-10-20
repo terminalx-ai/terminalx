@@ -27,8 +27,8 @@ export interface Prefs {
   foldToolCalls: boolean;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
-   * replacements in the fields where the reader writes to an agent (see
-   * `@/lib/autocorrect`). Off unless the reader turned it on.
+   * replacements in the fields where the reader writes to an agent, and in the
+   * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
    */
   autocorrect: boolean;
   lastProject: string | null;

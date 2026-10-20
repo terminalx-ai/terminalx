@@ -25,8 +25,6 @@ import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam,
 import { filterMiss, issueFilterFor, issueFilterKey, wireFilter, type IssueListFilter } from "@/lib/issueListFilter";
 import { openAutomation, selectProject, selectSession, takeNewIssueRequest, upsertSession, useSessionStore } from "@/lib/sessions";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
-import { PERMISSION_MODES } from "@/lib/models";
-import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
@@ -181,7 +179,7 @@ export function IssuesView({
   // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
   const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   const agentSelection = useSessionAgent(store.harnesses);
-  const { harness, modelId, effort } = agentSelection;
+  const { harness, modelId, effort, mode } = agentSelection;
   const linkedIssueUrls = useMemo(
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
     [store.sessions],
@@ -370,7 +368,7 @@ export function IssuesView({
           harness: harness.id,
           model: modelId,
           effort,
-          permissionMode: prefs.lastMode,
+          permissionMode: mode,
         },
       });
       upsertSession(s);
@@ -391,7 +389,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
+  }, [detail, selected, project, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -404,7 +402,6 @@ export function IssuesView({
     return null;
   }, [project, provider, ghOk, repo, linear]);
 
-  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
     setComposing(false);
     setSelected(issue);
@@ -754,21 +751,6 @@ export function IssuesView({
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} />
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="gap-1 text-xs">
-                      {mode?.label ?? prefs.lastMode}
-                      <ChevronDown className="text-faint" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    {PERMISSION_MODES.map((m) => (
-                      <DropdownMenuItem key={m.id} onSelect={() => chooseMode(harness?.id ?? "", m.id, (v) => setPrefs({ lastMode: v }))}>
-                        {m.label}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
               </div>
               {/* Where it runs, and the buttons. The buttons take a line of their own
                   when the pane is too narrow for both, rather than sit on the words. */}

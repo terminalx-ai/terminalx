@@ -25,6 +25,12 @@
 //! message from another agent — and writes each as a prompt nobody typed,
 //! often marked meta (#540). Those open a turn without being anybody's
 //! message: see [`started_by`].
+//!
+//! A compaction is two records: a `compact_boundary` saying how far the
+//! context shrank, then the summary the model is handed in place of what was
+//! folded away. The summary is a `user` record too (`isCompactSummary`), but
+//! it is the model's memory of the conversation, not something the reader
+//! said, and it starts no turn (#524).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -317,9 +323,26 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
     if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
         return None;
     }
-    // Ahead of the meta check: a scheduled prompt is written as meta, and
-    // dropping it left the CLI working on a turn the tab thought was over.
     if v["type"] == "user" {
+        // What a compaction leaves the model in place of the conversation
+        // (#524). It is a `user` record only because that is how the model
+        // is handed it; the CLI folds it behind "Conversation compacted".
+        // Nobody typed it and it starts nothing, though it carries the
+        // `turnOrigin` of the turn it was written in: so it is read before
+        // any record is taken for the start of a turn.
+        if v["isCompactSummary"].as_bool() == Some(true) {
+            let text = text_of(&v["message"]["content"]);
+            if !text.trim().is_empty() {
+                out.push(Payload::CompactionSummary { text });
+            }
+            return None;
+        }
+        // Kept for the CLI's own transcript view; nobody typed it either.
+        if v["isVisibleInTranscriptOnly"].as_bool() == Some(true) {
+            return None;
+        }
+        // Ahead of the meta check: a scheduled prompt is written as meta, and
+        // dropping it left the CLI working on a turn the tab thought was over.
         if let Some(started_by) = started_by(&v) {
             out.push(Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: Some(started_by) });
             return Some(TurnMark::Opened);
@@ -601,6 +624,7 @@ mod tests {
                 Payload::UsageUpdate(_) => "usage",
                 Payload::TurnCompleted { .. } => "end",
                 Payload::ContextCompacted { .. } => "compacted",
+                Payload::CompactionSummary { .. } => "summary",
                 Payload::TurnStarted { started_by: Some(_), .. } => "started",
                 _ => "other",
             })
@@ -1167,6 +1191,136 @@ mod tests {
         // Prose about the tag, and a tag that never closes, are left alone.
         assert_eq!(typed(user("what is pasted_content for?")), "what is pasted_content for?");
         assert_eq!(typed(user(r#"a <pasted_content id=\"3 that never ends"#)), r#"a <pasted_content id="3 that never ends"#);
+    }
+
+    /// #524. `/compact` typed into Claude Code 2.1.304 in a real interactive
+    /// session: a turn, the command, then `/exit`. Cut down to the records
+    /// the decoder reads (the request dumps, attachments and other tools'
+    /// hooks of the machine it ran on are left out) with the paths replaced.
+    const MANUAL_COMPACT: &str = include_str!("fixtures/manual_compact.jsonl");
+
+    fn prompts(payloads: &[Payload]) -> Vec<&str> {
+        payloads.iter().filter_map(|p| match p { Payload::UserMessage { text, .. } => Some(text.as_str()), _ => None }).collect()
+    }
+
+    #[test]
+    fn a_manual_compact_draws_the_compaction_and_its_summary_is_nobodys_prompt() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(MANUAL_COMPACT.as_bytes());
+        assert_eq!(kinds(&p), ["user", "tool", "usage", "result", "text", "usage", "user", "compacted", "summary", "user", "user"]);
+        // 2.1.304 writes the command twice, as typed before the compaction
+        // and as the command it ran after it, so a `/compact` typed once is
+        // read as two prompts. That is the CLI's doing and not settled here;
+        // what this asserts is that the summary between them is no prompt.
+        assert_eq!(prompts(&p), ["Reply with exactly: pong", "/compact", "/compact", "/exit"]);
+        assert!(matches!(&p[7], Payload::ContextCompacted { pre_tokens: Some(61848), post_tokens: Some(20261) }));
+        assert!(matches!(&p[8], Payload::CompactionSummary { text } if text.starts_with("This session is being continued from a previous conversation") && text.contains("Reply with exactly: pong")));
+
+        // The prompt opens a turn and `turn_duration` ends it; the commands
+        // open theirs. The summary says nothing about any of them.
+        let marks: Vec<TurnMark> = MANUAL_COMPACT.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended, TurnMark::Opened, TurnMark::Opened, TurnMark::Opened]);
+        let summary = MANUAL_COMPACT.lines().find(|line| line.contains(r#""isCompactSummary":true"#)).unwrap();
+        assert_eq!(turn_mark(summary), None);
+    }
+
+    /// The shapes Claude Code 2.1.300 wrote when it compacted a session of
+    /// this repository's while it sat idle (the session #524 was seen in),
+    /// cut down to the keys the decoder reads and with the text replaced.
+    /// The turn had ended an hour before; nothing was running.
+    const IDLE_COMPACTION: &str = concat!(
+        r#"{"type":"user","uuid":"p1","cwd":"/tmp/x","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"Open an issue for the banner"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Opened #523."}]}}"#, "\n",
+        r#"{"type":"system","subtype":"stop_hook_summary","uuid":"h1","hookCount":1,"hookInfos":[],"level":"suggestion"}"#, "\n",
+        r#"{"type":"system","subtype":"turn_duration","uuid":"d1","durationMs":41800,"isMeta":false}"#, "\n",
+        r#"{"type":"last-prompt","lastPrompt":"Open an issue for the banner"}"#, "\n",
+        r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","content":"Conversation compacted","level":"info","isMeta":false,"compactMetadata":{"trigger":"auto","preTokens":219942,"postTokens":13790,"durationMs":50572},"version":"2.1.300"}"#, "\n",
+        r#"{"type":"user","uuid":"s1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   Open an issue for the false banner.\n\n6. All user messages:\n   - \"Open an issue for the banner\""},"version":"2.1.300"}"#, "\n",
+        r#"{"type":"attachment","uuid":"x1","attachment":{"type":"hook_success","hookEvent":"SessionStart","content":""}}"#, "\n",
+        r#"{"type":"system","subtype":"informational","uuid":"i1","content":"Compacted while idle, before the prompt cache expired","level":"info","isMeta":false}"#, "\n",
+    );
+
+    #[test]
+    fn a_compaction_while_idle_opens_no_turn() {
+        let mut s = Streamer::at(0, decode_line).marking(Some(decode_marked));
+        let p = s.push(IDLE_COMPACTION.as_bytes());
+        assert_eq!(kinds(&p), ["user", "text", "compacted", "summary"]);
+        assert!(prompts(&p) == ["Open an issue for the banner"], "the summary is no prompt");
+        assert!(matches!(&p[2], Payload::ContextCompacted { pre_tokens: Some(219942), post_tokens: Some(13790) }));
+        assert!(matches!(&p[3], Payload::CompactionSummary { text } if text.contains("Open an issue for the false banner")));
+
+        // The last word on the turn is that it ended; the compaction after
+        // it opens nothing for the watcher to wait on (#523).
+        assert_eq!(s.take_mark(), Some(TurnMark::Ended));
+        let marks: Vec<TurnMark> = IDLE_COMPACTION.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended]);
+
+        // A tail that was already past the turn's end reads the compaction
+        // and hands over no mark at all.
+        let compaction = IDLE_COMPACTION.find(r#""subtype":"compact_boundary""#).map(|at| IDLE_COMPACTION[..at].rfind('\n').unwrap() + 1).unwrap();
+        let mut later = Streamer::at(0, decode_line).marking(Some(decode_marked));
+        assert_eq!(kinds(&later.push(&IDLE_COMPACTION.as_bytes()[compaction..])), ["compacted", "summary"]);
+        assert_eq!(later.take_mark(), None);
+
+        // The reader's next prompt is the next turn, as ever.
+        let next = r#"{"type":"user","uuid":"p2","cwd":"/tmp/x","origin":{"kind":"human"},"message":{"role":"user","content":"How is it going?"}}"#;
+        assert_eq!(turn_mark(next), Some(TurnMark::Opened));
+    }
+
+    /// The shapes 2.1.303 wrote when it compacted in the middle of a turn,
+    /// between a tool's result and the model carrying on, cut down the same
+    /// way.
+    #[test]
+    fn a_compaction_mid_turn_neither_opens_nor_ends_the_turn() {
+        let records = [
+            r#"{"type":"user","uuid":"p1","cwd":"/tmp/x","origin":{"kind":"human"},"message":{"role":"user","content":"Run the suite"}}"#,
+            r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","uuid":"r1","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"test result: ok"}]}}"#,
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","content":"Conversation compacted","level":"info","isMeta":false,"compactMetadata":{"trigger":"auto","preTokens":967378,"postTokens":23550,"durationMs":61,"precomputed":true},"version":"2.1.303"}"#,
+            r#"{"type":"user","uuid":"s1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent:\n   Run the suite."},"version":"2.1.303"}"#,
+            r#"{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"The suite passes."}]}}"#,
+        ];
+        let mut out = Vec::new();
+        let marks: Vec<TurnMark> = records.iter().filter_map(|line| decode_marked(line, &HashSet::new(), &mut out)).collect();
+        assert_eq!(kinds(&out), ["user", "tool", "result", "compacted", "summary", "text"]);
+        assert_eq!(marks, [TurnMark::Opened]);
+    }
+
+    #[test]
+    fn what_the_cli_keeps_for_its_transcript_view_is_never_a_prompt() {
+        for record in [
+            // Kept for the CLI's own view with no summary flag: nothing to draw.
+            r#"{"type":"user","uuid":"v1","isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"shown under ctrl+o"}}"#,
+            // A summary with nothing in it.
+            r#"{"type":"user","uuid":"v2","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"  "}}"#,
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(record, &HashSet::new(), &mut out), None, "{record}");
+            assert!(out.is_empty(), "{record}");
+        }
+        // A summary written as parts reads as its text, and a fork's copy of
+        // it is history like any other record.
+        let parts = r#"{"type":"user","uuid":"v3","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":"This session is being continued"}]}}"#;
+        let mut out = Vec::new();
+        decode_line(parts, &HashSet::new(), &mut out);
+        assert!(matches!(out.as_slice(), [Payload::CompactionSummary { text }] if text == "This session is being continued"));
+        let mut out = Vec::new();
+        decode_line(parts, &HashSet::from(["v3".to_string()]), &mut out);
+        assert!(out.is_empty());
+    }
+
+    /// The CLI stamps a summary with the origin of the turn it was written
+    /// in: 2.1.295 and 2.1.303 wrote `"turnOrigin":"human"` on two of the
+    /// summaries on record. One written during a turn the CLI started itself
+    /// (#540) is the compaction's all the same, and starts no turn.
+    #[test]
+    fn a_summary_starts_no_turn_whatever_turn_it_was_written_in() {
+        for origin in ["human", "scheduled", "task_notification", "peer", "sdk"] {
+            let record = format!(r#"{{"type":"user","uuid":"s-{origin}","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"turnOrigin":"{origin}","message":{{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}},"version":"2.1.303"}}"#);
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(&record, &HashSet::new(), &mut out), None, "{origin}");
+            assert_eq!(kinds(&out), ["summary"], "{origin}");
+        }
     }
 
     #[test]
