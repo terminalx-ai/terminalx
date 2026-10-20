@@ -229,6 +229,100 @@ describe("buildTranscript", () => {
     expect(t.turns[1].prompt).toBeUndefined();
   });
 
+  // #540: a `/loop` check started by the agent, and a goal sent while it ran.
+  // The terminal showed the check's report, then the goal, then the answer.
+  it("draws a turn the agent started itself with no prompt, and a message queued behind it below its work", () => {
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: true });
+    const started = ev({ type: "turn_started", startedBy: "Scheduled check" });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "assistant_text", text: "first" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      started,
+      toolStart("date", "Bash"),
+      goal,
+    ];
+    let t = buildTranscript(events, true);
+    expect(t.turns).toHaveLength(2);
+    expect(t.turns[1].prompt).toBeUndefined();
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool", "queued"]);
+    expect(t.turns[1].work[0]).toMatchObject({ kind: "status", text: "Scheduled check" });
+    expect(t.turns[1].live).toBe(true);
+    expect(t.workingSince).toBe(Date.parse(started.ts));
+
+    events.push(
+      ev({ type: "assistant_text", text: "No decision is needed from you right now." }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false, durationMs: 12_000 }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "Checking the evaluator" }),
+    );
+    t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined, "a goal for the work"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool", "text"]);
+    expect(t.turns[1].completed?.durationMs).toBe(12_000);
+    expect(t.turns[2].work.map((w) => w.kind === "text" && w.text)).toEqual(["Checking the evaluator"]);
+  });
+
+  it("keeps a message queued behind a turn it has not seen start out of that turn's prompt", () => {
+    // The CLI's hook said it was working before its first record landed.
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: true });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      goal,
+      ev({ type: "turn_started", startedBy: "Scheduled check" }),
+      toolStart("date", "Bash"),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "on it" }),
+    ];
+    const t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined, "a goal for the work"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool"]);
+  });
+
+  it("moves a message drawn as a prompt to where the agent took it, below the work it did first", () => {
+    // Sent as the agent began a turn of its own, before the app knew of it.
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: false });
+    const events = [
+      goal,
+      ev({ type: "turn_started", startedBy: "Scheduled check" }),
+      toolStart("date", "Bash"),
+      toolDone("date"),
+      ev({ type: "assistant_text", text: "report" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "answer" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+    ];
+    let t = buildTranscript(events, false);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, "a goal for the work"]);
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["status", "tool", "text"]);
+    expect(t.turns[0].completed?.status).toBe("ok");
+    expect(t.turns[1].prompt?.seq).toBe(goal.seq);
+    expect(t.turns[1].work.map((w) => w.kind === "text" && w.text)).toEqual(["answer"]);
+
+    // Taken mid-turn, the work before it stays where it was, apart from it.
+    t = buildTranscript([goal, toolStart("ls", "Bash"), ev({ type: "turn_started", promptSeq: goal.seq }), ev({ type: "assistant_text", text: "answer" })], true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, "a goal for the work"]);
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["tool"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["text"]);
+  });
+
+  it("drops a turn that only ever held the message it moves", () => {
+    const goal = ev({ type: "user_message", text: "then this", queued: true });
+    const t = buildTranscript(
+      [
+        goal,
+        ev({ type: "user_message", text: "typed in the terminal", queued: false }),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+        ev({ type: "turn_started", promptSeq: goal.seq }),
+      ],
+      false,
+    );
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["typed in the terminal", "then this"]);
+  });
+
   it("reads context occupancy off the latest reading", () => {
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),
