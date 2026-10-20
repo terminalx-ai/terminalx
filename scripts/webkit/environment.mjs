@@ -105,6 +105,8 @@ try {
       { status, recipes },
     );
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    // The section is on the active organization's page (PRO-107), reached from Settings → Account.
+    await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
     const template = page.getByRole("form", { name: "Environment template" });
     await template.waitFor();
     await page.getByRole("region", { name: "Environment recipes" }).waitFor();

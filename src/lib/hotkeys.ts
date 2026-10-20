@@ -144,6 +144,8 @@ function install() {
     (e) => {
       if (suspended) return;
       holdKeyDown(e);
+      // A key while an input method composes is the IME's (WebKit marks the one that ends it with 229).
+      if (e.isComposing || e.keyCode === 229) return;
       const chord = chordOf(e);
       if (!chord) return;
       // The shell's keys are the terminal's, whatever is bound to them.

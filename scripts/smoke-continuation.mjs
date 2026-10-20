@@ -16,6 +16,11 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
   const report = async () => fs.writeText(reportPath, JSON.stringify(results, null, 2));
   const assert = (ok, message) => { if (!ok) throw new Error(message); };
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // A provider's normal tab defaults, as the launch settings the dialog would pass.
+  const settingsFor = (harness) => {
+    const prefs = getPrefs();
+    return { harness, model: prefs.lastModel[harness] ?? '', effort: prefs.lastEffort[harness] ?? null, permissionMode: prefs.lastMode };
+  };
   const waitFor = async (read, check, label) => {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
@@ -33,10 +38,8 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
     await api.addProject(projectPath);
     await fs.writeText(`${projectPath}/continuation-uncommitted.txt`, 'SHARED_WORKSPACE_109\n');
     for (const sourceProvider of sourceProviders) {
-      const prefs = getPrefs();
       const created = await api.createSession({ projectPath, cwd: projectPath, useWorktree: false,
-        title: `Continuation smoke: ${sourceProvider}`, tab: { harness: sourceProvider,
-          model: prefs.lastModel[sourceProvider] ?? '', effort: prefs.lastEffort[sourceProvider] ?? null, permissionMode: prefs.lastMode } });
+        title: `Continuation smoke: ${sourceProvider}`, tab: settingsFor(sourceProvider) });
       upsertSession(created); selectSession(created.id);
       const source = created.tabs[0];
       const marker = `EARLY_CONTEXT_109_${sourceProvider}`;
@@ -56,13 +59,14 @@ export async function runContinuationSmoke({ projectPath, reportPath, sourceProv
         context = await agent.prepareContinuation(created.id, source.id);
         const count = (await api.listSessions()).find((s) => s.id === created.id).tabs.length;
         const startedAt = Date.now();
-        const result = await launchContinuation(context, provider, continuationPrompt(context, mode), () => {});
+        const result = await launchContinuation(context, settingsFor(provider), continuationPrompt(context, mode), () => {});
         assert(result.stage === 'delivered', `${sourceProvider} → ${provider} (${mode}): ${result.error}`);
         const deliveryMs = Date.now() - startedAt;
-        assert(getDraft(result.tab.id) === '', 'Confirmed continuation leaves the destination composer empty');
-        const events = await turnDone(created.id, result.tab.id);
+        const launched = result.launched.tab;
+        assert(getDraft(launched.id) === '', 'Confirmed continuation leaves the destination composer empty');
+        const events = await turnDone(created.id, launched.id);
         const entry = (await api.listSessions()).find((s) => s.id === created.id);
-        const destination = entry.tabs.find((t) => t.id === result.tab.id);
+        const destination = entry.tabs.find((t) => t.id === launched.id);
         assert(entry.cwd === projectPath && !entry.worktreeName, 'Same cwd, no worktree');
         assert(entry.tabs.length === count + 1, 'Exactly one new tab');
         assert(entry.activeTab === destination.id && getSessionStore().sessions.find((s) => s.id === entry.id).activeTab === destination.id, 'Destination selected');

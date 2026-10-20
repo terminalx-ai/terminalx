@@ -286,6 +286,7 @@ mod tests {
             url: "https://linear.app/acme/issue/ENG-42".into(),
             state: "Todo".into(),
             state_type: "open".into(),
+            workflow_state_type: None,
             labels: Vec::new(),
             assignee: None,
             assignees: Vec::new(),

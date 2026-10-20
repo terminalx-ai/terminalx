@@ -22,8 +22,8 @@ export function sentMessages(transcript: Transcript, pending?: { entries?: Outbo
       at = Date.parse(turn.prompt.ts) || at;
       items.push({ text: turn.prompt.text, at });
     }
-    // A follow-up queued while the agent worked.
-    for (const item of turn.work) if (item.kind === "queued") items.push({ text: item.text, at });
+    // A follow-up sent while the agent worked, waiting or taken.
+    for (const item of turn.work) if (item.kind === "queued" || item.kind === "message") items.push({ text: item.text, at });
   }
   // A command that reached the runtime is in the transcript already. One that ended some other way (rejected,
   // cancelled, outcome unknown) is placed by when it was written; one still on its way is the newest there is,

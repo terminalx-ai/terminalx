@@ -1,9 +1,9 @@
 import { agent, api, errorMessage } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
 import { getDraft, setDraft } from "@/lib/drafts";
-import { getPrefs } from "@/lib/prefs";
 import { addTab, archiveSession, selectSession, upsertSession } from "@/lib/sessions";
-import type { HarnessInfo, TabEntry } from "@/types/session";
+import type { LaunchSettings } from "@/lib/useSessionAgent";
+import type { TabEntry } from "@/types/session";
 
 export type ContextMode = "focused" | "full";
 export interface ContinuationContext {
@@ -19,11 +19,6 @@ export interface ContinuationContext {
   lastPrompt: string | null;
   lastUpdate: string | null;
   partialCapture: string | null;
-}
-
-export function selectContinuationProvider(providers: HarnessInfo[], source: string, configured: string): string {
-  const available = providers.filter((p) => p.available);
-  return [source, configured].find((id) => available.some((p) => p.id === id)) ?? available[0]?.id ?? "";
 }
 
 function block(text: string): string {
@@ -62,76 +57,112 @@ export function continuationPrompt(source: ContinuationContext, mode: ContextMod
   ].filter(Boolean).join("\n\n");
 }
 
-export type ContinuationResult =
-  | { stage: "delivered"; tab: TabEntry }
-  | { stage: "launch" | "delivery"; tab?: TabEntry; error: string };
-
-/** A tab is created once. A failed launch can retry that tab; an uncertain
- * delivery leaves the prompt in its composer for the reader to check/retry. */
-export async function launchContinuation(
-  context: ContinuationContext, provider: string, prompt: string,
-  onCreated: (tab: TabEntry) => void, existing?: TabEntry,
-): Promise<ContinuationResult> {
-  let tab = existing;
-  try {
-    const providers = await api.listHarnesses();
-    if (!providers.some((p) => p.id === provider && p.available)) throw new Error("The selected provider is no longer available on this host.");
-    if (!tab) {
-      const prefs = getPrefs();
-      tab = await addTab(context.sessionId, provider, prefs.lastModel[provider] ?? "", prefs.lastEffort[provider] ?? null, prefs.lastMode);
-      setDraft(tab.id, prompt);
-      onCreated(tab);
-    }
-    await agent.ensureStarted(context.sessionId, tab.id);
-  } catch (e) {
-    return { stage: "launch", tab, error: `Could not start the new session: ${errorMessage(e)}` };
-  }
-  try {
-    const out = await agent.send(context.sessionId, tab.id, prompt, undefined, true);
-    for (const event of out.events) applyEvent(event);
-    // Delivery can finish after the dialog is dismissed and the reader has
-    // started a new draft in the destination.
-    if (getDraft(tab.id) === prompt) setDraft(tab.id, "");
-    return { stage: "delivered", tab };
-  } catch (e) {
-    return { stage: "delivery", tab, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. The prepared prompt is in its composer. ${errorMessage(e)}` };
-  }
+/** The conversation a continuation started, and the workspace it is in. */
+export interface Launched {
+  sessionId: string;
+  tab: TabEntry;
 }
 
 /**
- * Carry a chat into a project: the same agent starts there (in place, or in a
- * new worktree), is handed the chat's context, and takes the chat's place in
- * the list, which archives the chat. Nothing moves if the agent cannot start.
+ * How far a continuation got. Only "launch" may be retried: past it the
+ * prompt has been sent, or may have been ("delivery"), and "archive" is a
+ * handoff that arrived while the chat it moved could not be archived.
+ */
+export type ContinuationResult =
+  | { stage: "delivered"; launched: Launched }
+  | { stage: "launch" | "delivery" | "archive"; launched?: Launched; error: string };
+
+async function ensureAvailable(harness: string) {
+  const providers = await api.listHarnesses();
+  if (!providers.some((p) => p.id === harness && p.available)) throw new Error("The selected provider is no longer available on this host.");
+}
+
+async function deliver(launched: Launched, prompt: string): Promise<ContinuationResult> {
+  try {
+    const out = await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
+    for (const event of out.events) applyEvent(event);
+    // Delivery can finish after the dialog is dismissed and the reader has
+    // started a new draft in the destination.
+    if (getDraft(launched.tab.id) === prompt) setDraft(launched.tab.id, "");
+    return { stage: "delivered", launched };
+  } catch (e) {
+    return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. The prepared prompt is in its composer. ${errorMessage(e)}` };
+  }
+}
+
+/** A tab is created once, with exactly the chosen settings. A failed launch
+ * can retry that tab; an uncertain delivery leaves the prompt in its composer
+ * for the reader to check/retry. */
+export async function launchContinuation(
+  context: ContinuationContext, settings: LaunchSettings, prompt: string,
+  onCreated: (launched: Launched) => void, existing?: Launched,
+): Promise<ContinuationResult> {
+  let launched = existing;
+  try {
+    await ensureAvailable(settings.harness);
+    if (!launched) {
+      const tab = await addTab(context.sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
+      launched = { sessionId: context.sessionId, tab };
+      setDraft(tab.id, prompt);
+      onCreated(launched);
+    }
+    await agent.ensureStarted(launched.sessionId, launched.tab.id);
+  } catch (e) {
+    return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
+  }
+  return deliver(launched, prompt);
+}
+
+/** Where a chat moving into a project starts again: in place, or in a new worktree. */
+export interface ProjectDestination {
+  projectPath: string;
+  worktree: boolean;
+}
+
+/**
+ * Carry a chat into a project: a new session there, with exactly the chosen
+ * settings, is handed the chat's context and takes the chat's place in the
+ * list. The session is created once; a failed start retries it. The chat is
+ * archived only once the new session has started, so a move that cannot
+ * start leaves the chat where it was. A chat that cannot be archived does not
+ * hold the handoff back: the context is still sent, and the result says the
+ * chat is still listed.
  */
 export async function moveChatToProject(
-  chat: { id: string; title: string; activeTab?: string | null; tabs: TabEntry[] },
-  projectPath: string,
-  worktree: boolean,
-): Promise<{ sessionId: string; delivered: boolean }> {
-  const source = chat.tabs.find((tab) => tab.id === chat.activeTab) ?? chat.tabs[0];
-  if (!source) throw new Error("This chat has no conversation to carry over.");
-  const context = await agent.prepareContinuation(chat.id, source.id);
-  const prompt = continuationPrompt(context, "focused", projectPath);
-  const prefs = getPrefs();
-  const session = await api.createSession({
-    projectPath,
-    title: chat.title,
-    useWorktree: worktree,
-    onMain: !worktree,
-    tab: { harness: source.harness, model: source.model || (prefs.lastModel[source.harness] ?? ""), effort: prefs.lastEffort[source.harness] ?? null, permissionMode: source.permissionMode || prefs.lastMode },
-  });
-  upsertSession(session);
-  selectSession(session.id);
-  await archiveSession(chat.id, true);
-  const tab = session.tabs[0];
+  chat: { id: string; title: string },
+  to: ProjectDestination,
+  settings: LaunchSettings,
+  prompt: string,
+  onCreated: (launched: Launched) => void,
+  existing?: Launched,
+): Promise<ContinuationResult> {
+  let launched = existing;
   try {
-    await agent.ensureStarted(session.id, tab.id);
-    const out = await agent.send(session.id, tab.id, prompt, undefined, true);
-    for (const event of out.events) applyEvent(event);
-    return { sessionId: session.id, delivered: true };
-  } catch {
-    // The project session exists either way; leave the handoff in its composer to send by hand.
-    setDraft(tab.id, prompt);
-    return { sessionId: session.id, delivered: false };
+    await ensureAvailable(settings.harness);
+    if (!launched) {
+      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, tab: settings });
+      upsertSession(session);
+      selectSession(session.id);
+      const tab = session.tabs[0];
+      if (!tab) throw new Error("The new session has no agent conversation.");
+      launched = { sessionId: session.id, tab };
+      setDraft(tab.id, prompt);
+      onCreated(launched);
+    }
+    await agent.ensureStarted(launched.sessionId, launched.tab.id);
+  } catch (e) {
+    const kept = launched ? " The chat has not been archived." : "";
+    return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}${kept}` };
   }
+  let unarchived: string | null = null;
+  try {
+    await archiveSession(chat.id, true);
+  } catch (e) {
+    unarchived = `The chat could not be archived, so it is still in the list: ${errorMessage(e)}`;
+  }
+  const result = await deliver(launched, prompt);
+  if (!unarchived) return result;
+  return result.stage === "delivered"
+    ? { stage: "archive", launched, error: `The new session started and has the chat's context. ${unarchived}` }
+    : { ...result, error: `${result.error} ${unarchived}` };
 }

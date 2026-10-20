@@ -230,7 +230,8 @@ export function Chat({
                 stream={isLast && live ? stream : []}
                 working={isLast && working && !transcript.pendingAsks.length && !transcript.compacting}
                 streamingTool={isLast && live ? streamingTool : undefined}
-                onSendQueuedNow={live ? onSendQueuedNow : undefined}
+                // Only what waits behind the running turn can go now; a note left in a turn that is over cannot (#551).
+                onSendQueuedNow={live && t.live ? onSendQueuedNow : undefined}
               />
             );
           })}

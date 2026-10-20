@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/tooltip";
 import { revealInOwnScroller } from "@/lib/shellScroll";
 import { cn } from "@/lib/cn";
+import { usePromptTextProps } from "@/lib/autocorrect";
 import type { PendingAsk } from "@/lib/transcript";
 import { LinkedText } from "./LinkedText";
 
@@ -160,6 +161,7 @@ export function QuestionCard({
   const blocked = !!blockedReason;
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [free, setFree] = useState<Record<string, string>>({});
+  const textProps = usePromptTextProps();
   const ref = useRef<HTMLFormElement>(null);
   useEffect(() => {
     const first = ref.current?.querySelector<HTMLElement>("button[data-choice]");
@@ -233,6 +235,7 @@ export function QuestionCard({
                   ))}
                   {q.freeText && (
                     <input
+                      {...textProps}
                       value={free[q.question] ?? ""}
                       onChange={(e) => setFree((f) => ({ ...f, [q.question]: e.target.value }))}
                       placeholder="Or type your own answer"

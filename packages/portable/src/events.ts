@@ -114,7 +114,7 @@ export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "de
 
 export type Payload =
   | { type: "recovery"; kind: RecoveryKind | null }
-  | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number }
+  | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number; startedBy?: string }
   | {
       type: "turn_completed";
       status: TurnStatus;
@@ -134,6 +134,8 @@ export type Payload =
       queued: boolean;
       cwd?: string;
     }
+  /** The agent took the queued `user_message` at `promptSeq` while its turn was still running (#551). */
+  | { type: "prompt_absorbed"; promptSeq: number }
   | { type: "assistant_text"; block?: BlockRef; text: string }
   | { type: "reasoning"; block?: BlockRef; text: string }
   | ({ type: "delta" } & Delta)
@@ -174,6 +176,8 @@ export type Payload =
   | ({ type: "usage_update" } & Usage)
   | { type: "context_compaction_started" }
   | { type: "context_compacted"; preTokens?: number; postTokens?: number }
+  /** What the agent kept of the conversation the compaction before it folded away; never a prompt (#524). */
+  | { type: "compaction_summary"; text: string }
   | { type: "api_retry"; attempt: number; maxRetries: number; reason?: string }
   | { type: "rate_limited"; status?: string; resetsAt?: number; window?: string; message?: string }
   | { type: "status"; text: string }

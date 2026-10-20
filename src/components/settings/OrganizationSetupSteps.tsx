@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
-import { api, errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
+import { api, errorMessage, type AgentLogin, type AgentLoginProvider, type CloudWorkspaceQuote } from "@/lib/api";
 import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
 import { creatableProviders } from "@/lib/hiddenProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
+import { openAgentLogins, openOrganizationSettings } from "@/lib/settingsLinks";
+import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
+import { agentLoginUsable, OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import {
   ENVIRONMENT_CHECK_PROMPT,
   reconcileSetup,
@@ -18,13 +21,30 @@ import {
   type SetupStep,
 } from "@/lib/organizationSetup";
 
-const SHOWN: readonly (keyof typeof STEP_LABELS)[] = ["compute", "repository", "workspace", "runtime", "agent"];
-const ORDER: readonly SetupStep[] = ["create", "select", "compute", "repository", "workspace", "runtime", "agent", "done"];
+const SHOWN: readonly (keyof typeof STEP_LABELS)[] = ["compute", "logins", "repository", "workspace", "runtime", "agent"];
+const ORDER: readonly SetupStep[] = ["create", "select", "compute", "logins", "repository", "workspace", "runtime", "agent", "done"];
 /** Agents a setup workspace can be checked with. */
 const AGENTS = [
   { id: "claude", label: "Claude Code" },
   { id: "codex", label: "Codex" },
 ];
+
+/** Every agent an organization keeps a login for (PRO-107), in the order its page lists them. */
+const LOGIN_AGENTS: readonly { id: AgentLoginProvider; label: string }[] = [
+  { id: "claude", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "cursor", label: "Cursor" },
+];
+
+/** The agents whose stored login a workspace can use now. */
+function usableAgents(logins: readonly AgentLogin[]): AgentLoginProvider[] {
+  return LOGIN_AGENTS.filter((agent) => agentLoginUsable(logins.find((login) => login.provider === agent.id))).map((agent) => agent.id);
+}
+
+/** "Codex", "Codex and Cursor", "Claude Code, Codex and Cursor". */
+function listed(names: readonly string[]): string {
+  return names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
 
 type Prepared = { form: CreateForm; pending: PendingCreate; quote: CloudWorkspaceQuote };
 
@@ -46,17 +66,24 @@ function failureText(failure: unknown): string {
  * The steps from a selected organization to a working first workspace
  * (PRO-16), read from the server every time this is shown. `record` is that
  * organization's setup record and nobody else's; `onRecord` stores a change.
+ * Right after the compute connection come the organization's agent logins
+ * (PRO-107), set here or later on its page.
  */
 export function OrganizationSetupSteps({
   record,
   organizationId,
+  organizationName,
+  contextRevision,
   onRecord,
 }: {
   record: OrganizationSetupRecord;
   organizationId: string;
+  organizationName: string;
+  /** The account's context revision, for the agent logins step. */
+  contextRevision: string;
   onRecord: (record: OrganizationSetupRecord) => void;
 }) {
-  const [facts, setFacts] = useState<SetupFacts>({ activeOrganizationId: organizationId, compute: null, repository: null, workspaces: null });
+  const [facts, setFacts] = useState<SetupFacts>({ activeOrganizationId: organizationId, compute: null, logins: null, repository: null, workspaces: null });
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,9 +117,13 @@ export function OrganizationSetupSteps({
   // Looking only reads lists: it never wakes or starts a workspace.
   const check = useCallback(async () => {
     setChecking(true);
-    const [providers, github, list] = await Promise.all([
+    const [providers, logins, github, list] = await Promise.all([
       api.cloudProviders().then(
         (response) => creatableProviders(response.providers),
+        () => null,
+      ),
+      api.cloudAgentLogins(organizationId).then(
+        (response) => usableAgents(response.credentials),
         () => null,
       ),
       organizationGithubApp.summary().then(
@@ -108,6 +139,7 @@ export function OrganizationSetupSteps({
     const next: SetupFacts = {
       activeOrganizationId: organizationId,
       compute: providers ? providers.length > 0 : null,
+      logins,
       repository: github ? github.length > 0 : null,
       workspaces: list,
     };
@@ -200,8 +232,25 @@ export function OrganizationSetupSteps({
     }
   };
 
+  /** The person goes on from the agent logins: with one connected, or to set them up later. */
+  const passLogins = (logins: "connected" | "later") => store(reconcileSetup({ ...current.current, logins }, facts));
+
   const step = record.step;
   const reached = (name: SetupStep) => ORDER.indexOf(step) > ORDER.indexOf(name);
+  // Which agents have no login yet, once that is known, when the person chose to set them up later: through the
+  // remaining steps and at completion. Not for a setup that went on with a login (or finished before the step).
+  const missing = facts.logins ? LOGIN_AGENTS.filter((agent) => !facts.logins!.includes(agent.id)).map((agent) => agent.label) : [];
+  const missingLogins = missing.length > 0 && record.logins === "later" && (step === "done" || reached("logins")) && (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-missing-logins">
+      <span>
+        No agent login yet for {listed(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
+        is connected.
+      </span>
+      <Button size="xs" variant="outline" onClick={() => openAgentLogins(organizationId)}>
+        Open {organizationName}'s agent logins
+      </Button>
+    </div>
+  );
   const item = setupWorkspace(record, facts.workspaces);
   // Resent only while the server still answers it as the same create.
   const unsent = resendable(record);
@@ -209,9 +258,12 @@ export function OrganizationSetupSteps({
 
   if (step === "done") {
     return (
-      <p className="mt-3 text-xs text-muted-foreground" data-testid="organization-setup-done">
-        Cloud setup is complete{record.agent === "terminal-only" ? " (terminal only, no agent)" : ""}.
-      </p>
+      <div className="mt-3">
+        <p className="text-xs text-muted-foreground" data-testid="organization-setup-done">
+          Cloud setup is complete{record.agent === "terminal-only" ? " (terminal only, no agent)" : ""}.
+        </p>
+        {missingLogins}
+      </div>
     );
   }
 
@@ -231,8 +283,45 @@ export function OrganizationSetupSteps({
         ))}
       </ol>
 
-      {step === "compute" && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider below, then check again.</p>}
-      {step === "repository" && <p className="mt-2 text-xs text-muted-foreground">Connect GitHub and choose at least one repository in the GitHub section below, then check again.</p>}
+      {/* The provider controls are drawn above these steps, in the same setup section. */}
+      {step === "compute" && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider above, then check again.</p>}
+      {step === "logins" && (
+        <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-logins">
+          <p>
+            Connect what the agents in {organizationName}'s cloud workspaces sign in with: Claude Code (Log in with Claude or an API key), Codex (Log in
+            with ChatGPT or an API key) or Cursor (an API key), or lend this Mac's sign-in. The logins belong to {organizationName} only. You can also set
+            them up later on its page in Settings → Organizations.
+          </p>
+          <div className="mt-2">
+            <OrganizationAgentLogins
+              contextRevision={contextRevision}
+              organizationId={organizationId}
+              organizationName={organizationName}
+              reveal={false}
+              onLogins={(logins) => setFacts((known) => ({ ...known, logins: logins ? usableAgents(logins) : null }))}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button size="sm" disabled={busy || !facts.logins?.length} onClick={() => passLogins("connected")}>
+              Continue
+            </Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => passLogins("later")}>
+              Set up later
+            </Button>
+            {!facts.logins?.length && <span>Continue needs at least one agent connected.</span>}
+          </div>
+        </div>
+      )}
+      {missingLogins}
+      {/* GitHub is on the organization's own page (PRO-107), not in this section. */}
+      {step === "repository" && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-repository">
+          <span>Connect GitHub and choose at least one repository on {organizationName}'s page in Settings → Organizations, under GitHub, then check again.</span>
+          <Button size="xs" variant="outline" onClick={() => openOrganizationSettings(organizationId)}>
+            Open {organizationName}'s GitHub settings
+          </Button>
+        </div>
+      )}
 
       {step === "workspace" && unsent && (
         <div className="mt-2 text-xs text-muted-foreground">
@@ -302,7 +391,11 @@ export function OrganizationSetupSteps({
           </Button>
         </div>
       )}
-      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      {error && (
+        <p className="mt-2 text-xs text-destructive">
+          {error} <AgentLoginsLink message={error} organizationId={organizationId} className="ml-1 align-baseline text-foreground" />
+        </p>
+      )}
     </div>
   );
 }

@@ -36,7 +36,6 @@ export const TurnBlock = memo(function TurnBlock({
   onSendQueuedNow?: (seq: number) => void;
 }) {
   const prefs = usePrefs();
-  const layout = prefs.transcriptLayout;
   const [expanded, setExpanded] = useState(false);
   const hasAnswer = turn.work.some((w) => w.kind === "text");
   const toolItems = turn.work.filter((w) => w.kind === "tool" || w.kind === "tool_group" || w.kind === "reasoning" || w.kind === "subagent");
@@ -48,34 +47,7 @@ export const TurnBlock = memo(function TurnBlock({
 
   return (
     <div className="transcript-turn" data-turn={turn.key}>
-      {turn.prompt && (
-        <div className={cn("mb-4 flex", layout === "chat" ? "justify-end" : "justify-stretch")}>
-          <div
-            className={cn(
-              "select-text whitespace-pre-wrap rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed shadow-card hairline",
-              layout === "chat" ? "max-w-[85%]" : "w-full",
-            )}
-          >
-            {turn.prompt.images?.length ? (
-              <div className="mb-2 flex flex-wrap gap-2">
-                {turn.prompt.images.map((im, i) =>
-                  // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
-                  cwd || isLoadableUrl(im.url) ? (
-                    <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
-                  ) : (
-                    <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
-                      <ImageIcon className="size-3.5 shrink-0" />
-                      <span className="min-w-0 truncate">{im.name || "Image"}</span>
-                    </span>
-                  ),
-                )}
-              </div>
-            ) : null}
-            {turn.prompt.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={turn.prompt.author.userId}>{turn.prompt.author.displayName}</div>}
-            <LinkedText text={turn.prompt.text} context={linkContext} />
-          </div>
-        </div>
-      )}
+      {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" />}
 
       {foldable ? (
         <div className="mb-3">
@@ -89,10 +61,10 @@ export const TurnBlock = memo(function TurnBlock({
           </button>
           {expanded && (
             <div className="ml-1 mt-1 border-l border-hairline pl-2">
-              {turn.work.map((w) => (w.kind === "text" ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />))}
+              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} />))}
             </div>
           )}
-          {turn.work.map((w) => (w.kind === "text" ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} /> : null))}
+          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
@@ -152,6 +124,11 @@ export const TurnBlock = memo(function TurnBlock({
   );
 });
 
+/** What a folded turn still shows: the answer, and the reader's own words (#551). */
+function outsideFold(item: WorkItem): boolean {
+  return item.kind === "text" || item.kind === "message" || item.kind === "queued";
+}
+
 function summarize(turn: Turn): string {
   const parts: string[] = [];
   if (turn.toolCount) parts.push(`${turn.toolCount} tool call${turn.toolCount === 1 ? "" : "s"}`);
@@ -187,6 +164,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
       return <ToolCallRow call={item.call} cwd={cwd} linkContext={linkContext} />;
     case "tool_group":
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
+    case "message":
+      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" />;
     case "queued":
       return (
         <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
@@ -212,13 +191,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
         </div>
       );
     case "compaction":
-      return (
-        <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-faint">
-          <Shrink className="size-3.5" />
-          Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
-          {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
-        </div>
-      );
+      return <CompactionRow item={item} linkContext={linkContext} />;
     case "retry":
       return (
         <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-warning">
@@ -241,6 +214,92 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
         </div>
       );
   }
+}
+
+/** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
+function ReaderMessage({
+  message,
+  cwd,
+  linkContext,
+  className,
+}: {
+  message: { author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[] };
+  cwd?: string;
+  linkContext?: { sessionId: string; cwd: string };
+  className: string;
+}) {
+  const layout = usePrefs().transcriptLayout;
+  return (
+    <div className={cn(className, "flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+      <div
+        className={cn(
+          "select-text whitespace-pre-wrap rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed shadow-card hairline",
+          layout === "chat" ? "max-w-[85%]" : "w-full",
+        )}
+      >
+        {message.images?.length ? (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {message.images.map((im, i) =>
+              // A cloud tab's image is a file on its workspace, not here: its name, not a broken thumbnail.
+              cwd || isLoadableUrl(im.url) ? (
+                <img key={i} src={toAssetUrl(im.url)} alt="" className="size-20 rounded-md object-cover hairline" />
+              ) : (
+                <span key={i} className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-veil-raised px-2 py-1 text-xs text-muted-foreground" data-testid="prompt-image-name">
+                  <ImageIcon className="size-3.5 shrink-0" />
+                  <span className="min-w-0 truncate">{im.name || "Image"}</span>
+                </span>
+              ),
+            )}
+          </div>
+        ) : null}
+        {message.author && <div className="mb-1 text-xs text-muted-foreground" data-user-id={message.author.userId}>{message.author.displayName}</div>}
+        <LinkedText text={message.text} context={linkContext} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The line a compaction leaves in the chat. What the agent kept of the
+ * conversation is its own memory, not anybody's message (#524): it folds
+ * under the line, as Claude Code keeps it behind ctrl+o.
+ */
+function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
+  const [open, setOpen] = useState(false);
+  const label = (
+    <>
+      Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
+      {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
+    </>
+  );
+  if (!item.summary) {
+    return (
+      <div className="my-1 flex items-center gap-2 px-1.5 py-1 text-xs text-faint">
+        <Shrink className="size-3.5" />
+        {label}
+      </div>
+    );
+  }
+  return (
+    <div className="my-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs text-faint hover:bg-veil-raised"
+      >
+        <Shrink className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">{label}</span>
+        <span className="shrink-0">{open ? "Hide summary" : "Show summary"}</span>
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && (
+        <div data-testid="compaction-summary" className="mb-2 ml-6 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
+          <LinkedText text={item.summary} context={linkContext} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ReasoningRow({ text, linkContext }: { text: string; linkContext?: { sessionId: string; cwd: string } }) {

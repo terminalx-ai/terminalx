@@ -64,7 +64,7 @@ const listType = (type: string): Issue["stateType"] => (type === "started" || ty
 /** How an issue is shown while a change to it is on its way. */
 function guessed(issue: Issue, change: StateChange, state?: WorkflowState): Issue {
   if (change.kind === "workflow_state" && state) {
-    return { ...issue, state: state.name, stateType: listType(state.type), stateId: state.id, stateColor: state.color } as Issue;
+    return { ...issue, state: state.name, stateType: listType(state.type), workflowStateType: state.type, stateId: state.id, stateColor: state.color } as Issue;
   }
   if (change.kind === "close") {
     return { ...issue, state: "Closed", stateType: change.reason === "not_planned" ? "canceled" : "completed", closeReason: change.reason } as Issue;

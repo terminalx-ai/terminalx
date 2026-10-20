@@ -1055,4 +1055,34 @@ describe("sentMessages", () => {
     const transcript = buildTranscript([user("again"), done(), user("other"), done(), user(RECOVERY_PROMPT), done(), user("again"), done()] as never, false);
     expect(sentMessages(transcript)).toEqual(["other", "again"]);
   });
+
+  it("leaves out a compaction's summary, as the agent writes it now and as an older log holds it (#524)", () => {
+    const summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+    const event = (payload: object) => ({ id: `e${++seq}`, seq, sessionId: "s", tabId: "t", harness: "claude", ts: "2026-10-01T10:00:00Z", payload });
+    const compacted = () => event({ type: "context_compacted", preTokens: 219942, postTokens: 13790 });
+    const transcript = buildTranscript([user("one"), done(), compacted(), event({ type: "compaction_summary", text: summary }), user("two"), done(), compacted(), user(summary)] as never, false);
+    expect(sentMessages(transcript)).toEqual(["one", "two"]);
+  });
+});
+
+describe("autocorrect in the composer (#525)", () => {
+  const CORRECTIONS = ["spellcheck", "autocorrect", "autocapitalize"];
+  const correctionsOf = (box: HTMLTextAreaElement) => Object.fromEntries(CORRECTIONS.filter((name) => box.hasAttribute(name)).map((name) => [name, box.getAttribute(name)]));
+
+  afterEach(() => act(() => setPrefs({ autocorrect: false })));
+
+  it("turns the system's corrections off while the setting is off, and follows it at once in an open composer", () => {
+    act(() => setPrefs({ autocorrect: false }));
+    render(<TestComposer onSend={vi.fn()} />);
+    const box = document.querySelector<HTMLTextAreaElement>("[data-composer]")!;
+    expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
+
+    // On sets none of them, so the browser and the system's keyboard settings decide, as for any text box.
+    act(() => setPrefs({ autocorrect: true }));
+    expect(document.querySelector("[data-composer]")).toBe(box);
+    expect(correctionsOf(box)).toEqual({});
+
+    act(() => setPrefs({ autocorrect: false }));
+    expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
+  });
 });

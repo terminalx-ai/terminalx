@@ -90,6 +90,45 @@ The path derived from the session id is a guess made before the CLI ran; the
 first hook to arrive carries `transcript_path`, which is authoritative, and the
 tail is re-pointed at it.
 
+#### Turns the CLI starts itself
+
+Not every turn has a prompt the reader sent (#540). The CLI starts turns of its
+own — a `/loop` wakeup or scheduled task, a background task reporting in,
+another agent's message — and writes each as a `user` record whose
+`turnOrigin` (2.1.278 on) is `scheduled`, `task_notification`, `peer` or `sdk`
+rather than `human`. A scheduled prompt is written as meta, and a notification's
+text is its `<task-notification>` markup. The decoder turns any of them into a
+`turn_started` with `startedBy` — "Scheduled check", the notification's own
+`<summary>`, "Message from another agent" — which opens the turn as a prompt
+would: the tab is working, a message sent meanwhile is queued, and `Stop` closes
+it with its own "Worked for". The chat draws the line and no message bubble.
+The `scheduled_task_fire` record ahead of a scheduled prompt opens nothing: in
+a quarter of the fires on record it lands before the previous turn's
+`turn_duration`.
+
+The CLI holds a message typed during such a turn until the turn is over, and
+takes it as the next prompt, so a queued message's echo then says where the
+next turn starts, as it does behind any turn. A message the composer sent as
+the CLI was starting a turn of its own — before the app had read a record of
+it — went out as a prompt and had that turn's work drawn under it. Any work the
+transcript holds before the CLI's record of that prompt was done before the CLI
+read it, so the record's arrival publishes a `turn_started` naming the message,
+and the chat moves it there.
+
+#### A compaction's summary
+
+A compaction is two records (#524): a `compact_boundary` system record with
+the token counts before and after, then the summary the model is handed in
+place of what was folded away. The summary is a `user` record marked
+`isCompactSummary` and `isVisibleInTranscriptOnly`, and it carries the
+`turnOrigin` of the turn it was written in. It is the model's memory, not
+anybody's message, so the decoder reads it before anything else that could
+take a `user` record for a prompt or a turn the CLI started: it becomes a
+`compaction_summary`, which opens no turn, and the chat folds it, collapsed,
+under the "Context compacted" line, as the CLI keeps it behind ctrl+o. A
+compaction while idle ("Compacted while idle, before the prompt cache
+expired") therefore leaves the tab idle.
+
 ### Hooks carry what the file cannot
 
 The transcript says what was said; it does not say *when a turn began or ended*,
@@ -133,7 +172,7 @@ when its holder exits, and `control.token` is written only by the holder.
 | Event | What it does |
 |---|---|
 | `SessionStart` | re-point the tail at the real `transcript_path` |
-| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | flush the tail, open the turn, status Working |
+| `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | flush the tail, open the turn, status Working. A `UserPromptSubmit` whose `source` names a turn the CLI started itself acknowledges nothing the reader sent, and a `poll_event` one starts no turn; 2.1.304's schema has the field, but its frame for a `/loop` wakeup did not carry it |
 | `PermissionRequest` | flush, publish the permission card, **park** until it is answered |
 | `Notification` (`permission_prompt`) | status Waiting — the CLI is asking in its own TUI, which means our hook did not answer in time |
 | `Stop` | flush, close the turn with the CLI's `last_assistant_message`, status Done |
@@ -279,9 +318,17 @@ when the message was sent: a message queued a minute earlier behind a reply
 that was still streaming used to have run out of time the moment its turn
 was stopped.
 
-One difference between the two CLIs is worth knowing and is theirs, not the
-app's: without Escape, Claude Code holds a queued message until its turn is
-over, while Codex submits it into the running turn at the next tool call.
+Without Escape, either CLI may take a queued message into the running turn,
+or hold it until the turn is over and take it as the next prompt. Codex
+submits it at the next tool call, as a steer. Claude Code delivers it with
+the next tool result: the transcript reads `queue-operation` remove with
+`reason: "absorbed_mid_turn"` and a `queued_command` attachment, and no
+`user` record (#551). Its echo says which happened, and the chat is told:
+`prompt_absorbed` for one taken mid-turn, which is then drawn as the
+reader's message where the agent read it, and never folded away with the
+tool calls; `turn_started` naming it for one that starts the next turn. A
+log from before `prompt_absorbed` does not say a message was taken mid-turn,
+so there it is shown as it was sent.
 
 The headless agents (ACP and OpenCode, still driven for the tabs that have
 them) have no screen and no queue. Their interrupt is their protocol's own
@@ -741,7 +788,14 @@ rule at click time rather than trusting the rendered row.
   typed input itself. The chat shows it as queued until the CLI takes it and the
   transcript says so; the app keeps no queue of its own for these tabs. What
   Escape does with that queue is the CLI's to decide (see "Escape interrupts;
-  only Stop ends the process").
+  only Stop ends the process"). "Send now" on a message still queued behind
+  the running turn interrupts it and types the message again as a prompt of
+  its own once the turn has ended, with the rest of the queue typed behind it
+  in order; its echo starts the new turn. Once the CLI's record of a message
+  has been read, the tab no longer holds it, and "Send now" on it neither
+  interrupts the turn nor types it again. One pressed just before that record
+  is read still stops the turn, but the record is told as the take it was,
+  and nothing is typed twice.
 - **Permission mode changes** restart the CLI on the same conversation, because
   the TUI only cycles modes on a key with no way to read the result back and
   the CLI reads `--permission-mode` at startup alone. A change made mid-turn

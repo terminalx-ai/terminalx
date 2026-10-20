@@ -123,8 +123,9 @@ Some detail on each:
 - **Cloud diagnostics.** Organization owners and administrators see recent
   cloud operations, create/resume stage timings, connection counts and relay
   close reasons from a cloud project's "…" menu, a cloud session's location
-  chip, or Settings → Account → Cloud diagnostics, fetched from
-  `/v1/desktop/orgs/:orgId/cloud-diagnostics` on the same API — no other host.
+  chip, or the default organization's page in Settings → Organizations,
+  fetched from `/v1/desktop/orgs/:orgId/cloud-diagnostics` on the same API —
+  no other host.
   The server checks the role in the organization the report is for.
   The server sends identifiers, states, codes and timings only. The last 50
   relay closes (4100–4104) this Mac met are kept in memory, never on disk;

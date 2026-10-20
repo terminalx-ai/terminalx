@@ -1212,12 +1212,17 @@ impl AccountManager {
         snapshot(&self.inner.lock().unwrap())
     }
 
-    /// The active organization's name, for a native dialog that must say
-    /// which organization something is about to be shared with. `None` when
-    /// `organization_id` is not the active one or its name is not known.
-    pub(crate) fn active_organization_name(&self, organization_id: &str) -> Option<String> {
-        let identity = self.snapshot().identity?;
-        (identity.organization_id.as_deref() == Some(organization_id)).then_some(identity.organization).flatten().filter(|name| !name.trim().is_empty())
+    /// An organization's name, for a native dialog that must say which
+    /// organization something is about to be shared with: the active one's,
+    /// or a member organization's (PRO-107, agent logins are set for any of
+    /// them). `None` when the user is not a member of `organization_id` or
+    /// its name is not known.
+    pub(crate) fn organization_name(&self, organization_id: &str) -> Option<String> {
+        let status = self.snapshot();
+        let active = status.identity.filter(|identity| identity.organization_id.as_deref() == Some(organization_id)).and_then(|identity| identity.organization);
+        active
+            .or_else(|| status.organizations.into_iter().find(|organization| organization.id == organization_id).map(|organization| organization.name))
+            .filter(|name| !name.trim().is_empty())
     }
 
     fn emit(&self, app: &AppHandle) {

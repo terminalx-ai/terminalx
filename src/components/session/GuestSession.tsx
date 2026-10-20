@@ -10,6 +10,7 @@ import { signIn, useAccount } from "@/lib/account";
 import { SessionGuestClient } from "@/lib/sessionGuest";
 import type { SharePerson, ShareRole, ShareState } from "@/lib/localSharing";
 import { errorMessage } from "@/lib/api";
+import { usePromptTextProps } from "@/lib/autocorrect";
 
 interface GuestStatus {
   admitted: boolean;
@@ -116,6 +117,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
   const [error, setError] = useState("");
   const [closed, setClosed] = useState(false);
   const [sending, setSending] = useState(false);
+  const textProps = usePromptTextProps();
   const selected = useRef(tabId);
   selected.current = tabId;
   useEffect(() => {
@@ -345,6 +347,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
               >
                 <textarea
                   aria-label="Prompt to agent"
+                  {...textProps}
                   disabled={!canDrive || sending}
                   className="min-h-20 w-full resize-y rounded-lg border border-hairline bg-card p-3 text-sm"
                   placeholder={
@@ -431,6 +434,7 @@ function GuestSession({ link, leave }: { link: string; leave: () => void }) {
               >
                 <textarea
                   aria-label="Note to people"
+                  {...textProps}
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
                   className="w-full rounded-md border border-hairline p-2 text-sm"

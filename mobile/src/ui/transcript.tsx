@@ -25,15 +25,19 @@ export function PermissionCard({ ask, connected, answering, error, onRespond }: 
   </Card>;
 }
 
-export function TurnCard({ turn }: { turn: Turn }) {
+/** The reader's own words: a turn's prompt, or a message the agent took while the turn ran. */
+function ReaderBubble({ text }: { text: string }) {
   const { palette } = useTheme();
-  return <View style={styles.turn}>{turn.prompt ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{turn.prompt.text}</LinkedText></View> : null}<View style={styles.work}>{turn.work.map((item) => <WorkRow key={item.key} item={item} />)}{turn.finalText ? <Markdown text={turn.finalText} /> : null}</View></View>;
+  return <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{text}</LinkedText></View>;
+}
+
+export function TurnCard({ turn }: { turn: Turn }) {
+  return <View style={styles.turn}>{turn.prompt ? <ReaderBubble text={turn.prompt.text} /> : null}<View style={styles.work}>{turn.work.map((item) => <WorkRow key={item.key} item={item} />)}{turn.finalText ? <Markdown text={turn.finalText} /> : null}</View></View>;
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ row }: { row: TurnRow }) {
-  const { palette } = useTheme();
   return <View style={row.startsTurn ? styles.turnStart : styles.row}>
-    {row.kind === "prompt" ? <View style={[styles.promptBubble, { backgroundColor: palette.selected }]}><LinkedText style={[styles.body, { color: palette.ink }]}>{row.text}</LinkedText></View>
+    {row.kind === "prompt" ? <ReaderBubble text={row.text} />
       : <View style={styles.work}>{row.kind === "markdown" ? <MarkdownBlock token={row.token} /> : <WorkRow item={row.item} />}</View>}
   </View>;
 });
@@ -46,6 +50,7 @@ function WorkRow({ item }: { item: WorkItem }) {
   if (item.kind === "tool_group") return <View style={[styles.tool, { backgroundColor: palette.raised }]}><TerminalIcon size={14} color={palette.muted} /><Text style={[styles.toolText, { color: palette.muted }]}>{item.name} · {item.calls.length} calls</Text></View>;
   if (item.kind === "error") return <LinkedText style={[styles.body, { color: palette.danger }]}>{item.text}</LinkedText>;
   if (item.kind === "queued") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`Queued · ${item.text}`}</LinkedText>;
+  if (item.kind === "message") return <ReaderBubble text={item.text} />;
   if (item.kind === "decision") return <LinkedText style={[styles.reasoning, { color: item.allowed ? palette.success : palette.danger }]}>{item.label}</LinkedText>;
   if (item.kind === "subagent") return <LinkedText style={[styles.reasoning, { color: palette.muted }]}>{`${item.label ?? "Background agent"} · ${item.done ? "done" : "working"}`}</LinkedText>;
   if (item.kind === "compaction") return <Text style={[styles.reasoning, { color: palette.muted }]}>Context compacted</Text>;

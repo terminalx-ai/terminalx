@@ -27,6 +27,7 @@ import {
 } from "@/lib/cloudSchedules";
 import { errorCode } from "@/lib/cloudTerminals";
 import { EFFORT_LABEL, modelOptionText, offeredOn, useModels } from "@/lib/models";
+import { usePromptTextProps } from "@/lib/autocorrect";
 
 /**
  * A cloud workspace's scheduled tasks (PRO-37): the list, with what each
@@ -318,6 +319,7 @@ function ScheduleRow({
 
 function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: string; workspaceId: string; onCancel: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<ScheduleForm>(blankScheduleForm);
+  const textProps = usePromptTextProps();
   const [touched, setTouched] = useState(false);
   // The settings whose cost was agreed to, not a bare tick: an agreement
   // holds only for the cost it was given for.
@@ -415,6 +417,7 @@ function NewScheduleForm({ orgId, workspaceId, onCancel, onCreated }: { orgId: s
         <span className="font-medium">Prompt</span>
         <textarea
           aria-label="Prompt"
+          {...textProps}
           className={`${inputClass} min-h-20 resize-y`}
           placeholder="What should the agent do each time? It cannot be a slash command or a “!” shell command."
           value={form.prompt}

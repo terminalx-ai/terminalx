@@ -58,7 +58,7 @@ export function shareErrorMessage(error: unknown, who?: string): string {
     case "cloud_workspace_share_redundant":
       return `${who ?? "This person"} already has access as owner/admin/creator.`;
     case "cloud_workspace_share_credential_restricted":
-      return "Can send is not available here while the organization has an agent login that only owners and admins may use. Share as view only, or share that login with the whole organization first (Settings → Account → Agent logins).";
+      return "Can send is not available here while the organization has an agent login that only owners and admins may use. Share as view only, or share that login with the whole organization first (Settings → Organizations → Agent logins).";
     case "cloud_workspace_share_requires_organization_access":
       return "Make the workspace visible to the organization first.";
     case "cloud_workspace_share_limit":

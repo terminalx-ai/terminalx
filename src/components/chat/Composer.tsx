@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
+import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
 import { EFFORT_LABEL, PERMISSION_MODES, aliasRuns, modeIsUnguarded, modeLabel, modelForTab, modelGroups, modelNote, pendingSettingsNote, pickerMode, prettyModelId, runningModelName, useModels } from "@/lib/models";
@@ -189,6 +190,7 @@ export function Composer({
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshPickerModels() });
   const modeMenu = useRowMenu();
   const ref = useRef<HTMLTextAreaElement>(null);
+  const textProps = usePromptTextProps();
   // A file dropped from this computer can be mentioned only to an agent that runs here.
   const mentionDropped = !remote;
   const attach = useImageAttachments({ textareaRef: ref, draft, onDraftChange, mentionFiles: mentionDropped });
@@ -500,6 +502,7 @@ export function Composer({
         <textarea
           ref={ref}
           data-composer
+          {...textProps}
           value={draft}
           onChange={(e) => {
             onDraftChange(e.target.value);

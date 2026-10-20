@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { SHORTCUTS_VERSION, migrateShortcuts, shortcutsVersionOf } from "@/lib/shortcutMigration";
+import type { IssueListFilter } from "@/lib/issueListFilter";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 
 /**
@@ -25,6 +26,12 @@ export interface Prefs {
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
   foldToolCalls: boolean;
+  /**
+   * The system's spelling correction, smart quotes and dashes, and text
+   * replacements in the fields where the reader writes to an agent, and in the
+   * notes beside them (see `@/lib/autocorrect`). Off unless the reader turned it on.
+   */
+  autocorrect: boolean;
   lastProject: string | null;
   lastAgent: string;
   lastModel: Record<string, string>;
@@ -35,6 +42,8 @@ export interface Prefs {
   issueCloudProject: string | null;
   /** Issue pipeline settings of cloud projects, by project key. Kept here; each issue session started from here takes them to its workspace. */
   cloudIssuePipelines: Record<string, IssuePipelineSettings>;
+  /** The Issues list's filter and sort, by project and tracker (`issueFilterKey`). */
+  issueFilters: Record<string, Partial<IssueListFilter>>;
   useWorktree: boolean;
   /** The reader ticked "don't ask again" on the bypass warning. */
   bypassConfirmed: boolean;
@@ -110,6 +119,7 @@ const DEFAULTS: Prefs = {
   fontScale: "md",
   transcriptLayout: "wide",
   foldToolCalls: true,
+  autocorrect: false,
   lastProject: null,
   lastAgent: "claude",
   lastModel: {},
@@ -118,6 +128,7 @@ const DEFAULTS: Prefs = {
   issueProvider: "github",
   issueCloudProject: null,
   cloudIssuePipelines: {},
+  issueFilters: {},
   useWorktree: true,
   bypassConfirmed: false,
   sidebarSections: {},
@@ -173,10 +184,13 @@ function load(): Prefs {
     prefs.selectedOrganization = typeof prefs.selectedOrganization === "string" ? prefs.selectedOrganization : null;
     // The project tree ("detailed") is gone; anyone who had it gets the default.
     prefs.sidebarLayout = prefs.sidebarLayout === "list" ? "list" : "simple";
+    prefs.autocorrect = prefs.autocorrect === true;
     prefs.cloudSections = cleanCloudSections(prefs.cloudSections);
     prefs.issueCloudProject = typeof prefs.issueCloudProject === "string" && prefs.issueCloudProject.startsWith("cloud:") ? prefs.issueCloudProject : null;
     const pipelines = prefs.cloudIssuePipelines;
     prefs.cloudIssuePipelines = pipelines && typeof pipelines === "object" && !Array.isArray(pipelines) ? Object.fromEntries(Object.entries(pipelines).filter(([, value]) => !!value && typeof value === "object" && !Array.isArray(value))) : {};
+    // Each entry is checked as it is read (`issueFilterFor`); only the map itself is checked here.
+    if (!prefs.issueFilters || typeof prefs.issueFilters !== "object" || Array.isArray(prefs.issueFilters)) prefs.issueFilters = {};
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;

@@ -2,13 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { onOpenAgentLogins, takeAgentLoginsRequest } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings, takeAgentLoginsRequest } from "@/lib/settingsLinks";
 import { api, type AgentLogin, type AgentLoginConsent, type AgentLoginProvider, type AgentLoginSource, type ClaudeLoginOutcome, type CodexLoginStatus } from "@/lib/api";
 
 /**
- * Agent logins for the organization's cloud workspaces (PRO-79): which
+ * Agent logins for an organization's cloud workspaces (PRO-79): which
  * agents can run there, and connecting, replacing or disconnecting each.
  * Until now this existed only in the web console's launch dialog.
+ *
+ * Each organization has its own (PRO-107): this acts on the one it is given
+ * by id, which need not be the active one, and says which one that is.
  *
  * Owners and admins only; the service refuses the list itself to anyone
  * else, and this says so instead of showing controls that would be refused.
@@ -206,6 +209,11 @@ export function agentLoginMessage(error: unknown, agent?: AgentLoginProvider): s
       return "Another login is being saved. Finish or cancel it first.";
     case "account_context_changed":
       return "The account or organization changed. Refresh before trying again.";
+    // PRO-107: a server that keeps agent logins on the active organization, or one this Mac can only reach while active.
+    case "active_organization_required":
+      return "This server changes an organization's agent logins only while it is the active organization. Make it the active organization, then try again. Nothing was changed.";
+    case "cloud_organization_unavailable":
+      return "This organization's agent logins can't be reached from here: you may no longer be a member, or this server works only in the active organization. Refresh, or make it the active organization.";
     default:
       return "The request could not be confirmed. Refresh to see what is stored, then try again.";
   }
@@ -245,6 +253,13 @@ export function agentLoginStatus(login: AgentLogin | undefined, now = Date.now()
   return { text: `Connected · ${how}${who}${scope} · updated ${new Date(login.updatedAt).toLocaleDateString()}`, warn: false };
 }
 
+/** Whether a workspace's agent can sign in with this login now: stored, not revoked, and not a lent sign-in past its expiry. */
+export function agentLoginUsable(login: AgentLogin | undefined, now = Date.now()): boolean {
+  if (!login || login.state === "disconnected" || login.state === "revoked") return false;
+  const lent = lentUntil(login);
+  return !lent || lent.at > now;
+}
+
 /**
  * The service says the person who connected this login no longer owns or
  * administers the organization. The login is kept (the owner's decision),
@@ -261,6 +276,7 @@ export function agentLoginConfigurerLeft(login: AgentLogin | undefined): boolean
  */
 export function CodexSignInDialog({
   signIn,
+  organization = "this organization",
   busy,
   onOpenPage,
   onCancel,
@@ -269,6 +285,8 @@ export function CodexSignInDialog({
   onReplace,
 }: {
   signIn: CodexSignIn;
+  /** The organization the login is for, by name. */
+  organization?: string;
   busy: boolean;
   onOpenPage: () => void;
   onCancel: () => void;
@@ -292,7 +310,7 @@ export function CodexSignInDialog({
           <DialogDescription>
             {waiting
               ? `Open OpenAI's page, sign in to ChatGPT and enter this code. It works for ${Math.round(signIn.expiresInSeconds / 60)} minutes. Enter it only because you started this sign-in here; if someone else gave you a code, cancel.`
-              : "Codex's own sign-in, run on this Mac for this organization's cloud workspaces."}
+              : `Codex's own sign-in, run on this Mac for the cloud workspaces of ${organization}.`}
           </DialogDescription>
         </DialogHeader>
         {waiting && (
@@ -379,8 +397,25 @@ export function CodexSignInDialog({
   );
 }
 
-export function OrganizationAgentLogins({ contextRevision, organizationName }: { contextRevision: string; organizationName?: string | null }) {
+export function OrganizationAgentLogins({
+  contextRevision,
+  organizationId,
+  organizationName,
+  reveal: revealOnRequest = true,
+  onLogins,
+}: {
+  contextRevision: string;
+  /** The organization whose logins these are: any one the person belongs to (PRO-107). */
+  organizationId: string;
+  organizationName?: string | null;
+  /** Come into view when a message elsewhere asks for this organization's logins. Off where another section of the page shows them too. */
+  reveal?: boolean;
+  /** Each time the list is read: the logins, or null when they could not be listed (refused to a member, or failed). */
+  onLogins?: (logins: AgentLogin[] | null) => void;
+}) {
   const organization = organizationName?.trim() || "this organization";
+  const reported = useRef(onLogins);
+  reported.current = onLogins;
   const [logins, setLogins] = useState<AgentLogin[] | null>(null);
   const [adminOnly, setAdminOnly] = useState(false);
   const [memberStatus, setMemberStatus] = useState<MemberStatus | null>(null);
@@ -405,28 +440,31 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
   const section = useRef<HTMLDivElement>(null);
   const revealing = useRef(false);
   useEffect(() => {
+    if (!revealOnRequest) return;
     const reveal = () => {
-      if (takeAgentLoginsRequest()) revealing.current = true;
+      if (takeAgentLoginsRequest(organizationId)) revealing.current = true;
       if (!revealing.current) return;
       section.current?.scrollIntoView?.({ block: "start" });
       if (!loading) revealing.current = false;
     };
     reveal();
-    return onOpenAgentLogins(reveal);
-  }, [loading]);
+    return onOpenOrganizationSettings(reveal);
+  }, [loading, organizationId, revealOnRequest]);
 
   const load = useCallback(async () => {
     const request = ++epoch.current;
     setLoading(true);
     try {
-      const result = await api.cloudAgentLogins();
+      const result = await api.cloudAgentLogins(organizationId);
       if (request !== epoch.current) return;
       // A reload after a failed save keeps that failure's message on screen.
       setLogins(result.credentials);
       setAdminOnly(false);
+      reported.current?.(result.credentials);
     } catch (failure) {
       if (request !== epoch.current) return;
       setLogins(null);
+      reported.current?.(null);
       const refused = !!failure && typeof failure === "object" && "code" in failure && failure.code === "organization_admin_required";
       setAdminOnly(refused);
       setError(refused ? null : agentLoginMessage(failure));
@@ -436,7 +474,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
         const answers = await Promise.all(
           AGENTS.map(async (agent) => {
             try {
-              const preflight = await api.cloudWorkspacePreflight([], null, agent.launch);
+              const preflight = await api.cloudWorkspacePreflight([], organizationId, agent.launch);
               // Only a check that names this agent counts: an older service answers about the setup, not the organization's logins.
               const check = preflight.checks.find((candidate) => candidate.kind === "agent-credential" && candidate.agent === agent.launch);
               return [agent.id, check ? check.status === "verified" : null] as const;
@@ -450,7 +488,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
     } finally {
       if (request === epoch.current) setLoading(false);
     }
-  }, []);
+  }, [organizationId]);
 
   useEffect(() => {
     void load();
@@ -471,7 +509,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
   /** Begin "Log in with Claude": the app opens the provider's page; the panel then asks for the code it shows. */
   const startSignIn = async (stored: boolean) => {
     if (busy) return;
-    const consent: AgentLoginConsent = { contextRevision, organizationSharing: sharing, machineInstallation: machines, replaceExisting: stored && replace };
+    const consent: AgentLoginConsent = { contextRevision, organizationSharing: sharing, machineInstallation: machines, replaceExisting: stored && replace, organizationId };
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -523,7 +561,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
     if (busy || !signIn) return;
     setBusy(true);
     // Best effort: the attempt expires by itself in ten minutes if this does not reach the service.
-    await api.cloudAgentClaudeLoginCancel(signIn.attemptId, contextRevision).catch(() => undefined);
+    await api.cloudAgentClaudeLoginCancel(signIn.attemptId, contextRevision, organizationId).catch(() => undefined);
     setSignIn(null);
     choose(null);
     setBusy(false);
@@ -648,7 +686,9 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
   return (
     <div ref={section} className="rounded-lg border border-hairline p-3" data-testid="agent-logins">
       <div className="flex items-center justify-between">
-        <div className="text-sm font-medium">Agent logins</div>
+        <div className="text-sm font-medium" data-testid="agent-logins-title">
+          Agent logins for {organization}
+        </div>
         <Button variant="ghost" size="icon-xs" aria-label="Refresh agent logins" disabled={loading || busy}
           onClick={() => {
             setError(null);
@@ -660,8 +700,8 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
         </Button>
       </div>
       <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-        What the agents in this organization's cloud workspaces sign in with. A login is stored encrypted by the account service and is never shown
-        again; workspace machines only ever receive short-lived access made from it.
+        What the agents in the cloud workspaces of {organization} sign in with: one login per agent, for this organization only. A login is
+        stored encrypted by the account service and is never shown again; workspace machines only ever receive short-lived access made from it.
       </p>
 
       {loading && !logins && !adminOnly ? (
@@ -807,7 +847,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                         </span>
                       </label>
                       <p className="text-muted-foreground">
-                        To end it, press Disconnect here. That reaches every workspace of the organization, running ones included: their agents need a
+                        To end it, press Disconnect here. That reaches every workspace of {organization}, running ones included: their agents need a
                         sign-in again once the access already handed to a machine runs out, which lasts until its own expiry. Disconnecting does not sign
                         you out at the provider.
                       </p>
@@ -817,7 +857,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                           disabled={busy || !sharing || !machines || (stored && !replace)}
                           onClick={() =>
                             open.source === "sign-in" && agent.id === "codex"
-                              ? void startCodexSignIn({ contextRevision, organizationSharing: sharing, machineInstallation: machines, replaceExisting: stored && replace })
+                              ? void startCodexSignIn({ contextRevision, organizationSharing: sharing, machineInstallation: machines, replaceExisting: stored && replace, organizationId })
                               : open.source === "sign-in"
                               ? void startSignIn(stored)
                               : void run(
@@ -827,6 +867,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                                   organizationSharing: sharing,
                                   machineInstallation: machines,
                                   replaceExisting: stored && replace,
+                                  organizationId,
                                 }),
                               (saved) => connectedNotice(agent.name, saved),
                               agent.id,
@@ -846,8 +887,8 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                   {open?.source === "disconnect" && (
                     <div className="mt-2 space-y-2 rounded-md border border-destructive/25 bg-background p-2" data-testid="agent-login-disconnect">
                       <p>
-                        Disconnect {agent.name}? The stored login is removed and {agent.name} agents will need a sign-in before they can work again. This
-                        reaches every workspace of the organization, running ones included: nothing is stopped, and access already handed to a machine
+                        Disconnect {agent.name} from {organization}? The stored login is removed and {agent.name} agents will need a sign-in before they
+                        can work again. This reaches every workspace of {organization}, running ones included: nothing is stopped, and access already handed to a machine
                         lasts until its own expiry. The service refuses only while a workspace that was created with this very login chosen for it still
                         exists. Disconnecting does not sign the account out at the provider.
                       </p>
@@ -856,7 +897,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
                           size="xs"
                           variant="destructive"
                           disabled={busy}
-                          onClick={() => void run(() => api.cloudAgentLoginRemove(agent.id, contextRevision), `${agent.name} is disconnected.`)}
+                          onClick={() => void run(() => api.cloudAgentLoginRemove(agent.id, contextRevision, organizationId), `${agent.name} is disconnected from ${organization}.`)}
                         >
                           {busy && <Loader2 className="animate-spin" />}
                           Disconnect {agent.name}
@@ -877,6 +918,7 @@ export function OrganizationAgentLogins({ contextRevision, organizationName }: {
       {codex && (
         <CodexSignInDialog
           signIn={codex}
+          organization={organization}
           busy={busy}
           onOpenPage={() =>
             void api.cloudAgentCodexLoginOpen(codex.attemptId).catch((failure: unknown) => setCodex((current) => (current ? { ...current, detail: agentLoginMessage(failure, "codex") } : current)))

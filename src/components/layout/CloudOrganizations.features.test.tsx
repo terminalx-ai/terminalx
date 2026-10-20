@@ -485,6 +485,29 @@ describe("workspace lifecycle menus", () => {
     expect(within(menu).getByTestId("cloud-add-blank-project").textContent).toContain("admins only");
   });
 
+  // PRO-107: GitHub is on the organization's own page now, not in Settings → Account.
+  it("sends the way to choose repositories to the organization's own page", async () => {
+    const { takeOrganizationRequest } = await import("@/lib/settingsLinks");
+    await standard();
+    mount();
+    let menu = await openMenu("Add project to Beta");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "From repository…" }));
+    const empty = await screen.findByTestId("cloud-no-repositories");
+    expect(empty.textContent).toContain("Choose them on Beta's page in Settings → Organizations, under GitHub.");
+    fireEvent.click(within(empty).getByRole("button", { name: "Open Beta's settings" }));
+    expect(takeOrganizationRequest()).toBe(OTHER);
+    expect(screen.queryByTestId("cloud-add-repository")).toBeNull();
+
+    mocks.api.cloudWorkspaceRepositories.mockResolvedValue({ configured: false, repositories: [] });
+    menu = await openMenu("Add project to Beta");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "From repository…" }));
+    const missing = await screen.findByTestId("cloud-github-not-connected");
+    expect(missing.textContent).toContain("on Beta's page in Settings → Organizations, under GitHub");
+    expect(missing.textContent).not.toContain("Settings → Account");
+    fireEvent.click(within(missing).getByRole("button", { name: "Open Beta's settings" }));
+    expect(takeOrganizationRequest()).toBe(OTHER);
+  });
+
   it("renames, pins, archives and deletes a session from its menu, on a runtime with session/2 only", async () => {
     await standard();
     mount();

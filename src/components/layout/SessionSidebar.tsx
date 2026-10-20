@@ -13,10 +13,10 @@ import { cn } from "@/lib/cn";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
 import { addProject, archiveSession, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
-import { moveChatToProject } from "@/lib/continuation";
+import { ContinuationDialog } from "@/components/session/ContinuationDialog";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
-import type { Project, Workspace } from "@/types/session";
+import type { Project, TabEntry, Workspace } from "@/types/session";
 import { sessionStatus, type SessionEntry } from "@/types/session";
 import { RowTime } from "./SidebarRows";
 import { useFold } from "./useFold";
@@ -160,6 +160,8 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const store = useSessionStore();
   const filter = useSidebarFilter();
   const [error, setError] = useState<string | null>(null);
+  // A chat on its way into a project: the dialog that chooses how its new session starts there.
+  const [moving, setMoving] = useState<{ session: SessionEntry; source: TabEntry; project: Project; worktree: boolean } | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
   const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
   const showAgents = useMemo(() => mixesAgents(store.sessions.filter((session) => !session.archived)), [store.sessions]);
@@ -175,9 +177,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
     action().then(() => setError(null), (cause) => setError(errorMessage(cause)));
   };
   const newChat = run(() => startChat());
-  const move = async (session: SessionEntry, projectPath: string, worktree: boolean) => {
-    const moved = await moveChatToProject({ ...session, title: conversationTitle(session) }, projectPath, worktree);
-    if (!moved.delivered) throw new Error("Moved, but the chat's context could not be confirmed as sent. It is in the new conversation's composer.");
+  const move = (session: SessionEntry, project: Project, worktree: boolean) => {
+    const source = session.tabs.find((tab) => tab.id === session.activeTab) ?? session.tabs[0];
+    if (!source) throw new Error("This chat has no conversation to carry over.");
+    setError(null);
+    setMoving({ session, source, project, worktree: worktree && project.kind !== "folder" });
   };
   const addAndStart = run(async () => {
     const dir = await openDialog({ directory: true, multiple: false, title: "Add a project" });
@@ -235,12 +239,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
                       branch={null}
                       linkTo={{
                         projects,
-                        onMove: (project, worktree) => run(() => move(session, project.path, worktree))(),
+                        onMove: (project, worktree) => run(async () => move(session, project, worktree))(),
                         onAddProject: (worktree) => run(async () => {
                           const dir = await openDialog({ directory: true, multiple: false, title: "Link this chat to a project" });
                           if (typeof dir !== "string") return;
-                          const project = await addProject(dir);
-                          await move(session, project.path, worktree && project.kind !== "folder");
+                          move(session, await addProject(dir), worktree);
                         })(),
                       }}
                     />
@@ -250,10 +253,19 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
             )}
           </>
         )}
-        <CloudOrganizations onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />
+        <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
         <DevelopmentSection />
       </nav>
       </ShowAgents.Provider>
+      {moving && (
+        <ContinuationDialog
+          session={moving.session}
+          source={moving.source}
+          into={{ project: moving.project, worktree: moving.worktree }}
+          onClose={() => setMoving(null)}
+          onLateError={setError}
+        />
+      )}
 
       <div className="flex shrink-0 items-center gap-1 border-t border-hairline px-2 pb-2 pt-1" data-testid="sidebar-account-row">
         {/* The account; Settings keeps the far end. */}

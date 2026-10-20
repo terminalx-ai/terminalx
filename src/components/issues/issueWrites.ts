@@ -5,7 +5,9 @@ export const issueKey = (issue: Pick<Issue, "provider" | "id">) => `${issue.prov
 
 /**
  * The writes to issues that are on their way, by issue, and when each issue
- * was last written to. A read of the list or of an issue that started before
+ * was last written to: a status change is counted while it is out, and
+ * every change made here (assignees, labels, title, description, priority,
+ * status) is `touch`ed as it shows and as it is answered. A read of the list or of an issue that started before
  * a write began or ended reads the issue as it was, so what it says of that
  * issue is not shown over the write. Kept by the view, not by a picker, so an
  * issue opened again while its write is on its way still shows it busy.
@@ -25,10 +27,14 @@ export function useIssueWrites() {
   }, []);
   const begin = useCallback((key: string) => mark(key, 1), [mark]);
   const end = useCallback((key: string) => mark(key, -1), [mark]);
+  /** A change to the issue shown here, optimistic or answered. */
+  const touch = useCallback((key: string) => {
+    lastWrite.current.set(key, ++clock.current);
+  }, []);
   /** The moment a read starts, to hand back to `outdated` with its answer. */
   const readStarted = useCallback(() => clock.current, []);
   /** True when what a read that started at `started` says of the issue is older than what is shown. */
   const outdated = useCallback((key: string, started: number) => counts.current.has(key) || (lastWrite.current.get(key) ?? 0) > started, []);
 
-  return { writing, begin, end, readStarted, outdated };
+  return { writing, begin, end, touch, readStarted, outdated };
 }

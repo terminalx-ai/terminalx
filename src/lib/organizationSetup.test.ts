@@ -3,8 +3,8 @@ import type { CloudWorkspaceListItem } from "@/lib/api";
 import { forgetSetups, loadSetups, newSetup, reconcileSetup, resendable, saveSetup, setupFor, unfinishedCreation, unsettledRequest, type OrganizationSetupRecord, type SetupFacts } from "./organizationSetup";
 
 const USER = "owner@example.test";
-const record = (patch: Partial<OrganizationSetupRecord> = {}): OrganizationSetupRecord => ({ ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", ...patch });
-const facts = (patch: Partial<SetupFacts> = {}): SetupFacts => ({ activeOrganizationId: "org-1", compute: true, repository: true, workspaces: [], ...patch });
+const record = (patch: Partial<OrganizationSetupRecord> = {}): OrganizationSetupRecord => ({ ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", logins: "connected", ...patch });
+const facts = (patch: Partial<SetupFacts> = {}): SetupFacts => ({ activeOrganizationId: "org-1", compute: true, logins: ["claude"], repository: true, workspaces: [], ...patch });
 const workspace = (patch: Record<string, unknown> = {}): CloudWorkspaceListItem =>
   ({ workspace: { id: "ws-1", state: "ready", runtimeActivity: { online: true, reportedAt: 1, activeTurns: 0, pendingApprovals: 0 }, launch: { category: null, sessionId: "s-1" }, ...patch }, latestOperation: null }) as unknown as CloudWorkspaceListItem;
 const withWorkspace = (patch: Partial<OrganizationSetupRecord> = {}) => record({ step: "runtime", workspace: { pending: null, id: "ws-1" }, ...patch });
@@ -58,6 +58,31 @@ describe("the setup record", () => {
 
 describe("reconciling against the server", () => {
   const step = (r: OrganizationSetupRecord, f: SetupFacts) => reconcileSetup(r, f, 99).step;
+
+  // PRO-107: right after the compute connection, the organization's agent logins.
+  it("holds a new setup at the agent logins until the person goes on, with one connected or to set them up later", () => {
+    const fresh = record({ logins: undefined });
+    expect(step(fresh, facts({ logins: [] }))).toBe("logins");
+    // A login connected meanwhile does not leave the step by itself: the person may connect another.
+    expect(step(fresh, facts())).toBe("logins");
+    expect(step(fresh, facts({ logins: null }))).toBe("logins");
+    expect(step(record({ logins: "connected" }), facts())).toBe("workspace");
+    expect(step(record({ logins: "later" }), facts({ logins: [] }))).toBe("workspace");
+    // Still after the compute connection: no cloud, no logins step yet.
+    expect(step(fresh, facts({ compute: false }))).toBe("compute");
+  });
+
+  it("puts a record from before the step back on it only when no agent has a login", () => {
+    const older = record({ logins: undefined, step: "workspace" });
+    expect(step(older, facts())).toBe("workspace");
+    // Not known (a member, or the list failed): held where it was.
+    expect(step(older, facts({ logins: null }))).toBe("workspace");
+    expect(step(older, facts({ logins: [] }))).toBe("logins");
+    // Its setup workspace was chosen to run without an agent: no login is needed for it.
+    expect(step(withWorkspace({ logins: undefined, agent: "terminal-only" }), facts({ logins: [], workspaces: [workspace({ launch: null })] }))).toBe("done");
+    // A completed setup stays completed.
+    expect(step(record({ logins: undefined, step: "done", completedAt: 5 }), facts({ logins: [] }))).toBe("done");
+  });
 
   it("walks the steps in order from what the server says, whatever step was stored", () => {
     expect(step(record({ organizationId: null, step: "create" }), facts())).toBe("create");
