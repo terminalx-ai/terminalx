@@ -85,8 +85,8 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
       const next = models.find((m) => m.id === id);
       if (!harness || !next) return;
       if (!controlled) setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: id } });
-      // The form's own value never keeps an effort the new model does not take.
-      else change({ model: id, effort: effort && next.efforts.includes(effort) ? effort : null });
+      // Only an effort picked here or saved carries over, where the new model takes it; else that model's default applies, as on New Session.
+      else change({ model: id, effort: chosen?.effort && next.efforts.includes(chosen.effort) ? chosen.effort : null });
     },
     selectEffort: (value: string) => {
       if (!harness || !model?.efforts.includes(value)) return;

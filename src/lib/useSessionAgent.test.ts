@@ -91,6 +91,19 @@ describe("a form's own launch settings", () => {
     expect(result.current.selection.effort).toBe("high");
   });
 
+  it("lets the new model's own default apply where no effort was picked, as New Session does", () => {
+    setPrefs({ lastAgent: "codex" });
+    const { result } = renderHook(() => useForm(launchDefaults()));
+    expect(result.current.selection.effort).toBe("medium");
+    // Medium was only GPT-6 Astra's default; GPT-5.6 Sol's own is High.
+    act(() => result.current.selection.selectModel("gpt-5.6-sol"));
+    expect(result.current.value.effort).toBeNull();
+    expect(result.current.selection.effort).toBe("high");
+    const newSession = renderHook(() => useSessionAgent(HARNESSES));
+    act(() => newSession.result.current.selectModel("gpt-5.6-sol"));
+    expect(newSession.result.current.effort).toBe("high");
+  });
+
   it("ignores a model or effort the list does not offer", () => {
     const { result } = renderHook(() => useForm(launchDefaults()));
     act(() => result.current.selection.selectModel("gpt-6-astra"));
