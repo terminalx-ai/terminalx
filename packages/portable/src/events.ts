@@ -114,7 +114,7 @@ export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "de
 
 export type Payload =
   | { type: "recovery"; kind: RecoveryKind | null }
-  | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number }
+  | { type: "turn_started"; model?: string; providerSessionId?: string; promptSeq?: number; startedBy?: string }
   | {
       type: "turn_completed";
       status: TurnStatus;
