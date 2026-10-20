@@ -22,6 +22,50 @@
   starts one from the command line. A runtime that predates this starts a
   plain session, and the page says so. (#433, #461)
 
+## 0.2.15
+
+### Issues
+
+- Post a comment from an issue's detail pane. A comment box sits under the
+  thread, with Write/Preview, dictation and `@` mentions of the people the
+  assignee picker offers (GitHub inserts `@login`, Linear a profile link it
+  turns into a real mention). **Comment** or ⌘/Ctrl+Enter posts; the comment
+  shows in the thread as *Sending…* and becomes a normal comment when the
+  provider answers. A failed post keeps the text in the thread with the
+  reason, **Retry** and **Discard**, and a comment that did land is
+  recognised on the re-read so it is never posted twice. Drafts and failed
+  posts are kept per issue across switching issues and restarting the app.
+  On an open GitHub issue, **Close with comment** posts and then closes; if
+  the close fails after the comment went in, **Try closing again** only
+  closes. (PRO-94, #542)
+- The Issues list has filters and sorting: State, Assignee (anyone, me,
+  unassigned or a person), Labels, the Linear team, and Sort, remembered per
+  project and provider. They replace the "Assigned to me" toggle. GitHub
+  reads the repository's own list with the website's filters, pull requests
+  left out; Linear filters, sorts and searches on its side, so closed issues
+  past the first page can be found. An edit made in the detail pane updates
+  its row at once, and a row that no longer matches the filter stays, dimmed
+  with the reason ("Now Closed", "No longer assigned to you"…), until a
+  refresh that has the change; a list read older than an edit can't undo it.
+  Keyboard, while the Issues view has the focus: Up/Down move through the
+  list, `s` opens the status picker, `a` assignees, `l` labels, `c` the
+  comment box, all listed in Settings → Shortcuts. (PRO-98, #544)
+- **New issue** in the Issues toolbar, or **New issue…** in the command
+  palette, creates a GitHub or Linear issue from the detail column: provider
+  and target (the project's repository or a Linear team), title and
+  description in the Markdown editor, assignees with **Assign to me**,
+  labels, and status and priority on Linear. GitHub repositories' issue
+  templates fill the description, and the title prefix and labels when
+  those are still empty; an edited description is not replaced without
+  asking. The new issue is selected and pinned at the top of the list until
+  a read includes it, and its detail pane opens with **Start session**. The
+  draft is kept per project and provider across Escape, opening another
+  issue and restarting, with **Discard draft** to drop it; a failed create
+  keeps everything and says why, and a create that timed out after
+  succeeding finds the issue it made. ⌘/Ctrl+Enter creates; Enter and IME
+  composition never do. The identifier in an issue's header is now a copy
+  button. (PRO-99, #543)
+
 ### Organizations
 
 - Agent logins are a setting of each organization. Settings → Organizations
@@ -39,6 +83,7 @@
   which agents have no login, with the way to the organization's page.
 - Every "sign in required" message opens the Agent logins of the
   workspace's own organization, not the active one's.
+
 ### Chat
 
 - A turn Claude Code starts by itself — a `/loop` check or scheduled task, a
@@ -58,6 +103,17 @@
   turn: the message it sends opens the turn it starts, the rest stay queued
   behind it, and one the agent has already taken is not sent again. (#551)
 
+- A compaction's summary is folded, collapsed, under the **Context
+  compacted** line instead of appearing as a huge message you sent. It
+  opens no turn and stays out of the composer's history and the last-prompt
+  text, including summaries older tab logs stored as prompts. (#524)
+- Settings → General has an **Autocorrect** switch, off by default. Off
+  leaves what you type exactly as typed in prompts, answers to an agent's
+  questions and notes; on, your keyboard's spelling correction, smart quotes
+  and dashes, and text replacements apply there as before. The setting
+  applies live to every agent-facing field, the typed answer on a question
+  card included. (#525)
+
 ### Sessions
 
 - **Link to a project** in a chat's menu now opens a dialog before anything
@@ -76,6 +132,14 @@
 - New Session and issue starts share one permission picker with each mode's
   hint. Bypass permissions asks first, the same everywhere.
 
+### Cloud workspaces
+
+- Creating a cloud workspace and starting another agent inside one use the
+  same launch-settings component as New Session: the cloud agent list,
+  model, effort and permission mode, with bypass confirmed once. Effort
+  stays valid when the model changes, which fixes the stale effort that
+  could be sent before. (#554)
+
 ### Mobile companion
 
 - A message sent to the agent from the phone shows once, as the prompt of
@@ -86,6 +150,8 @@
   to an agent is marked with the tab and message it became, and the phone
   leaves it out of that tab's conversation; the note-plus-prompt pairs saved
   by earlier phones are hidden too (#541).
+
+These source changes require a separately updated mobile app.
 
 ## 0.2.14
 
