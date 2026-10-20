@@ -229,6 +229,100 @@ describe("buildTranscript", () => {
     expect(t.turns[1].prompt).toBeUndefined();
   });
 
+  // #540: a `/loop` check started by the agent, and a goal sent while it ran.
+  // The terminal showed the check's report, then the goal, then the answer.
+  it("draws a turn the agent started itself with no prompt, and a message queued behind it below its work", () => {
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: true });
+    const started = ev({ type: "turn_started", startedBy: "Scheduled check" });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "assistant_text", text: "first" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      started,
+      toolStart("date", "Bash"),
+      goal,
+    ];
+    let t = buildTranscript(events, true);
+    expect(t.turns).toHaveLength(2);
+    expect(t.turns[1].prompt).toBeUndefined();
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool", "queued"]);
+    expect(t.turns[1].work[0]).toMatchObject({ kind: "status", text: "Scheduled check" });
+    expect(t.turns[1].live).toBe(true);
+    expect(t.workingSince).toBe(Date.parse(started.ts));
+
+    events.push(
+      ev({ type: "assistant_text", text: "No decision is needed from you right now." }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false, durationMs: 12_000 }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "Checking the evaluator" }),
+    );
+    t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined, "a goal for the work"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool", "text"]);
+    expect(t.turns[1].completed?.durationMs).toBe(12_000);
+    expect(t.turns[2].work.map((w) => w.kind === "text" && w.text)).toEqual(["Checking the evaluator"]);
+  });
+
+  it("keeps a message queued behind a turn it has not seen start out of that turn's prompt", () => {
+    // The CLI's hook said it was working before its first record landed.
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: true });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      goal,
+      ev({ type: "turn_started", startedBy: "Scheduled check" }),
+      toolStart("date", "Bash"),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "on it" }),
+    ];
+    const t = buildTranscript(events, true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["start", undefined, "a goal for the work"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["status", "tool"]);
+  });
+
+  it("moves a message drawn as a prompt to where the agent took it, below the work it did first", () => {
+    // Sent as the agent began a turn of its own, before the app knew of it.
+    const goal = ev({ type: "user_message", text: "a goal for the work", queued: false });
+    const events = [
+      goal,
+      ev({ type: "turn_started", startedBy: "Scheduled check" }),
+      toolStart("date", "Bash"),
+      toolDone("date"),
+      ev({ type: "assistant_text", text: "report" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "turn_started", promptSeq: goal.seq }),
+      ev({ type: "assistant_text", text: "answer" }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+    ];
+    let t = buildTranscript(events, false);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, "a goal for the work"]);
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["status", "tool", "text"]);
+    expect(t.turns[0].completed?.status).toBe("ok");
+    expect(t.turns[1].prompt?.seq).toBe(goal.seq);
+    expect(t.turns[1].work.map((w) => w.kind === "text" && w.text)).toEqual(["answer"]);
+
+    // Taken mid-turn, the work before it stays where it was, apart from it.
+    t = buildTranscript([goal, toolStart("ls", "Bash"), ev({ type: "turn_started", promptSeq: goal.seq }), ev({ type: "assistant_text", text: "answer" })], true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, "a goal for the work"]);
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["tool"]);
+    expect(t.turns[1].work.map((w) => w.kind)).toEqual(["text"]);
+  });
+
+  it("drops a turn that only ever held the message it moves", () => {
+    const goal = ev({ type: "user_message", text: "then this", queued: true });
+    const t = buildTranscript(
+      [
+        goal,
+        ev({ type: "user_message", text: "typed in the terminal", queued: false }),
+        ev({ type: "turn_completed", status: "ok", authFailed: false }),
+        ev({ type: "turn_started", promptSeq: goal.seq }),
+      ],
+      false,
+    );
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["typed in the terminal", "then this"]);
+  });
+
   it("reads context occupancy off the latest reading", () => {
     const events = [
       ev({ type: "user_message", text: "go", queued: false }),
@@ -269,5 +363,95 @@ describe("buildTranscript", () => {
     ];
     const work = buildTranscript(events, false).turns[0].work;
     expect(work.map((item) => item.kind)).toEqual(["status", "text", "status"]);
+  });
+
+  // How Claude Code 2.1.300 opens the summary it writes when it compacts (#524).
+  const summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   Open an issue for the banner.";
+
+  it("draws a compaction's summary under the compaction line, never as a prompt (#524)", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Open an issue for the banner", queued: false }),
+      ev({ type: "assistant_text", text: "Opened #523." }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      // Compacted while idle: nothing was running.
+      ev({ type: "context_compacted", preTokens: 219942, postTokens: 13790 }),
+      ev({ type: "compaction_summary", text: summary }),
+      ev({ type: "user_message", text: "How is it going?", queued: false }),
+    ], true);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["Open an issue for the banner", undefined, "How is it going?"]);
+    expect(t.turns[1].work).toEqual([{ kind: "compaction", preTokens: 219942, postTokens: 13790, summary, key: expect.any(String), seq: expect.any(Number) }]);
+    expect(t.contextUsed).toBe(13790);
+  });
+
+  it("keeps a summary in the turn it was compacted in, and a summary with no compaction before it still draws one line", () => {
+    const midTurn = buildTranscript([
+      ev({ type: "user_message", text: "Run the suite", queued: false }),
+      toolStart("c1", "Bash"),
+      toolDone("c1"),
+      ev({ type: "context_compacted", preTokens: 967378, postTokens: 23550 }),
+      ev({ type: "compaction_summary", text: summary }),
+      ev({ type: "assistant_text", text: "The suite passes." }),
+    ], true);
+    expect(midTurn.turns).toHaveLength(1);
+    expect(midTurn.turns[0].work.map((item) => item.kind === "compaction" ? `compaction:${item.summary === summary}` : item.kind)).toEqual(["tool", "compaction:true", "text"]);
+
+    // A second compaction's summary is its own, not the first one's.
+    const twice = buildTranscript([
+      ev({ type: "context_compacted", preTokens: 2 }),
+      ev({ type: "compaction_summary", text: "first" }),
+      ev({ type: "context_compacted", preTokens: 3 }),
+      ev({ type: "compaction_summary", text: "second" }),
+      ev({ type: "compaction_summary", text: "no compaction of its own" }),
+    ], false);
+    const lines = twice.turns.flatMap((turn) => turn.work).map((item) => item.kind === "compaction" && [item.preTokens, item.summary]);
+    expect(lines).toEqual([[2, "first"], [3, "second"], [undefined, "no compaction of its own"]]);
+  });
+
+  it("folds a summary an older log holds as a prompt under the compaction it follows", () => {
+    const t = buildTranscript([
+      ev({ type: "user_message", text: "Open an issue for the banner", queued: false }),
+      ev({ type: "turn_completed", status: "ok", authFailed: false }),
+      ev({ type: "context_compacted", preTokens: 219942, postTokens: 13790 }),
+      ev({ type: "user_message", text: summary, queued: false, cwd: "/repo" }),
+      ev({ type: "recovery", kind: "timeout" }),
+    ], false);
+    expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["Open an issue for the banner", undefined]);
+    expect(t.turns[1].work).toEqual([expect.objectContaining({ kind: "compaction", summary })]);
+
+    // A recovery that was standing is cleared as the summary is taken for a prompt, between the two.
+    const cleared = buildTranscript([
+      ev({ type: "recovery", kind: "failed" }),
+      ev({ type: "context_compacted", preTokens: 219942, postTokens: 13790 }),
+      ev({ type: "recovery", kind: null }),
+      ev({ type: "user_message", text: summary, queued: false }),
+    ], false);
+    expect(cleared.turns.map((turn) => turn.prompt?.text)).toEqual([undefined]);
+    expect(cleared.turns[0].work).toEqual([expect.objectContaining({ kind: "compaction", summary })]);
+  });
+
+  it("leaves a prompt with a named sender alone even straight after a compaction", () => {
+    const author = { userId: "alice", displayName: "Alice" };
+    const t = buildTranscript([
+      ev({ type: "context_compacted", preTokens: 1 }),
+      ev({ type: "user_message", text: summary, queued: false, author }),
+    ], false);
+    expect(t.turns.map((turn) => turn.prompt)).toEqual([undefined, expect.objectContaining({ author, text: summary })]);
+  });
+
+  it("leaves the same words alone where the reader sent them: pasted into a prompt, or queued", () => {
+    const pasted = buildTranscript([ev({ type: "user_message", text: summary, queued: false })], false);
+    expect(pasted.turns[0].prompt?.text).toBe(summary);
+    const later = buildTranscript([
+      ev({ type: "context_compacted", preTokens: 1 }),
+      ev({ type: "assistant_text", text: "Picked up where it left off." }),
+      ev({ type: "user_message", text: summary, queued: false }),
+    ], false);
+    expect(later.turns.map((turn) => turn.prompt?.text)).toEqual([undefined, summary]);
+    const queued = buildTranscript([
+      ev({ type: "user_message", text: "go", queued: false }),
+      ev({ type: "context_compacted", preTokens: 1 }),
+      ev({ type: "user_message", text: summary, queued: true }),
+    ], true);
+    expect(queued.turns[0].work.map((item) => item.kind)).toEqual(["compaction", "queued"]);
   });
 });

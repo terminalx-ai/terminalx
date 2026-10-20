@@ -19,6 +19,234 @@
   which agents have no login, with the way to the organization's page.
 - Every "sign in required" message opens the Agent logins of the
   workspace's own organization, not the active one's.
+### Chat
+
+- A turn Claude Code starts by itself — a `/loop` check or scheduled task, a
+  background task reporting in, a message from another agent — is a turn in
+  the chat: the tab shows the agent working, the turn opens with a line
+  saying what started it ("Scheduled check", or the background task's own
+  summary) and ends with its own "Worked for …". A message sent while it runs
+  is queued behind it and lands after its output, where the terminal shows
+  it; it used to be drawn above the output, as though that were its answer. A
+  background task's `<task-notification>` is no longer taken for something
+  you said. (#540)
+
+### Mobile companion
+
+- A message sent to the agent from the phone shows once, as the prompt of
+  the turn it starts, rather than also as a worktree note. **Send to agent**
+  sends the text and its attachments in one request, so a send that fails
+  leaves no note behind and a retry sends the message once. **Add worktree
+  note** still adds a note and sends nothing to the agent. A note promoted
+  to an agent is marked with the tab and message it became, and the phone
+  leaves it out of that tab's conversation; the note-plus-prompt pairs saved
+  by earlier phones are hidden too (#541).
+
+## 0.2.14
+
+Issues worked from inside the app: a comment thread, status, assignees,
+labels, priority, title and description all editable from the issue detail
+pane, and a `terminalx issues` command for agents whose every write is
+confirmed first; the cloud sidebar's sections, filter and workspace menus
+back in the chat-first sidebar; **Log in with ChatGPT** for Codex in Agent
+logins; a tab bar without the session name, its actions pinned right; cloud
+sessions that say what happened when a machine never checked in, a provider
+is hidden, a workspace is deleted or access is removed; an agent CLI
+installed after the fact that is found without a restart; and a phone that
+notices a workspace someone else started or stopped.
+
+### Issues
+
+- An issue's comments are a thread in the detail pane, under the
+  description: avatar, name, relative time with the exact time on hover,
+  "· edited", and the body as Markdown. The most recent 30 are shown and
+  **Show earlier comments (N)** uncovers older ones 30 at a time; past 2,000
+  comments the oldest are counted and left on the website. **Refresh**
+  re-reads the issue and the thread and keeps what is on screen until the
+  answer arrives. Your own comments have a **…** menu: edit in place in a
+  Write/Preview editor (⌘/Ctrl+Enter saves, Esc cancels, a refused edit
+  keeps the draft) or delete after an inline confirmation. The comments
+  reach the agent too: the issue prompt gains a **## Comments** section for
+  both providers, newest first kept, capped at 12,000 characters with each
+  comment clipped at 3,000. On Linear the pane shows the description alone,
+  so the pasted comments no longer duplicate the thread. (#529, #534)
+- Change an issue's status from the detail header. Linear offers the team's
+  workflow states grouped by type in Linear's order, each with its colour
+  dot and the current one checked; GitHub offers **Close as completed** and
+  **Close as not planned** on an open issue and **Reopen** on a closed one,
+  and the trigger reads "Closed as not planned" when the reason is known.
+  The header and the list row change at once and the provider's answer
+  replaces them; a refusal shows the provider's message and re-reads the
+  issue. **Mod+Shift+S**, in a new Issues group in Settings → Shortcuts,
+  opens the picker while the pane has focus. While a pipeline on a Linear
+  issue has yet to move it to review the picker still works and says the
+  pipeline may move the issue when its pull request opens; the pipeline now
+  leaves alone an issue someone moved by hand past the review state. (#535)
+- "Assigned to …" in the detail header is an assignee picker. On Linear it
+  lists the team's members with avatars, **Assign to me** and **Unassign**,
+  and a pick replaces the assignee. On GitHub it lists the repository's
+  assignable users as checkboxes with **Assign to me** and **Clear**; each
+  tick is one write, and past 10 the rest are greyed out with "An issue can
+  have up to 10 assignees." Search matches names and logins, current
+  assignees are listed first, and only people the provider offers can be
+  picked, so **Assign to me** appears only when the provider would accept
+  you. A refused write shows its message in the picker and re-reads the
+  issue. The header shows every assignee as an avatar stack with all names
+  on hover, list rows show the assignee avatars, and a row in **Assigned to
+  me** that is assigned away stays until the next read, marked "No longer
+  assigned to you". (#532)
+- Edit an issue's labels, priority, title and description from the detail
+  pane. Labels have a searchable picker with colour dots and multi-select
+  that lists the repository's labels on GitHub and the team's on Linear in
+  their groups, and sends the whole set once the picker closes. Priority
+  (Linear only) offers No priority, Urgent, High, Medium and Low with
+  Linear's icons. Click the title to edit it in place: Enter saves, Escape
+  cancels. **Edit** on the description opens a Write/Preview Markdown editor
+  with **Save** and **Cancel**; when the issue changed meanwhile and only a
+  comment or label moved it, the save is retried once, and when the
+  description itself changed nothing is written and the pane offers **Show
+  their text**, **Copy theirs**, **Start again from theirs** and **Replace
+  theirs with mine**. Labels, priority and title update on screen at once
+  and roll back with the provider's message if the write fails. Linear rows
+  show at once and read the whole issue in the background. (#531)
+- GitHub and Linear issues are read and written through one contract.
+  GitHub goes through `gh api` with your own login: every assignee is kept,
+  a pull request's number is refused, assignees are changed so an issue
+  never passes 10, and a label the repository does not have is refused
+  instead of quietly created. Linear reads comments oldest first, offers
+  labels from the team, its parent teams and the workspace with their
+  groups, reads a stale picker id as invalid instead of "couldn't find that
+  issue", checks a description for conflicts just before the write, and no
+  longer pastes comments into the description; the agent's prompt for a
+  Linear issue carries the newest 50 comments under the description, capped
+  at about 12,000 characters with a link to the rest. Failures carry a fixed
+  message per kind, so no token or provider reply can reach the screen.
+  (#526, #533, #534)
+- Agents running inside TerminalX read and update the issue they work on
+  with the app's own credentials: `terminalx issues view` (with
+  `--comments`), `comment`, `status`, `assign`, `label` and `create`, each
+  with `--json`. `#123`, `PRO-42` and GitHub or Linear URLs all name an
+  issue, and `--project` defaults to the calling session's project or the
+  working directory. `--to STATE` must match exactly one state ignoring
+  case, else the error lists the valid states; people and labels follow the
+  same rule, never a guess. Every write is asked for in the same native
+  question the cloud CLI uses, whoever runs the command: **Refuse** is the
+  default, the question expires after 40 seconds, and it backs off after a
+  refusal. (#528)
+
+### Cloud sidebar
+
+- Everything the cloud tree had is back in the chat-first sidebar, in its
+  look. The organization header has **⋯** (refresh, **New section**, **New
+  cloud workspace…**, **Hide organization**; also on right-click), **+**
+  for **From repository…** and **New project…**, a running-slots chip, and
+  Loading, failed and **Offline · last known HH:MM** lines each with
+  **Retry**, plus **Switch** for an organization that is not live. Personal
+  sections are folding rows inside the organization: create, rename (menu,
+  F2 or double-click), move up and down, delete, and **Move to section** ▸
+  on a project. A project's **⋯** has new session, pin, refresh, diagnostics
+  and the workspace lifecycle (stop, resume, archive, unarchive, delete),
+  one submenu per workspace when there are several; a project with several
+  workspaces names each on its own row with its state ("Stopped",
+  "Resuming", …) and its own **⋯**, and a lone workspace's state shows on
+  the project row. Archived workspaces, the Unread / Needs you filter, the
+  notice for a workspace deleted elsewhere, the "N organizations hidden"
+  line and the session menu are back too. (#491)
+- A running cloud session shows its Working mark in the sidebar, taken from
+  the same reading the Dashboard and the filter use, and a stopped
+  workspace's sessions are never marked Working. A workspace nobody has
+  opened offers **Open to load sessions** to admins as it did to members,
+  and once connected its sessions reach the sidebar, the Dashboard and
+  Search. **+** on a cloud project no longer offers to create another
+  workspace when one is Ready but its first prompt once failed, as long as
+  an agent has run there since. After a relaunch the selected cloud session
+  and its unsent draft come back. (#508)
+- A workspace whose first prompt failed on a broken agent login no longer
+  reads "Needs attention" for good: once a session with a tab exists there,
+  or its runtime reports a turn or approval, the failure is history in the
+  sidebar rows, the Dashboard, the workspace header and a project's
+  only-workspace row. A workspace the server flags as needing attention
+  still says so. (#505, #521)
+
+### Cloud workspaces
+
+- A create whose machine never checks in now says so: "The workspace's
+  machine did not finish setting up in time, so it was deleted at the
+  provider. Create the workspace again.", with **Create another** instead of
+  Retry. Needs the matching terminalx-saas release, which gives up on the
+  create and deletes the machine. (#489)
+- Machine0 is hidden unless the server offers it: the new-workspace pickers
+  never list it, provider and environment settings list it only while the
+  organization is still connected to it so an admin can disconnect, and
+  Compute settings show its row only while a policy already limits it.
+  Existing Machine0 workspaces still list, open and delete. A provider the
+  server hides reads "This provider isn't offered right now. Choose another
+  provider." on a create, and settings say a saved connection can still be
+  disconnected, instead of an unavailable error or a retry for a create the
+  server refused. The server half is in terminalx-saas. (#490, #494)
+- A cloud workspace that refuses a new session shows the runtime's own
+  reason, such as "Claude Code is not installed in this workspace", instead
+  of "The workspace could not be created (unavailable)"; a refusal whose
+  message is not text reads as its code. The missing agent CLI on Hetzner
+  is fixed in terminalx-saas. (#492, #495)
+- A workspace whose access was removed no longer reconnects forever from
+  the workspace view: it shows "Your access to this workspace was removed."
+  with **Back** and **Check again**, closes the connection and updates the
+  sidebar row, and reopens only when the list grants a role again. (#504)
+- A session open on a workspace that was deleted, here or elsewhere, shows
+  "This cloud workspace was deleted" with **Back**, instead of "Loading the
+  session…" under a "Development runtime" chip. The side panel says open
+  previews ended with it and nothing reconnects. (#511)
+- A local mirror cut off by a quit resumes after a relaunch: the app follows
+  cloud connections from launch, with the sidebar hidden or Settings open
+  too, instead of staying at "Mirror paused: the workspace is not
+  connected" until the mirror is turned off and on. (#503)
+- The Share dialog reads the organization's members again every time it
+  opens, so someone removed from the organization is no longer offered. A
+  share refused because the person left re-reads the shares and members,
+  drops their stale row and clears the **Add person** picker. (#506)
+- The organization list is read again about every minute while the window
+  is visible and someone is signed in, and when a hidden window is shown
+  again, so being added back to an organization shows within a minute
+  instead of on the next focus or token rotation. (#518)
+
+### Agent logins and CLIs
+
+- Settings → Account → Agent logins offers Codex the same ways to connect
+  as Claude Code. **Log in with ChatGPT** runs Codex's own device-code login
+  in a private throwaway home, so neither `~/.codex` nor an `OPENAI_API_KEY`
+  reaches it. The dialog shows the one-time code large and copyable, with
+  **Open the ChatGPT page and copy the code**, **Copy code**, a link to the
+  page the CLI printed, a live status line, **Cancel** and **Get a new
+  code** after an expiry. Once signed in, the credentials are uploaded to
+  the account service, which alone holds and renews the refresh token, and
+  the row shows the ChatGPT account. The code is never logged or sent to
+  the account service, and the CLI is stopped on cancel or quit. (#483)
+- **Lend this Mac's Codex sign-in** lends the access token, ID token and
+  account id from `$CODEX_HOME/auth.json`, never the refresh token, with
+  the same confirmation as the Claude Code lend. An API key kept there is
+  refused (connect it as an API key), and a login Codex keeps in the
+  Keychain shows as not found. A departed admin's Codex login says "log in
+  with ChatGPT again". (#483)
+- Quitting during a Codex login waits until the login CLI is gone before
+  wiping its throwaway home, so the refresh token never survives a quit.
+  (#509)
+- A Claude Code or Codex installed while the app or a cloud runtime is
+  running is found within seconds, without Settings' Re-check or a resume:
+  a missing CLI is looked for again after two seconds instead of being
+  believed missing for the life of the process. The runtime part needs a
+  runtime release. (#496, #520)
+
+### Tab bar and menus
+
+- The session's name and branch are gone from the tab bar; both stay in the
+  sidebar, and a tab's hover names its session when the workspace has
+  several. **Share**, new chat, the chat/terminal switch and the side panel
+  button sit at the right edge at every width, with the empty room between
+  the **+** and the actions still dragging the window. (#477, #487)
+- A menu or submenu that has to shift to fit stays 8 px inside the window's
+  edges, so a tall workspace submenu no longer ends half a pixel past the
+  bottom. (#522)
 
 ### Workspaces
 
@@ -30,6 +258,30 @@
   file nobody listed, such as `.env`, still keeps the workspace. A newly
   merged workspace that is kept says so in a notice with the full reason, and
   its row's **Why** shows that reason in full. (#476)
+
+### Reliability
+
+- An agent-browser call that passes input while a terminal or CLI is being
+  started no longer hangs: the input goes through a file instead of a pipe
+  whose write end a child spawned at the same moment could inherit. (#510)
+- Debug builds no longer contact the production pairing relay; release
+  builds are unchanged. (#493, #519)
+
+### Mobile companion
+
+- The phone notices a workspace someone else started or stopped: the
+  workspace list is read every 15 seconds while a workspace screen or the
+  Cloud list is open, so an open workspace goes Live within one read instead
+  of staying on "Stopped. Showing the saved conversation; nothing is
+  running." Nothing is read in the background. (#500, #507)
+- The Sharing screen reads the organization's members afresh every time it
+  opens, so someone removed from the organization is no longer offered, and
+  a refused change for someone who left re-reads both lists and drops their
+  row. (#501, #506)
+- "No conversation yet" and "Not readable on this phone yet" are drawn
+  upright instead of upside down. (#512, #515)
+
+These source changes require a separately updated mobile app.
 
 ## 0.2.13
 

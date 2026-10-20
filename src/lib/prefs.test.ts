@@ -38,6 +38,30 @@ describe("permission mode preferences", () => {
   });
 });
 
+describe("autocorrect preference (#525)", () => {
+  it("is off on a fresh install", async () => {
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs().autocorrect).toBe(false);
+  });
+
+  it("is off for someone whose saved preferences predate it, and their other choices stay", async () => {
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ foldToolCalls: false, sounds: false }));
+    const { getPrefs } = await import("./prefs");
+    expect(getPrefs()).toMatchObject({ autocorrect: false, foldToolCalls: false, sounds: false });
+  });
+
+  it("stays on across a restart once turned on, and reads anything but true as off", async () => {
+    const { setPrefs } = await import("./prefs");
+    setPrefs({ autocorrect: true });
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().autocorrect).toBe(true);
+
+    localStorage.setItem("raccoon.prefs", JSON.stringify({ autocorrect: "true" }));
+    vi.resetModules();
+    expect((await import("./prefs")).getPrefs().autocorrect).toBe(false);
+  });
+});
+
 describe("website browser preferences", () => {
   it("asks for a browser when no preference has been saved", async () => {
     const { getPrefs } = await import("./prefs");

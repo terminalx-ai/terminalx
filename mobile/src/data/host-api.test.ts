@@ -57,10 +57,24 @@ describe("mobile chat sends", () => {
     await expect(hostApi(request).postNote("session-1", "hello")).resolves.toEqual({ sent: false, message: "host identity is unavailable" });
   });
 
-  it("preserves whether promotion was queued", async () => {
+  it("sends a message's text to the agent and preserves whether it was queued (#541)", async () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { status: "sent", queued: true } });
 
-    await expect(hostApi(request).promoteNote("session-1", "tab-1", "note-1")).resolves.toEqual({ sent: true, queued: true });
+    await expect(hostApi(request).sendSession("tab-1", "hello")).resolves.toEqual({ sent: true, queued: true });
+    expect(request).toHaveBeenCalledWith("session.send", { tabId: "tab-1", text: "hello" });
+  });
+
+  it("lists which tab a note was promoted to, keeping a note whose promotion it cannot read (#541)", async () => {
+    const plain = { id: "plain", body: "hello", createdAt: 1, author: { userId: "user-1" } };
+    const promoted = { ...plain, id: "promoted", createdAt: 2, promotedTo: [{ tabId: "tab-1", seq: 7 }, { tabId: "tab-2" }] };
+    const unreadable = { ...plain, id: "unreadable", createdAt: 3, promotedTo: "tab-1" };
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { messages: [promoted, unreadable, plain] } });
+
+    await expect(hostApi(request).listNotes("session-1")).resolves.toEqual([
+      plain,
+      { ...promoted, promotedTo: [{ tabId: "tab-1", seq: 7 }] },
+      { ...plain, id: "unreadable", createdAt: 3 },
+    ]);
   });
 
   it("forwards selected attachments with a session message", async () => {

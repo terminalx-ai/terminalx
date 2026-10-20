@@ -15,8 +15,9 @@ import { managesOrganization } from "@/lib/multiOrg";
 import { useTabLog } from "@/lib/agentEvents";
 import { setDraft as setTabDraft, useDraft } from "@/lib/drafts";
 import { buildTranscript } from "@/lib/transcript";
-import { usePickerModels } from "@/lib/cloudModels";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, useModels } from "@/lib/models";
+import { SessionAgentControls } from "@/components/session/SessionAgentControls";
+import { useSessionStore } from "@/lib/sessions";
+import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
 import {
   attachCloudAgentTab,
   closeCloudAgentTab,
@@ -400,6 +401,7 @@ export function provisioningLabel(workspaceState: string | null, wake: WakeResul
   }
 }
 
+/** Another agent in this workspace, with the same launch settings New Session offers for the cloud. */
 function NewAgentForm({
   client,
   onCreate,
@@ -409,55 +411,25 @@ function NewAgentForm({
   onCreate: (params: { agent: string; model?: string; effort?: string | null; mode?: string }) => Promise<void>;
   onCancel: () => void;
 }) {
-  const [agent, setAgent] = useState("claude");
-  const { models, refresh } = usePickerModels(useModels(agent), true, client, agent);
-  const [model, setModel] = useState("");
-  const [effort, setEffort] = useState("");
-  const [mode, setMode] = useState(DEFAULT_PERMISSION_MODE);
+  const { harnesses } = useSessionStore();
+  const [launch, setLaunch] = useState(launchDefaults);
+  // The workspace's own models once it answers; until then the cloud's aliases.
+  const selection = useSessionAgent(harnesses, false, client, { value: launch, onChange: setLaunch });
+  const { harness, modelId, effort, mode } = selection;
   const [busy, setBusy] = useState(false);
-  const modelId = models.some((m) => m.id === model) ? model : "";
-  const chosen = models.find((m) => m.id === modelId) ?? models.find((m) => m.isDefault);
-  const select = "rounded-md border border-hairline bg-transparent px-2 py-1 text-xs";
   return (
     <form
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-hairline px-3 py-2 text-xs"
+      className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-hairline px-3 py-2 text-xs"
       data-testid="cloud-agent-new"
       onSubmit={(event) => {
         event.preventDefault();
+        if (!harness) return;
         setBusy(true);
-        void onCreate({ agent, model: modelId || undefined, effort: effort || undefined, mode }).finally(() => setBusy(false));
+        void onCreate({ agent: harness.id, model: modelId || undefined, effort, mode }).finally(() => setBusy(false));
       }}
     >
-      <select aria-label="Agent" className={select} value={agent} onChange={(e) => (setAgent(e.target.value), setModel(""), setEffort(""))}>
-        <option value="claude">Claude</option>
-        <option value="codex">Codex</option>
-      </select>
-      <select aria-label="Model" onFocus={refresh} onPointerDown={refresh} className={select} value={modelId} onChange={(e) => setModel(e.target.value)}>
-        <option value="">Default model</option>
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {modelOptionText(m, models)}
-          </option>
-        ))}
-      </select>
-      {!!chosen?.efforts.length && (
-        <select aria-label="Effort" className={select} value={effort} onChange={(e) => setEffort(e.target.value)}>
-          <option value="">Default effort</option>
-          {chosen.efforts.map((e) => (
-            <option key={e} value={e}>
-              {EFFORT_LABEL[e] ?? e}
-            </option>
-          ))}
-        </select>
-      )}
-      <select aria-label="Permission mode" className={select} value={mode} onChange={(e) => setMode(e.target.value)}>
-        {PERMISSION_MODES.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.label}
-          </option>
-        ))}
-      </select>
-      <Button size="sm" type="submit" disabled={busy}>
+      <SessionAgentControls selection={selection} />
+      <Button size="sm" type="submit" disabled={busy || !harness}>
         Start agent
       </Button>
       <Button size="sm" type="button" variant="ghost" onClick={onCancel}>

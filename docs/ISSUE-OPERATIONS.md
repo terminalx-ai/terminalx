@@ -12,6 +12,7 @@ interface. The UI never branches on the provider's name; it reads
 | `src-tauri/src/commands.rs` | The `issue_*` Tauri commands |
 | `src/lib/issueOps.ts` | The TypeScript types and one wrapper per command |
 | `src/test/issueOpsMock.ts` | A fake backend with fixture issues for component tests |
+| `src/components/issues/NewIssueForm.tsx` | The new-issue form; its draft is kept per project and provider by `src/lib/newIssueDrafts.ts` |
 
 ## Commands
 
@@ -33,9 +34,48 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 | `issue_set_title(id, title)` | `IssueDetails` |
 | `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedDescription` (or, without it, `edit.expectedUpdatedAt`) turns a stale edit into a `conflict` |
 | `issue_create(input)` | `IssueDetails`. A GitHub issue in the project's repository, or a Linear one in `input.teamId` |
+| `issue_templates()` | `IssueTemplate[]`: the project's Markdown issue templates (`.github/ISSUE_TEMPLATE/*.md` in its checkout; `issue_ops/templates.rs`), with their front matter's name, about, title, labels and assignees, and the body. Takes `projectPath` only |
 
 Every write answers with the issue as re-read from the provider. After a
 failed write the UI reads the issue again: part of a write may have landed.
+
+## The list
+
+`issues_list(filter)` (`issues::github_list` / `issues::linear_list`) reads
+the Issues view's list, 60 at a time. `filter` takes:
+
+| Field | GitHub | Linear |
+| -- | -- | -- |
+| `state` | `open` (default), `closed`, `all` | `open` (default: neither completed nor canceled), `all`, or a state type: `triage`, `backlog`, `unstarted`, `started`, `completed`, `canceled` |
+| `assignee` | `{kind: "me"}`, `{kind: "unassigned"}`, `{kind: "person", id}` (a login) | the same, `id` a user id |
+| `labels` | names; issues with **all** of them | names; issues with **any** of them |
+| `sort` | `updated` (default), `created` (newest), `created_asc` (oldest) | the same, plus `priority` (urgent first, none last) |
+| `search` | GitHub's issue search | the title, or the number (`42`, `ENG-42`) |
+| `teamId` | | the team |
+
+Each matches what the provider's website shows for the same filter. GitHub
+lists are the repository's own (`GET /repos/{repo}/issues` with `state`,
+`assignee` (`none` for unassigned), `labels`, `sort` and `direction`, pull
+requests left out); only free text goes through `gh issue list --search`,
+whose index is the slowest to see a change. Linear's go through
+`issues(filter, sort)`. `terminalx issues list` keeps its order: GitHub's
+newest first, Linear's recently updated first.
+
+Every GitHub list lags a write by a few seconds (2–7 s measured, the
+repository's list included). The view keeps what was
+changed here over a read that started before the change, or whose row is
+older (by the provider's `updatedAt`) than the one the change answered with.
+`assignedToMe` is the older spelling of `assignee: {kind: "me"}`. Rows carry
+`workflowStateType` on Linear (the type `stateType` folds together), and a
+GitHub issue closed as not planned is `canceled`.
+
+The view keeps the filter per project and tracker (`prefs.issueFilters`). An
+issue changed in the detail pane updates its row in place; one that no
+longer matches stays, dimmed with the reason, until the next refresh.
+
+`TERMINALX_LIVE_ISSUE_SANDBOX=1 cargo test live_list_filters -- --ignored --nocapture`
+compares the GitHub lists with the website's search and checks each Linear
+filter, then closes and reopens the two sandbox issues through the closed list.
 
 ## Providers
 

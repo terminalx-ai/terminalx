@@ -16,9 +16,11 @@ export interface SessionSummary {
   tabs: { id: string; title?: string | null; harness: string; status: SessionStatus }[];
 }
 
-export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string } }
+/** A note promoted to a tab's agent: the `seq` of the user message it became (#541). */
+export interface NotePromotion { tabId: string; seq: number }
+export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string }; promotedTo?: NotePromotion[] }
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
-export type PromoteNoteResult = { sent: true; queued: boolean } | { sent: false; message: string };
+export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
 
 export class HostApi {
@@ -116,7 +118,7 @@ export class HostApi {
   async listNotes(sessionId: string): Promise<ChatNote[]> {
     const value = await this.list("chat.list", { worktreeId: sessionId, limit: 100 }) as { messages?: unknown } | null;
     const messages = value?.messages;
-    return Array.isArray(messages) ? messages.filter(isChatNote).sort((left, right) => left.createdAt - right.createdAt) : [];
+    return Array.isArray(messages) ? messages.flatMap(readNote).sort((left, right) => left.createdAt - right.createdAt) : [];
   }
 
   async postNote(sessionId: string, text: string): Promise<PostNoteResult> {
@@ -126,19 +128,7 @@ export class HostApi {
     return { sent: false, message: "The host did not add this note." };
   }
 
-  async promoteNote(sessionId: string, tabId: string, noteId: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
-    const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("chat.promoteToAgent", {
-      worktreeId: sessionId,
-      tabId,
-      messageIds: [noteId],
-      ...(attachments.length ? { attachments } : {}),
-    });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
-    if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
-    return { sent: false, message: "The host did not send this note to the agent." };
-  }
-
-  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<PromoteNoteResult> {
+  async sendSession(tabId: string, text: string, attachments: AttachmentInput[] = []): Promise<SendResult> {
     const result = await this.connection.request<{ status?: unknown; queued?: unknown }>("session.send", {
       tabId,
       text,
@@ -209,4 +199,18 @@ function isChatNote(value: unknown): value is ChatNote {
   const record = value as Record<string, unknown>;
   const author = record.author as Record<string, unknown> | undefined;
   return typeof record.id === "string" && typeof record.body === "string" && typeof record.createdAt === "number" && !!author && typeof author.userId === "string" && (author.displayName === undefined || typeof author.displayName === "string");
+}
+
+/** A promotion this phone cannot read only costs the note its de-duplication; the note is still shown. */
+function readNote(value: unknown): ChatNote[] {
+  if (!isChatNote(value)) return [];
+  const { promotedTo, ...note } = value as ChatNote & { promotedTo?: unknown };
+  const promotions = Array.isArray(promotedTo) ? promotedTo.filter(isNotePromotion) : [];
+  return [promotions.length ? { ...note, promotedTo: promotions } : note];
+}
+
+function isNotePromotion(value: unknown): value is NotePromotion {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.tabId === "string" && typeof record.seq === "number";
 }

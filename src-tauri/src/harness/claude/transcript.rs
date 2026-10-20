@@ -19,6 +19,18 @@
 //! `queued_command` attachment when it was typed while a turn was running —
 //! the CLI hands that one to the model with the next tool result and never
 //! writes a `user` record for it.
+//!
+//! Not every `user` record that starts a turn is the reader's. The CLI starts
+//! turns of its own — a scheduled check, a background task reporting in, a
+//! message from another agent — and writes each as a prompt nobody typed,
+//! often marked meta (#540). Those open a turn without being anybody's
+//! message: see [`started_by`].
+//!
+//! A compaction is two records: a `compact_boundary` saying how far the
+//! context shrank, then the summary the model is handed in place of what was
+//! folded away. The summary is a `user` record too (`isCompactSummary`), but
+//! it is the model's memory of the conversation, not something the reader
+//! said, and it starts no turn (#524).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -297,18 +309,46 @@ pub fn decode_line(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) {
 }
 
 /// [`decode_line`], and what the record says about the turn, for the session
-/// watcher: a prompt opens one; the `turn_duration` record the CLI writes
-/// when it prints "Worked for …", or an interruption, ends it. Both come from
-/// the one parse of the record.
+/// watcher: a prompt opens one, the reader's or one the CLI started itself;
+/// the `turn_duration` record the CLI writes when it prints "Worked for …",
+/// or an interruption, ends it. Both come from the one parse of the record.
 pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>) -> Option<TurnMark> {
     if line.trim().is_empty() {
         return None;
     }
     let v = serde_json::from_str::<Value>(line).ok()?;
-    if v["isSidechain"].as_bool().unwrap_or(false) || v["isMeta"].as_bool().unwrap_or(false) {
+    if v["isSidechain"].as_bool().unwrap_or(false) {
         return None;
     }
     if v["uuid"].as_str().is_some_and(|u| skip.contains(u)) {
+        return None;
+    }
+    if v["type"] == "user" {
+        // What a compaction leaves the model in place of the conversation
+        // (#524). It is a `user` record only because that is how the model
+        // is handed it; the CLI folds it behind "Conversation compacted".
+        // Nobody typed it and it starts nothing, though it carries the
+        // `turnOrigin` of the turn it was written in: so it is read before
+        // any record is taken for the start of a turn.
+        if v["isCompactSummary"].as_bool() == Some(true) {
+            let text = text_of(&v["message"]["content"]);
+            if !text.trim().is_empty() {
+                out.push(Payload::CompactionSummary { text });
+            }
+            return None;
+        }
+        // Kept for the CLI's own transcript view; nobody typed it either.
+        if v["isVisibleInTranscriptOnly"].as_bool() == Some(true) {
+            return None;
+        }
+        // Ahead of the meta check: a scheduled prompt is written as meta, and
+        // dropping it left the CLI working on a turn the tab thought was over.
+        if let Some(started_by) = started_by(&v) {
+            out.push(Payload::TurnStarted { model: None, provider_session_id: None, prompt_seq: None, started_by: Some(started_by) });
+            return Some(TurnMark::Opened);
+        }
+    }
+    if v["isMeta"].as_bool().unwrap_or(false) {
         return None;
     }
     match v["type"].as_str().unwrap_or("") {
@@ -400,6 +440,68 @@ fn decode_user(v: &Value, out: &mut Vec<Payload>) {
     }
     let text = as_typed(prompt);
     out.push(Payload::UserMessage { author: None, text, images: Vec::new(), baseline: None, queued: false, cwd: v["cwd"].as_str().map(String::from) });
+}
+
+/// What started a turn when the prompt in a `user` record is not the
+/// reader's, in the words the chat shows for it (#540).
+///
+/// The CLI says whose a prompt is in `turnOrigin` (2.1.278 on): `human` for
+/// the reader's; `scheduled` for a `/loop` wakeup or a scheduled task,
+/// written as meta; `task_notification` for a background task reporting in,
+/// whose text is the `<task-notification>` markup; `peer` for another
+/// agent's message, also meta; `sdk` for a non-interactive run. Some records
+/// name only `origin.kind` (a task notification as `task-notification`), and
+/// the oldest name neither: those are the reader's.
+///
+/// The `scheduled_task_fire` system record that comes before a scheduled
+/// prompt does not open its turn. It can land ahead of the `turn_duration`
+/// of the turn before (2.1.295–2.1.303 wrote it so in a quarter of the fires
+/// on record), and would have that turn's end close this one.
+fn started_by(v: &Value) -> Option<String> {
+    let content = &v["message"]["content"];
+    if content.as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool_result")) {
+        return None;
+    }
+    let origin = v["turnOrigin"].as_str().or_else(|| v["origin"]["kind"].as_str())?;
+    Some(match origin {
+        "human" => return None,
+        "scheduled" => "Scheduled check".into(),
+        // The CLI's own summary: "Background command "…" completed (exit
+        // code 0)", "Agent "…" finished", "Monitor event: …".
+        "task_notification" | "task-notification" => {
+            tagged(&text_of(content), "summary").filter(|summary| !summary.is_empty()).unwrap_or("A background task reported in").into()
+        }
+        "peer" => "Message from another agent".into(),
+        "sdk" => "Prompt from the Agent SDK".into(),
+        _ => "Started by the agent".into(),
+    })
+}
+
+/// Who put the prompt a `UserPromptSubmit` frame is about where it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptSource {
+    /// The reader, in the CLI's own input or the app typing into it.
+    Reader,
+    /// The CLI itself, starting a turn nobody prompted (#540).
+    Agent,
+    /// An event being handed to the CLI, heard before the CLI has taken it.
+    /// No turn has started.
+    Enqueued,
+}
+
+/// Whose prompt a `UserPromptSubmit` frame is about. Claude Code's schema
+/// names it in `source` (2.1.304): `user` from its input; `loop_wakeup`,
+/// `schedule_wakeup`, `system` and `sdk` for turns it starts itself; and
+/// `poll_event` for an event it has yet to take. It also says payloads may
+/// leave the field out while it rolls out, and 2.1.304 did, for a `/loop`
+/// wakeup: a frame without it is taken to be the reader's, as every prompt
+/// was before it, and the transcript's record is what says otherwise.
+pub fn prompt_source(frame: &Value) -> PromptSource {
+    match frame["source"].as_str() {
+        None | Some("user") => PromptSource::Reader,
+        Some("poll_event") => PromptSource::Enqueued,
+        Some(_) => PromptSource::Agent,
+    }
 }
 
 /// The model and effort in a status line frame: the JSON the CLI hands its
@@ -522,6 +624,8 @@ mod tests {
                 Payload::UsageUpdate(_) => "usage",
                 Payload::TurnCompleted { .. } => "end",
                 Payload::ContextCompacted { .. } => "compacted",
+                Payload::CompactionSummary { .. } => "summary",
+                Payload::TurnStarted { started_by: Some(_), .. } => "started",
                 _ => "other",
             })
             .collect()
@@ -669,6 +773,144 @@ mod tests {
             assert_eq!(decode_marked(&record, &HashSet::new(), &mut out), None, "{record}");
             assert!(out.is_empty(), "{record}");
         }
+    }
+
+    /// The records Claude Code 2.1.295–2.1.303 wrote around a turn it started
+    /// itself on a schedule (#540), cut down to the keys the decoder reads and
+    /// with the text replaced. As in a quarter of the fires on record, the
+    /// fire lands ahead of the end of the turn before it.
+    const SCHEDULED_TURN: &str = concat!(
+        r#"{"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (Oct 9 6:50pm)","isMeta":false,"isSidechain":false,"uuid":"fire","cwd":"/tmp/x","sessionId":"s","taskId":"t1","version":"2.1.302"}"#,
+        "\n",
+        r#"{"type":"system","subtype":"stop_hook_summary","hookCount":1,"isSidechain":false,"uuid":"hooks","cwd":"/tmp/x","sessionId":"s","version":"2.1.302"}"#,
+        "\n",
+        r#"{"type":"system","subtype":"turn_duration","durationMs":418000,"isMeta":false,"isSidechain":false,"uuid":"before","cwd":"/tmp/x","sessionId":"s","version":"2.1.302"}"#,
+        "\n",
+        r#"{"type":"user","isMeta":true,"turnOrigin":"scheduled","promptSource":"system","scheduledTaskId":"t1","isSidechain":false,"uuid":"sched","userType":"external","cwd":"/tmp/x","sessionId":"s","version":"2.1.302","message":{"role":"user","content":"Report the job's status"}}"#,
+        "\n",
+        r#"{"type":"assistant","isSidechain":false,"uuid":"s1","cwd":"/tmp/x","sessionId":"s","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_s1","name":"Bash","input":{"command":"date -u"}}]}}"#,
+        "\n",
+        r#"{"type":"user","isSidechain":false,"uuid":"s2","cwd":"/tmp/x","sessionId":"s","message":{"role":"user","content":[{"tool_use_id":"toolu_s1","type":"tool_result","content":"Mon Oct 20 08:05:00 UTC 2026"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","isSidechain":false,"uuid":"s3","cwd":"/tmp/x","sessionId":"s","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"No decision is needed from you right now."}]}}"#,
+        "\n",
+        r#"{"type":"system","subtype":"turn_duration","durationMs":12000,"isMeta":false,"isSidechain":false,"uuid":"after","cwd":"/tmp/x","sessionId":"s","version":"2.1.302"}"#,
+        "\n",
+    );
+
+    /// A `user` record the CLI wrote for a turn it started itself, in the
+    /// shape 2.1.287–2.1.303 wrote for `turn_origin`, text replaced.
+    fn started_record(turn_origin: &str, extra: &str, content: &str) -> String {
+        format!(r#"{{"type":"user","turnOrigin":"{turn_origin}","promptSource":"system"{extra},"isSidechain":false,"uuid":"o-{turn_origin}","userType":"external","cwd":"/tmp/x","sessionId":"s","message":{{"role":"user","content":"{content}"}}}}"#)
+    }
+
+    const NOTIFICATION: &str = r#"<task-notification>\n<task-id>b3a8zex3u</task-id>\n<tool-use-id>toolu_015J</tool-use-id>\n<output-file>/tmp/x/tasks/b3a8zex3u.output</output-file>\n<status>completed</status>\n<summary>Background command \"Watch the CI run\" completed (exit code 0)</summary>\n</task-notification>"#;
+
+    fn started_by_of(line: &str) -> (Vec<Payload>, Option<TurnMark>) {
+        let mut out = Vec::new();
+        let mark = decode_marked(line, &HashSet::new(), &mut out);
+        (out, mark)
+    }
+
+    fn said(payloads: &[Payload]) -> Vec<String> {
+        payloads.iter().filter_map(|p| match p { Payload::TurnStarted { started_by: Some(by), prompt_seq: None, .. } => Some(by.clone()), _ => None }).collect()
+    }
+
+    /// #540. A scheduled turn is written as a meta prompt, which was dropped
+    /// with every other meta record: nothing opened the turn, and the tab
+    /// sent the reader's next message as though the CLI were idle. It opens
+    /// one turn and closes it, and is nobody's message.
+    #[test]
+    fn a_scheduled_turn_opens_and_closes_one_turn_with_no_message() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(SCHEDULED_TURN.as_bytes());
+        assert_eq!(kinds(&p), ["started", "tool", "result", "text"]);
+        assert_eq!(said(&p), ["Scheduled check"]);
+        assert!(!p.iter().any(|p| matches!(p, Payload::UserMessage { .. })), "the scheduled prompt is not drawn as the reader's");
+
+        // The turn before ends, this one opens at its prompt and not at the
+        // fire, and ends at its own `turn_duration`.
+        let marks: Vec<TurnMark> = SCHEDULED_TURN.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Ended, TurnMark::Opened, TurnMark::Ended]);
+        let opener = SCHEDULED_TURN.lines().find(|line| turn_mark(line) == Some(TurnMark::Opened)).unwrap();
+        assert!(opener.contains(r#""uuid":"sched""#), "{opener}");
+
+        // A fork's copy of it is history, as any record is.
+        let mut forked = Streamer::skipping(0, decode_line, uuids_in(SCHEDULED_TURN));
+        assert!(forked.push(SCHEDULED_TURN.as_bytes()).is_empty());
+    }
+
+    /// A background task reporting in is written as a `user` record that is
+    /// not meta and whose text is the notification's markup. It used to be
+    /// decoded as the reader's message; it opens a turn, and the chat is told
+    /// the CLI's own summary of it.
+    #[test]
+    fn a_background_task_reporting_in_opens_a_turn_and_is_not_a_message() {
+        let origin = r#","origin":{"kind":"task-notification","producer":"session-task","runId":"0mv1-a20b"}"#;
+        let (p, mark) = started_by_of(&started_record("task_notification", origin, NOTIFICATION));
+        assert_eq!(said(&p), [r#"Background command "Watch the CI run" completed (exit code 0)"#]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(mark, Some(TurnMark::Opened));
+
+        // 2.1.295–2.1.303 also wrote some with the origin alone.
+        let bare = started_record("task_notification", origin, NOTIFICATION).replace(r#""turnOrigin":"task_notification","#, "");
+        assert!(!bare.contains("turnOrigin"));
+        assert_eq!(said(&started_by_of(&bare).0), [r#"Background command "Watch the CI run" completed (exit code 0)"#]);
+        // A notification with no summary still says what it is.
+        let (p, _) = started_by_of(&started_record("task_notification", origin, "<task-notification><task-id>b1</task-id></task-notification>"));
+        assert_eq!(said(&p), ["A background task reported in"]);
+    }
+
+    #[test]
+    fn every_turn_the_cli_starts_itself_opens_one_and_the_reader_s_prompts_are_still_theirs() {
+        for (origin, extra, expected) in [
+            ("peer", r#","isMeta":true,"origin":{"kind":"peer","from":"a003","name":"fork"}"#, "Message from another agent"),
+            ("sdk", "", "Prompt from the Agent SDK"),
+            ("coordinator", "", "Started by the agent"),
+        ] {
+            let (p, mark) = started_by_of(&started_record(origin, extra, "a prompt nobody typed"));
+            assert_eq!(said(&p), [expected], "{origin}");
+            assert_eq!(mark, Some(TurnMark::Opened), "{origin}");
+        }
+
+        // The reader's, however the CLI came by it: typed, held until a turn
+        // was over (2.1.287 on), or written before there was any origin.
+        for record in [
+            r#"{"type":"user","turnOrigin":"human","promptSource":"typed","origin":{"kind":"human"},"uuid":"h1","cwd":"/tmp/x","message":{"role":"user","content":"typed"}}"#,
+            r#"{"type":"user","turnOrigin":"human","promptSource":"queued","origin":{"kind":"human"},"uuid":"h2","cwd":"/tmp/x","message":{"role":"user","content":"typed"}}"#,
+            r#"{"type":"user","promptSource":"typed","origin":{"kind":"human"},"uuid":"h3","cwd":"/tmp/x","message":{"role":"user","content":"typed"}}"#,
+            r#"{"type":"user","uuid":"h4","cwd":"/tmp/x","message":{"role":"user","content":"typed"}}"#,
+        ] {
+            let (p, mark) = started_by_of(record);
+            assert!(matches!(p.as_slice(), [Payload::UserMessage { text, .. }] if text == "typed"), "{record}");
+            assert_eq!(mark, Some(TurnMark::Opened), "{record}");
+        }
+
+        // A tool's result is never a turn's start, whatever it carries.
+        let result = r#"{"type":"user","turnOrigin":"scheduled","uuid":"r1","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"ok"}]}}"#;
+        let (p, mark) = started_by_of(result);
+        assert_eq!(kinds(&p), ["result"]);
+        assert_eq!(mark, None);
+        // Other meta records are still nothing.
+        assert_eq!(started_by_of(r#"{"type":"user","isMeta":true,"uuid":"m1","message":{"role":"user","content":"<local-command-caveat>x</local-command-caveat>"}}"#), (Vec::new(), None));
+    }
+
+    /// The source Claude Code 2.1.304 names on `UserPromptSubmit`.
+    #[test]
+    fn a_prompt_hook_says_whose_prompt_it_is() {
+        let source = |source: Option<&str>| {
+            let mut frame = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "p"});
+            if let Some(source) = source {
+                frame["source"] = source.into();
+            }
+            prompt_source(&frame)
+        };
+        assert_eq!(source(None), PromptSource::Reader, "before the field: every prompt was the reader's");
+        assert_eq!(source(Some("user")), PromptSource::Reader);
+        for agent in ["loop_wakeup", "schedule_wakeup", "system", "sdk"] {
+            assert_eq!(source(Some(agent)), PromptSource::Agent, "{agent}");
+        }
+        assert_eq!(source(Some("poll_event")), PromptSource::Enqueued);
     }
 
     /// A slash command reads as it was typed, which is what the composer
@@ -949,6 +1191,136 @@ mod tests {
         // Prose about the tag, and a tag that never closes, are left alone.
         assert_eq!(typed(user("what is pasted_content for?")), "what is pasted_content for?");
         assert_eq!(typed(user(r#"a <pasted_content id=\"3 that never ends"#)), r#"a <pasted_content id="3 that never ends"#);
+    }
+
+    /// #524. `/compact` typed into Claude Code 2.1.304 in a real interactive
+    /// session: a turn, the command, then `/exit`. Cut down to the records
+    /// the decoder reads (the request dumps, attachments and other tools'
+    /// hooks of the machine it ran on are left out) with the paths replaced.
+    const MANUAL_COMPACT: &str = include_str!("fixtures/manual_compact.jsonl");
+
+    fn prompts(payloads: &[Payload]) -> Vec<&str> {
+        payloads.iter().filter_map(|p| match p { Payload::UserMessage { text, .. } => Some(text.as_str()), _ => None }).collect()
+    }
+
+    #[test]
+    fn a_manual_compact_draws_the_compaction_and_its_summary_is_nobodys_prompt() {
+        let mut s = Streamer::at(0, decode_line);
+        let p = s.push(MANUAL_COMPACT.as_bytes());
+        assert_eq!(kinds(&p), ["user", "tool", "usage", "result", "text", "usage", "user", "compacted", "summary", "user", "user"]);
+        // 2.1.304 writes the command twice, as typed before the compaction
+        // and as the command it ran after it, so a `/compact` typed once is
+        // read as two prompts. That is the CLI's doing and not settled here;
+        // what this asserts is that the summary between them is no prompt.
+        assert_eq!(prompts(&p), ["Reply with exactly: pong", "/compact", "/compact", "/exit"]);
+        assert!(matches!(&p[7], Payload::ContextCompacted { pre_tokens: Some(61848), post_tokens: Some(20261) }));
+        assert!(matches!(&p[8], Payload::CompactionSummary { text } if text.starts_with("This session is being continued from a previous conversation") && text.contains("Reply with exactly: pong")));
+
+        // The prompt opens a turn and `turn_duration` ends it; the commands
+        // open theirs. The summary says nothing about any of them.
+        let marks: Vec<TurnMark> = MANUAL_COMPACT.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended, TurnMark::Opened, TurnMark::Opened, TurnMark::Opened]);
+        let summary = MANUAL_COMPACT.lines().find(|line| line.contains(r#""isCompactSummary":true"#)).unwrap();
+        assert_eq!(turn_mark(summary), None);
+    }
+
+    /// The shapes Claude Code 2.1.300 wrote when it compacted a session of
+    /// this repository's while it sat idle (the session #524 was seen in),
+    /// cut down to the keys the decoder reads and with the text replaced.
+    /// The turn had ended an hour before; nothing was running.
+    const IDLE_COMPACTION: &str = concat!(
+        r#"{"type":"user","uuid":"p1","cwd":"/tmp/x","origin":{"kind":"human"},"promptSource":"typed","message":{"role":"user","content":"Open an issue for the banner"}}"#, "\n",
+        r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"Opened #523."}]}}"#, "\n",
+        r#"{"type":"system","subtype":"stop_hook_summary","uuid":"h1","hookCount":1,"hookInfos":[],"level":"suggestion"}"#, "\n",
+        r#"{"type":"system","subtype":"turn_duration","uuid":"d1","durationMs":41800,"isMeta":false}"#, "\n",
+        r#"{"type":"last-prompt","lastPrompt":"Open an issue for the banner"}"#, "\n",
+        r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","content":"Conversation compacted","level":"info","isMeta":false,"compactMetadata":{"trigger":"auto","preTokens":219942,"postTokens":13790,"durationMs":50572},"version":"2.1.300"}"#, "\n",
+        r#"{"type":"user","uuid":"s1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   Open an issue for the false banner.\n\n6. All user messages:\n   - \"Open an issue for the banner\""},"version":"2.1.300"}"#, "\n",
+        r#"{"type":"attachment","uuid":"x1","attachment":{"type":"hook_success","hookEvent":"SessionStart","content":""}}"#, "\n",
+        r#"{"type":"system","subtype":"informational","uuid":"i1","content":"Compacted while idle, before the prompt cache expired","level":"info","isMeta":false}"#, "\n",
+    );
+
+    #[test]
+    fn a_compaction_while_idle_opens_no_turn() {
+        let mut s = Streamer::at(0, decode_line).marking(Some(decode_marked));
+        let p = s.push(IDLE_COMPACTION.as_bytes());
+        assert_eq!(kinds(&p), ["user", "text", "compacted", "summary"]);
+        assert!(prompts(&p) == ["Open an issue for the banner"], "the summary is no prompt");
+        assert!(matches!(&p[2], Payload::ContextCompacted { pre_tokens: Some(219942), post_tokens: Some(13790) }));
+        assert!(matches!(&p[3], Payload::CompactionSummary { text } if text.contains("Open an issue for the false banner")));
+
+        // The last word on the turn is that it ended; the compaction after
+        // it opens nothing for the watcher to wait on (#523).
+        assert_eq!(s.take_mark(), Some(TurnMark::Ended));
+        let marks: Vec<TurnMark> = IDLE_COMPACTION.lines().filter_map(turn_mark).collect();
+        assert_eq!(marks, [TurnMark::Opened, TurnMark::Ended]);
+
+        // A tail that was already past the turn's end reads the compaction
+        // and hands over no mark at all.
+        let compaction = IDLE_COMPACTION.find(r#""subtype":"compact_boundary""#).map(|at| IDLE_COMPACTION[..at].rfind('\n').unwrap() + 1).unwrap();
+        let mut later = Streamer::at(0, decode_line).marking(Some(decode_marked));
+        assert_eq!(kinds(&later.push(&IDLE_COMPACTION.as_bytes()[compaction..])), ["compacted", "summary"]);
+        assert_eq!(later.take_mark(), None);
+
+        // The reader's next prompt is the next turn, as ever.
+        let next = r#"{"type":"user","uuid":"p2","cwd":"/tmp/x","origin":{"kind":"human"},"message":{"role":"user","content":"How is it going?"}}"#;
+        assert_eq!(turn_mark(next), Some(TurnMark::Opened));
+    }
+
+    /// The shapes 2.1.303 wrote when it compacted in the middle of a turn,
+    /// between a tool's result and the model carrying on, cut down the same
+    /// way.
+    #[test]
+    fn a_compaction_mid_turn_neither_opens_nor_ends_the_turn() {
+        let records = [
+            r#"{"type":"user","uuid":"p1","cwd":"/tmp/x","origin":{"kind":"human"},"message":{"role":"user","content":"Run the suite"}}"#,
+            r#"{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","uuid":"r1","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"test result: ok"}]}}"#,
+            r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","content":"Conversation compacted","level":"info","isMeta":false,"compactMetadata":{"trigger":"auto","preTokens":967378,"postTokens":23550,"durationMs":61,"precomputed":true},"version":"2.1.303"}"#,
+            r#"{"type":"user","uuid":"s1","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent:\n   Run the suite."},"version":"2.1.303"}"#,
+            r#"{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":[{"type":"text","text":"The suite passes."}]}}"#,
+        ];
+        let mut out = Vec::new();
+        let marks: Vec<TurnMark> = records.iter().filter_map(|line| decode_marked(line, &HashSet::new(), &mut out)).collect();
+        assert_eq!(kinds(&out), ["user", "tool", "result", "compacted", "summary", "text"]);
+        assert_eq!(marks, [TurnMark::Opened]);
+    }
+
+    #[test]
+    fn what_the_cli_keeps_for_its_transcript_view_is_never_a_prompt() {
+        for record in [
+            // Kept for the CLI's own view with no summary flag: nothing to draw.
+            r#"{"type":"user","uuid":"v1","isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"shown under ctrl+o"}}"#,
+            // A summary with nothing in it.
+            r#"{"type":"user","uuid":"v2","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"  "}}"#,
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(record, &HashSet::new(), &mut out), None, "{record}");
+            assert!(out.is_empty(), "{record}");
+        }
+        // A summary written as parts reads as its text, and a fork's copy of
+        // it is history like any other record.
+        let parts = r#"{"type":"user","uuid":"v3","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":"This session is being continued"}]}}"#;
+        let mut out = Vec::new();
+        decode_line(parts, &HashSet::new(), &mut out);
+        assert!(matches!(out.as_slice(), [Payload::CompactionSummary { text }] if text == "This session is being continued"));
+        let mut out = Vec::new();
+        decode_line(parts, &HashSet::from(["v3".to_string()]), &mut out);
+        assert!(out.is_empty());
+    }
+
+    /// The CLI stamps a summary with the origin of the turn it was written
+    /// in: 2.1.295 and 2.1.303 wrote `"turnOrigin":"human"` on two of the
+    /// summaries on record. One written during a turn the CLI started itself
+    /// (#540) is the compaction's all the same, and starts no turn.
+    #[test]
+    fn a_summary_starts_no_turn_whatever_turn_it_was_written_in() {
+        for origin in ["human", "scheduled", "task_notification", "peer", "sdk"] {
+            let record = format!(r#"{{"type":"user","uuid":"s-{origin}","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"turnOrigin":"{origin}","message":{{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."}},"version":"2.1.303"}}"#);
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(&record, &HashSet::new(), &mut out), None, "{origin}");
+            assert_eq!(kinds(&out), ["summary"], "{origin}");
+        }
     }
 
     #[test]

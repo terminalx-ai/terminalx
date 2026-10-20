@@ -40,6 +40,10 @@ import { resetCloudAgents } from "@/lib/cloudAgents";
 import { rememberYou, resetCollab, startCollab, TYPING_IDLE_MS } from "@/lib/cloudCollab";
 import { rememberPeople, resetPeople } from "@/lib/cloudPeople";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { BypassDialog } from "@/components/session/BypassDialog";
+import { getPrefs, setPrefs } from "@/lib/prefs";
+import { refreshHarnesses } from "@/lib/sessions";
+import type { HarnessInfo } from "@/types/session";
 
 const scope = { organizationId: "org-1", workspaceId: "ws-1" };
 
@@ -76,8 +80,16 @@ let checkpoints: Record<string, Checkpoint>;
 let outbox: OutboxEntry[];
 let enqueued: Record<string, unknown>[];
 
+// Claude Code is not installed on this computer; the workspace runs it.
+const HARNESSES = [
+  { id: "claude", name: "Claude Code", available: false },
+  { id: "codex", name: "Codex", available: true },
+] as HarnessInfo[];
+
 function backend(cmd: string, args: Record<string, unknown> = {}) {
   switch (cmd) {
+    case "list_harnesses":
+      return Promise.resolve(HARNESSES);
     case "cloud_agent_cache_load":
       return Promise.resolve({ tabs: cache });
     case "cloud_agent_cache_save":
@@ -171,7 +183,7 @@ function view(state: WorkspaceConnectionState, workspaceState: string | null = "
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   cache = {};
   checkpoints = {};
   outbox = [];
@@ -183,6 +195,8 @@ beforeEach(() => {
   notificationListeners.clear();
   mocks.invoke.mockReset();
   mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => backend(cmd, args));
+  await refreshHarnesses();
+  setPrefs({ lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", bypassConfirmed: false });
 });
 
 afterEach(() => {
@@ -192,6 +206,35 @@ afterEach(() => {
   resetPeople();
   vi.useRealTimers();
 });
+
+const runtimeModel = { efforts: [] as string[], defaultEffort: null as string | null, acceptsImages: true, upgrade: null, description: null, isDefault: false };
+/** What the workspace's own CLIs offer (`agents/1`). */
+const RUNTIME_AGENTS = [
+  {
+    id: "claude", name: "Claude Code", caps: {}, modes: [], defaultMode: "bypassPermissions",
+    models: [
+      { ...runtimeModel, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true, efforts: ["low", "high", "max"], defaultEffort: "high" },
+      { ...runtimeModel, id: "sonnet", label: "Sonnet", alias: true, efforts: ["low", "high"], defaultEffort: "high" },
+      { ...runtimeModel, id: "haiku", label: "Haiku", alias: true },
+      { ...runtimeModel, id: "claude-opus-4-6", label: "Opus 4.6" },
+    ],
+  },
+  {
+    id: "codex", name: "Codex", caps: {}, modes: [], defaultMode: "bypassPermissions",
+    models: [
+      { ...runtimeModel, id: "gpt-6-astra", label: "GPT-6 Astra", isDefault: true, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" },
+      { ...runtimeModel, id: "gpt-5.6-sol", label: "GPT-5.6 Sol", efforts: ["medium", "high"], defaultEffort: "high" },
+    ],
+  },
+];
+
+/** Open one of the shared launch pickers by its title and choose an item. */
+async function choose(picker: string, name: string | RegExp, role: "menuitem" | "menuitemradio" = "menuitemradio") {
+  fireEvent.click(screen.getByTitle(picker));
+  fireEvent.click(await screen.findByRole(role, { name }));
+}
+
+const pill = (title: string) => screen.getByTitle(title).textContent;
 
 describe("cloud agent tabs", () => {
   it("shows a sleeping workspace's chat from cache and checkpoint without attaching, and attaches once the runtime is online", async () => {
@@ -247,27 +290,27 @@ describe("cloud agent tabs", () => {
     render(view(connected()));
     fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
     const form = await screen.findByTestId("cloud-agent-new");
-    expect((within(form).getByLabelText("Permission mode") as HTMLSelectElement).value).toBe("bypassPermissions");
+    expect(within(form).getByTitle("Permissions").textContent).toBe("Bypass permissions");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
     expect(client.createAgentTab.mock.calls[0][0]).toMatchObject({ agent: "claude", mode: "bypassPermissions" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    await choose("Permissions", /^Ask every time/);
+    fireEvent.submit(await screen.findByTestId("cloud-agent-new"));
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(2));
+    expect(client.createAgentTab.mock.calls[1][0]).toMatchObject({ agent: "claude", mode: "manual" });
   });
 
   it("offers pinned models from the workspace when creating a cloud tab", async () => {
-    const base = { efforts: [], defaultEffort: null, acceptsImages: true, upgrade: null, description: null };
-    client.listRuntimeAgents.mockResolvedValue([{
-      id: "claude", name: "Claude Code", caps: {}, modes: [], defaultMode: "bypassPermissions",
-      models: [
-        { ...base, id: "opus", label: "Opus", alias: true, resolved: "claude-opus-4-6", isDefault: true },
-        { ...base, id: "claude-opus-4-6", label: "Opus 4.6", isDefault: false },
-      ],
-    }]);
+    client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS);
     client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
     render(view(connected({ capabilities: ["session/1", "keys/1", "agents/1"] })));
     fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
     const form = await screen.findByTestId("cloud-agent-new");
-    expect(await within(form).findByRole("option", { name: "Opus (latest · Opus 4.6)" })).toBeTruthy();
-    fireEvent.change(within(form).getByLabelText("Model"), { target: { value: "claude-opus-4-6" } });
+    // The workspace's own CLI says what its alias runs.
+    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("Opus (latest · Opus 4.6)"));
+    await choose("Model", "Opus 4.6");
     fireEvent.submit(form);
     await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledWith(expect.objectContaining({ agent: "claude", model: "claude-opus-4-6" })));
   });
@@ -722,5 +765,105 @@ describe("wake refused at the running limit (saas PRO-76)", () => {
       expect(provisioningLabel("archived", null, state)).toBe("Archived (unarchive it to resume)");
     }
     expect(connectionLabel(tries[1]!, "archived")).toBe("Offline (workspace archived)");
+  });
+});
+
+describe("a new agent tab's launch settings (#554)", () => {
+  /** Open the new-tab form on a workspace whose runtime lists its agents and models. */
+  async function openForm() {
+    client.listRuntimeAgents.mockResolvedValue(RUNTIME_AGENTS);
+    client.createAgentTab.mockResolvedValue({ sessionId: "s-9", tabId: "t-9" });
+    render(
+      <>
+        {view(connected({ capabilities: ["session/1", "keys/1", "agents/1"] }))}
+        <BypassDialog />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "New agent tab" }));
+    const form = await screen.findByTestId("cloud-agent-new");
+    await waitFor(() => expect(client.listRuntimeAgents).toHaveBeenCalled());
+    return form;
+  }
+
+  async function started() {
+    fireEvent.submit(screen.getByTestId("cloud-agent-new"));
+    await waitFor(() => expect(client.createAgentTab).toHaveBeenCalledTimes(1));
+    return client.createAgentTab.mock.calls[0][0];
+  }
+
+  it("starts from what New Session would launch with, in the shared pickers, and saves nothing it picks", async () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
+    const form = await openForm();
+    await waitFor(() => expect(within(form).getByTitle("Model").textContent).toBe("GPT-5.6 Sol"));
+    expect(["Agent", "Effort", "Permissions"].map((title) => within(form).getByTitle(title).textContent)).toEqual(["Codex", "medium", "Ask every time"]);
+    // No copy of the pickers is left on the form.
+    expect(within(form).queryAllByRole("combobox")).toEqual([]);
+    await choose("Effort", "high");
+    expect(await started()).toMatchObject({ agent: "codex", model: "gpt-5.6-sol", effort: "high", mode: "manual" });
+    expect(getPrefs()).toMatchObject({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
+  });
+
+  it("offers the agents New Session offers for a cloud project, installed on this computer or not", async () => {
+    await openForm();
+    fireEvent.click(screen.getByTitle("Agent"));
+    const agents = await screen.findAllByRole("menuitem");
+    expect(agents.map((item) => item.textContent)).toEqual(HARNESSES.map((h) => h.name));
+    expect(agents.map((item) => item.getAttribute("aria-disabled"))).toEqual([null, null]);
+  });
+
+  it("switches agent to that agent's saved model and effort, from the workspace's own list", async () => {
+    setPrefs({ lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
+    await openForm();
+    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await choose("Agent", "Codex", "menuitem");
+    expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "high"]);
+    fireEvent.click(screen.getByTitle("Model"));
+    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["GPT-6 Astra", "GPT-5.6 Sol"]);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "GPT-6 Astra" }));
+    // GPT-6 Astra takes high too, so it stays.
+    expect(pill("Effort")).toBe("high");
+    expect(await started()).toMatchObject({ agent: "codex", model: "gpt-6-astra", effort: "high" });
+  });
+
+  it("never sends an effort the chosen model does not take", async () => {
+    await openForm();
+    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await choose("Effort", "max");
+    // Sonnet has no max: its own default goes, not the one picked for Opus.
+    await choose("Model", /^Sonnet/);
+    expect(pill("Effort")).toBe("high");
+    fireEvent.click(screen.getByTitle("Effort"));
+    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["low", "high"]);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(await started()).toMatchObject({ agent: "claude", model: "sonnet", effort: "high" });
+  });
+
+  it("drops the effort for a model without one", async () => {
+    await openForm();
+    await waitFor(() => expect(pill("Model")).toBe("Opus (latest · Opus 4.6)"));
+    await choose("Effort", "max");
+    await choose("Model", /^Haiku/);
+    expect(screen.queryByTitle("Effort")).toBeNull();
+    expect(await started()).toMatchObject({ agent: "claude", model: "haiku", effort: null });
+  });
+
+  it("asks before bypass as New Session does, and keeps the answer to this tab", async () => {
+    setPrefs({ lastMode: "manual" });
+    await openForm();
+    expect(pill("Permissions")).toBe("Ask every time");
+
+    await choose("Permissions", /^Bypass permissions/);
+    const dialog = await screen.findByRole("dialog", { name: "Let Claude Code run without asking?" });
+    expect(pill("Permissions")).toBe("Ask every time");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pill("Permissions")).toBe("Ask every time");
+
+    await choose("Permissions", /^Bypass permissions/);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Bypass permissions" }));
+    await waitFor(() => expect(pill("Permissions")).toBe("Bypass permissions"));
+    expect((await started()).mode).toBe("bypassPermissions");
+    expect(getPrefs().lastMode).toBe("manual");
   });
 });

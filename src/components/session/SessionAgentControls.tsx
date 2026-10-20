@@ -12,15 +12,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, modelGroups, modelNote, modelOptionText } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
-/** Shared by New Session and issue starts; the parent supplies a wrapping row. */
+/**
+ * Agent, model, effort and permission mode for a new session or agent tab.
+ * Shared by New Session, issue starts, a new cloud workspace and a cloud
+ * workspace's new agent tab; the parent supplies a wrapping row.
+ */
 export function SessionAgentControls({ selection }: { selection: ReturnType<typeof useSessionAgent> }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, selectHarness, selectModel, selectEffort } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
+  const modeMenu = useRowMenu();
   const pill = "min-w-0 max-w-full gap-1.5";
 
   return (
@@ -95,6 +100,26 @@ export function SessionAgentControls({ selection }: { selection: ReturnType<type
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+
+      <DropdownMenu {...modeMenu.root}>
+        <DropdownMenuTrigger asChild {...modeMenu.trigger}>
+          <Button variant="secondary" size="sm" className={pill} title="Permissions">
+            <span className="truncate">{PERMISSION_MODES.find((m) => m.id === mode)?.label ?? mode}</span>
+            <ChevronDown className="text-faint" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[14rem]">
+          <DropdownMenuLabel>Permissions</DropdownMenuLabel>
+          <DropdownMenuRadioGroup value={mode} onValueChange={selectMode}>
+            {PERMISSION_MODES.map((m) => (
+              <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
+                <span>{m.label}</span>
+                <span className="text-[11px] text-faint">{m.hint}</span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </>
   );
 }

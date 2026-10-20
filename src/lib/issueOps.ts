@@ -158,6 +158,21 @@ export interface IssueCreate {
   priority?: number | null;
 }
 
+/** A GitHub repository's Markdown issue template, from `.github/ISSUE_TEMPLATE/*.md` in the project's checkout. */
+export interface IssueTemplate {
+  file: string;
+  name: string;
+  about?: string | null;
+  /** The title the issue starts with, often a prefix such as "[Bug] ". */
+  title?: string | null;
+  /** Label names. */
+  labels: string[];
+  /** GitHub logins. */
+  assignees: string[];
+  /** The Markdown under the front matter. */
+  body: string;
+}
+
 export type IssueOpErrorKind =
   | "not_signed_in"
   | "missing_scope"
@@ -211,4 +226,6 @@ export const issueOps = {
     invoke<IssueDetails>("issue_set_description", { projectPath, provider, id, edit }),
   create: (projectPath: string, provider: IssueProvider, input: IssueCreate) =>
     invoke<IssueDetails>("issue_create", { projectPath, provider, input }),
+  /** The project's GitHub issue templates, by file name; none without the folder. */
+  templates: (projectPath: string) => invoke<IssueTemplate[]>("issue_templates", { projectPath }),
 };

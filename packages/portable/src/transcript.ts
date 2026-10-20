@@ -18,6 +18,12 @@ export interface ToolCall {
 /** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
 const RUNTIME_RESTARTED_NOTICE = "The workspace runtime restarted";
 
+/**
+ * How Claude Code begins a compaction's summary. Logs from before #524 hold
+ * that summary as a prompt, straight after the compaction it belongs to.
+ */
+const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previous conversation that ran out of context.";
+
 export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
@@ -26,7 +32,7 @@ export type WorkItem =
   | { kind: "queued"; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; images?: { url: string }[] }
   | { kind: "status"; text: string; key: string; seq: number }
   | { kind: "error"; text: string; key: string; seq: number }
-  | { kind: "compaction"; preTokens?: number; postTokens?: number; key: string; seq: number }
+  | { kind: "compaction"; preTokens?: number; postTokens?: number; summary?: string; key: string; seq: number }
   | { kind: "retry"; attempt: number; maxRetries: number; reason?: string; key: string; seq: number }
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
   | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number };
@@ -96,20 +102,31 @@ function visibleUserText(text: string): string {
 }
 
 /**
- * Take a queued message out of the turn it was a note in. The agent held it
- * until that turn was over and then took it as its next prompt; a
- * `turn_started` naming its seq says so (the message itself is published
- * once, when it is sent). One the agent took mid-turn has no such event and
- * stays where it is.
+ * Take a message out of where it was drawn, for the turn it was in fact the
+ * prompt of; a `turn_started` naming its seq says so (the message itself is
+ * published once, when it is sent). Returns it with the turn it came from.
+ *
+ * A queued message is a note in the turn it was queued behind: the agent held
+ * it until that turn was over and then took it as its next prompt. One the
+ * agent took mid-turn has no such event and stays where it is.
+ *
+ * A message drawn as a turn's prompt can be taken too (#540). It was sent
+ * while the agent was busy on a turn of its own that the app had not heard
+ * of, and what the agent did before taking it was drawn under it.
  */
-function takeQueued(turns: Turn[], seq: number): Turn["prompt"] {
+function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["prompt"]>; from: Turn } | undefined {
   for (let index = turns.length - 1; index >= 0; index--) {
-    const work = turns[index].work;
-    const at = work.findIndex((item) => item.kind === "queued" && item.seq === seq);
+    const turn = turns[index];
+    if (turn.prompt?.seq === seq) {
+      const prompt = turn.prompt;
+      turn.prompt = undefined;
+      return { prompt, from: turn };
+    }
+    const at = turn.work.findIndex((item) => item.kind === "queued" && item.seq === seq);
     if (at < 0) continue;
-    const [held] = work.splice(at, 1);
+    const [held] = turn.work.splice(at, 1);
     if (held.kind !== "queued") return undefined;
-    return { text: held.text, images: held.images, ts: held.ts ?? turns[index].completed?.ts ?? "", seq: held.seq };
+    return { prompt: { author: held.author, text: held.text, images: held.images, ts: held.ts ?? turn.completed?.ts ?? "", seq: held.seq }, from: turn };
   }
   return undefined;
 }
@@ -163,15 +180,33 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
     }
     return current;
   };
+  // A compaction's summary is drawn under the compaction it follows.
+  const attachSummary = (event: AgentEvent, summary: string) => {
+    const turn = ensureTurn(event);
+    const compaction = [...turn.work].reverse().find((item) => item.kind === "compaction");
+    if (compaction?.kind === "compaction" && compaction.summary === undefined) compaction.summary = summary;
+    else turn.work.push({ kind: "compaction", summary, key: `k${event.seq}`, seq: event.seq });
+  };
+  let afterCompaction = false;
 
   for (const event of events) {
     const payload: Payload = event.payload;
+    const followsCompaction = afterCompaction;
+    // The app may clear a standing recovery between the two as the summary is taken for a prompt.
+    if (!event.subagent && payload.type !== "recovery") afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "user_message": {
+        if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
+          attachSummary(event, payload.text);
+          break;
+        }
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
         if (!text.trim() && !payload.images?.length && text !== payload.text) break;
-        if (payload.queued && current && !current.completed) {
-          current.work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
+        // Queued behind the turn the agent is on, even one that has drawn
+        // nothing yet: a turn the agent started itself is heard of before its
+        // first record (#540), and the message is not that turn's prompt.
+        if (payload.queued) {
+          ensureTurn(event).work.push({ kind: "queued", author: payload.author, text, key: `q${event.seq}`, seq: event.seq, ts: event.ts, images: payload.images });
           break;
         }
         for (const call of calls.values()) if (!call.result) call.abandoned = true;
@@ -191,16 +226,28 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         break;
       }
       case "turn_started": {
+        // A turn the agent started itself (#540): nobody's prompt, and a line
+        // saying what started it.
+        if (payload.startedBy) {
+          ensureTurn(event).work.push({ kind: "status", text: payload.startedBy, key: `st${event.seq}`, seq: event.seq });
+          modelRequestOpen = false;
+          workingSince = Date.parse(event.ts);
+        }
         if (payload.promptSeq == null) break;
-        const prompt = takeQueued(turns, payload.promptSeq);
-        if (!prompt) break;
-        if (current && !current.completed && !current.prompt) {
+        const taken = takeMessage(turns, payload.promptSeq);
+        if (!taken) break;
+        const { prompt, from } = taken;
+        // The open turn has no prompt yet, unless it is the one the message
+        // came out of and the agent's earlier work stays there.
+        if (current && !current.completed && !current.prompt && (current !== from || !current.work.length)) {
           current.prompt = prompt;
         } else {
           for (const call of calls.values()) if (!call.result) call.abandoned = true;
           current = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, prompt, work: [], toolCount: 0, editedFiles: 0, live: false };
           turns.push(current);
         }
+        // A turn that only ever held the message goes with it.
+        if (from !== current && !from.prompt && !from.work.length && !from.completed) turns.splice(turns.indexOf(from), 1);
         modelRequestOpen = false;
         workingSince = Date.parse(event.ts);
         break;
@@ -327,6 +374,9 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         turn.work.push({ kind: "compaction", preTokens: payload.preTokens, postTokens: payload.postTokens, key: `k${event.seq}`, seq: event.seq });
         break;
       }
+      case "compaction_summary":
+        attachSummary(event, payload.text);
+        break;
       case "api_retry":
         retry = { attempt: payload.attempt, maxRetries: payload.maxRetries, reason: payload.reason };
         break;
