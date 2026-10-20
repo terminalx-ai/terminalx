@@ -220,6 +220,13 @@ pub enum Payload {
         /// says it is the new turn's prompt and no longer a note in the old.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_seq: Option<u64>,
+        /// Set when nobody prompted this turn: the agent started it itself
+        /// (#540) — a scheduled check, a background task reporting in, a
+        /// message from another agent. The CLI writes each as a prompt no one
+        /// typed; this is what the chat says instead, and a message sent
+        /// while it runs is queued behind it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_by: Option<String>,
     },
     TurnCompleted {
         status: TurnStatus,

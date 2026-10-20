@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Chat
+
+- A turn Claude Code starts by itself — a `/loop` check or scheduled task, a
+  background task reporting in, a message from another agent — is a turn in
+  the chat: the tab shows the agent working, the turn opens with a line
+  saying what started it ("Scheduled check", or the background task's own
+  summary) and ends with its own "Worked for …". A message sent while it runs
+  is queued behind it and lands after its output, where the terminal shows
+  it; it used to be drawn above the output, as though that were its answer. A
+  background task's `<task-notification>` is no longer taken for something
+  you said. (#540)
+
 ## 0.2.14
 
 Issues worked from inside the app: a comment thread, status, assignees,

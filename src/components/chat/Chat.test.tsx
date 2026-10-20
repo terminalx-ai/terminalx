@@ -387,8 +387,9 @@ describe("a message sent while the agent worked", () => {
         <Chat sessionId="s" transcript={transcript} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onSendQueuedNow={sendNow} />
       </TooltipProvider>,
     );
-    expect(screen.getAllByTestId("queued-message").map((card) => card.textContent)).toEqual([expect.stringContaining("waiting now")]);
-    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual(["go", "taken long ago", "next"]);
+    expect(screen.getAllByTestId("queued-message").map((card) => card.textContent)).toEqual([expect.stringContaining("taken long ago"), expect.stringContaining("waiting now")]);
+    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual(["go", "next"]);
+    // One Send now, on the message behind the running turn.
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
     expect(sendNow).toHaveBeenCalledWith(6);
   });

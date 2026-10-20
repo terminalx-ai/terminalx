@@ -812,6 +812,34 @@ fn a_queued_prompt_sent_now_starts_the_turn_it_is_typed_again_for() {
     }
 }
 
+/// A "Send now" that crosses a take the tab has not read yet: the CLI wrote
+/// that it took the message mid-turn just before the Escape went in. That
+/// record is still the take, not the prompt typed again: the turn it is read
+/// in is not over, and nothing has been typed. Read as the retyped prompt,
+/// it opened a turn inside the running one, which never closed.
+#[test]
+fn a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "").with_pane();
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("use staging", 0), "{kind:?}");
+        let seq = rig.queued_seq("use staging");
+
+        rig.manager.send_queued_now(SESSION, TAB, seq).unwrap();
+        rig.append(&rig.cli().steer("use staging"));
+        assert!(rig.turn_open(), "{kind:?}");
+        assert!(rig.taken_as_prompts().is_empty(), "{kind:?}: no turn of its own inside the running one");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "taken: use staging"], "{kind:?}");
+
+        // The Escape still stops the turn, and nothing is left to type again.
+        rig.interrupt();
+        assert!(!rig.turn_open(), "{kind:?}: nothing typed again opens another");
+        assert!(rig.held().is_empty(), "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "taken: use staging", "end"], "{kind:?}");
+    }
+}
+
 /// The CLI can also hold a queued prompt until the turn is over and take it
 /// as the next turn's. Still one message, and the turn it starts closes like
 /// any other — whether the `UserPromptSubmit` hook or the record of the
@@ -1225,3 +1253,7 @@ fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
 /// rig and the same two CLIs, and a headless tab beside them.
 #[path = "session_interrupt_tests.rs"]
 mod interrupts;
+
+/// Turns the agent starts itself, and a message sent while one runs (#540).
+#[path = "session_self_started_tests.rs"]
+mod self_started;
