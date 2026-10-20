@@ -5,8 +5,9 @@ import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { agent, api, errorMessage } from "@/lib/api";
 import { continuationPrompt, launchContinuation, moveChatToProject, type ContextMode, type ContinuationContext, type Launched } from "@/lib/continuation";
-import { loadModels } from "@/lib/models";
-import { launchSettingsOf, useSessionAgent } from "@/lib/useSessionAgent";
+import { loadModels, useModels } from "@/lib/models";
+import { usePrefs } from "@/lib/prefs";
+import { handoffStart, launchSettingsOf, useSessionAgent, type LaunchSettings } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/session";
 
@@ -15,7 +16,8 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  * the same settings controls as New Session. Without `into` it is Continue in
  * New Session: a tab beside the source, in the same workspace. With it, a chat
  * moves into a project: a new session starts there, and the chat is archived
- * once it has.
+ * once it has. The settings are this launch's own: what is picked here is not
+ * saved as a preference.
  *
  * Mounted afresh for each opening: no stale selection, mode, or errors. The
  * source stays pinned even when creation selects the destination underneath.
@@ -41,9 +43,15 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const startingRef = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
-  // The source conversation's own settings, each kept while it is valid for the provider chosen.
-  const selection = useSessionAgent(providers, true, null, launchSettingsOf(source));
-  const settings = selection.settings;
+  const [chosen, setChosen] = useState<LaunchSettings | null>(null);
+  const models = useModels();
+  const prefs = usePrefs();
+  // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
+  const value = chosen ?? (loading ? null : handoffStart(launchSettingsOf(source), providers, models, prefs));
+  const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
+  const settings = value && selection.harness
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode }
+    : null;
 
   useEffect(() => {
     active.current = true;

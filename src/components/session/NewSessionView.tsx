@@ -100,7 +100,7 @@ export function NewSessionView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && cloud?.mayStart
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
-  const { harness, modelId, effort, permissionMode } = agentSelection;
+  const { harness, modelId, effort, mode } = agentSelection;
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -163,7 +163,7 @@ export function NewSessionView({
     agent: harness!.id,
     model: modelId,
     effort,
-    mode: permissionMode,
+    mode,
     prompt: text,
     useWorktree,
   });
@@ -244,7 +244,7 @@ export function NewSessionView({
     try {
       const title = text.trim().split("\n")[0].slice(0, 60);
       const images = attach.images;
-      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode } });
+      const s = await createQuickChat({ title, cwd: quickCwd, tab: { harness: harness.id, model: modelId, effort, permissionMode: mode } });
       setText("");
       attach.clear();
       setQuickCwd(null);
@@ -276,7 +276,7 @@ export function NewSessionView({
         onMain: !preset?.cwd && !useWorktree,
         worktreeName: !preset?.cwd && useWorktree ? workspaceName : null,
         cwd: preset?.cwd ?? null,
-        tab: { harness: harness.id, model: modelId, effort, permissionMode },
+        tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
       });
       upsertSession(s);
       setText("");

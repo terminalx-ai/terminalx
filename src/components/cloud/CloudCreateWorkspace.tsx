@@ -39,13 +39,14 @@ import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { quoteText } from "@/components/session/CloudNewSession";
-import { DEFAULT_PERMISSION_MODE, EFFORT_LABEL, PERMISSION_MODES, modelOptionText, offeredOn, useModels } from "@/lib/models";
+import { SessionAgentControls } from "@/components/session/SessionAgentControls";
+import { useSessionStore } from "@/lib/sessions";
+import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
 import { usePromptTextProps } from "@/lib/autocorrect";
 
-const AGENTS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-];
+/** The form's own fields; the agent's settings are the shared pickers'. */
+type FormFields = Omit<CreateForm, "agent" | "model" | "effort" | "mode">;
+
 const POLL_MS = 2000;
 const inputClass = "min-w-0 rounded-md border border-hairline bg-transparent px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/40";
 
@@ -79,17 +80,23 @@ export function CloudCreateWorkspace({
   const [providers, setProviders] = useState<CloudProviderSummary[] | null>(null);
   const [selected, setSelected] = useState<CloudSelectedRepository[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [form, setForm] = useState<CreateForm>({
+  const [form, setForm] = useState<FormFields>({
     name: "",
     provider: null,
     repositories: [],
     prompt: "",
-    agent: "claude",
-    model: "",
-    effort: "",
-    mode: DEFAULT_PERMISSION_MODE,
     accessMode: "private",
   });
+  const { harnesses } = useSessionStore();
+  const [launch, setLaunch] = useState(launchDefaults);
+  // No workspace runs yet to ask: the cloud's aliases, never a version pinned on this computer.
+  const agent = useSessionAgent(harnesses, false, null, { value: launch, onChange: setLaunch });
+  const agentId = agent.harness?.id ?? "";
+  // What is checked, priced and created: the settings as the pickers show them, never a model or effort they dropped.
+  const request = useMemo<CreateForm>(
+    () => ({ ...form, agent: agentId, model: agent.modelId, effort: agent.effort ?? "", mode: agent.mode }),
+    [form, agentId, agent.modelId, agent.effort, agent.mode],
+  );
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
   const [pending, setPending] = useState<PendingCreate | null>(() => loadPending(organizationId));
@@ -103,9 +110,6 @@ export function CloudCreateWorkspace({
     setTrackedState(snapshot);
     if (snapshot) progress.current?.(snapshot);
   }, []);
-  // Aliases only: this list is the desktop's, and the new workspace's CLI may not run a version pinned from it.
-  const models = offeredOn(useModels(form.agent), false);
-  const model = models.find((item) => item.id === form.model) ?? null;
 
   const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
   const loadRepositories = useCallback(() => {
@@ -136,10 +140,10 @@ export function CloudCreateWorkspace({
     [organizationId],
   );
 
-  const update = <K extends keyof CreateForm>(key: K, value: CreateForm[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const update = <K extends keyof FormFields>(key: K, value: FormFields[K]) => setForm((current) => ({ ...current, [key]: value }));
   // The price shown was for the form as it was: any change asks for it again.
-  useEffect(() => setQuoted(null), [form]);
-  const errors = useMemo(() => validateForm(form), [form]);
+  useEffect(() => setQuoted(null), [request]);
+  const errors = useMemo(() => validateForm(request), [request]);
   const busy = step !== null;
 
   const fail = (e: unknown) => {
@@ -154,7 +158,7 @@ export function CloudCreateWorkspace({
   const showPrice = async () => {
     setError(null);
     try {
-      setQuoted(await quoteCreate(api, form, { onStep: setStep }));
+      setQuoted(await quoteCreate(api, request, { onStep: setStep }));
     } catch (e) {
       fail(e);
     } finally {
@@ -167,7 +171,7 @@ export function CloudCreateWorkspace({
     const confirmed = retry ? pending : quoted?.pending ?? null;
     setQuoted(null);
     try {
-      const snapshot = await createWorkspace(api, form, {
+      const snapshot = await createWorkspace(api, request, {
         pending: confirmed,
         onStep: setStep,
         onPending: keep,
@@ -324,60 +328,12 @@ export function CloudCreateWorkspace({
         {errors.prompt && <span className="text-red-500">{errors.prompt}</span>}
       </label>
 
-      <div className="grid grid-cols-2 gap-2 text-xs">
-        <label className="flex flex-col gap-1">
-          <span className="font-medium">Agent</span>
-          <select
-            aria-label="Agent"
-            className={inputClass}
-            value={form.agent}
-            onChange={(event) => setForm((current) => ({ ...current, agent: event.target.value, model: "", effort: "" }))}
-          >
-            {AGENTS.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-medium">Model</span>
-          <select
-            aria-label="Model"
-            className={inputClass}
-            value={form.model}
-            onChange={(event) => setForm((current) => ({ ...current, model: event.target.value, effort: "" }))}
-          >
-            <option value="">Default</option>
-            {models.map((item) => (
-              <option key={item.id} value={item.id}>
-                {modelOptionText(item, models, false)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-medium">Effort</span>
-          <select aria-label="Effort" className={inputClass} value={form.effort} onChange={(event) => update("effort", event.target.value)}>
-            <option value="">Default</option>
-            {(model?.efforts ?? []).map((effort) => (
-              <option key={effort} value={effort}>
-                {EFFORT_LABEL[effort] ?? effort}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="font-medium">Permissions</span>
-          <select aria-label="Permission mode" className={inputClass} value={form.mode} onChange={(event) => update("mode", event.target.value)}>
-            {PERMISSION_MODES.map((mode) => (
-              <option key={mode.id} value={mode.id} title={mode.hint}>
-                {mode.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      <fieldset className="flex flex-col gap-1 text-xs">
+        <legend className="mb-1 font-medium">Agent</legend>
+        <div className="flex flex-wrap items-center gap-1.5" data-testid="cloud-create-launch">
+          <SessionAgentControls selection={agent} />
+        </div>
+      </fieldset>
 
       <div className="flex items-center gap-3 text-xs">
         <span className="font-medium">Visible to</span>

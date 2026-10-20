@@ -179,7 +179,7 @@ export function IssuesView({
   // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
   const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   const agentSelection = useSessionAgent(store.harnesses);
-  const { harness, modelId, effort, permissionMode } = agentSelection;
+  const { harness, modelId, effort, mode } = agentSelection;
   const linkedIssueUrls = useMemo(
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
     [store.sessions],
@@ -368,7 +368,7 @@ export function IssuesView({
           harness: harness.id,
           model: modelId,
           effort,
-          permissionMode,
+          permissionMode: mode,
         },
       });
       upsertSession(s);
@@ -389,7 +389,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, modelId, effort, permissionMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
+  }, [detail, selected, project, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";

@@ -23,7 +23,7 @@ vi.mock("@/lib/models", async (original) => ({
   refreshModels: vi.fn(),
   useModels: (harness?: string) => catalog.filter((m) => !harness || m.harness === harness),
 }));
-import { setPrefs } from "@/lib/prefs";
+import { getPrefs, setPrefs } from "@/lib/prefs";
 import { continuationPrompt } from "@/lib/continuation";
 import { ContinuationDialog } from "./ContinuationDialog";
 const source = { id: "source", harness: "claude", title: "Fix issue", status: "waiting", model: "sonnet", effort: "low", permissionMode: "plan" } as TabEntry;
@@ -67,6 +67,18 @@ it("switches provider to that provider's saved settings, keeps the mode, and lau
   fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
   await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan" }, continuationPrompt(context, "full"), expect.any(Function), undefined));
+});
+it("keeps the dialog's choices to this launch, leaving the saved preferences as they were", async () => {
+  mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
+  const saved = { lastAgent: getPrefs().lastAgent, lastModel: getPrefs().lastModel, lastEffort: getPrefs().lastEffort, lastMode: getPrefs().lastMode };
+  open(); await loaded();
+  await pickAgent("Codex");
+  fireEvent.click(screen.getByTitle("Model"));
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-6" }));
+  expect(shown()).toEqual(["Codex", "GPT-6", "Medium", "Plan"]);
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6", effort: "medium", permissionMode: "plan" }, expect.any(String), expect.any(Function), undefined));
+  expect(getPrefs()).toMatchObject(saved);
 });
 it("falls back to the configured provider and disables full mode with an explanation", async () => {
   mocks.providers.mockResolvedValue([{ ...providers[0], available: false }, providers[1]]);

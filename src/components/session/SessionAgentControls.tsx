@@ -12,17 +12,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { EFFORT_LABEL, PERMISSION_MODES, modeLabel, modelGroups, modelNote, modelOptionText } from "@/lib/models";
+import { EFFORT_LABEL, PERMISSION_MODES, modelGroups, modelNote, modelOptionText } from "@/lib/models";
 import type { useSessionAgent } from "@/lib/useSessionAgent";
 
 /**
- * Everything a new agent conversation is launched with: agent, model, effort
- * and permissions. Shared by New Session, issue starts, and the handoffs
- * (Continue in New Session, Link to a project); the parent supplies a
- * wrapping row. `disabled` holds the choices once the launch has begun.
+ * Agent, model, effort and permission mode for a new session or agent tab.
+ * Shared by New Session, issue starts, a new cloud workspace, a cloud
+ * workspace's new agent tab, and the handoffs (Continue in New Session, Link
+ * to a project); the parent supplies a wrapping row. `disabled` holds the
+ * choices once a launch has begun.
  */
 export function SessionAgentControls({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
-  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, permissionMode, selectHarness, selectModel, selectEffort, selectMode } = selection;
+  const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
   const effortMenu = useRowMenu();
@@ -105,13 +106,13 @@ export function SessionAgentControls({ selection, disabled = false }: { selectio
       <DropdownMenu {...modeMenu.root}>
         <DropdownMenuTrigger asChild {...modeMenu.trigger}>
           <Button variant="secondary" size="sm" className={pill} title="Permissions" disabled={disabled}>
-            <span className="truncate">{modeLabel(permissionMode)}</span>
+            <span className="truncate">{PERMISSION_MODES.find((m) => m.id === mode)?.label ?? mode}</span>
             <ChevronDown className="text-faint" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-[14rem]">
           <DropdownMenuLabel>Permissions</DropdownMenuLabel>
-          <DropdownMenuRadioGroup value={permissionMode} onValueChange={selectMode}>
+          <DropdownMenuRadioGroup value={mode} onValueChange={selectMode}>
             {PERMISSION_MODES.map((m) => (
               <DropdownMenuRadioItem key={m.id} value={m.id} className="flex-col items-start gap-0">
                 <span>{m.label}</span>

@@ -10,9 +10,9 @@ invokes `fork_session` or `tab_handoff`.
 
 The dialog chooses agent, model, effort, and permission mode with
 `SessionAgentControls` and `useSessionAgent`, the same controls New Session and
-issue starts use. They start from the source tab's own settings (a pending
-model, effort, or mode it was asked to switch to counts as its own), and each
-value counts only while it is valid:
+issue starts use, as a controlled form (`{ value, onChange }`). It starts from
+`handoffStart`: the source tab's own settings (a pending model, effort, or mode
+it was asked to switch to counts as its own), each kept only while it is valid:
 
 - The provider must be installed; otherwise the saved provider, then the first
   installed one.
@@ -25,12 +25,12 @@ value counts only while it is valid:
   a Codex approval and sandbox) starts as "Ask every time", never as the saved
   mode, which could be looser than the source (Bypass).
 
-Switching provider falls back to that provider's saved model and effort, and
-switching back finds the source's again. The mode is provider-independent and
-carries over. Bypass permissions goes through `chooseMode`, so it asks once, as
-everywhere else. A choice the reader makes is saved as the preference for the
-next launch, the same on every surface. The controls lock once the destination
-exists, so a retry never launches different settings.
+Switching provider falls back to that provider's saved model and effort. The
+mode is provider-independent and carries over. Bypass permissions goes through
+`chooseMode`, so it asks once, as everywhere else. The choices are this
+launch's own and are not saved as preferences, like the cloud forms' and
+unlike New Session's. The controls lock once the destination exists, so a
+retry never launches different settings.
 
 ## Link a chat to a project
 

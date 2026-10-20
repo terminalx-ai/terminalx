@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useRef } from "react";
 import type { WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { chooseMode } from "@/lib/dialogs";
 import { DEFAULT_PERMISSION_MODE, pickerMode, useModels } from "@/lib/models";
 import { usePickerModels } from "@/lib/cloudModels";
-import { setPrefs, usePrefs } from "@/lib/prefs";
+import { chooseMode } from "@/lib/dialogs";
+import { getPrefs, setPrefs, usePrefs, type Prefs } from "@/lib/prefs";
+import type { ModelInfo } from "@/lib/api";
 import type { HarnessInfo, TabEntry } from "@/types/session";
 
-/** What a new agent conversation is launched with. */
+/** One launch: the agent, its model and effort, and the permission mode it starts in. */
 export interface LaunchSettings {
   harness: string;
   model: string;
@@ -14,7 +15,26 @@ export interface LaunchSettings {
   permissionMode: string;
 }
 
-/** A tab's settings as the start of another launch: what it was last asked to run, pending or not. */
+/**
+ * A form that keeps its own launch settings (a cloud workspace's first agent,
+ * another agent tab in one): nothing it picks is saved as a preference.
+ */
+export interface ControlledLaunch {
+  value: LaunchSettings;
+  onChange: (next: LaunchSettings) => void;
+}
+
+/** What New Session would launch with now: where a controlled form starts. */
+export function launchDefaults(prefs: Prefs = getPrefs()): LaunchSettings {
+  return {
+    harness: prefs.lastAgent,
+    model: prefs.lastModel[prefs.lastAgent] ?? "",
+    effort: prefs.lastEffort[prefs.lastAgent] ?? null,
+    permissionMode: prefs.lastMode,
+  };
+}
+
+/** A tab's settings, as what it was last asked to run, pending or not. */
 export function launchSettingsOf(tab: TabEntry): LaunchSettings {
   return {
     harness: tab.harness,
@@ -22,13 +42,6 @@ export function launchSettingsOf(tab: TabEntry): LaunchSettings {
     effort: tab.requestedEffort ?? tab.effort ?? null,
     permissionMode: tab.requestedPermissionMode || tab.permissionMode,
   };
-}
-
-interface Picked {
-  harness?: string;
-  model: Record<string, string>;
-  effort: Record<string, string>;
-  permissionMode?: string;
 }
 
 /**
@@ -40,44 +53,59 @@ interface Picked {
 const UNOFFERED_START_MODE = "manual";
 
 /**
- * The same preferences and valid launch choices for every new-session surface.
- *
- * `start` is where a surface begins other than the saved preferences (a
- * handoff starts from its source conversation), and each of its values counts
- * only while it is valid: an installed provider, a model that provider lists,
- * an effort that model takes. Its model and effort belong to its provider, so
- * switching to another provider falls back to that one's preferences, and
- * switching back finds them again. Its mode is never swapped for a looser one
- * (see `UNOFFERED_START_MODE`).
- *
- * A choice made here is saved as the preference for the next launch on every
- * surface alike. A surface with a `start` also keeps its own picks over it.
+ * Where a handoff's form starts: its source conversation's settings, each
+ * kept only while it is valid, else the saved preference for the provider,
+ * else its default. The provider must be installed, the model one it lists,
+ * the effort one that model takes. The mode is never swapped for a looser one
+ * (see `UNOFFERED_START_MODE`). `null` when no provider is installed.
  */
-export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClient?: WorkspaceRpcClient | null, start?: LaunchSettings) {
+export function handoffStart(source: LaunchSettings, harnesses: HarnessInfo[], models: ModelInfo[], prefs: Prefs = getPrefs()): LaunchSettings | null {
+  const installed = (id: string) => harnesses.some((h) => h.id === id && h.available);
+  const harness = [source.harness, prefs.lastAgent].find(installed) ?? harnesses.find((h) => h.available)?.id;
+  if (!harness) return null;
+  const own = harness === source.harness;
+  const listed = models.filter((m) => m.harness === harness);
+  const model = [own ? source.model : undefined, prefs.lastModel[harness]]
+    .map((wanted) => (wanted ? listed.find((m) => m.id === wanted) : undefined))
+    .find(Boolean) ?? listed.find((m) => m.isDefault) ?? listed[0];
+  // Nothing valid saved: null, so the form shows the model's own default.
+  const effort = [own ? source.effort : undefined, prefs.lastEffort[harness]].find((wanted) => !!wanted && !!model?.efforts.includes(wanted)) ?? null;
+  const permissionMode = source.permissionMode
+    ? (pickerMode(source.permissionMode)?.id ?? UNOFFERED_START_MODE)
+    : (pickerMode(prefs.lastMode)?.id ?? DEFAULT_PERMISSION_MODE);
+  return { harness, model: model?.id ?? "", effort, permissionMode };
+}
+
+/**
+ * The same preferences and valid launch choices for every new-session surface.
+ * With `controlled`, the choices are the form's own and preferences are only
+ * read, for the saved model and effort of an agent switched to.
+ */
+export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClient?: WorkspaceRpcClient | null, controlled?: ControlledLaunch) {
   const prefs = usePrefs();
-  const [picked, setPicked] = useState<Picked>({ model: {}, effort: {} });
-  const offered = (id?: string) => harnesses.find((h) => h.id === id && (!here || h.available));
-  const harness = start
-    ? (offered(picked.harness) ?? offered(start.harness) ?? offered(prefs.lastAgent) ?? harnesses.find((h) => !here || h.available) ?? null)
-    : (harnesses.find((h) => h.id === prefs.lastAgent) ?? harnesses[0] ?? null);
+  // The bypass confirmation answers later: it must change the value as it is then.
+  const latest = useRef(controlled);
+  latest.current = controlled;
+  const chosen = controlled?.value;
+  const harness = harnesses.find((h) => h.id === (chosen ? chosen.harness : prefs.lastAgent)) ?? harnesses[0] ?? null;
   const listed = useModels(harness?.id);
   const picker = usePickerModels(listed, !here, modelClient, harness?.id);
   const models = harness ? picker.models : [];
-  const id = harness?.id ?? "";
-  const begun = start?.harness === id ? start : undefined;
+  const savedModel = harness ? (chosen ? chosen.model : prefs.lastModel[harness.id]) : undefined;
   // A retired model, another provider's id, or a local pin unavailable in the
   // cloud must never reach the launch payload. Keep prefs intact while loading.
-  const model = [picked.model[id], begun?.model, prefs.lastModel[id]]
-    .map((wanted) => (wanted ? models.find((m) => m.id === wanted) : undefined))
-    .find(Boolean) ?? models.find((m) => m.isDefault) ?? models[0] ?? null;
-  const effort = [picked.effort[id], begun?.effort, prefs.lastEffort[id], model?.defaultEffort]
-    .find((wanted) => !!wanted && !!model?.efforts.includes(wanted)) ?? model?.efforts[0] ?? null;
-  const begunMode = start?.permissionMode ? (pickerMode(start.permissionMode)?.id ?? UNOFFERED_START_MODE) : undefined;
-  const permissionMode = [picked.permissionMode, begunMode, prefs.lastMode]
-    .map((wanted) => (wanted ? pickerMode(wanted)?.id : undefined))
-    .find(Boolean) ?? DEFAULT_PERMISSION_MODE;
-  const keep = (patch: (current: Picked) => Picked) => {
-    if (start) setPicked(patch);
+  const model = models.find((m) => m.id === savedModel) ?? models.find((m) => m.isDefault) ?? models[0] ?? null;
+  const savedEffort = harness ? (chosen ? chosen.effort : prefs.lastEffort[harness.id]) : undefined;
+  const effort = savedEffort && model?.efforts.includes(savedEffort)
+    ? savedEffort
+    : model?.defaultEffort && model.efforts.includes(model.defaultEffort)
+      ? model.defaultEffort
+      : model?.efforts[0] ?? null;
+  const mode = pickerMode(chosen ? chosen.permissionMode : prefs.lastMode)?.id ?? DEFAULT_PERMISSION_MODE;
+
+  const change = (patch: Partial<LaunchSettings>) => {
+    const current = latest.current;
+    if (current) current.onChange({ ...current.value, ...patch });
   };
 
   return {
@@ -89,29 +117,26 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     model,
     modelId: model?.id ?? "",
     effort,
-    permissionMode,
-    settings: harness ? { harness: harness.id, model: model?.id ?? "", effort, permissionMode } : null,
+    mode,
     // Like New Session, only explicit choices are persisted, per provider.
-    selectHarness: (next: string) => {
-      setPrefs({ lastAgent: next });
-      keep((current) => ({ ...current, harness: next }));
+    selectHarness: (id: string) => {
+      if (!controlled) setPrefs({ lastAgent: id });
+      // Another agent starts on its own saved model and effort, as it would on New Session.
+      else if (id !== harness?.id) change({ harness: id, model: prefs.lastModel[id] ?? "", effort: prefs.lastEffort[id] ?? null });
     },
-    selectModel: (next: string) => {
-      if (harness && models.some((m) => m.id === next)) {
-        setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: next } });
-        keep((current) => ({ ...current, model: { ...current.model, [harness.id]: next } }));
-      }
+    selectModel: (id: string) => {
+      const next = models.find((m) => m.id === id);
+      if (!harness || !next) return;
+      if (!controlled) setPrefs({ lastModel: { ...prefs.lastModel, [harness.id]: id } });
+      // Only an effort picked here or saved carries over, where the new model takes it; else that model's default applies, as on New Session.
+      else change({ model: id, effort: chosen?.effort && next.efforts.includes(chosen.effort) ? chosen.effort : null });
     },
-    selectEffort: (next: string) => {
-      if (harness && model?.efforts.includes(next)) {
-        setPrefs({ lastEffort: { ...prefs.lastEffort, [harness.id]: next } });
-        keep((current) => ({ ...current, effort: { ...current.effort, [harness.id]: next } }));
-      }
+    selectEffort: (value: string) => {
+      if (!harness || !model?.efforts.includes(value)) return;
+      if (!controlled) setPrefs({ lastEffort: { ...prefs.lastEffort, [harness.id]: value } });
+      else change({ effort: value });
     },
-    // Bypass asks first, the same everywhere; the mode lands once it is agreed to.
-    selectMode: (next: string) => chooseMode(id, next, (mode) => {
-      setPrefs({ lastMode: mode });
-      keep((current) => ({ ...current, permissionMode: mode }));
-    }),
+    // Bypass is confirmed once, whichever surface picks it.
+    selectMode: (id: string) => chooseMode(harness?.id ?? "", id, (picked) => (latest.current ? change({ permissionMode: picked }) : setPrefs({ lastMode: picked }))),
   };
 }
