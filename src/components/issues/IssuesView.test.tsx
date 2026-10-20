@@ -1103,6 +1103,33 @@ describe("who is working on an issue (#441)", () => {
     expect(await screen.findByText("Fix login timeout")).toBeTruthy();
   });
 
+  it("moves with Up and Down only through the rows a work filter leaves shown", async () => {
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({})] };
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession({ modified: new Date(NOW - 3 * 60 * 60 * 1000).toISOString() })];
+    render(<IssuesView />);
+    await within(await row("Fix login timeout")).findByText("Alice · working");
+    const view = screen.getByTestId("issues-view");
+    const current = () => screen.getAllByRole("button").find((button) => button.getAttribute("aria-current") === "true")?.textContent ?? "";
+    const listedRow = (title: string) => screen.getAllByRole("button").find((button) => button.closest("ul") && button.textContent?.includes(title));
+    const choose = async (label: string) => {
+      fireEvent.pointerDown(screen.getByRole("button", { name: /^Working: / }), { button: 0, ctrlKey: false });
+      fireEvent.click(await screen.findByRole("menuitem", { name: label }));
+    };
+    // #11, Alice's, is hidden by both: Down opens #12, the first row shown, and Up has nowhere above it to go.
+    for (const label of ["Hide issues someone is working on", "Only mine"]) {
+      await choose(label);
+      await waitFor(() => expect(listedRow("Fix login timeout")).toBeUndefined());
+      view.focus();
+      fireEvent.keyDown(view, { key: "ArrowDown" });
+      await waitFor(() => expect(current()).toContain("Repair session target"));
+      expect(document.activeElement).toBe(listedRow("Repair session target"));
+      fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+      expect(current()).toContain("Repair session target");
+      expect(document.activeElement).toBe(listedRow("Repair session target"));
+    }
+    expect(invoke.mock.calls.some(([command, args]) => command === "issue_details" && (args as { id?: string })?.id === "11")).toBe(false);
+  });
+
   it("shows this Mac only, and says so, while signed out", async () => {
     claims = { available: false, reason: "signed_out", now: NOW, liveForSeconds: 300, claims: [] };
     (sessionStore as { sessions: unknown[] }).sessions = [localSession()];

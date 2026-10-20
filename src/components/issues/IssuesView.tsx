@@ -199,7 +199,9 @@ export function IssuesView({
   // Who works on each listed issue: this Mac's sessions, the reader's other machines, teammates.
   const work = useIssueWork(project?.path, provider, list, store.sessions, tick);
   const workOf = (issue: Issue) => work.byIssue.get(workKeyOf(issue));
-  const shownList = workFilter === "all" ? list : list.filter((issue) => (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
+  // The issue just created here stays listed while it is pinned, whoever works on it (PRO-99).
+  const pinnedKey = created.current ? writeKey(created.current.issue) : null;
+  const shownList = workFilter === "all" ? list : list.filter((issue) => writeKey(issue) === pinnedKey || (workFilter === "free" ? !taken(workOf(issue)) : mine(workOf(issue))));
   const workNote = unavailableText(work.answer);
   // Issues with a pipeline here that the list does not hold: closed by their
   // merge, or outside the search. They stay below it, so the record of what
@@ -499,9 +501,9 @@ export function IssuesView({
 
   // Who has the issue shows once that is known: from the row, or from its details.
   const assigneeShown = !!current && !!(current.assignees || current.assignee || !detailLoading);
-  // Up and Down through the rows, the listed ones and then those below them; the row moved to takes the focus.
+  // Up and Down through the rows shown, the listed ones and then those below them; the row moved to takes the focus.
   const move = (by: 1 | -1) => {
-    const rows = [...list, ...unlisted.map((each) => each.issue)];
+    const rows = [...shownList, ...unlisted.map((each) => each.issue)];
     if (!rows.length) return;
     const at = rows.findIndex(isOpen);
     const next = at < 0 ? (by > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, at + by));

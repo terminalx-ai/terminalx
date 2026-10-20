@@ -480,6 +480,30 @@ describe("NewIssueForm", () => {
     fireEvent.change(screen.getByPlaceholderText("Search"), { target: { value: "login" } });
     await waitFor(() => expect(listed("#101")).toBeUndefined());
   });
+
+  it("keeps the created issue listed under a work filter that hides the rest, while it is pinned (#441)", async () => {
+    setPrefs({ issueProvider: "github" });
+    render(<IssuesView />);
+    await waitFor(() => expect(listed("#41")).toBeTruthy());
+    // Nobody here works on anything, so Only mine leaves nothing listed.
+    await menu(/^Working: /);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Only mine" }));
+    await waitFor(() => expect(listed("#41")).toBeUndefined());
+
+    fireEvent.click(screen.getByRole("button", { name: /New issue/ }));
+    const form = await screen.findByTestId("new-issue");
+    fireEvent.change(within(form).getByRole("textbox", { name: "Title" }), { target: { value: "Made under Only mine" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.queryByTestId("new-issue")).toBeNull());
+    // Open beside the list and selected in it, as with no filter.
+    expect(listed("#101")?.getAttribute("aria-current")).toBe("true");
+    expect(listed("#41")).toBeUndefined();
+
+    // Once a read holds it, the filter applies to it like any other row.
+    listsNew = true;
+    await refresh();
+    await waitFor(() => expect(listed("#101")).toBeUndefined());
+  });
 });
 
 describe("createInput and applyTemplate", () => {
