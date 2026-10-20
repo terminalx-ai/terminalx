@@ -23,6 +23,7 @@ import { useCloudModelClient } from "@/lib/cloudModels";
 import { useSessionAgent } from "@/lib/useSessionAgent";
 import { SessionAgentControls } from "./SessionAgentControls";
 import { setPrefs, usePrefs } from "@/lib/prefs";
+import { usePromptTextProps } from "@/lib/autocorrect";
 import { openLocalProject } from "@/lib/projectStart";
 import { keycaps, matchesShortcut, useKeymap } from "@/lib/shortcuts";
 import { stopDictation } from "@/lib/dictation";
@@ -73,6 +74,7 @@ export function NewSessionView({
   const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [localUseWorktree, setLocalUseWorktree] = useState(prefs.useWorktree);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const textProps = usePromptTextProps();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
   // A cloud project's `+` (PRO-23): the same form, run in the organization's cloud. A quick chat is local.
   const cloudDraft = useCloudDraft();
@@ -480,6 +482,7 @@ export function NewSessionView({
               ref={ref}
               autoFocus
               data-new-session-prompt
+              {...textProps}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {

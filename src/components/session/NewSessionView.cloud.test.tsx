@@ -59,6 +59,7 @@ vi.mock("@/lib/prefs", () => ({
   usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: { claude: "claude-opus-5" }, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
   getPrefs: () => ({}),
   setPrefs: vi.fn(),
+  subscribePrefs: () => () => {},
 }));
 const local = { path: "/repos/raccoon", name: "raccoon" } as Project;
 // Claude is not installed on this computer; it is on the cloud workspace.

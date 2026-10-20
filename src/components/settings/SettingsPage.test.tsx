@@ -23,6 +23,22 @@ describe("Website links", () => {
   });
 });
 
+describe("Autocorrect (#525)", () => {
+  it("is a switch in General, after Fold tool calls, off until turned on, and saves the choice", () => {
+    setPrefs({ autocorrect: false });
+    render(<SettingsPage initialTab="general" onBack={vi.fn()} />);
+    const toggle = screen.getByRole("switch", { name: "Autocorrect" });
+    expect(screen.getByText("Fold tool calls").compareDocumentPosition(screen.getByText("Autocorrect")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(getPrefs().autocorrect).toBe(true);
+    expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).autocorrect).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(getPrefs().autocorrect).toBe(false);
+  });
+});
+
 describe("Settings dismissal", () => {
   it("offers Close and keeps Back working", () => {
     const onBack = vi.fn();
