@@ -63,9 +63,14 @@ export interface Launched {
   tab: TabEntry;
 }
 
+/**
+ * How far a continuation got. Only "launch" may be retried: past it the
+ * prompt has been sent, or may have been ("delivery"), and "archive" is a
+ * handoff that arrived while the chat it moved could not be archived.
+ */
 export type ContinuationResult =
   | { stage: "delivered"; launched: Launched }
-  | { stage: "launch" | "delivery"; launched?: Launched; error: string };
+  | { stage: "launch" | "delivery" | "archive"; launched?: Launched; error: string };
 
 async function ensureAvailable(harness: string) {
   const providers = await api.listHarnesses();
@@ -119,7 +124,9 @@ export interface ProjectDestination {
  * settings, is handed the chat's context and takes the chat's place in the
  * list. The session is created once; a failed start retries it. The chat is
  * archived only once the new session has started, so a move that cannot
- * start leaves the chat where it was.
+ * start leaves the chat where it was. A chat that cannot be archived does not
+ * hold the handoff back: the context is still sent, and the result says the
+ * chat is still listed.
  */
 export async function moveChatToProject(
   chat: { id: string; title: string },
@@ -147,10 +154,15 @@ export async function moveChatToProject(
     const kept = launched ? " The chat has not been archived." : "";
     return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}${kept}` };
   }
+  let unarchived: string | null = null;
   try {
     await archiveSession(chat.id, true);
   } catch (e) {
-    return { stage: "launch", launched, error: `The new session started, but the chat could not be archived: ${errorMessage(e)}` };
+    unarchived = `The chat could not be archived, so it is still in the list: ${errorMessage(e)}`;
   }
-  return deliver(launched, prompt);
+  const result = await deliver(launched, prompt);
+  if (!unarchived) return result;
+  return result.stage === "delivered"
+    ? { stage: "archive", launched, error: `The new session started and has the chat's context. ${unarchived}` }
+    : { ...result, error: `${result.error} ${unarchived}` };
 }

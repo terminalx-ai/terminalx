@@ -19,10 +19,13 @@ import type { HarnessInfo, Project, SessionEntry, TabEntry } from "@/types/sessi
  *
  * Mounted afresh for each opening: no stale selection, mode, or errors. The
  * source stays pinned even when creation selects the destination underneath.
+ * Once the destination exists the reader may leave while it starts; a failure
+ * after that goes to `onLateError`, if given, rather than nowhere.
  */
-export function ContinuationDialog({ session, source, into, onClose }: {
+export function ContinuationDialog({ session, source, into, onClose, onLateError }: {
   session: SessionEntry; source: TabEntry; onClose: () => void;
   into?: { project: Project; worktree: boolean };
+  onLateError?: (error: string) => void;
 }) {
   const [context, setContext] = useState<ContinuationContext | null>(null);
   const [providers, setProviders] = useState<HarnessInfo[]>([]);
@@ -33,7 +36,8 @@ export function ContinuationDialog({ session, source, into, onClose }: {
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [destination, setDestination] = useState<Launched>();
-  const [deliveryFailed, setDeliveryFailed] = useState(false);
+  // The prompt went, or may have: nothing is left to retry, only the destination to open.
+  const [sent, setSent] = useState(false);
   const startingRef = useRef(false);
   const preparedPrompt = useRef<string | undefined>(undefined);
   const active = useRef(true);
@@ -75,7 +79,7 @@ export function ContinuationDialog({ session, source, into, onClose }: {
   }, [session.id, source.id, attempt]);
 
   const start = async () => {
-    if (startingRef.current || !context || !settings || deliveryFailed) return;
+    if (startingRef.current || !context || !settings || sent) return;
     startingRef.current = true;
     setStarting(true);
     setError(null);
@@ -88,15 +92,19 @@ export function ContinuationDialog({ session, source, into, onClose }: {
       const result = into
         ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination)
         : await launchContinuation(context, settings, prompt, created, destination);
-      if (!active.current) return;
+      if (!active.current) {
+        if (result.stage !== "delivered") onLateError?.(result.error);
+        return;
+      }
       if (result.stage === "delivered") close();
       else {
         setError(result.error);
-        setDeliveryFailed(result.stage === "delivery");
+        setSent(result.stage !== "launch");
         if (!result.launched) preparedPrompt.current = undefined;
       }
     } catch (e) {
       if (active.current) setError(errorMessage(e));
+      else onLateError?.(errorMessage(e));
     } finally {
       startingRef.current = false;
       if (active.current) setStarting(false);
@@ -154,7 +162,7 @@ export function ContinuationDialog({ session, source, into, onClose }: {
         <DialogFooter>
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
-          {!deliveryFailed && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />Starting…</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
+          {!sent && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />Starting…</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

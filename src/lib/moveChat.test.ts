@@ -91,11 +91,21 @@ describe("moving a chat into a project", () => {
     expect(calls("set_session_archived")).toHaveLength(0);
   });
 
-  it("says so when the chat cannot be archived, and does not hand over the context twice on retry", async () => {
+  it("still hands over the context when the chat cannot be archived, and says the chat is still listed", async () => {
     answer({ archiveFails: true });
-    const failed = await moveChatToProject({ id: chat.id, title: chat.title }, { projectPath: "/repos/web", worktree: true }, selected, prompt, vi.fn());
-    expect(failed.stage !== "delivered" && failed.error).toMatch(/started, but the chat could not be archived/);
-    expect(calls("send_message")).toHaveLength(0);
+    const moved = await moveChatToProject({ id: chat.id, title: chat.title }, { projectPath: "/repos/web", worktree: true }, selected, prompt, vi.fn());
+    expect(moved.stage).toBe("archive");
+    expect(moved.stage !== "delivered" && moved.error).toBe("The new session started and has the chat's context. The chat could not be archived, so it is still in the list: store is read-only");
+    expect(calls("send_message")).toHaveLength(1);
+    expect(getDraft("work-tab")).toBe("");
+  });
+
+  it("names both failures when neither the archive nor the delivery went through", async () => {
+    answer({ archiveFails: true, sendFails: true });
+    const moved = await moveChatToProject({ id: chat.id, title: chat.title }, { projectPath: "/repos/web", worktree: true }, selected, prompt, vi.fn());
+    expect(moved.stage).toBe("delivery");
+    expect(moved.stage !== "delivered" && moved.error).toMatch(/prepared prompt is in its composer.*no echo The chat could not be archived, so it is still in the list/);
+    expect(getDraft("work-tab")).toBe(prompt);
   });
 
   it("keeps the move and leaves the handoff in the composer when delivery is not confirmed", async () => {

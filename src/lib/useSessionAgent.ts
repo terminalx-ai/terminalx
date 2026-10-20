@@ -32,14 +32,23 @@ interface Picked {
 }
 
 /**
+ * Where a start's mode lands when the picker does not offer it: one its agent
+ * reported (Claude Code's `dontAsk`, a Codex approval and sandbox, a mode set
+ * in the terminal). Never the saved mode, which may be looser than the source
+ * (Bypass): the new session asks before anything until the reader picks.
+ */
+const UNOFFERED_START_MODE = "manual";
+
+/**
  * The same preferences and valid launch choices for every new-session surface.
  *
  * `start` is where a surface begins other than the saved preferences (a
  * handoff starts from its source conversation), and each of its values counts
  * only while it is valid: an installed provider, a model that provider lists,
- * an effort that model takes, a mode the picker offers. Its model and effort
- * belong to its provider, so switching to another provider falls back to that
- * one's preferences, and switching back finds them again.
+ * an effort that model takes. Its model and effort belong to its provider, so
+ * switching to another provider falls back to that one's preferences, and
+ * switching back finds them again. Its mode is never swapped for a looser one
+ * (see `UNOFFERED_START_MODE`).
  *
  * A choice made here is saved as the preference for the next launch on every
  * surface alike. A surface with a `start` also keeps its own picks over it.
@@ -63,7 +72,8 @@ export function useSessionAgent(harnesses: HarnessInfo[], here = true, modelClie
     .find(Boolean) ?? models.find((m) => m.isDefault) ?? models[0] ?? null;
   const effort = [picked.effort[id], begun?.effort, prefs.lastEffort[id], model?.defaultEffort]
     .find((wanted) => !!wanted && !!model?.efforts.includes(wanted)) ?? model?.efforts[0] ?? null;
-  const permissionMode = [picked.permissionMode, start?.permissionMode, prefs.lastMode]
+  const begunMode = start?.permissionMode ? (pickerMode(start.permissionMode)?.id ?? UNOFFERED_START_MODE) : undefined;
+  const permissionMode = [picked.permissionMode, begunMode, prefs.lastMode]
     .map((wanted) => (wanted ? pickerMode(wanted)?.id : undefined))
     .find(Boolean) ?? DEFAULT_PERMISSION_MODE;
   const keep = (patch: (current: Picked) => Picked) => {

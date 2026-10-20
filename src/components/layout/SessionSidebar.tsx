@@ -263,6 +263,7 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
           source={moving.source}
           into={{ project: moving.project, worktree: moving.worktree }}
           onClose={() => setMoving(null)}
+          onLateError={setError}
         />
       )}
 

@@ -200,6 +200,42 @@ describe("linking a chat to a project", () => {
     expect(screen.getByText("In the folder · no Git")).toBeTruthy();
   });
 
+  it("offers no retry once the context has arrived, when only the archive failed", async () => {
+    const launched = { sessionId: "work-1", tab: { id: "work-tab" } };
+    mocks.move.mockImplementation(async (_chat, _to, _settings, _prompt, onCreated) => {
+      onCreated(launched);
+      return { stage: "archive", launched, error: "The new session started and has the chat's context. The chat could not be archived, so it is still in the list: read-only" };
+    });
+    const view = link(repo, true); await loaded("Link and Start");
+    fireEvent.click(screen.getByRole("button", { name: "Link and Start" }));
+    expect((await screen.findByRole("alert")).textContent).toMatch(/still in the list/);
+    expect(screen.queryByRole("button", { name: /Start/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open New Session" }));
+    expect(view.onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.move).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a failed start", async () => ({ stage: "launch", launched: { sessionId: "work-1", tab: { id: "work-tab" } }, error: "Could not start the new session: spawn failed The chat has not been archived." }), "Could not start the new session: spawn failed The chat has not been archived."],
+    ["a thrown error", async () => { throw new Error("bridge gone"); }, "Error: bridge gone"],
+  ])("still reports %s that arrives after the reader opened the new session", async (_case, outcome, reported) => {
+    let finish!: () => void;
+    mocks.move.mockImplementation(async (_chat, _to, _settings, _prompt, onCreated) => {
+      onCreated({ sessionId: "work-1", tab: { id: "work-tab" } });
+      await new Promise<void>((done) => { finish = done; });
+      return outcome();
+    });
+    const onLateError = vi.fn();
+    const onClose = vi.fn();
+    render(<ContinuationDialog session={chat} source={chatTab} into={{ project: repo, worktree: true }} onClose={onClose} onLateError={onLateError} />);
+    await loaded("Link and Start");
+    fireEvent.click(screen.getByRole("button", { name: "Link and Start" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open New Session" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+    expect(onLateError).toHaveBeenCalledExactlyOnceWith(reported);
+  });
+
   it("says when the new session could not start, and retries that session rather than creating another", async () => {
     const launched = { sessionId: "work-1", tab: { id: "work-tab" } };
     mocks.move.mockImplementationOnce(async (_chat, _to, _settings, _prompt, onCreated) => {

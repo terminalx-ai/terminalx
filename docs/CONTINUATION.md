@@ -20,8 +20,10 @@ value counts only while it is valid:
   provider's id falls back to the provider's saved model, then its default.
 - The effort must be one the model takes; otherwise the saved effort, then the
   model's default.
-- The mode must be one the picker offers (older spellings are mapped); an
-  agent-reported mode such as `dontAsk` falls back to the saved mode.
+- The mode must be one the picker offers (older spellings are mapped). A mode
+  the agent reported that the picker does not offer (Claude Code's `dontAsk`,
+  a Codex approval and sandbox) starts as "Ask every time", never as the saved
+  mode, which could be looser than the source (Bypass).
 
 Switching provider falls back to that provider's saved model and effort, and
 switching back finds the source's again. The mode is provider-independent and
@@ -37,7 +39,11 @@ destination: the project and, for a Git project, a worktree or the main
 checkout (switchable in the dialog). `moveChatToProject` creates a session in
 the project with the chosen settings, starts it, and only then archives the
 chat. If the start fails, the chat stays where it was and the error says so;
-Retry Start reuses the session already created. The prompt tells the agent its
+Retry Start reuses the session already created. A chat that cannot be
+archived does not hold the handoff back: the context is still sent and the
+dialog says the chat is still listed, with nothing left to retry. The reader
+may open the new session while it is still starting; a failure after that
+reaches the sidebar's error banner. The prompt tells the agent its
 working directory changed, since the files the history mentions stay in the
 chat's folder. The dialog is mounted by the sidebar rather than the chat's row,
 because archiving removes the row.

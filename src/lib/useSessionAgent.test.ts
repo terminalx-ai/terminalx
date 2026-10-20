@@ -125,8 +125,15 @@ describe("launch settings", () => {
     expect(getPrefs().lastMode).toBe("bypassPermissions");
   });
 
-  it("falls back to the saved mode when the source's mode is one the picker does not offer", () => {
-    expect(launch({ ...source, permissionMode: "dontAsk" }).result.current.agent.permissionMode).toBe("auto");
+  it("starts a mode the picker does not offer in Ask every time, never in a looser saved mode", () => {
+    setPrefs({ lastMode: "bypassPermissions" });
+    for (const reported of ["dontAsk", "untrusted, read-only", "never, workspace-write", "never, danger-full-access", "terminal"]) {
+      expect(launch({ ...source, permissionMode: reported }).result.current.agent.permissionMode).toBe("manual");
+    }
+    // An older spelling of a picker mode is that mode.
     expect(launch({ ...source, permissionMode: "ask" }).result.current.agent.permissionMode).toBe("manual");
+    expect(launch({ ...source, permissionMode: "accept_edits" }).result.current.agent.permissionMode).toBe("acceptEdits");
+    // A source that names no mode at all starts from the saved one, as before.
+    expect(launch({ ...source, permissionMode: "" }).result.current.agent.permissionMode).toBe("bypassPermissions");
   });
 });
