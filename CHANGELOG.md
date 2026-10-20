@@ -13,6 +13,13 @@
   it; it used to be drawn above the output, as though that were its answer. A
   background task's `<task-notification>` is no longer taken for something
   you said. (#540)
+- A message sent while the agent is working stays in the chat once the agent
+  has taken it. Taken mid-turn, it is drawn as your message at the point the
+  agent read it, in the app and on the phone, and a finished turn no longer
+  folds it away with the tool calls; it used to vanish when the turn ended.
+  **Send now** shows only on a message still waiting behind the running
+  turn: the message it sends opens the turn it starts, the rest stay queued
+  behind it, and one the agent has already taken is not sent again. (#551)
 
 ### Mobile companion
 
