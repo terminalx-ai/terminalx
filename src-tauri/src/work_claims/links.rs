@@ -27,7 +27,8 @@ pub const PULL_REQUEST_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How long a tracker that could not answer (offline, `gh` not ready, Linear
 /// down) is left before it is asked again.
 const RETRY_FAILED: Duration = Duration::from_secs(2 * 60);
-/// How long the Linear team keys, and a project's repository, are kept.
+/// How long the Linear team keys, or that Linear could not say them, and a
+/// project's repository, are kept.
 const TEAMS_FOR: Duration = Duration::from_secs(60 * 60);
 const REPO_FOR: Duration = Duration::from_secs(10 * 60);
 /// The most candidates tried for one session in one pass.
@@ -56,9 +57,9 @@ static LEADING_HASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*#(\d{1,
 static LINEAR_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([A-Z][A-Z0-9_]{0,9}-\d{1,7})\b").unwrap());
 static CLOSING_LINEAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+([A-Za-z][A-Za-z0-9_]{0,9}-\d{1,7})\b").unwrap());
 
-fn push(found: &mut Vec<Candidate>, candidate: Candidate) {
-    if !found.contains(&candidate) {
-        found.push(candidate);
+fn push<T: PartialEq>(found: &mut Vec<T>, value: T) {
+    if !found.contains(&value) {
+        found.push(value);
     }
 }
 
@@ -93,29 +94,61 @@ pub fn name_candidates(names: &[&str], github: bool, teams: &BTreeSet<String>) -
     found
 }
 
-/// What a first prompt says about its issue. `repo` is the project's GitHub
-/// `owner/name`: a URL into another repository is not this project's issue.
-pub fn prompt_candidates(text: &str, repo: Option<&str>, teams: &BTreeSet<String>) -> Vec<Candidate> {
-    let mut found = Vec::new();
-    for capture in GITHUB_URL.captures_iter(text) {
-        if repo.is_some_and(|repo| repo.eq_ignore_ascii_case(&format!("{}/{}", &capture[1], &capture[2]))) {
-            push(&mut found, Candidate::GitHub(capture[3].to_string()));
+/// Everything a first prompt could name, read from it once: which of it is a
+/// candidate depends on the project's repository and the Linear teams, which
+/// are asked again later, and the transcript is not read again for them.
+#[derive(Clone, Default)]
+struct PromptRefs {
+    /// `(owner/name, number)` of each GitHub issue URL.
+    github_urls: Vec<(String, String)>,
+    /// The identifier of each Linear issue URL, upper case.
+    linear_urls: Vec<String>,
+    /// `#N` leading the prompt or after a word such as "fixes".
+    numbers: Vec<String>,
+    /// Every word shaped like a Linear identifier.
+    identifiers: Vec<String>,
+}
+
+impl PromptRefs {
+    fn read(text: &str) -> Self {
+        let mut refs = Self::default();
+        for capture in GITHUB_URL.captures_iter(text) {
+            push(&mut refs.github_urls, (format!("{}/{}", &capture[1], &capture[2]), capture[3].to_string()));
         }
-    }
-    for capture in LINEAR_URL.captures_iter(text) {
-        push(&mut found, Candidate::Linear(capture[1].to_ascii_uppercase()));
-    }
-    if repo.is_some() {
+        for capture in LINEAR_URL.captures_iter(text) {
+            push(&mut refs.linear_urls, capture[1].to_ascii_uppercase());
+        }
         for capture in LEADING_HASH.captures_iter(text).chain(NAMED_NUMBER.captures_iter(text)) {
-            push(&mut found, Candidate::GitHub(capture[1].to_string()));
+            push(&mut refs.numbers, capture[1].to_string());
         }
-    }
-    for capture in LINEAR_ID.captures_iter(text) {
-        if teams.contains(team_of(&capture[1])) {
-            push(&mut found, Candidate::Linear(capture[1].to_string()));
+        for capture in LINEAR_ID.captures_iter(text) {
+            push(&mut refs.identifiers, capture[1].to_string());
         }
+        refs
     }
-    found
+
+    /// What the first prompt says about its issue. `repo` is the project's GitHub
+    /// `owner/name`: a URL into another repository is not this project's issue.
+    fn candidates(&self, repo: Option<&str>, teams: &BTreeSet<String>) -> Vec<Candidate> {
+        let mut found = Vec::new();
+        for (owner_name, number) in &self.github_urls {
+            if repo.is_some_and(|repo| repo.eq_ignore_ascii_case(owner_name)) {
+                push(&mut found, Candidate::GitHub(number.clone()));
+            }
+        }
+        for identifier in &self.linear_urls {
+            push(&mut found, Candidate::Linear(identifier.clone()));
+        }
+        if repo.is_some() {
+            for number in &self.numbers {
+                push(&mut found, Candidate::GitHub(number.clone()));
+            }
+        }
+        for identifier in self.identifiers.iter().filter(|identifier| teams.contains(team_of(identifier))) {
+            push(&mut found, Candidate::Linear(identifier.clone()));
+        }
+        found
+    }
 }
 
 /// What a branch's pull request says about the issue it closes.
@@ -167,12 +200,16 @@ pub trait Lookup {
 }
 
 /// What was settled of a session: the names its branch candidates were
-/// answered for, and whether its first prompt was. Only an answer the
-/// trackers gave settles anything; a failed lookup is tried again.
+/// answered for, and whether its first prompt's were, each under the Linear
+/// teams answer of the time ([`Linker::teams_answer`]). Only an answer the
+/// trackers gave settles anything; a failed lookup is tried again, and both
+/// are looked at again under a new teams answer.
 #[derive(Default)]
 struct Checked {
-    names: Option<Vec<String>>,
-    prompt: bool,
+    names: Option<(Vec<String>, u64)>,
+    /// What its first request names, once there is one.
+    prompt: Option<PromptRefs>,
+    prompt_settled: Option<u64>,
 }
 
 /// What a tracker said of a candidate.
@@ -198,6 +235,9 @@ pub struct Linker {
     verified: HashMap<(String, Candidate), Verified>,
     /// The Linear team keys, or `None` when Linear could not be asked.
     teams: Option<(Instant, Option<BTreeSet<String>>)>,
+    /// Counts the different teams answers read: what was settled under one is
+    /// looked at again under the next.
+    teams_answer: u64,
     repos: HashMap<String, (Instant, Option<String>)>,
     pulls: HashMap<String, (Instant, Option<BranchPull>)>,
 }
@@ -212,17 +252,27 @@ fn recent(session: &SessionEntry) -> bool {
 }
 
 impl Linker {
-    /// The Linear team keys; `None` while Linear cannot be asked, which is
-    /// tried again sooner than a known answer is read again.
+    /// The Linear team keys, read at most every [`TEAMS_FOR`]; `None` while
+    /// Linear cannot be asked, which is not asked again any sooner: a key that
+    /// keeps failing would otherwise be asked every pass.
     fn teams(&mut self, lookup: &dyn Lookup) -> Option<BTreeSet<String>> {
         if let Some((at, teams)) = &self.teams {
-            if at.elapsed() < if teams.is_some() { TEAMS_FOR } else { RETRY_FAILED } {
+            if at.elapsed() < TEAMS_FOR {
                 return teams.clone();
             }
         }
         let teams = lookup.linear_teams();
+        if self.teams.as_ref().is_none_or(|(_, before)| *before != teams) {
+            self.teams_answer += 1;
+        }
         self.teams = Some((Instant::now(), teams.clone()));
         teams
+    }
+
+    /// Which teams answer is the latest: an answer settled under another one
+    /// is to be looked for again.
+    pub fn teams_answer(&self) -> u64 {
+        self.teams_answer
     }
 
     /// A project's GitHub repository, asked of its checkout at most every [`REPO_FOR`].
@@ -324,23 +374,23 @@ impl Linker {
                 continue;
             }
             let repo = self.repo(lookup, &session.project_path);
-            let known_teams = asked.get_or_insert_with(|| self.teams(lookup)).clone();
-            // Without the team keys a Linear candidate cannot be told apart, so nothing is settled.
-            let teams_known = known_teams.is_some();
-            let teams = known_teams.unwrap_or_default();
+            // Without the team keys no Linear candidate is told apart: what is settled
+            // meanwhile is looked at again once they are known.
+            let teams = asked.get_or_insert_with(|| self.teams(lookup)).clone().unwrap_or_default();
+            let answer = self.teams_answer;
             let unlinked = &session.issue_work.unlinked;
             let names: Vec<String> = [session.branch.as_deref(), session.worktree_name.as_deref()].into_iter().flatten().filter(|name| !shared_branch(name)).map(String::from).collect();
             let (names_new, prompt_new) = {
                 let checked = self.checked.entry(session.id.clone()).or_default();
-                (checked.names.as_ref() != Some(&names), !checked.prompt)
+                (!checked.names.as_ref().is_some_and(|(seen, under)| *seen == names && *under == answer), checked.prompt_settled != Some(answer))
             };
             let mut found = None;
             if names_new {
                 let refs: Vec<&str> = names.iter().map(String::as_str).collect();
                 let candidates = name_candidates(&refs, repo.is_some(), &teams);
                 let (issue, settled) = self.first_issue(lookup, &session.project_path, &candidates, unlinked);
-                if settled && (teams_known || issue.is_some()) {
-                    self.checked.get_mut(&session.id).expect("checked above").names = Some(names.clone());
+                if settled {
+                    self.checked.get_mut(&session.id).expect("checked above").names = Some((names.clone(), answer));
                 }
                 found = issue.map(|issue| (issue, IssueLinkSource::Branch));
             }
@@ -351,13 +401,17 @@ impl Linker {
                 }
             }
             if found.is_none() && prompt_new {
-                // Only once there is a first request; a session not yet
+                // Read once there is a first request; a session not yet
                 // prompted is looked at again in the next pass.
-                if let Some(text) = lookup.first_request(session) {
-                    let candidates = prompt_candidates(&text, repo.as_deref(), &teams);
+                let checked = self.checked.get_mut(&session.id).expect("checked above");
+                if checked.prompt.is_none() {
+                    checked.prompt = lookup.first_request(session).map(|text| PromptRefs::read(&text));
+                }
+                if let Some(prompt) = checked.prompt.clone() {
+                    let candidates = prompt.candidates(repo.as_deref(), &teams);
                     let (issue, settled) = self.first_issue(lookup, &session.project_path, &candidates, unlinked);
-                    if settled && (teams_known || issue.is_some()) {
-                        self.checked.get_mut(&session.id).expect("checked above").prompt = true;
+                    if settled {
+                        self.checked.get_mut(&session.id).expect("checked above").prompt_settled = Some(answer);
                     }
                     found = issue.map(|issue| (issue, IssueLinkSource::Prompt));
                 }
@@ -370,15 +424,14 @@ impl Linker {
     }
 
     /// The issue a cloud session's branch names, in its workspace's
-    /// repository, and whether that answer is final (as [`Self::first_issue`]).
+    /// repository, and whether that answer is final (as [`Self::first_issue`])
+    /// under the teams answer it was looked for under ([`Self::teams_answer`]).
     pub fn cloud_issue(&mut self, lookup: &dyn Lookup, repo: Option<&str>, names: &[&str]) -> (Option<IssueRef>, bool) {
-        let teams = self.teams(lookup);
-        let teams_known = teams.is_some();
+        let teams = self.teams(lookup).unwrap_or_default();
         let names: Vec<&str> = names.iter().copied().filter(|name| !shared_branch(name)).collect();
-        let candidates = name_candidates(&names, repo.is_some(), &teams.unwrap_or_default());
+        let candidates = name_candidates(&names, repo.is_some(), &teams);
         let place = repo.map(|repo| format!("repo:{repo}")).unwrap_or_default();
-        let (issue, settled) = self.first_issue(lookup, &place, &candidates, &[]);
-        (issue.clone(), settled && (teams_known || issue.is_some()))
+        self.first_issue(lookup, &place, &candidates, &[])
     }
 }
 
@@ -417,6 +470,10 @@ mod tests {
         assert_eq!(name_candidates(&["raccoon/441-x", "441-x"], true, &none), vec![gh("441")]);
     }
 
+    fn prompt_candidates(text: &str, repo: Option<&str>, teams: &BTreeSet<String>) -> Vec<Candidate> {
+        PromptRefs::read(text).candidates(repo, teams)
+    }
+
     #[test]
     fn a_first_prompt_names_its_issue() {
         let keys = teams(&["ENG"]);
@@ -451,6 +508,9 @@ mod tests {
         offline: Cell<bool>,
         /// Linear could not be asked for its teams.
         no_teams: Cell<bool>,
+        /// How often Linear was asked for its teams, and a first request read.
+        teams_asked: Cell<usize>,
+        prompts_read: Cell<usize>,
     }
 
     impl Lookup for Fake {
@@ -476,6 +536,7 @@ mod tests {
             Ok(self.issues.iter().find(|issue| issue.identifier == identifier).cloned())
         }
         fn linear_teams(&self) -> Option<BTreeSet<String>> {
+            self.teams_asked.set(self.teams_asked.get() + 1);
             (!self.no_teams.get()).then(|| teams(&["ENG"]))
         }
         fn branch_pulls(&self, _: &str, branches: &[String]) -> Option<HashMap<String, BranchPull>> {
@@ -483,6 +544,7 @@ mod tests {
             Some(self.pulls.clone())
         }
         fn first_request(&self, _: &SessionEntry) -> Option<String> {
+            self.prompts_read.set(self.prompts_read.get() + 1);
             self.prompt.clone()
         }
     }
@@ -516,8 +578,12 @@ mod tests {
                 *at = long_ago;
             }
         }
-        if let Some((at, None)) = &mut linker.teams {
-            *at = long_ago;
+    }
+
+    /// Let the Linear teams answer run out, as if [`TEAMS_FOR`] had passed.
+    fn age_teams(linker: &mut Linker) {
+        if let Some((at, _)) = &mut linker.teams {
+            *at = Instant::now().checked_sub(TEAMS_FOR + Duration::from_secs(1)).unwrap();
         }
     }
 
@@ -542,15 +608,46 @@ mod tests {
     }
 
     #[test]
-    fn without_the_linear_teams_nothing_is_settled() {
+    fn linear_teams_that_cannot_be_read_settle_each_session_until_they_can() {
+        // A Linear key that is set but keeps failing (revoked, invalid): the team keys stay unknown.
+        let fake = Fake { issues: vec![issue("linear", "uuid-42", "ENG-42")], prompt: Some("Please fix ENG-42".into()), ..Default::default() };
+        fake.no_teams.set(true);
+        let mut linker = Linker::default();
+        let sessions = [session("s1", Some("me/eng-42-login")), session("s2", Some("raccoon/other"))];
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        assert_eq!((fake.prompts_read.get(), fake.teams_asked.get()), (2, 1));
+        // Pass after pass, no first request is read again and Linear is not asked again within the hour.
+        for _ in 0..5 {
+            age_failures(&mut linker);
+            assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        }
+        assert_eq!((fake.prompts_read.get(), fake.teams_asked.get()), (2, 1));
+        // Once Linear answers, both are looked at again: the branch, and the prompt as it was read.
+        fake.no_teams.set(false);
+        age_teams(&mut linker);
+        assert_eq!(linker.pass(&fake, &sessions).links, vec![
+            ("s1".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Branch),
+            ("s2".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Prompt),
+        ]);
+        assert_eq!((fake.prompts_read.get(), fake.teams_asked.get()), (2, 2));
+    }
+
+    #[test]
+    fn a_cloud_session_is_settled_under_the_teams_answer_it_was_looked_for_under() {
         let fake = Fake { issues: vec![issue("linear", "uuid-42", "ENG-42")], ..Default::default() };
         fake.no_teams.set(true);
         let mut linker = Linker::default();
-        let sessions = [session("s1", Some("me/eng-42-login"))];
-        assert_eq!(linker.pass(&fake, &sessions).links, vec![]);
+        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["eng-42-login"]), (None, true));
+        let unknown = linker.teams_answer();
+        // The same answer read again an hour on: what was settled under it stands.
+        age_teams(&mut linker);
+        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["other"]), (None, true));
+        assert_eq!(linker.teams_answer(), unknown);
+        // A new answer: looked for again, the branch names the issue.
         fake.no_teams.set(false);
-        age_failures(&mut linker);
-        assert_eq!(linker.pass(&fake, &sessions).links, vec![("s1".to_string(), issue("linear", "uuid-42", "ENG-42"), IssueLinkSource::Branch)]);
+        age_teams(&mut linker);
+        assert_eq!(linker.cloud_issue(&fake, Some("acme/widgets"), &["eng-42-login"]), (Some(issue("linear", "uuid-42", "ENG-42")), true));
+        assert_ne!(linker.teams_answer(), unknown);
     }
 
     #[test]

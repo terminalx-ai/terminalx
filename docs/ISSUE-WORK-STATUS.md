@@ -70,7 +70,10 @@ an issue and not a pull request):
   leading `#441`, or a Linear identifier.
 
 Only sessions active in the last week are looked at, and each candidate is
-asked about once. An automatic link says how it was made (in the title bar
+asked about once; a lookup that failed is asked again two minutes later.
+Linear's team keys are read once an hour. While Linear cannot say them, no
+Linear identifier is recognised, and once it can, each session is looked at
+again, its first prompt from what was read of it then. An automatic link says how it was made (in the title bar
 chip's tooltip and the menu), and every link can be removed:
 
 - **Link to issue…** in a session's menu (sidebar, conversation list, or the
