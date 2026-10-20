@@ -235,7 +235,7 @@ function GeneralTab() {
       />
       <SettingRow
         label="Autocorrect"
-        description="Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply while you type a prompt. Off leaves what you type exactly as typed."
+        description="Your keyboard's spelling correction, smart quotes and dashes, and text replacements apply in prompts, answers to an agent's questions, and notes. Off leaves what you type exactly as typed."
         control={<Switch aria-label="Autocorrect" checked={prefs.autocorrect} onCheckedChange={(v) => setPrefs({ autocorrect: v })} />}
       />
       <SettingRow
