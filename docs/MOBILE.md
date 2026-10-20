@@ -226,8 +226,16 @@ accepts, or displays a PTY id, pane id, process handle, host path, or arbitrary
 filesystem path. The Rust host resolves each tab id under the session lock and
 rechecks that mapping at the point of use.
 
-Chat notes remain distinct from agent messages. Posting uses `chat.post`;
-promotion uses `chat.promoteToAgent` and passes the multiplayer write gate.
+Chat notes remain distinct from agent messages. The Session screen's **Send
+to agent** sends its text and attachments with `session.send`, and the message
+shows once, as the prompt of the turn it starts; **Add worktree note** posts
+with `chat.post` and sends nothing to the agent (#541). Promoting an existing
+note uses `chat.promoteToAgent` and passes the multiplayer write gate. Once the
+agent has the message, the host records `promotedTo: [{ tabId, seq }]` on the
+note (one entry per tab, `seq` being the `UserMessage` it became), and the
+phone leaves the note out of that tab's conversation. Phones before #541
+posted and then promoted every message without that record; the phone hides
+such a note when a prompt with the same text follows it within 30 seconds.
 Presence aggregates multiple surfaces belonging to the same verified person.
 The host must still have `multiplayer.use`, and the session must have passed the
 Bypass-mode share gate.

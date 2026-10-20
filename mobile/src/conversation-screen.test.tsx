@@ -2,6 +2,7 @@
 import { act, useImperativeHandle, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as DocumentPicker from "expo-document-picker";
 import type { AgentEvent } from "@terminalx/portable/events";
 import SessionScreen from "../app/session/[sessionId]";
 import SessionsScreen from "../app/(tabs)/sessions";
@@ -100,7 +101,7 @@ beforeEach(() => {
       respondPermission: vi.fn(async () => ({ answered: true })),
       queueInput: vi.fn(async () => true), releaseInput: vi.fn(async () => {}),
       postNote: vi.fn(async (_session, text) => ({ sent: true, note: { id: "note", body: text, createdAt: 0, author: { userId: "me" } } })),
-      promoteNote: vi.fn(async () => ({ sent: true, queued: false })),
+      sendSession: vi.fn(async () => ({ sent: true, queued: false })),
     },
   };
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
@@ -231,6 +232,95 @@ describe("mobile transcript ordering (#384)", () => {
   });
 });
 
+describe("messages for the agent and worktree notes (#541)", () => {
+  // Every row of the conversation that shows this text, as a note or as a prompt.
+  const shown = (text: string) => mocks.listProps.data.filter((item: any) => (item.kind === "note" ? item.note.body : item.row.text) === text);
+  const at = Date.parse("2026-09-15T00:00:00Z");
+  const note = (id: string, body: string, createdAt: number, promotedTo?: { tabId: string; seq: number }[]) => ({ id, body, createdAt, author: { userId: "me", displayName: "Paresh" }, ...(promotedTo ? { promotedTo } : {}) });
+  const publish = async (text: string, seq = 2) => { await act(async () => mocks.sessionListeners.get("claude")!(event("claude", text, seq))); };
+
+  it("sends a text message straight to the agent and shows it once, as the prompt", async () => {
+    await render(); await type("Run the tests"); await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "Run the tests", []);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Sent to the agent.");
+    await publish("Run the tests");
+    expect(shown("Run the tests")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
+  });
+
+  it("sends the text and its attachments in one message", async () => {
+    vi.mocked(DocumentPicker.getDocumentAsync).mockResolvedValueOnce({ canceled: false, assets: [{ uri: "file:///brief.pdf", name: "brief.pdf", mimeType: "application/pdf", size: 3, base64: "cGRm", lastModified: 1 }] } as any);
+    await render(); await click("Attach file"); await type("See the brief"); await click("Send");
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("claude", "See the brief", [{ mediaType: "application/pdf", data: "cGRm", name: "brief.pdf" }]);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
+    await publish("See the brief");
+    expect(shown("See the brief")).toHaveLength(1);
+  });
+
+  it("adds a worktree note once and sends nothing to the agent", async () => {
+    await render(); await click("Add worktree note"); await type("Deploying at 5"); await click("Send");
+    expect(mocks.app.api.postNote).toHaveBeenCalledWith("worktree", "Deploying at 5");
+    expect(mocks.app.api.sendSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Note added.");
+    expect(shown("Deploying at 5")).toEqual([expect.objectContaining({ kind: "note" })]);
+  });
+
+  it("leaves no note behind when a send fails, and a retry sends the message once", async () => {
+    mocks.app.api.sendSession
+      .mockRejectedValueOnce(new Error("Connection closed"))
+      .mockResolvedValueOnce({ sent: false, message: "The agent is busy" });
+    await render(); await type("Retry me");
+    await click("Send");
+    expect(container.textContent).toContain("Message not sent: Connection closed");
+    await click("Send");
+    expect(container.textContent).toContain("Message not sent: The agent is busy");
+    expect(input().value).toBe("Retry me");
+    expect(shown("Retry me")).toHaveLength(0);
+    await click("Send");
+    expect(container.textContent).toContain("Sent to the agent.");
+    expect(input().value).toBe("");
+    expect(mocks.app.api.sendSession.mock.calls).toEqual([["claude", "Retry me", []], ["claude", "Retry me", []], ["claude", "Retry me", []]]);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
+    await publish("Retry me");
+    expect(shown("Retry me")).toHaveLength(1);
+  });
+
+  it("shows a promoted note and its user message as a single row, and the note in other tabs", async () => {
+    mocks.app.api.tail.mockImplementation(async (_session: string, tab: string) => ({ events: tab === "claude" ? [event("claude", "Ship it", 2)] : [event(tab, `${tab} transcript`)], hasMore: false }));
+    mocks.app.api.listNotes.mockResolvedValue([note("promoted", "Ship it", at - 86_400_000, [{ tabId: "claude", seq: 2 }])]);
+    await render();
+    expect(mocks.listProps.data).toHaveLength(1);
+    expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
+    await select("codex");
+    expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "note" })]);
+  });
+
+  it("shows an existing note once after it is promoted to the agent", async () => {
+    const listeners: ((message: { method: string; params?: unknown }) => void)[] = [];
+    mocks.app.connection.onEvent = (listener: (typeof listeners)[number]) => { listeners.push(listener); return () => {}; };
+    const existing = note("existing", "Ship it", at - 86_400_000);
+    mocks.app.api.listNotes.mockResolvedValueOnce([existing]).mockResolvedValueOnce([{ ...existing, promotedTo: [{ tabId: "claude", seq: 2 }] }]);
+    await render();
+    expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "note" })]);
+    await publish("Ship it");
+    await act(async () => {
+      for (const listener of listeners) listener({ method: "chat.changed", params: { worktreeId: "worktree" } });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(shown("Ship it")).toEqual([expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) })]);
+  });
+
+  it("hides the note an older phone saved just before sending it, but not one added long before", async () => {
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [event("claude", "From an older phone")], hasMore: false });
+    mocks.app.api.listNotes.mockResolvedValueOnce([note("by-hand", "From an older phone", at - 3_600_000), note("legacy", "From an older phone", at - 1_200)]);
+    await render();
+    expect([...shown("From an older phone")].reverse()).toEqual([
+      expect.objectContaining({ kind: "note", note: expect.objectContaining({ id: "by-hand" }) }),
+      expect.objectContaining({ kind: "turn", row: expect.objectContaining({ kind: "prompt" }) }),
+    ]);
+  });
+});
+
 describe("mobile transcript mount budget (#385)", () => {
   it("mounts only a small part of a page with twenty long prompts", async () => {
     mocks.initialBatchOnly = true;
@@ -289,7 +379,8 @@ describe("mobile conversation navigation", () => {
     expect(container.textContent).not.toContain("claude transcript");
     await type("Codex draft");
     await click("Send");
-    expect(mocks.app.api.promoteNote).toHaveBeenCalledWith("worktree", "codex", "note", []);
+    expect(mocks.app.api.sendSession).toHaveBeenCalledWith("codex", "Codex draft", []);
+    expect(mocks.app.api.postNote).not.toHaveBeenCalled();
     await select("claude");
     expect(input().value).toBe("Claude draft");
     expect(container.textContent).not.toContain("codex transcript");
@@ -333,7 +424,7 @@ describe("mobile conversation navigation", () => {
 
   it("keeps an in-flight send scoped when returning to its conversation", async () => {
     let finish!: (value: unknown) => void;
-    mocks.app.api.promoteNote.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    mocks.app.api.sendSession.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await render(); await type("Send once"); await click("Send");
     await select("codex"); await type("Other draft"); await select("claude");
     expect(button("Send").disabled).toBe(true);
