@@ -16,6 +16,7 @@ use crate::sink::BroadcastSink;
 
 struct Fixture {
     _home: crate::store::TempHome,
+    _claude: crate::harness::claude::pty::TestProgram,
     _dir: tempfile::TempDir,
     root: PathBuf,
     rpc: Arc<WorkspaceRpc>,
@@ -46,7 +47,9 @@ fn quiet_agent(dir: &Path) -> String {
 }
 
 /// A cloud workspace's runtime: its project registered, agent tabs served,
-/// and Claude installed (as a stand-in that never answers).
+/// and Claude installed (as a stand-in that never answers). The stand-in is
+/// what its sessions launch, too: never a Claude Code installed here, nor
+/// "not installed" where none is.
 fn fixture() -> Fixture {
     let home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
@@ -71,6 +74,7 @@ fn fixture() -> Fixture {
     );
     let rpc = WorkspaceRpc::new(&root, 7, sink, terminals.clone(), Some(manager.clone())).unwrap();
     let agent = quiet_agent(&base);
+    let claude = crate::harness::claude::pty::launch_program_for_tests(PathBuf::from(&agent));
     rpc.set_offered_for_tests(
         crate::harness::catalog()
             .into_iter()
@@ -84,7 +88,7 @@ fn fixture() -> Fixture {
     let ops = crate::cloud_agents::ManagerOps { manager, root: root.to_string_lossy().into_owned() };
     let agents = crate::cloud_agents::CloudAgents::open(&base.join("agents"), Arc::new(ops), None, None, 7).unwrap();
     rpc.set_agents(agents);
-    Fixture { _home: home, _dir: dir, root, rpc, terminals }
+    Fixture { _home: home, _claude: claude, _dir: dir, root, rpc, terminals }
 }
 
 async fn call(rpc: &Arc<WorkspaceRpc>, peer: &Arc<Peer>, method: &str, params: Value) -> Result<Value, (String, String)> {

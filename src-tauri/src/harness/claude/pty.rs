@@ -100,10 +100,41 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// The program a test's sessions launch as Claude Code (`launch_program_for_tests`).
+#[cfg(test)]
+static TEST_PROGRAM: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// While it is held, sessions launch `program` as Claude Code: a stand-in,
+/// whether or not a real CLI is installed where the tests run. Process-wide,
+/// so the tests that hold one take turns.
+#[cfg(test)]
+pub(crate) struct TestProgram {
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn launch_program_for_tests(program: std::path::PathBuf) -> TestProgram {
+    static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+    *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = Some(program);
+    TestProgram { _turn: turn }
+}
+
+#[cfg(test)]
+impl Drop for TestProgram {
+    fn drop(&mut self) {
+        *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// The shell command line the pane runs. `Terminals::spawn` execs it from a
 /// login shell, so it is one string rather than an argv.
 pub fn launch_command(opts: LaunchOptions<'_>) -> Option<String> {
-    let program = crate::binpath::resolve("claude")?;
+    #[cfg(test)]
+    let pinned = TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    #[cfg(not(test))]
+    let pinned = None;
+    let program = pinned.or_else(|| crate::binpath::resolve("claude"))?;
     let mut c = quote(&program.to_string_lossy());
     match (opts.fork_from, opts.resume) {
         (Some(parent), _) => c.push_str(&format!(" --resume {} --fork-session --session-id {}", quote(parent), quote(opts.provider_session_id))),
