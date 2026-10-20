@@ -288,10 +288,10 @@ describe("buildTranscript", () => {
     let t = buildTranscript(events, true);
     expect(t.turns.map((turn) => turn.prompt?.text)).toEqual(["go", "second held"]);
     expect(t.turns[1].live).toBe(true);
-    // Sent before the one taken, it is not told apart from an older log's
-    // note the agent took mid-turn: it stays a note where it was sent.
-    expect(t.turns[0].work.map((w) => (w.kind === "queued" ? `queued: ${w.text}` : w.kind))).toEqual(["tool", "queued: first held"]);
-    expect(t.turns[1].work).toEqual([]);
+    // Sent before the one sent now, and still held: it waits behind the turn
+    // typed for that one, where it can be sent now in its turn.
+    expect(t.turns[0].work.map((w) => w.kind)).toEqual(["tool"]);
+    expect(t.turns[1].work.map((w) => (w.kind === "queued" ? `queued: ${w.text}` : w.kind))).toEqual(["queued: first held"]);
 
     events.push(toolStart("b", "Read"), toolDone("b"), ev({ type: "prompt_absorbed", promptSeq: first.seq }), ev({ type: "assistant_text", text: "both" }), ev({ type: "turn_completed", status: "ok", authFailed: false }));
     t = buildTranscript(events, false);

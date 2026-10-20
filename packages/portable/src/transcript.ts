@@ -241,9 +241,12 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         // What was queued after it waits behind this turn now (#551), where it
         // can still be sent now: the agent takes what it holds in order. One
         // queued before it and still a note was taken mid-turn in a log from
-        // before `prompt_absorbed`, and stays in the turn that read it.
+        // before `prompt_absorbed`, and stays in the turn that read it. A
+        // turn stopped to send one now puts that one first, so all of what
+        // it held waits.
         if (from !== current) {
-          const waiting = (item: WorkItem) => item.kind === "queued" && item.seq > prompt.seq;
+          const stopped = from.completed?.status === "aborted";
+          const waiting = (item: WorkItem) => item.kind === "queued" && (stopped || item.seq > prompt.seq);
           current.work.unshift(...from.work.filter(waiting));
           from.work = from.work.filter((item) => !waiting(item));
         }

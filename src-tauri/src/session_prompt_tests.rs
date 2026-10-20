@@ -817,26 +817,35 @@ fn a_queued_prompt_sent_now_starts_the_turn_it_is_typed_again_for() {
 /// record is still the take, not the prompt typed again: the turn it is read
 /// in is not over, and nothing has been typed. Read as the retyped prompt,
 /// it opened a turn inside the running one, which never closed.
+///
+/// What else was queued is not typed again either. The CLI still holds it,
+/// and stopped with a message queued it sends that at once as its next
+/// prompt ("Escape interrupts; only Stop ends the process" in PTY-FIRST.md);
+/// typed again as well, it would go to the agent twice.
 #[test]
 fn a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take() {
     for kind in BOTH {
         let rig = Rig::of(kind, "").with_pane();
         rig.compose("start", 0);
         rig.cli_takes("start");
-        assert!(rig.compose("use staging", 0), "{kind:?}");
-        let seq = rig.queued_seq("use staging");
+        assert!(rig.compose("use staging", 0) && rig.compose("then deploy", 0), "{kind:?}");
+        let (chosen, other) = (rig.queued_seq("use staging"), rig.queued_seq("then deploy"));
 
-        rig.manager.send_queued_now(SESSION, TAB, seq).unwrap();
+        rig.manager.send_queued_now(SESSION, TAB, chosen).unwrap();
         rig.append(&rig.cli().steer("use staging"));
         assert!(rig.turn_open(), "{kind:?}");
         assert!(rig.taken_as_prompts().is_empty(), "{kind:?}: no turn of its own inside the running one");
-        assert_eq!(rig.told(), ["user: start", "queued: use staging", "taken: use staging"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "queued: then deploy", "taken: use staging"], "{kind:?}");
 
-        // The Escape still stops the turn, and nothing is left to type again.
+        // The Escape still stops the turn, and nothing is typed again to open another.
         rig.interrupt();
-        assert!(!rig.turn_open(), "{kind:?}: nothing typed again opens another");
+        assert!(!rig.turn_open(), "{kind:?}");
+        assert_eq!(rig.held(), [other], "{kind:?}: still the CLI's to send");
+
+        rig.cli_takes("then deploy");
+        assert_eq!(rig.taken_as_prompts(), ["then deploy"], "{kind:?}: its record starts the next turn, as behind any stopped turn");
         assert!(rig.held().is_empty(), "{kind:?}");
-        assert_eq!(rig.told(), ["user: start", "queued: use staging", "taken: use staging", "end"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "queued: then deploy", "taken: use staging", "end"], "{kind:?}: each message once");
     }
 }
 

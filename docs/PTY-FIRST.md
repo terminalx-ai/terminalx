@@ -304,9 +304,17 @@ when the message was sent: a message queued a minute earlier behind a reply
 that was still streaming used to have run out of time the moment its turn
 was stopped.
 
-One difference between the two CLIs is worth knowing and is theirs, not the
-app's: without Escape, Claude Code holds a queued message until its turn is
-over, while Codex submits it into the running turn at the next tool call.
+Without Escape, either CLI may take a queued message into the running turn,
+or hold it until the turn is over and take it as the next prompt. Codex
+submits it at the next tool call, as a steer. Claude Code delivers it with
+the next tool result: the transcript reads `queue-operation` remove with
+`reason: "absorbed_mid_turn"` and a `queued_command` attachment, and no
+`user` record (#551). Its echo says which happened, and the chat is told:
+`prompt_absorbed` for one taken mid-turn, which is then drawn as the
+reader's message where the agent read it, and never folded away with the
+tool calls; `turn_started` naming it for one that starts the next turn. A
+log from before `prompt_absorbed` does not say a message was taken mid-turn,
+so there it is shown as it was sent.
 
 The headless agents (ACP and OpenCode, still driven for the tabs that have
 them) have no screen and no queue. Their interrupt is their protocol's own
@@ -766,7 +774,14 @@ rule at click time rather than trusting the rendered row.
   typed input itself. The chat shows it as queued until the CLI takes it and the
   transcript says so; the app keeps no queue of its own for these tabs. What
   Escape does with that queue is the CLI's to decide (see "Escape interrupts;
-  only Stop ends the process").
+  only Stop ends the process"). "Send now" on a message still queued behind
+  the running turn interrupts it and types the message again as a prompt of
+  its own once the turn has ended, with the rest of the queue typed behind it
+  in order; its echo starts the new turn. Once the CLI's record of a message
+  has been read, the tab no longer holds it, and "Send now" on it neither
+  interrupts the turn nor types it again. One pressed just before that record
+  is read still stops the turn, but the record is told as the take it was,
+  and nothing is typed twice.
 - **Permission mode changes** restart the CLI on the same conversation, because
   the TUI only cycles modes on a key with no way to read the result back and
   the CLI reads `--permission-mode` at startup alone. A change made mid-turn

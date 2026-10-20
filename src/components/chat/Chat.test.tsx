@@ -356,6 +356,9 @@ describe("a prompt the composer never saw", () => {
 
 // #551: a note left in a turn that is over offered a Send now that could only fail.
 describe("a message sent while the agent worked", () => {
+  const base = { sessionId: "s", tabId: "t", harness: "claude" };
+  const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
+
   beforeEach(() => {
     vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
     vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduced-motion"), addEventListener() {}, removeEventListener() {} }));
@@ -367,8 +370,6 @@ describe("a message sent while the agent worked", () => {
   });
 
   it("can be sent now only while it waits behind the running turn", () => {
-    const base = { sessionId: "s", tabId: "t", harness: "claude" };
-    const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
     const transcript = buildTranscript(
       [
         { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "go", queued: false } },
@@ -395,8 +396,6 @@ describe("a message sent while the agent worked", () => {
   });
 
   it("offers no Send now once the turn it waited behind is over: the agent sends it itself", () => {
-    const base = { sessionId: "s", tabId: "t", harness: "claude" };
-    const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
     const transcript = buildTranscript(
       [
         { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "go", queued: false } },
