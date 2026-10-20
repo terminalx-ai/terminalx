@@ -220,6 +220,13 @@ pub enum Payload {
         /// says it is the new turn's prompt and no longer a note in the old.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_seq: Option<u64>,
+        /// Set when nobody prompted this turn: the agent started it itself
+        /// (#540) — a scheduled check, a background task reporting in, a
+        /// message from another agent. The CLI writes each as a prompt no one
+        /// typed; this is what the chat says instead, and a message sent
+        /// while it runs is queued behind it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_by: Option<String>,
     },
     TurnCompleted {
         status: TurnStatus,
@@ -265,6 +272,13 @@ pub enum Payload {
         queued: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+    },
+    /// A queued `user_message`, `prompt_seq`, the CLI took while its turn
+    /// was still running (#551): Claude Code with the next tool result,
+    /// Codex as a steer. From here on it is a message the agent has, at this
+    /// point in the turn, and no longer one waiting behind it.
+    PromptAbsorbed {
+        prompt_seq: u64,
     },
     AssistantText {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -376,6 +390,12 @@ pub enum Payload {
         pre_tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         post_tokens: Option<u64>,
+    },
+    /// What the agent kept of the conversation a compaction just folded
+    /// away: its own memory of it, written for the model (#524). It belongs
+    /// to the `ContextCompacted` before it and is never a prompt.
+    CompactionSummary {
+        text: String,
     },
     ApiRetry {
         attempt: u32,

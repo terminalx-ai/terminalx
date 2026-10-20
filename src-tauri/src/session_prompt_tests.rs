@@ -130,19 +130,52 @@ impl Rig {
     }
 
     /// The conversation as the chat is told it: every prompt, reply and turn
-    /// end, in the order they were published.
+    /// end, and each queued prompt the CLI took mid-turn, in the order they
+    /// were published.
     fn told(&self) -> Vec<String> {
-        self.events()
+        let events = self.events();
+        events
             .iter()
             .filter_map(|e| match &e.payload {
                 Payload::UserMessage { text, queued: false, .. } => Some(format!("user: {text}")),
                 Payload::UserMessage { text, queued: true, .. } => Some(format!("queued: {text}")),
+                Payload::PromptAbsorbed { prompt_seq } => Some(format!("taken: {}", queued_text(&events, *prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
                 Payload::TurnCompleted { .. } => Some("end".to_string()),
                 _ => None,
             })
             .collect()
     }
+
+    /// The composer `seq`s of the prompts the tab would type again for a
+    /// "Send now".
+    fn held(&self) -> Vec<u64> {
+        match &self.rt.lock().unwrap().engine {
+            Engine::Cli(p) => p.held.iter().map(|(seq, _)| *seq).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The `seq` of the queued message the reader sent as `text`.
+    fn queued_seq(&self, text: &str) -> u64 {
+        self.events()
+            .iter()
+            .find(|e| matches!(&e.payload, Payload::UserMessage { text: sent, queued: true, .. } if sent == text))
+            .unwrap_or_else(|| panic!("no queued message {text:?}"))
+            .seq
+    }
+}
+
+/// The text of the queued message published under `seq`.
+fn queued_text(events: &[AgentEvent], seq: u64) -> String {
+    events
+        .iter()
+        .find(|e| e.seq == seq)
+        .and_then(|e| match &e.payload {
+            Payload::UserMessage { text, queued: true, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| format!("no queued message at {seq}"))
 }
 
 #[test]
@@ -591,14 +624,10 @@ impl Rig {
     /// The queued messages the log says a later turn was started by.
     fn taken_as_prompts(&self) -> Vec<String> {
         let events = self.events();
-        let text_at = |seq: u64| events.iter().find(|e| e.seq == seq).and_then(|e| match &e.payload {
-            Payload::UserMessage { text, queued: true, .. } => Some(text.clone()),
-            _ => None,
-        });
         events
             .iter()
             .filter_map(|e| match &e.payload {
-                Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(text_at(*seq).unwrap_or_else(|| format!("no queued message at {seq}"))),
+                Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(queued_text(&events, *seq)),
                 _ => None,
             })
             .collect()
@@ -708,6 +737,9 @@ fn a_prompt_typed_in_the_terminal_mid_turn_is_one_message() {
 /// A composer prompt sent while a turn runs is published as queued, and the
 /// CLI holds it. When the CLI takes it mid-turn, its record is the message
 /// the composer already published — it used to be drawn again as a new turn.
+/// The chat is told it was taken, there and then (#551): it had gone on
+/// showing it as waiting, and folded it away with the tool calls once the
+/// turn was over.
 #[test]
 fn a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message() {
     for kind in BOTH {
@@ -715,10 +747,105 @@ fn a_queued_composer_prompt_the_cli_takes_mid_turn_is_one_message() {
         rig.compose("start", 0);
         rig.cli_takes("start");
         assert!(rig.compose("while you are at it", 0), "{kind:?}: a turn is running, so it is queued");
+        let seq = rig.queued_seq("while you are at it");
+        assert_eq!(rig.held(), [seq], "{kind:?}: waiting, so it can still be sent now");
+
         rig.append(&rig.cli().steer("while you are at it"));
+        assert_eq!(rig.told(), ["user: start", "queued: while you are at it", "taken: while you are at it"], "{kind:?}");
+        assert!(rig.held().is_empty(), "{kind:?}: the CLI has it; nothing is left to send now");
+
+        // A "Send now" that crossed the take: the turn goes on, and nothing is typed again.
+        assert!(rig.manager.send_queued_now(SESSION, TAB, seq).is_err(), "{kind:?}");
+        assert!(rig.turn_open(), "{kind:?}: not interrupted");
+        assert!(matches!(&rig.rt.lock().unwrap().engine, Engine::Cli(p) if p.resend_after_abort.is_none()), "{kind:?}");
+
         rig.cli_replies("both");
-        assert_eq!(rig.told(), ["user: start", "queued: while you are at it", "reply: both", "end"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: while you are at it", "taken: while you are at it", "reply: both", "end"], "{kind:?}");
         assert!(rig.taken_as_prompts().is_empty(), "{kind:?}: taken within the turn, it starts no turn of its own");
+    }
+}
+
+impl Rig {
+    /// A pane that takes whatever is typed into it and draws nothing, for a
+    /// test where the tab types a prompt again.
+    fn with_pane(self) -> Self {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+        let spec = pty::PaneSpec { cwd: self._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sh -c 'cat > /dev/null'"), env: &[] };
+        self.manager.terminals.spawn(sink, &self.pane, spec).unwrap();
+        self
+    }
+}
+
+/// "Send now" on the second of two queued prompts: the turn is stopped, that
+/// one is typed again as a prompt of its own, and the first behind it,
+/// queued. The chat is told the new turn is the chosen message's answer, and
+/// that the other was taken when the CLI takes it (#551). Neither used to be
+/// said: the chosen message stayed a queued card in the stopped turn, with a
+/// Send now that could only answer that the agent had taken it. And with the
+/// echoes awaited in the order they were first sent, the chosen one's record
+/// dropped the other's echo as missed, and drew it again when it came.
+#[test]
+fn a_queued_prompt_sent_now_starts_the_turn_it_is_typed_again_for() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "").with_pane();
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("first held", 0) && rig.compose("second held", 0), "{kind:?}");
+        let (first, second) = (rig.queued_seq("first held"), rig.queued_seq("second held"));
+
+        rig.manager.send_queued_now(SESSION, TAB, second).unwrap();
+        rig.interrupt();
+        assert!(rig.turn_open(), "{kind:?}: the chosen message opens a turn of its own");
+        assert_eq!(rig.held(), [first], "{kind:?}: the other is held behind it");
+
+        rig.cli_takes("second held");
+        assert_eq!(rig.taken_as_prompts(), ["second held"], "{kind:?}: the log says which message the new turn answers");
+        assert_eq!(rig.held(), [first], "{kind:?}");
+        rig.append(&rig.cli().steer("first held"));
+        assert!(rig.held().is_empty(), "{kind:?}");
+        rig.cli_replies("both");
+        assert_eq!(
+            rig.told(),
+            ["user: start", "queued: first held", "queued: second held", "end", "taken: first held", "reply: both", "end"],
+            "{kind:?}: each message once, and the one taken mid-turn said so"
+        );
+    }
+}
+
+/// A "Send now" that crosses a take the tab has not read yet: the CLI wrote
+/// that it took the message mid-turn just before the Escape went in. That
+/// record is still the take, not the prompt typed again: the turn it is read
+/// in is not over, and nothing has been typed. Read as the retyped prompt,
+/// it opened a turn inside the running one, which never closed.
+///
+/// What else was queued is not typed again either. The CLI still holds it,
+/// and stopped with a message queued it sends that at once as its next
+/// prompt ("Escape interrupts; only Stop ends the process" in PTY-FIRST.md);
+/// typed again as well, it would go to the agent twice.
+#[test]
+fn a_send_now_that_crosses_an_unread_mid_turn_take_is_still_that_take() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "").with_pane();
+        rig.compose("start", 0);
+        rig.cli_takes("start");
+        assert!(rig.compose("use staging", 0) && rig.compose("then deploy", 0), "{kind:?}");
+        let (chosen, other) = (rig.queued_seq("use staging"), rig.queued_seq("then deploy"));
+
+        rig.manager.send_queued_now(SESSION, TAB, chosen).unwrap();
+        rig.append(&rig.cli().steer("use staging"));
+        assert!(rig.turn_open(), "{kind:?}");
+        assert!(rig.taken_as_prompts().is_empty(), "{kind:?}: no turn of its own inside the running one");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "queued: then deploy", "taken: use staging"], "{kind:?}");
+
+        // The Escape still stops the turn, and nothing is typed again to open another.
+        rig.interrupt();
+        assert!(!rig.turn_open(), "{kind:?}");
+        assert_eq!(rig.held(), [other], "{kind:?}: still the CLI's to send");
+
+        rig.cli_takes("then deploy");
+        assert_eq!(rig.taken_as_prompts(), ["then deploy"], "{kind:?}: its record starts the next turn, as behind any stopped turn");
+        assert!(rig.held().is_empty(), "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: use staging", "queued: then deploy", "taken: use staging", "end"], "{kind:?}: each message once");
     }
 }
 
@@ -749,6 +876,7 @@ fn a_queued_composer_prompt_the_cli_takes_after_the_turn_starts_the_next_one() {
             assert!(rig.turn_open(), "{case}");
             assert_eq!(rig.status(), TabStatus::InProgress, "{case}");
             assert_eq!(rig.taken_as_prompts(), ["then this"], "{case}: the log says which message the new turn answers");
+            assert!(rig.held().is_empty(), "{case}: it is the new turn's prompt, not one still to send");
 
             rig.cli_replies("two");
             assert_eq!(rig.told(), ["user: start", "queued: then this", "reply: one", "end", "reply: two", "end"], "{case}");
@@ -1134,3 +1262,7 @@ fn a_running_turn_keeps_its_start_through_its_hooks_and_a_mid_turn_prompt() {
 /// rig and the same two CLIs, and a headless tab beside them.
 #[path = "session_interrupt_tests.rs"]
 mod interrupts;
+
+/// Turns the agent starts itself, and a message sent while one runs (#540).
+#[path = "session_self_started_tests.rs"]
+mod self_started;

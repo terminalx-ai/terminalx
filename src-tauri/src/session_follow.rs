@@ -648,7 +648,9 @@ impl SessionManager {
                 for payload in payloads {
                     match payload {
                         Payload::ProviderSettings { signal } => self.provider_settings(&mut rt, signal),
-                        Payload::UserMessage { .. } => {
+                        // A turn the CLI started itself (#540) is a turn of
+                        // the history like any prompted one.
+                        Payload::UserMessage { .. } | Payload::TurnStarted { started_by: Some(_), .. } => {
                             if open {
                                 self.publish(&mut rt, ended(TurnStatus::Ok), None);
                             }

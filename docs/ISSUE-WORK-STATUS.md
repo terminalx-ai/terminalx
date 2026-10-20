@@ -90,9 +90,9 @@ chip's tooltip and the menu), and every link can be removed:
     GitHub account its GitHub App is installed on for all repositories).
     What counts is the issue's repository, not the checkout's, so work in a
     personal fork on the organization's issue shows;
-  - a Linear issue in a workspace the organization's admins named in
-    Settings → Account, worked on in a project whose repository the
-    organization connected.
+  - a Linear issue in a workspace the organization's admins named on its
+    page in Settings → Organizations, worked on in a project whose
+    repository the organization connected.
 
   Anything else, a personal project's work among it, is never shown to
   anyone else: asking for another repository or workspace answers nothing.
@@ -108,7 +108,8 @@ chip's tooltip and the menu), and every link can be removed:
 - **Controls**: Settings → Account → "Show my team what I'm working on"
   (own machines still see it), the per-session "Don't share this session",
   and, for an organization's owners and admins, "Work status in
-  *organization*" and its Linear workspaces.
+  *organization*" and its Linear workspaces on the organization's page in
+  Settings → Organizations, whichever organization is active.
 - **Machine names** go only to their owner; teammates see the person.
 
 ## How it works
@@ -160,7 +161,7 @@ chip's tooltip and the menu), and every link can be removed:
 | `src/lib/issueWork.ts` | Local and remote work merged, aged, sorted and labelled; the polling hooks |
 | `src/components/issues/IssueWork.tsx` | The chip, the detail list, the start warning |
 | `src/components/session/LinkIssueDialog.tsx`, `IssueLinkMenuItems.tsx` | Link to issue…, Unlink, Don't share this session |
-| `src/components/settings/WorkStatusSettings.tsx` | The person's and the organization's switches |
+| `src/components/settings/WorkStatusSettings.tsx` | The person's switch (Settings → Account) and the organization's (its page in Settings → Organizations) |
 
 ## Server
 

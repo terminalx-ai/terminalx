@@ -12,6 +12,7 @@ interface. The UI never branches on the provider's name; it reads
 | `src-tauri/src/commands.rs` | The `issue_*` Tauri commands |
 | `src/lib/issueOps.ts` | The TypeScript types and one wrapper per command |
 | `src/test/issueOpsMock.ts` | A fake backend with fixture issues for component tests |
+| `src/components/issues/NewIssueForm.tsx` | The new-issue form; its draft is kept per project and provider by `src/lib/newIssueDrafts.ts` |
 
 ## Commands
 
@@ -33,6 +34,7 @@ issue's `id` (the number on GitHub, the UUID or `ENG-42` on Linear).
 | `issue_set_title(id, title)` | `IssueDetails` |
 | `issue_set_description(id, edit)` | `IssueDetails`. `edit.expectedDescription` (or, without it, `edit.expectedUpdatedAt`) turns a stale edit into a `conflict` |
 | `issue_create(input)` | `IssueDetails`. A GitHub issue in the project's repository, or a Linear one in `input.teamId` |
+| `issue_templates()` | `IssueTemplate[]`: the project's Markdown issue templates (`.github/ISSUE_TEMPLATE/*.md` in its checkout; `issue_ops/templates.rs`), with their front matter's name, about, title, labels and assignees, and the body. Takes `projectPath` only |
 
 Every write answers with the issue as re-read from the provider. After a
 failed write the UI reads the issue again: part of a write may have landed.

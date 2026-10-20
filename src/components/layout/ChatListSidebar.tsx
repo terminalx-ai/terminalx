@@ -113,7 +113,7 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             ))}
           </ul>
         )}
-        <CloudOrganizations onOpenAccount={onOpenAccount} onOpenOrganizations={() => onOpenSettings("organizations")} />
+        <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
         <DevelopmentSection />
       </nav>
 

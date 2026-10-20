@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronDown, ExternalLink, FolderGit2, GitBranch, Loader2, RefreshCw, Search, Settings2, Users } from "@/icons";
+import { Check, ChevronDown, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -9,6 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from "@/components/ui/menu";
 import { AutomationEditor, type AutomationEditorPrefill } from "@/components/automations/AutomationEditor";
 import { AssigneePicker } from "@/components/issues/AssigneePicker";
+import { NewIssueForm } from "@/components/issues/NewIssueForm";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { IssueListFilters } from "@/components/issues/IssueListFilters";
 import { IssuePipelinePanel } from "@/components/issues/IssuePipelinePanel";
@@ -23,10 +24,8 @@ import { useSessionAgent } from "@/lib/useSessionAgent";
 import { Markdown } from "@/components/chat/Markdown";
 import { api, errorMessage, gh, issues as issuesApi, type Issue, type IssueTeam, type LinearStatus } from "@/lib/api";
 import { filterMiss, issueFilterFor, issueFilterKey, wireFilter, type IssueListFilter } from "@/lib/issueListFilter";
-import { openAutomation, selectProject, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
+import { openAutomation, selectProject, selectSession, takeNewIssueRequest, upsertSession, useSessionStore } from "@/lib/sessions";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
-import { PERMISSION_MODES } from "@/lib/models";
-import { chooseMode } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { issuePrompt, issuePromptWithComments, issueWorktreeName } from "@/lib/issueSession";
 import type { IssueThread } from "@/lib/issueComments";
@@ -159,6 +158,12 @@ export function IssuesView({
   const root = useRef<HTMLDivElement>(null);
   const detailPane = useRef<HTMLDivElement>(null);
   const listColumn = useRef<HTMLDivElement>(null);
+  // The new-issue form, in the detail column in place of the open issue.
+  const [composing, setComposing] = useState(false);
+  // The issue created here last: listed and open even when the list read since doesn't hold it yet, under
+  // the filter it was made under. Let go of once a read holds it or the filter changes.
+  const created = useRef<{ projectPath: string; filter: string; issue: Issue } | null>(null);
+  const [copied, setCopied] = useState(false);
   const writes = useIssueWrites();
   const setUseWorktree = onUseWorktreeChange ?? setLocalUseWorktree;
 
@@ -167,6 +172,7 @@ export function IssuesView({
   const filterKey = project ? issueFilterKey(project.path, provider) : null;
   const filter = issueFilterFor(filterKey ? prefs.issueFilters[filterKey] : undefined, provider);
   const filterAsked = JSON.stringify(wireFilter(filter, ""));
+  const pinFilter = `${filterAsked}\n${search}`;
   const setFilter = (next: IssueListFilter) => {
     if (filterKey) setPrefs({ issueFilters: { ...getPrefs().issueFilters, [filterKey]: next } });
   };
@@ -185,7 +191,7 @@ export function IssuesView({
   // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
   const viewer = useIssueViewer(project?.path, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   const agentSelection = useSessionAgent(store.harnesses);
-  const { harness, modelId, effort } = agentSelection;
+  const { harness, modelId, effort, mode } = agentSelection;
   const linkedIssueUrls = useMemo(
     () => new Set(store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : [])),
     [store.sessions],
@@ -262,6 +268,13 @@ export function IssuesView({
     };
   }, [provider, linear?.connected]);
 
+  // The command palette's "New issue…".
+  useEffect(() => {
+    if (!store.newIssueRequested) return;
+    takeNewIssueRequest();
+    setComposing(true);
+  }, [store.newIssueRequested]);
+
   // The list itself. Search is debounced because GitHub runs it server-side.
   useEffect(() => {
     if (!project) return;
@@ -288,7 +301,11 @@ export function IssuesView({
             kept.add(key);
             return keepEdits(row, here);
           });
-          setList(rows);
+          // An issue just created here may not be in a list read so soon after; it stays at the top until it is.
+          const mine = created.current;
+          const pinned = mine && mine.projectPath === project.path && mine.issue.provider === provider && mine.filter === pinFilter ? mine.issue : null;
+          if (!pinned || rows.some((row) => writeKey(row) === writeKey(pinned))) created.current = null;
+          setList(created.current && pinned ? [shown.get(writeKey(pinned)) ?? pinned, ...rows] : rows);
           setListOf(`${project.path}\n${provider}`);
           setChangedHere(kept);
         }
@@ -306,7 +323,7 @@ export function IssuesView({
       live = false;
       window.clearTimeout(t);
     };
-  }, [project, provider, filterAsked, search, linear?.connected, tick]);
+  }, [project, provider, filterAsked, search, pinFilter, linear?.connected, tick]);
 
   // Body on demand: GitHub lists come without it. A refresh reads the open
   // issue again as well, since its state may have moved; what is on the page
@@ -375,7 +392,7 @@ export function IssuesView({
           harness: harness.id,
           model: modelId,
           effort,
-          permissionMode: prefs.lastMode,
+          permissionMode: mode,
         },
       });
       upsertSession(s);
@@ -396,7 +413,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, project, harness, modelId, effort, prefs.lastMode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson, work.byIssue]);
+  }, [detail, selected, project, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults.requirePerson, work.byIssue]);
 
   const emptyReason = useMemo(() => {
     if (!project) return "Add a project to see its issues.";
@@ -409,8 +426,8 @@ export function IssuesView({
     return null;
   }, [project, provider, ghOk, repo, linear]);
 
-  const mode = PERMISSION_MODES.find((m) => m.id === prefs.lastMode);
   const open = (issue: Issue) => {
+    setComposing(false);
     setSelected(issue);
     setStatusOpen(false);
     setAssigneeOpen(false);
@@ -449,8 +466,30 @@ export function IssuesView({
     setList((rows) => rows.map((row) => (same(row) ? { ...row, title: next.title, labels: next.labels, state: next.state, stateType: next.stateType, workflowStateType: next.workflowStateType, assignee: next.assignee, assignees: next.assignees, updatedAt: next.updatedAt } : row)));
     writes.touch(writeKey(next));
     setChangedHere((keys) => new Set(keys).add(writeKey(next)));
+    const mine = created.current;
+    if (mine && same(mine.issue)) created.current = { ...mine, issue: next };
   }, [writes.touch]);
   const edits = useIssueEdits(project?.path ?? null, editableIssue(current), changed);
+  const projectNow = useRef(project?.path);
+  projectNow.current = project?.path;
+  const pinFilterNow = useRef(pinFilter);
+  pinFilterNow.current = pinFilter;
+  // Created: selected in the list and open beside it, ready for "Start session".
+  const onIssueCreated = useCallback((projectPath: string, issue: IssueDetails) => {
+    if (projectNow.current !== projectPath) return;
+    created.current = { projectPath, filter: pinFilterNow.current, issue };
+    setComposing(false);
+    setProvider(issue.provider);
+    setList((rows) => [issue, ...rows.filter((row) => writeKey(row) !== writeKey(issue))]);
+    setSelected(issue);
+    setDetail(issue);
+    setStatusOpen(false);
+  }, []);
+  useEffect(() => setCopied(false), [selected?.provider, selected?.id]);
+  const copyIdentifier = () => {
+    if (!selected) return;
+    void navigator.clipboard?.writeText(selected.identifier).then(() => setCopied(true), () => {});
+  };
   // The editors are the open issue's own: a switch starts them afresh.
   const issueKey = selected ? `${project?.path}:${selected.provider}:${selected.id}` : "";
   // The session working on the issue: the pipeline's author, never its reviewer.
@@ -482,7 +521,8 @@ export function IssuesView({
       move(e.key === "ArrowDown" ? 1 : -1);
       return;
     }
-    if (!current || !project) return;
+    // The open issue's keys are not the new-issue form's, shown in its place.
+    if (!current || !project || composing) return;
     const native = e.nativeEvent;
     if (matchesShortcut(native, "issues.status")) {
       // Only an issue read whole has a picker to open, and not while a change to it is on its way.
@@ -529,7 +569,7 @@ export function IssuesView({
 
   return (
     <div ref={root} className="flex h-full min-h-0 outline-none" tabIndex={-1} onKeyDown={onViewKeyDown} data-testid="issues-view">
-      <div ref={listColumn} className="flex min-w-0 flex-1 flex-col border-r border-hairline">
+      <div ref={listColumn} className="@container flex min-w-0 flex-1 flex-col border-r border-hairline">
         <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2 pt-3">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -562,14 +602,15 @@ export function IssuesView({
             onChange={(v) => {
               setProvider(v);
               setSelected(null);
+              created.current = null;
             }}
             options={[
               { value: "github", label: "GitHub" },
               { value: "linear", label: "Linear" },
             ]}
           />
-          <div className="ml-auto flex items-center gap-1">
-            <div className="flex h-7 items-center gap-1 rounded-md bg-well px-2">
+          <div className="ml-auto flex min-w-0 max-w-full items-center gap-1">
+            <div className="flex h-7 min-w-0 items-center gap-1 rounded-md bg-well px-2">
               <Search className="size-3.5 text-faint" />
               <input
                 value={search}
@@ -579,6 +620,13 @@ export function IssuesView({
                 className="w-28 min-w-0 bg-transparent text-xs outline-none placeholder:text-faint sm:w-36"
               />
             </div>
+            {/* A narrow list column keeps the icon alone, so the toolbar stays on its side. */}
+            <WithTooltip label="New issue">
+              <Button variant="secondary" size="sm" className="shrink-0 gap-1" aria-label="New issue" onClick={() => setComposing(true)} disabled={!project}>
+                <Plus />
+                <span className="hidden @lg:inline">New issue</span>
+              </Button>
+            </WithTooltip>
             <WithTooltip label="Refresh">
               <Button variant="ghost" size="icon-xs" aria-label="Refresh" onClick={() => setTick((t) => t + 1)}>
                 {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -685,13 +733,40 @@ export function IssuesView({
       </div>
 
       <div ref={detailPane} className="flex w-[46%] min-w-[18rem] max-w-[40rem] flex-col outline-none" tabIndex={-1} data-testid="issue-detail">
-        {!selected ? (
+        {composing && project ? (
+          <NewIssueForm
+            key={`${project.path}\n${provider}`}
+            projectPath={project.path}
+            provider={provider}
+            onProviderChange={(value) => {
+              setProvider(value);
+              setSelected(null);
+            }}
+            repo={repo}
+            teams={teams}
+            defaultTeamId={filter.teamId}
+            viewer={viewer}
+            unavailable={emptyReason}
+            onCreated={onIssueCreated}
+            onClose={() => setComposing(false)}
+          />
+        ) : !selected ? (
           <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-faint">Pick an issue to read it and start a session on it.</div>
         ) : (
           <>
             <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
-                <span className="font-mono text-xs text-faint">{selected.identifier}</span>
+                <WithTooltip label={copied ? "Copied" : "Copy identifier"}>
+                  <button
+                    type="button"
+                    aria-label={`Copy ${selected.identifier}`}
+                    onClick={copyIdentifier}
+                    className="group -mx-1 flex shrink-0 items-center gap-1 self-center rounded px-1 font-mono text-xs text-faint hover:bg-veil-raised hover:text-foreground"
+                  >
+                    {selected.identifier}
+                    {copied ? <Check className="size-3" /> : <Copy className="size-3 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100" />}
+                  </button>
+                </WithTooltip>
                 <IssueTitle key={issueKey} edits={edits} title={current?.title ?? selected.title} />
               </div>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
@@ -730,21 +805,6 @@ export function IssuesView({
               {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} />
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="gap-1 text-xs">
-                      {mode?.label ?? prefs.lastMode}
-                      <ChevronDown className="text-faint" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
-                    {PERMISSION_MODES.map((m) => (
-                      <DropdownMenuItem key={m.id} onSelect={() => chooseMode(harness?.id ?? "", m.id, (v) => setPrefs({ lastMode: v }))}>
-                        {m.label}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
               </div>
               {/* Where it runs, and the buttons. The buttons take a line of their own
                   when the pane is too narrow for both, rather than sit on the words. */}

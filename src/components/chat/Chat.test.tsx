@@ -5,6 +5,7 @@ import { buildTranscript } from "@/lib/transcript";
 import { syntheticLog } from "@/demo/synthetic";
 import type { StreamBlock } from "@/lib/agentEvents";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // jsdom lays nothing out, so this models the one box that matters: a scroller
 // of fixed height over content whose children stack at known heights. Like a
@@ -350,6 +351,66 @@ describe("a prompt the composer never saw", () => {
     expect(order.every((index) => index >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(text.match(/typed in the terminal/g)).toHaveLength(1);
+  });
+});
+
+// #551: a note left in a turn that is over offered a Send now that could only fail.
+describe("a message sent while the agent worked", () => {
+  const base = { sessionId: "s", tabId: "t", harness: "claude" };
+  const at = (seq: number) => new Date(1_700_000_000_000 + seq * 1000).toISOString();
+
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", CapturingResizeObserver);
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("reduced-motion"), addEventListener() {}, removeEventListener() {} }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("can be sent now only while it waits behind the running turn", () => {
+    const transcript = buildTranscript(
+      [
+        { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "go", queued: false } },
+        // Taken mid-turn in a log from before `prompt_absorbed`: nothing says so.
+        { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "user_message", text: "taken long ago", queued: true } },
+        { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "assistant_text", text: "done" } },
+        { ...base, id: "e4", seq: 4, ts: at(4), payload: { type: "turn_completed", status: "ok", authFailed: false } },
+        { ...base, id: "e5", seq: 5, ts: at(5), payload: { type: "user_message", text: "next", queued: false } },
+        { ...base, id: "e6", seq: 6, ts: at(6), payload: { type: "user_message", text: "waiting now", queued: true } },
+      ],
+      true,
+    );
+    const sendNow = vi.fn();
+    render(
+      <TooltipProvider>
+        <Chat sessionId="s" transcript={transcript} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onSendQueuedNow={sendNow} />
+      </TooltipProvider>,
+    );
+    expect(screen.getAllByTestId("queued-message").map((card) => card.textContent)).toEqual([expect.stringContaining("taken long ago"), expect.stringContaining("waiting now")]);
+    expect(screen.getAllByTestId("reader-message").map((bubble) => bubble.textContent)).toEqual(["go", "next"]);
+    // One Send now, on the message behind the running turn.
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+    expect(sendNow).toHaveBeenCalledWith(6);
+  });
+
+  it("offers no Send now once the turn it waited behind is over: the agent sends it itself", () => {
+    const transcript = buildTranscript(
+      [
+        { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "go", queued: false } },
+        { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "user_message", text: "then this", queued: true } },
+        { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "turn_completed", status: "ok", authFailed: false } },
+      ],
+      true,
+    );
+    render(
+      <TooltipProvider>
+        <Chat sessionId="s" transcript={transcript} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onSendQueuedNow={vi.fn()} />
+      </TooltipProvider>,
+    );
+    expect(screen.getByTestId("queued-message").textContent).toContain("then this");
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
   });
 });
 

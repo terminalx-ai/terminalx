@@ -418,10 +418,17 @@ pub struct AgentLoginConsent {
     /// The login now stored for this agent may be replaced. Required when there is one.
     #[serde(default)]
     pub replace_existing: bool,
+    /// The organization whose logins these are (PRO-107): any one the
+    /// person belongs to, named by id, whatever the active one is. None is
+    /// the active organization, as before.
+    #[serde(default)]
+    pub organization_id: Option<String>,
 }
 
 pub(crate) struct AgentLoginAuthorization {
     context: AccountContext,
+    /// What authorized `context`'s organization, which decides what keeps it current.
+    access: OrgAccess,
     /// The kind of login stored for the agent now, which saving replaces.
     replaces: Option<AgentLoginKind>,
     /// That login's kind and scope as the service names them, for `reach`.
@@ -488,7 +495,7 @@ impl AgentLoginAuthorization {
     #[cfg(test)]
     pub(crate) fn for_test(context: AccountContext, stored: Option<(&str, Option<&str>)>) -> Self {
         let replaces = stored.map(|(kind, _)| if kind == "api-key" { AgentLoginKind::ApiKey } else { AgentLoginKind::LoginDocument });
-        Self { context, replaces, stored: stored.map(|(kind, scope)| (kind.to_owned(), scope.map(str::to_owned))) }
+        Self { context, access: OrgAccess::Active, replaces, stored: stored.map(|(kind, scope)| (kind.to_owned(), scope.map(str::to_owned))) }
     }
 }
 
@@ -2122,12 +2129,32 @@ impl CloudWorkspaceService {
         ensure_connection(result, provider)
     }
 
-    /// The organization's agent logins for cloud workspaces (PRO-79): which
-    /// agents are connected and how, never the login itself. The service
-    /// answers owners and admins only; anyone else gets
+    /// An organization's agent logins for cloud workspaces (PRO-79): which
+    /// agents are connected and how, never the login itself. `organization`
+    /// is any one the person belongs to (PRO-107), the active one when none.
+    /// The service answers owners and admins only; anyone else gets
     /// `organization_admin_required`.
-    pub fn agent_logins(&self) -> Result<AgentLoginList, CloudWorkspaceClientError> {
-        self.run(RequestRisk::Read, Self::read_agent_logins)
+    pub fn agent_logins(&self, organization: Option<&str>) -> Result<AgentLoginList, CloudWorkspaceClientError> {
+        self.run_in(organization, RequestRisk::Read, Self::read_agent_logins)
+    }
+
+    /// The context a change to agent logins is made in: `organization` (the
+    /// active one when none), for the account and default organization the
+    /// page knew when the person chose it (`context_revision`, the page's
+    /// own). Naming the organization is what lets the page change one that is
+    /// not the active one; switching the default organization in between
+    /// still refuses, as it did before.
+    fn agent_login_context(&self, organization: Option<&str>, context_revision: &str, risk: RequestRisk) -> Result<(AccountContext, OrgAccess), CloudWorkspaceClientError> {
+        let active = self.context()?;
+        if context_revision != AccountManager::context_revision(&active) {
+            return Err(context_changed_error(risk));
+        }
+        let (context, access) = self.context_in(organization)?;
+        // The same account and generation the revision was checked against: never a newer sign-in's.
+        if context.generation != active.generation || context.user_id != active.user_id || context.profile_id != active.profile_id {
+            return Err(context_changed_error(risk));
+        }
+        Ok((context, access))
     }
 
     fn read_agent_logins(client: &Client, context: &AccountContext) -> Result<AgentLoginList, CloudWorkspaceClientError> {
@@ -2139,9 +2166,10 @@ impl CloudWorkspaceService {
 
     /// Before a login is collected or read from this computer: the person
     /// consented to both things the service will ask about, the request is
-    /// for the organization that is active now, and the service accepts them
-    /// as an owner or admin (the list is refused to anyone else). Nothing is
-    /// prompted for, read or sent before this passes.
+    /// for the organization they were looking at (named in the consent, or
+    /// the active one) in the account they were looking at, and the service
+    /// accepts them as an owner or admin there (the list is refused to anyone
+    /// else). Nothing is prompted for, read or sent before this passes.
     ///
     /// The service holds one login per organization and agent, so storing one
     /// replaces whatever is there. When a login is stored for `provider`,
@@ -2151,12 +2179,9 @@ impl CloudWorkspaceService {
         if !consent.organization_sharing || !consent.machine_installation {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        let context = self.context()?;
-        if consent.context_revision != AccountManager::context_revision(&context) {
-            return Err(context_changed_error(RequestRisk::Read));
-        }
+        let (context, access) = self.agent_login_context(consent.organization_id.as_deref(), &consent.context_revision, RequestRisk::Read)?;
         let stored = Self::read_agent_logins(&self.client, &context)?;
-        if !self.account.is_current(&context) {
+        if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(RequestRisk::Read));
         }
         let stored = stored
@@ -2168,7 +2193,7 @@ impl CloudWorkspaceService {
         if replaces.is_some() && !consent.replace_existing {
             return Err(CloudWorkspaceClientError::local("cloud_agent_login_replace_unconfirmed", false));
         }
-        Ok(AgentLoginAuthorization { context, replaces, stored })
+        Ok(AgentLoginAuthorization { context, access, replaces, stored })
     }
 
     /// Store a login for an agent. `secret` is sent once, to the service
@@ -2188,7 +2213,7 @@ impl CloudWorkspaceService {
         if secret.trim().is_empty() || secret.len() > 64 * 1024 {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        if !self.account.is_current(&authorization.context) {
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         // Built as text in zeroized buffers: the secret is JSON-escaped once and placed in the body once.
@@ -2204,7 +2229,7 @@ impl CloudWorkspaceService {
         ));
         drop(escaped);
         let login: AgentLogin = self.client.send_secret("PUT", &authorization.context, &["cloud-workspace-credentials", provider.as_str()], body)?;
-        if !self.account.is_current(&authorization.context) {
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         if login.provider != provider.as_str() {
@@ -2223,7 +2248,7 @@ impl CloudWorkspaceService {
     /// Begin a sign-in. The answer's page address is checked here: only an
     /// `https` page of the provider is ever opened.
     pub(crate) fn start_claude_login(&self, authorization: &AgentLoginAuthorization) -> Result<ClaudeLoginStart, CloudWorkspaceClientError> {
-        if !self.account.is_current(&authorization.context) {
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         let started: ClaudeLoginStart = self
@@ -2250,7 +2275,7 @@ impl CloudWorkspaceService {
         if !valid_resource_id(attempt_id) || code.trim().is_empty() || code.len() > 8 * 1024 {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        if !self.account.is_current(&authorization.context) {
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         let invalid = |_| CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false);
@@ -2266,7 +2291,7 @@ impl CloudWorkspaceService {
             .client
             .send_secret("POST", &authorization.context, &["cloud-workspace-credentials", "claude", "login-complete"], body)
             .map_err(attempt_gone_on_404)?;
-        if !self.account.is_current(&authorization.context) {
+        if !self.account.is_current_in(&authorization.context, authorization.access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         if outcome.credential.as_ref().is_some_and(|login| login.provider != AgentLoginProvider::Claude.as_str()) {
@@ -2275,13 +2300,13 @@ impl CloudWorkspaceService {
         Ok(outcome)
     }
 
-    /// Abandon a sign-in that was started here.
-    pub fn cancel_claude_login(&self, attempt_id: &str, context_revision: String) -> Result<(), CloudWorkspaceClientError> {
+    /// Abandon a sign-in that was started here, for `organization` (the active one when none).
+    pub fn cancel_claude_login(&self, attempt_id: &str, context_revision: String, organization: Option<&str>) -> Result<(), CloudWorkspaceClientError> {
         if !valid_resource_id(attempt_id) {
             return Err(CloudWorkspaceClientError::local("cloud_workspace_request_invalid", false));
         }
-        let context = self.context()?;
-        if context_revision != AccountManager::context_revision(&context) || !self.account.is_current(&context) {
+        let (context, access) = self.agent_login_context(organization, &context_revision, RequestRisk::Mutation)?;
+        if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         let _: Value = self
@@ -2291,12 +2316,12 @@ impl CloudWorkspaceService {
         Ok(())
     }
 
-    /// Disconnect an agent's login. The service refuses while a workspace
-    /// still uses it, and access already handed to a machine lasts until its
-    /// own expiry.
-    pub fn remove_agent_login(&self, provider: AgentLoginProvider, context_revision: String) -> Result<(), CloudWorkspaceClientError> {
-        let context = self.context()?;
-        if context_revision != AccountManager::context_revision(&context) || !self.account.is_current(&context) {
+    /// Disconnect an agent's login in `organization` (the active one when
+    /// none). The service refuses while a workspace still uses it, and access
+    /// already handed to a machine lasts until its own expiry.
+    pub fn remove_agent_login(&self, provider: AgentLoginProvider, context_revision: String, organization: Option<&str>) -> Result<(), CloudWorkspaceClientError> {
+        let (context, access) = self.agent_login_context(organization, &context_revision, RequestRisk::Mutation)?;
+        if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         let _: Value = self.client.request_as(
@@ -2308,7 +2333,7 @@ impl CloudWorkspaceService {
             None,
             RequestRisk::Mutation,
         )?;
-        if !self.account.is_current(&context) {
+        if !self.account.is_current_in(&context, access) {
             return Err(context_changed_error(RequestRisk::Mutation));
         }
         Ok(())
@@ -3948,7 +3973,7 @@ mod tests {
     // ---- agent logins (PRO-79)
 
     fn consent(revision: &str, sharing: bool, machines: bool) -> AgentLoginConsent {
-        AgentLoginConsent { context_revision: revision.into(), organization_sharing: sharing, machine_installation: machines, replace_existing: false }
+        AgentLoginConsent { context_revision: revision.into(), organization_sharing: sharing, machine_installation: machines, replace_existing: false, organization_id: None }
     }
 
     // Review of #293: lending a sign-in silently replaced a working API key.
@@ -4067,7 +4092,7 @@ mod tests {
         ]}"#;
         let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        let listed = service.agent_logins().unwrap();
+        let listed = service.agent_logins(None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/cloud-workspace-credentials HTTP/1.1"));
         assert_eq!(listed.credentials.iter().map(|login| login.provider.as_str()).collect::<Vec<_>>(), ["claude", "codex"]);
@@ -4102,6 +4127,95 @@ mod tests {
         let (_, service) = test_service(&base);
         assert_eq!(service.authorize_agent_login(AgentLoginProvider::Claude, &consent(&revision, true, true)).err().unwrap().code, "organization_admin_required");
         assert!(!request.join().unwrap().extra_request);
+    }
+
+    // PRO-107: agent logins belong to each organization. One the person belongs to is named by id
+    // and changed by its own path while another is active; nothing is ever sent to the active one.
+    #[test]
+    fn a_named_member_organizations_agent_logins_are_read_and_changed_by_its_own_path() {
+        let revision = AccountManager::context_revision(&context());
+        let in_org_2 = |replace| AgentLoginConsent { replace_existing: replace, organization_id: Some("org-2".into()), ..consent(&revision, true, true) };
+        let stored = r#"{"credentials":[{"id":"c1","provider":"codex","authKind":"api-key","fingerprint":"sha256:ab","version":1,"updatedAt":5,"state":"connected"}]}"#;
+        let saved = r#"{"id":"c2","provider":"codex","authKind":"api-key","fingerprint":"sha256:cd","version":2,"updatedAt":9,"state":"connected"}"#;
+
+        // An older server reaches only the active organization: refused before any request.
+        let (_, service) = test_service("http://127.0.0.1:9");
+        assert_eq!(service.agent_logins(Some("org-2")).unwrap_err().code, "cloud_organization_unavailable");
+        assert_eq!(service.authorize_agent_login(AgentLoginProvider::Codex, &in_org_2(true)).err().unwrap().code, "cloud_organization_unavailable");
+
+        // The list.
+        let (base, _, request) = serve_once(response("200 OK", stored, ""), Duration::ZERO);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.agent_logins(Some("org-2")).unwrap().credentials[0].provider, "codex");
+        assert!(request.join().unwrap().text.starts_with("GET /v1/desktop/orgs/org-2/cloud-workspace-credentials HTTP/1.1"));
+        // The native dialogs name it: the active organization's name, a member organization's, and nothing for any other.
+        assert_eq!(account.organization_name("org-1").as_deref(), Some("Test Organization"));
+        assert_eq!(account.organization_name("org-2").as_deref(), Some("org-2"));
+        assert_eq!(account.organization_name("org-3"), None);
+
+        // Replacing org-2's Codex login while org-1 is active: the replace choice is still asked
+        // for, and the read and the PUT both go to org-2.
+        let (base, requests) = serve_each(vec![response("200 OK", stored, ""), response("200 OK", stored, ""), response("200 OK", saved, "")]);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        assert_eq!(service.authorize_agent_login(AgentLoginProvider::Codex, &in_org_2(false)).err().unwrap().code, "cloud_agent_login_replace_unconfirmed");
+        let authorization = service.authorize_agent_login(AgentLoginProvider::Codex, &in_org_2(true)).unwrap();
+        assert_eq!(authorization.organization_id(), "org-2");
+        assert_eq!(authorization.replaces(), Some(AgentLoginKind::ApiKey));
+        service.save_agent_login(authorization, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-2".to_string()), None).unwrap();
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("GET /v1/desktop/orgs/org-2/cloud-workspace-credentials HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /v1/desktop/orgs/org-2/cloud-workspace-credentials HTTP/1.1"));
+        assert!(requests[2].starts_with("PUT /v1/desktop/orgs/org-2/cloud-workspace-credentials/codex HTTP/1.1"));
+        assert!(requests.iter().all(|request| !request.contains("/orgs/org-1/")));
+
+        // Disconnecting and cancelling a sign-in name it too.
+        let (base, requests) = serve_each(vec![response("200 OK", r#"{"ok":true}"#, ""), response("200 OK", r#"{"status":"canceled"}"#, "")]);
+        let (account, service) = test_service(&base);
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        service.remove_agent_login(AgentLoginProvider::Codex, revision.clone(), Some("org-2")).unwrap();
+        service.cancel_claude_login("attempt_1", revision.clone(), Some("org-2")).unwrap();
+        let requests = requests.join().unwrap();
+        assert!(requests[0].starts_with("DELETE /v1/desktop/orgs/org-2/cloud-workspace-credentials/codex HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /v1/desktop/orgs/org-2/cloud-workspace-credentials/claude/login-cancel HTTP/1.1"));
+
+        // Never an organization the person is not a member of, and never on a page that knew another account.
+        let (account, service) = test_service("http://127.0.0.1:9");
+        account.set_memberships_for_test(&["org-1", "org-2"], true);
+        let in_org_3 = AgentLoginConsent { organization_id: Some("org-3".into()), ..consent(&revision, true, true) };
+        assert_eq!(service.authorize_agent_login(AgentLoginProvider::Codex, &in_org_3).err().unwrap().code, "cloud_organization_unavailable");
+        assert_eq!(service.remove_agent_login(AgentLoginProvider::Codex, revision.clone(), Some("org-3")).err().unwrap().code, "cloud_organization_unavailable");
+        assert_eq!(service.remove_agent_login(AgentLoginProvider::Codex, "old-context".into(), Some("org-2")).err().unwrap().code, "account_context_changed");
+    }
+
+    // PRO-107: a request in flight for a named organization is fenced by the membership, not by
+    // which organization is active: a default switch does not drop it, leaving the organization does.
+    #[test]
+    fn a_named_organizations_login_change_survives_a_default_switch_but_not_leaving_it() {
+        let revision = AccountManager::context_revision(&context());
+        let saved = r#"{"id":"c2","provider":"codex","authKind":"api-key","fingerprint":"sha256:cd","version":2,"updatedAt":9,"state":"connected"}"#;
+        let authorize = |account: &AccountManager, service: &CloudWorkspaceService| {
+            account.set_memberships_for_test(&["org-1", "org-2"], true);
+            service.authorize_agent_login(AgentLoginProvider::Codex, &AgentLoginConsent { organization_id: Some("org-2".into()), ..consent(&revision, true, true) }).unwrap()
+        };
+
+        let (base, requests) = serve_each(vec![response("200 OK", r#"{"credentials":[]}"#, ""), response("200 OK", saved, "")]);
+        let (account, service) = test_service(&base);
+        let authorization = authorize(&account, &service);
+        account.set_active_org_for_test("org-2");
+        assert!(service.save_agent_login(authorization, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-2".to_string()), None).is_ok());
+        requests.join().unwrap();
+
+        let (base, requests) = serve_each(vec![response("200 OK", r#"{"credentials":[]}"#, "")]);
+        let (account, service) = test_service(&base);
+        let authorization = authorize(&account, &service);
+        account.set_memberships_for_test(&["org-1"], true);
+        assert_eq!(
+            service.save_agent_login(authorization, AgentLoginProvider::Codex, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("sk-2".to_string()), None).err().unwrap().code,
+            "account_context_changed"
+        );
+        assert_eq!(requests.join().unwrap().len(), 1, "nothing is sent for an organization the person left");
     }
 
     #[test]
@@ -4253,8 +4367,8 @@ mod tests {
 
         let (base, _, request) = serve_once(response("200 OK", r#"{"status":"canceled"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        assert_eq!(service.cancel_claude_login("attempt_1", "old-context".into()).err().unwrap().code, "account_context_changed");
-        service.cancel_claude_login("attempt_1", AccountManager::context_revision(&context())).unwrap();
+        assert_eq!(service.cancel_claude_login("attempt_1", "old-context".into(), None).err().unwrap().code, "account_context_changed");
+        service.cancel_claude_login("attempt_1", AccountManager::context_revision(&context()), None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("POST /v1/desktop/orgs/org-1/cloud-workspace-credentials/claude/login-cancel HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({ "attemptId": "attempt_1" }));
@@ -4285,7 +4399,7 @@ mod tests {
     fn an_agent_login_is_removed_with_delete_and_a_rejected_key_says_so() {
         let (base, _, request) = serve_once(response("200 OK", r#"{"ok":true}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
-        service.remove_agent_login(AgentLoginProvider::Cursor, AccountManager::context_revision(&context())).unwrap();
+        service.remove_agent_login(AgentLoginProvider::Cursor, AccountManager::context_revision(&context()), None).unwrap();
         let captured = request.join().unwrap();
         assert!(captured.text.starts_with("DELETE /v1/desktop/orgs/org-1/cloud-workspace-credentials/cursor HTTP/1.1"));
         assert_eq!(serde_json::from_str::<Value>(captured.text.split("\r\n\r\n").nth(1).unwrap()).unwrap(), json!({}));
@@ -4293,7 +4407,7 @@ mod tests {
         let (base, _, request) = serve_once(response("422 Unprocessable Entity", r#"{"error":"cloud_workspace_credential_invalid"}"#, ""), Duration::ZERO);
         let (_, service) = test_service(&base);
         // Asked for another organization than the active one: nothing is sent.
-        assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into()).err().unwrap().code, "account_context_changed");
+        assert_eq!(service.remove_agent_login(AgentLoginProvider::Cursor, "old-context".into(), None).err().unwrap().code, "account_context_changed");
         let refused = service.save_agent_login(AgentLoginAuthorization::for_test(context(), None), AgentLoginProvider::Cursor, AgentLoginKind::ApiKey, zeroize::Zeroizing::new("key-1".to_string()), None);
         assert_eq!(refused.err().unwrap().code, "cloud_workspace_credential_invalid");
         let captured = request.join().unwrap();

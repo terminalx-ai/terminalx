@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const { WorkStatusSettings } = await import("./WorkStatusSettings");
+const { OrganizationWorkStatus, WorkStatusSettings } = await import("./WorkStatusSettings");
 
 let organizationShares = true;
 let linearWorkspaces: string[] = [];
@@ -44,16 +44,24 @@ const organizations = [
 
 describe("work status settings", () => {
   it("turns off sharing with the team, which the publisher reads", async () => {
-    render(<WorkStatusSettings organizations={organizations} />);
+    render(<WorkStatusSettings />);
     const share = await screen.findByRole("switch", { name: "Show my team what I’m working on" });
     await waitFor(() => expect(share.getAttribute("aria-checked")).toBe("true"));
     fireEvent.click(share);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_work_status_settings", { shareWithTeam: false }));
     await waitFor(() => expect(share.getAttribute("aria-checked")).toBe("false"));
+    // An organization's own switches are on its page in Settings → Organizations (PRO-107).
+    expect(invoke.mock.calls.some(([command]) => command === "organization_work_status")).toBe(false);
   });
 
   it("gives an admin the organization's switch, and nobody else", async () => {
-    render(<WorkStatusSettings organizations={organizations} />);
+    render(
+      <>
+        {organizations.map((organization) => (
+          <OrganizationWorkStatus key={organization.id} organization={organization} />
+        ))}
+      </>,
+    );
     const org = await screen.findByRole("switch", { name: "Share work status in Acme" });
     expect(screen.queryByRole("switch", { name: "Share work status in Other" })).toBeNull();
     expect(screen.queryByRole("switch", { name: "Share work status in Me" })).toBeNull();

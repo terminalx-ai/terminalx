@@ -423,9 +423,10 @@ const MESSAGES: Record<string, string> = {
   cloud_provider_connection_attention_required: "The compute provider connection needs attention in Settings.",
   cloud_provider_billing_required: "The compute provider account needs billing set up.",
   cloud_provider_permission_denied: "The provider key is valid but lacks a permission TerminalX needs. An admin can check its scope in the provider console.",
-  cloud_workspace_repository_not_accessible: "The GitHub App cannot read that repository. Choose it in Settings → GitHub.",
+  // GitHub is on the organization's own page (PRO-107).
+  cloud_workspace_repository_not_accessible: "The GitHub App cannot read that repository. Choose it on the organization's page in Settings → Organizations, under GitHub.",
   cloud_workspace_repository_ref_not_found: "That branch does not exist in the repository.",
-  cloud_workspace_repository_credential_required: "Connect GitHub in Settings to use private repositories.",
+  cloud_workspace_repository_credential_required: "Connect GitHub on the organization's page in Settings → Organizations to use private repositories.",
   cloud_workspace_repository_verification_unavailable: "GitHub could not be reached to check the repositories. Try again.",
   cloud_workspace_repository_invalid: "That repository cannot be used.",
   cloud_environment_repository_not_in_image: "That repository is not in the organization's environment image. Add it and rebuild the environment first.",
@@ -445,8 +446,11 @@ const MESSAGES: Record<string, string> = {
   cloud_workspace_launch_invalid: "Choose a valid agent, model and effort.",
 };
 
-/** Where an organization's agent logins are listed. Only an owner or admin can change them. */
-export const AGENT_LOGIN_PLACE = "Settings → Account → Agent logins";
+/**
+ * Where an organization's agent logins are listed: on that organization's own
+ * page (PRO-107). Only an owner or admin can change them.
+ */
+export const AGENT_LOGIN_PLACE = "Settings → Organizations → Agent logins";
 
 /** A message that sends its reader to the agent logins, so the page can offer the way there. */
 export function mentionsAgentLogins(message: string | null | undefined): boolean {

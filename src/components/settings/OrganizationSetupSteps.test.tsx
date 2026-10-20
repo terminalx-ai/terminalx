@@ -1,12 +1,23 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api, type AgentLogin } from "@/lib/api";
+import { takeAgentLoginsRequest, takeOrganizationRequest } from "@/lib/settingsLinks";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import { ENVIRONMENT_CHECK_PROMPT, newSetup, type OrganizationSetupRecord } from "@/lib/organizationSetup";
 import { OrganizationSetupSteps } from "./OrganizationSetupSteps";
 
 vi.mock("@/lib/api", () => ({
-  api: { cloudProviders: vi.fn(), cloudWorkspaces: vi.fn(), cloudWorkspaceSetup: vi.fn(), cloudWorkspaceQuote: vi.fn(), cloudWorkspaceCreate: vi.fn(), cloudWorkspacePreflight: vi.fn() },
+  api: {
+    cloudProviders: vi.fn(),
+    cloudWorkspaces: vi.fn(),
+    cloudWorkspaceSetup: vi.fn(),
+    cloudWorkspaceQuote: vi.fn(),
+    cloudWorkspaceCreate: vi.fn(),
+    cloudWorkspacePreflight: vi.fn(),
+    cloudAgentLogins: vi.fn(),
+    cloudAgentLoginConnect: vi.fn(),
+    cloudAgentCodexLoginCancel: vi.fn(),
+  },
   errorMessage: (error: Error) => error.message,
 }));
 vi.mock("@/lib/organizationGithubApp", () => ({ organizationGithubApp: { summary: vi.fn() } }));
@@ -18,11 +29,14 @@ const creates = () => {
   return snapshot as never;
 };
 let record: OrganizationSetupRecord;
+let stored: AgentLogin[];
 const history: OrganizationSetupRecord[] = [];
 const view = () => (
   <OrganizationSetupSteps
     record={record}
     organizationId="org-1"
+    organizationName="Team"
+    contextRevision="rev-1"
     onRecord={(next) => {
       record = next;
       history.push(next);
@@ -33,7 +47,10 @@ const view = () => (
 beforeEach(() => {
   vi.resetAllMocks();
   history.length = 0;
-  record = { ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute" };
+  // Past the agent logins step unless a test is about it (PRO-107).
+  record = { ...newSetup("Team", "request-1", 1), organizationId: "org-1", step: "compute", logins: "connected" };
+  stored = [{ provider: "claude", authKind: "api-key", fingerprint: "sha256:ab", version: 1, updatedAt: 1, state: "connected" }];
+  vi.mocked(api.cloudAgentLogins).mockImplementation(async () => ({ credentials: structuredClone(stored) }));
   vi.mocked(api.cloudProviders).mockResolvedValue({ providers: [{ id: "box", displayName: "Box", availability: "available" }] } as never);
   vi.mocked(organizationGithubApp.summary).mockResolvedValue({ repositories: [{ fullName: "acme/app", cloneUrl: "https://github.com/acme/app.git", state: "accessible" }] } as never);
   vi.mocked(api.cloudWorkspaces).mockResolvedValue({ workspaces: [] } as never);
@@ -49,6 +66,11 @@ it("reconciles against the server when shown, and says what is missing", async (
   await waitFor(() => expect(record.step).toBe("repository"));
   shown.rerender(view());
   expect(screen.getByText(/choose at least one repository/)).toBeTruthy();
+  // GitHub is on the organization's page (PRO-107), not in the setup's own section.
+  const step = screen.getByTestId("organization-setup-repository");
+  expect(step.textContent).toContain("on Team's page in Settings → Organizations, under GitHub");
+  fireEvent.click(within(step).getByRole("button", { name: "Open Team's GitHub settings" }));
+  expect(takeOrganizationRequest()).toBe("org-1");
   expect(api.cloudWorkspaceCreate).not.toHaveBeenCalled();
 });
 
@@ -204,4 +226,108 @@ it("runs the create preflight before quoting, and a missing agent login stops it
   fireEvent.click(screen.getByRole("button", { name: "Terminal only, no agent" }));
   await screen.findByTestId("organization-setup-confirm");
   expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([{ cloneUrl: "https://github.com/acme/app.git", ref: null }], null, null);
+});
+
+// PRO-107: an organization's agent logins are set right after its cloud is chosen, or later.
+describe("the agent logins step", () => {
+  const key = (agent: string) => {
+    const row = screen.getAllByTestId("agent-login").find((item) => item.dataset.agent === agent)!;
+    fireEvent.click(within(row).getByRole("button", { name: "Connect with an API key" }));
+    const panel = within(row).getByTestId("agent-login-consent");
+    within(panel).getAllByRole("checkbox").forEach((box) => fireEvent.click(box));
+    fireEvent.click(within(panel).getByRole("button", { name: "Enter the key" }));
+  };
+
+  beforeEach(() => {
+    record = { ...record, logins: undefined };
+    stored = [];
+  });
+
+  it("comes right after the compute connection, and goes on once a login is connected", async () => {
+    vi.mocked(api.cloudAgentLoginConnect).mockImplementation(async (provider) => {
+      stored = [{ provider, authKind: "api-key", fingerprint: "sha256:cd", version: 1, updatedAt: 2, state: "connected" }];
+      return stored[0]!;
+    });
+    const shown = render(view());
+    await waitFor(() => expect(record.step).toBe("logins"));
+    shown.rerender(view());
+    const step = screen.getByTestId("organization-setup-logins");
+    expect(step.textContent).toContain("Claude Code (Log in with Claude or an API key), Codex (Log in with ChatGPT or an API key) or Cursor (an API key), or lend this Mac's sign-in");
+    expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Team");
+    // Every way to connect each agent is offered here, as on the organization's page.
+    await screen.findAllByTestId("agent-login");
+    expect(screen.getByRole("button", { name: "Log in with Claude" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Log in with ChatGPT" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Lend this Mac's Codex sign-in (temporary)" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(true);
+
+    key("codex");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(false));
+    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("codex", "api-key", expect.objectContaining({ organizationId: "org-1", contextRevision: "rev-1" }));
+    // Connecting does not leave the step by itself: another agent can be connected too.
+    expect(record.step).toBe("logins");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect([record.logins, record.step]).toEqual(["connected", "workspace"]);
+  });
+
+  it("stays on the step after a failed connect, and goes on after a retry", async () => {
+    vi.mocked(api.cloudAgentLoginConnect)
+      .mockRejectedValueOnce({ code: "cloud_workspace_credential_invalid" })
+      .mockImplementationOnce(async (provider) => {
+        stored = [{ provider, authKind: "api-key", fingerprint: "sha256:cd", version: 1, updatedAt: 2, state: "connected" }];
+        return stored[0]!;
+      });
+    const shown = render(view());
+    await waitFor(() => expect(record.step).toBe("logins"));
+    shown.rerender(view());
+    await screen.findAllByTestId("agent-login");
+    key("claude");
+    expect((await screen.findByRole("alert")).textContent).toBe("The provider did not accept that login. Nothing was changed.");
+    expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(true);
+    expect(record.step).toBe("logins");
+
+    await waitFor(() => expect(screen.getAllByTestId("agent-login").find((item) => item.dataset.agent === "claude")!.querySelector("button")!.hasAttribute("disabled")).toBe(false));
+    key("claude");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Continue" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(record.step).toBe("workspace");
+  });
+
+  it("can be set up later, and then says which agents have no login, with the way to the organization's page", async () => {
+    const shown = render(view());
+    await waitFor(() => expect(record.step).toBe("logins"));
+    shown.rerender(view());
+    fireEvent.click(screen.getByRole("button", { name: "Set up later" }));
+    expect([record.logins, record.step]).toEqual(["later", "workspace"]);
+    expect(api.cloudAgentLoginConnect).not.toHaveBeenCalled();
+    shown.rerender(view());
+    const missing = screen.getByTestId("organization-setup-missing-logins");
+    expect(missing.textContent).toContain("No agent login yet for Claude Code, Codex and Cursor in Team");
+    fireEvent.click(within(missing).getByRole("button", { name: "Open Team's agent logins" }));
+    expect(takeOrganizationRequest()).toBe("org-1");
+    expect(takeAgentLoginsRequest("org-1")).toBe(true);
+  });
+
+  it("says nothing about other agents once setup went on with a login, or finished before the step", async () => {
+    for (const logins of ["connected", undefined] as const) {
+      record = { ...record, step: "done", completedAt: 5, logins, workspace: { pending: null, id: "ws-1" } };
+      stored = [{ provider: "claude", authKind: "api-key", fingerprint: "sha256:ab", version: 1, updatedAt: 1, state: "connected" }];
+      render(view());
+      await waitFor(() => expect(api.cloudAgentLogins).toHaveBeenCalled());
+      // The list has answered and been read.
+      await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(screen.getByTestId("organization-setup-done")).toBeTruthy();
+      expect(screen.queryByTestId("organization-setup-missing-logins")).toBeNull();
+      cleanup();
+      vi.mocked(api.cloudAgentLogins).mockClear();
+    }
+  });
+
+  it("names the agents still without a login at setup completion", async () => {
+    record = { ...record, step: "done", completedAt: 5, logins: "later", agent: "terminal-only", workspace: { pending: null, id: "ws-1" } };
+    stored = [{ provider: "claude", authKind: "api-key", fingerprint: "sha256:ab", version: 1, updatedAt: 1, state: "connected" }];
+    render(view());
+    expect((await screen.findByTestId("organization-setup-missing-logins")).textContent).toContain("No agent login yet for Codex and Cursor in Team");
+    expect(screen.getByTestId("organization-setup-done").textContent).toContain("Cloud setup is complete");
+  });
 });

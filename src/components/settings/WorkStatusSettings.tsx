@@ -5,13 +5,13 @@ import { errorMessage, workStatus, type OrganizationSummary, type OrganizationWo
 
 /**
  * What this person's work status shares, and with whom (#441): their own
- * other machines always, teammates unless they turn it off, and, for an
- * admin, whether their organization shares it at all.
+ * other machines always, and teammates unless they turn it off. Whether an
+ * organization shares it at all is on the organization's page
+ * (OrganizationWorkStatus).
  */
-export function WorkStatusSettings({ organizations }: { organizations: OrganizationSummary[] }) {
+export function WorkStatusSettings() {
   const [shareWithTeam, setShareWithTeam] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const managed = organizations.filter((organization) => !organization.isPersonal && (organization.role === "owner" || organization.role === "admin"));
 
   useEffect(() => {
     let live = true;
@@ -43,9 +43,6 @@ export function WorkStatusSettings({ organizations }: { organizations: Organizat
         description="Teammates in an organization that connected a repository see which of its issues you have a session on: your name, the session’s title and branch, and whether an agent is working. Your other machines always see it, with this Mac’s name. Prompts, transcripts, paths and code never leave this Mac."
         control={<Switch aria-label="Show my team what I’m working on" checked={shareWithTeam ?? true} disabled={shareWithTeam === null} onCheckedChange={(on) => void changeShare(on)} />}
       />
-      {managed.map((organization) => (
-        <OrganizationSwitch key={organization.id} organization={organization} />
-      ))}
       {error && <p role="alert" className="pb-2 text-xs text-destructive">{error}</p>}
     </div>
   );
@@ -61,6 +58,16 @@ const ORGANIZATION_ERRORS: Record<string, string> = {
 export function linearWorkspaceKeys(text: string): string[] | null {
   const keys = [...new Set(text.split(/[\s,]+/).map((key) => key.trim().toLowerCase().replace(/^https?:\/\/linear\.app\//, "").replace(/\/.*$/, "")).filter(Boolean))];
   return keys.every((key) => /^[a-z0-9-]{1,64}$/.test(key)) && keys.length <= 10 ? keys : null;
+}
+
+/**
+ * An organization's work status, on its page in Settings → Organizations
+ * (PRO-107), for its owners and administrators. It is the organization's
+ * own, so it changes whichever organization is active.
+ */
+export function OrganizationWorkStatus({ organization }: { organization: OrganizationSummary }) {
+  if (organization.isPersonal || (organization.role !== "owner" && organization.role !== "admin")) return null;
+  return <OrganizationSwitch organization={organization} />;
 }
 
 /**
@@ -104,7 +111,7 @@ function OrganizationSwitch({ organization }: { organization: OrganizationSummar
   const typed = workspaces ?? declared;
   const keys = linearWorkspaceKeys(typed);
   return (
-    <>
+    <div className="rounded-lg border border-hairline px-3 py-2" data-testid="organization-work-status">
       <SettingRow
         label={`Work status in ${organization.name}`}
         description={error ?? "Members see who works on the issues of the organization’s repositories. Off, nobody in it is shown anyone else’s work; each person’s own machines still are."}
@@ -140,6 +147,6 @@ function OrganizationSwitch({ organization }: { organization: OrganizationSummar
         />
       )}
       {workspaces != null && !keys && <p role="alert" className="pb-2 text-xs text-destructive">A workspace is the name after linear.app/ in an issue’s address: letters, digits and dashes.</p>}
-    </>
+    </div>
   );
 }

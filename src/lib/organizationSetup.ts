@@ -10,12 +10,12 @@
 // on every resume (`reconcileSetup`); the stored `step` is only what the
 // last reconciliation found, shown until the server answers.
 
-import type { CloudWorkspaceListItem } from "@/lib/api";
+import type { AgentLoginProvider, CloudWorkspaceListItem } from "@/lib/api";
 import type { PendingCreate } from "@/lib/cloudCreate";
 
 export const SETUP_VERSION = 2;
 
-export type SetupStep = "create" | "select" | "compute" | "repository" | "workspace" | "runtime" | "agent" | "done";
+export type SetupStep = "create" | "select" | "compute" | "logins" | "repository" | "workspace" | "runtime" | "agent" | "done";
 
 export interface OrganizationSetupRecord {
   v: typeof SETUP_VERSION;
@@ -28,6 +28,13 @@ export interface OrganizationSetupRecord {
   step: SetupStep;
   /** `terminal-only`: the person chose to finish setup without an agent login. */
   agent: "required" | "terminal-only";
+  /**
+   * The agent logins step (PRO-107), right after the compute connection:
+   * `connected` once the person went on with at least one login connected,
+   * `later` when they chose to set them up later. Absent until then, and in
+   * records from before the step.
+   */
+  logins?: "connected" | "later";
   /**
    * The one setup workspace: its create request (kept until the server has
    * answered, so a retry returns the same workspace and its single first
@@ -47,7 +54,7 @@ function encodeUser(user: string): string {
 
 const storageKey = (user: string) => `${KEY}.${encodeUser(user)}`;
 
-const STEPS: readonly SetupStep[] = ["create", "select", "compute", "repository", "workspace", "runtime", "agent", "done"];
+const STEPS: readonly SetupStep[] = ["create", "select", "compute", "logins", "repository", "workspace", "runtime", "agent", "done"];
 
 function valid(value: unknown): value is OrganizationSetupRecord {
   if (!value || typeof value !== "object") return false;
@@ -220,6 +227,8 @@ export interface SetupFacts {
   activeOrganizationId: string | null;
   /** A compute provider is connected and usable. */
   compute: boolean | null;
+  /** The agents with a login the organization's workspaces can use (PRO-107). */
+  logins: readonly AgentLoginProvider[] | null;
   /** At least one repository is chosen and accessible. */
   repository: boolean | null;
   /** The organization's workspaces, to find the setup workspace in. */
@@ -254,7 +263,11 @@ function stepFrom(record: OrganizationSetupRecord, facts: SetupFacts): SetupStep
   if (record.completedAt !== null) return "done";
   const at = (step: SetupStep) => STEPS.indexOf(record.step) >= STEPS.indexOf(step);
   // An unknown fact holds the setup where it was last seen.
-  if (facts.compute === false || (facts.compute === null && !at("repository"))) return "compute";
+  if (facts.compute === false || (facts.compute === null && !at("logins"))) return "compute";
+  // The agent logins, chosen once: the person goes on with one connected, or sets them up later. A record
+  // from before the step that is past it already goes on where a login is connected, and is held where unknown;
+  // one whose setup workspace was chosen to run without an agent needs none.
+  if (!record.logins && record.agent !== "terminal-only" && !(at("repository") && (facts.logins === null || facts.logins.length > 0))) return "logins";
   if (facts.repository === false || (facts.repository === null && !at("workspace"))) return "repository";
   if (!record.workspace?.id) return "workspace";
   if (facts.workspaces === null) return at("runtime") ? record.step : "runtime";
@@ -302,6 +315,7 @@ export const ENVIRONMENT_CHECK_PROMPT = [
 
 export const STEP_LABELS: Record<Exclude<SetupStep, "create" | "select" | "done">, string> = {
   compute: "Connect a compute provider",
+  logins: "Connect agent logins",
   repository: "Choose a repository",
   workspace: "Create the setup workspace",
   runtime: "Workspace running with the repository cloned",

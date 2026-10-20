@@ -25,7 +25,7 @@ let stored: AgentLogin[];
 const login = (fields: Partial<AgentLogin>): AgentLogin => ({ provider: "claude", authKind: "oauth-credentials-json", fingerprint: "sha256:ab", version: 1, updatedAt: 1_790_000_000_000, state: "connected", sharedUse: "organization", ...fields });
 const row = (agent: string) => screen.getAllByTestId("agent-login").find((item) => item.dataset.agent === agent)!;
 const show = async () => {
-  render(<OrganizationAgentLogins contextRevision="org-revision" organizationName="Acme Robotics" />);
+  render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-1" organizationName="Acme Robotics" />);
   await screen.findAllByTestId("agent-login");
 };
 const consent = (within_: HTMLElement) => within(within_).getAllByRole("checkbox").forEach((box) => fireEvent.click(box));
@@ -54,7 +54,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     cleanup();
 
     vi.mocked(api.cloudAgentLogins).mockRejectedValue({ code: "organization_admin_required" });
-    render(<OrganizationAgentLogins contextRevision="org-revision" />);
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-1" />);
     expect((await screen.findByTestId("agent-logins-member")).textContent).toMatch(/owners and administrators connect agent logins/);
     expect(screen.queryAllByTestId("agent-login")).toHaveLength(0);
     expect(screen.queryByRole("alert")).toBeNull();
@@ -77,7 +77,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(panel.textContent).toContain("every member's cloud workspaces of Acme Robotics");
     expect(panel.textContent).toContain("anyone who can drive a workspace can read it");
     // What Disconnect does is what the service does (#450): it reaches running workspaces too.
-    expect(panel.textContent).toContain("That reaches every workspace of the organization, running ones included");
+    expect(panel.textContent).toContain("That reaches every workspace of Acme Robotics, running ones included");
     expect(panel.textContent).not.toContain("refuses while a workspace of the organization still uses the login");
     expect(panel.textContent).not.toMatch(/stop receiving it at once|does not change the login/);
     const go = within(panel).getByRole("button", { name: "Read this Mac's sign-in and confirm" });
@@ -89,7 +89,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     fireEvent.click(go);
     await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Claude Code is connected"));
     // The page names the source and the consent; the login is read by the app, not passed through here.
-    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false });
+    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("claude", "local-login", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false, organizationId: "org-1" });
     expect(within(row("claude")).getByTestId("agent-login-status").textContent).toMatch(/^Connected/);
     expect(document.querySelector('input[type="text"], input[type="password"], textarea')).toBeNull();
   });
@@ -135,12 +135,13 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(api.cloudAgentLoginRemove).not.toHaveBeenCalled();
     const confirm = within(row("claude")).getByTestId("agent-login-disconnect");
     // #450: a running workspace does not stop a disconnect, and the text no longer says it does.
-    expect(confirm.textContent).toContain("This reaches every workspace of the organization, running ones included");
+    expect(confirm.textContent).toContain("Disconnect Claude Code from Acme Robotics?");
+    expect(confirm.textContent).toContain("This reaches every workspace of Acme Robotics, running ones included");
     expect(confirm.textContent).toContain("The service refuses only while a workspace that was created with this very login chosen for it still exists");
     expect(confirm.textContent).not.toContain("refuses while a workspace of the organization still uses the login");
     fireEvent.click(within(confirm).getByRole("button", { name: "Disconnect Claude Code" }));
     await waitFor(() => expect(within(row("claude")).getByTestId("agent-login-status").textContent).toBe("Not connected"));
-    expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision");
+    expect(api.cloudAgentLoginRemove).toHaveBeenCalledWith("claude", "org-revision", "org-1");
   });
 
   it("says why a disconnect was refused for a workspace created with this login chosen for it, and keeps it listed", async () => {
@@ -184,7 +185,7 @@ describe("agent logins in Settings (PRO-79)", () => {
           ? []
           : [{ kind: "agent-credential", cloneUrl: null, agent, status: agent === "claude" ? "verified" : "failed", errorCode: agent === "claude" ? null : "cloud_workspace_agent_credential_required", retryable: false }],
     }));
-    render(<OrganizationAgentLogins contextRevision="org-revision" organizationName="Acme Robotics" />);
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-1" organizationName="Acme Robotics" />);
     await screen.findByTestId("agent-logins-member");
     await waitFor(() => expect(screen.getAllByTestId("agent-login-member-status")).toHaveLength(3));
     const status = (agent: string) => screen.getAllByTestId("agent-login-member-status").find((item) => item.dataset.agent === agent)!.textContent;
@@ -192,7 +193,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     expect(status("codex")).toBe("Codex: no login your workspaces can use. Either none is connected, or the one stored is limited to workspaces only owners and admins can drive.");
     // A server that does not answer per agent says nothing, and neither does the row.
     expect(status("cursor")).toBe("Cursor: the service did not say.");
-    expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([], null, "cursor-agent");
+    expect(api.cloudWorkspacePreflight).toHaveBeenCalledWith([], "org-1", "cursor-agent");
     expect(screen.queryAllByTestId("agent-login")).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /Disconnect|Connect|Log in/ })).toBeNull();
   });
@@ -204,7 +205,7 @@ describe("agent logins in Settings (PRO-79)", () => {
     await show();
     expect(scrolled).not.toHaveBeenCalled();
     cleanup();
-    openAgentLogins();
+    openAgentLogins("org-1");
     await show();
     expect(scrolled).toHaveBeenCalled();
     expect(scrolled.mock.contexts.at(-1)).toBe(screen.getByTestId("agent-logins"));
@@ -288,7 +289,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       fireEvent.click(within(panel).getByRole("button", { name: "Open Claude to sign in" }));
       fireEvent.click(within(await within(row("claude")).findByTestId("agent-login-code")).getByRole("button", { name: "Enter the code" }));
       // The consent carries no scope, so the app has none to send; the notice and the row say what the service kept.
-      const agreed = { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: true };
+      const agreed = { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: true, organizationId: "org-1" };
       await waitFor(() => expect(api.cloudAgentClaudeLoginComplete).toHaveBeenCalledWith("attempt_1", agreed));
       await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toBe("Claude Code is connected for this organization's cloud workspaces: only workspaces that nobody but owners and admins can drive. The account service keeps this login and renews it."));
       expect(within(row("claude")).getByTestId("agent-login-status").textContent).toContain("grace@example.com · only workspaces that nobody but owners and admins can drive");
@@ -376,7 +377,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       consent(panel);
       fireEvent.click(go);
       const code = within(await within(row("claude")).findByTestId("agent-login-code"));
-      const agreed = { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false };
+      const agreed = { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false, organizationId: "org-1" };
       expect(api.cloudAgentClaudeLoginStart).toHaveBeenCalledWith(agreed);
       // No field for the code on the page: the app asks for it in its own dialog.
       expect(document.querySelector('input[type="text"], input[type="password"], textarea')).toBeNull();
@@ -443,7 +444,7 @@ describe("agent logins in Settings (PRO-79)", () => {
       vi.mocked(api.cloudAgentClaudeLoginCancel).mockRejectedValue({ code: "cloud_workspace_unavailable" });
       fireEvent.click(code.getByRole("button", { name: "Cancel sign-in" }));
       await waitFor(() => expect(within(row("claude")).queryByTestId("agent-login-code")).toBeNull());
-      expect(api.cloudAgentClaudeLoginCancel).toHaveBeenCalledWith("attempt_1", "org-revision");
+      expect(api.cloudAgentClaudeLoginCancel).toHaveBeenCalledWith("attempt_1", "org-revision", "org-1");
       // Nothing was stored, and the other ways are offered again.
       expect(api.cloudAgentClaudeLoginComplete).not.toHaveBeenCalled();
       expect(within(row("claude")).getByRole("button", { name: "Connect with an API key" }).hasAttribute("disabled")).toBe(false);
@@ -523,7 +524,7 @@ describe("agent logins in Settings (PRO-79)", () => {
 
     it("shows the code large and copyable, opens OpenAI's page with it copied, and stores the login once Codex has it", async () => {
       const dialog = await begin();
-      expect(api.cloudAgentCodexLoginStart).toHaveBeenCalledWith({ contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false });
+      expect(api.cloudAgentCodexLoginStart).toHaveBeenCalledWith({ contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: false, organizationId: "org-1" });
       expect(dialog.getByTestId("codex-sign-in-code").textContent).toBe("WXYZ-12345");
       expect(status()).toBe("Waiting for you to sign in to ChatGPT and enter the code…");
       fireEvent.click(dialog.getByRole("button", { name: "Open the ChatGPT page and copy the code" }));
@@ -665,5 +666,67 @@ describe("agent logins in Settings (PRO-79)", () => {
       expect(agentLoginMessage({ code: "cloud_agent_codex_login_unavailable" }, "codex")).toContain("it needs to reach OpenAI");
       expect(agentLoginMessage({ code: "cloud_agent_codex_cli_untrusted" }, "codex")).toContain("or the node it runs on");
     });
+  });
+});
+
+// PRO-107: agent logins are each organization's own, set for any one the person administers.
+describe("an organization's own agent logins", () => {
+  it("names the organization it changes, and reads and replaces its login by id", async () => {
+    stored = [login({ provider: "codex", authKind: "api-key" })];
+    vi.mocked(api.cloudAgentLoginConnect).mockResolvedValue(login({ provider: "codex", authKind: "api-key", version: 2 }));
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" organizationName="Beta" />);
+    await screen.findAllByTestId("agent-login");
+    expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Beta");
+    expect(api.cloudAgentLogins).toHaveBeenCalledWith("org-b");
+    fireEvent.click(within(row("codex")).getByRole("button", { name: "Replace with an API key" }));
+    const panel = within(row("codex")).getByTestId("agent-login-consent");
+    expect(panel.textContent).toContain("A secure dialog will ask for the Codex API key for Beta");
+    // One login per agent and organization: replacing it is a choice of its own.
+    expect(within(panel).getByTestId("agent-login-replace").textContent).toContain("Replace the API key now stored for Codex.");
+    consent(panel);
+    fireEvent.click(within(panel).getByRole("button", { name: "Enter the key" }));
+    await waitFor(() => expect(screen.getByTestId("agent-logins-notice").textContent).toContain("Codex is connected"));
+    expect(api.cloudAgentLoginConnect).toHaveBeenCalledWith("codex", "api-key", { contextRevision: "org-revision", organizationSharing: true, machineInstallation: true, replaceExisting: true, organizationId: "org-b" });
+  });
+
+  it("says so when the server changes logins only in the active organization", async () => {
+    vi.mocked(api.cloudAgentLogins).mockRejectedValue({ code: "active_organization_required" });
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" organizationName="Beta" />);
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "This server changes an organization's agent logins only while it is the active organization. Make it the active organization, then try again. Nothing was changed.",
+    );
+    expect(agentLoginMessage({ code: "cloud_organization_unavailable" })).toContain("you may no longer be a member");
+  });
+
+  it("tells its page what is stored each time it reads the list, and null when it could not", async () => {
+    const reported = vi.fn();
+    stored = [login({})];
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" onLogins={reported} />);
+    await waitFor(() => expect(reported).toHaveBeenCalledWith([expect.objectContaining({ provider: "claude" })]));
+    cleanup();
+    vi.mocked(api.cloudAgentLogins).mockRejectedValue({ code: "organization_admin_required" });
+    vi.mocked(api.cloudWorkspacePreflight).mockResolvedValue({ ready: true, checks: [] });
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" onLogins={reported} />);
+    await screen.findByTestId("agent-logins-member");
+    expect(reported).toHaveBeenLastCalledWith(null);
+  });
+
+  it("comes into view only for a request about its own organization", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    openAgentLogins("org-a");
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" />);
+    await screen.findAllByTestId("agent-login");
+    expect(scrolled).not.toHaveBeenCalled();
+    cleanup();
+    // Not where another section of the page shows them (the setup step).
+    openAgentLogins("org-b");
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" reveal={false} />);
+    await screen.findAllByTestId("agent-login");
+    expect(scrolled).not.toHaveBeenCalled();
+    cleanup();
+    render(<OrganizationAgentLogins contextRevision="org-revision" organizationId="org-b" />);
+    await screen.findAllByTestId("agent-login");
+    expect(scrolled).toHaveBeenCalled();
   });
 });

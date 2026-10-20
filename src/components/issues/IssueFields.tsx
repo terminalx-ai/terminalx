@@ -128,7 +128,7 @@ export function useIssueEdits(projectPath: string | null, issue: IssueDetails | 
  * focus on nothing at all, as after Write turns to Preview. A menu or dialog
  * open over it keeps its own Escape.
  */
-function useEscapeCancels(inside: RefObject<HTMLElement | null>, enabled: boolean, cancel: () => void, busy = false) {
+export function useEscapeCancels(inside: RefObject<HTMLElement | null>, enabled: boolean, cancel: () => void, busy = false) {
   const handler = useCallback(() => {
     if (hasEscapeOverlay()) return false;
     const focus = document.activeElement;
@@ -229,7 +229,7 @@ export function IssueTitle({ edits, title }: { edits: IssueEdits; title: string 
 
 // ------------------------------------------------------------------ labels
 
-function Dot({ color }: { color?: string | null }) {
+export function LabelDot({ color }: { color?: string | null }) {
   return <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: color ? `#${color}` : "var(--ink-faint)" }} />;
 }
 
@@ -263,11 +263,8 @@ export function labelsAfter(now: string[], change: LabelChange, options: LabelOp
  */
 function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: LabelChange, of: IssueDetails) => void }) {
   const issue = edits.issue!;
-  const [query, setQuery] = useState("");
   const [started] = useState<string[]>(() => issue.labels.map(labelId));
   const [chosen, setChosen] = useState<string[]>(started);
-  const [active, setActive] = useState(0);
-  const searchBox = useRef<HTMLInputElement>(null);
   const chosenRef = useRef(chosen);
   chosenRef.current = chosen;
   useEffect(() => edits.loadOptions(), [edits.loadOptions]);
@@ -276,8 +273,25 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
     () => () => onClose({ add: chosenRef.current.filter((id) => !started.includes(id)), remove: started.filter((id) => !chosenRef.current.includes(id)) }, issue),
     [onClose, issue.provider, issue.id],
   );
+  return <LabelChooser labels={edits.options?.labels ?? null} error={edits.optionsError} chosen={chosen} onChange={setChosen} />;
+}
 
-  const all = edits.options?.labels ?? [];
+/** `chosen` with `label` ticked or unticked; ticking a label lets go of the others in its Linear group. */
+export function toggleLabel(chosen: string[], label: LabelOption, all: LabelOption[]): string[] {
+  if (chosen.includes(label.id)) return chosen.filter((id) => id !== label.id);
+  const siblings = label.group ? new Set(all.filter((other) => other.group === label.group).map((other) => other.id)) : new Set<string>();
+  return [...chosen.filter((id) => !siblings.has(id)), label.id];
+}
+
+/**
+ * A search box over the labels, in their Linear groups, ticked by `chosen`.
+ * `labels` is null while they are read. The label picker and the new-issue
+ * form both show it; what a tick means is theirs.
+ */
+export function LabelChooser({ labels, error, chosen, onChange }: { labels: LabelOption[] | null; error?: string | null; chosen: string[]; onChange: (chosen: string[]) => void }) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const all = labels ?? [];
   const groups = useMemo(() => new Map(all.filter((label) => label.isGroup).map((label) => [label.name, label])), [all]);
   const rows = useMemo(() => {
     const words = query.trim().toLowerCase();
@@ -289,12 +303,7 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
   const flat = useMemo(() => [...rows.loose, ...rows.grouped.flatMap((each) => each.labels)], [rows]);
   useEffect(() => setActive(0), [query]);
 
-  const toggle = (label: LabelOption) =>
-    setChosen((now) => {
-      if (now.includes(label.id)) return now.filter((id) => id !== label.id);
-      const siblings = label.group ? new Set(all.filter((other) => other.group === label.group).map((other) => other.id)) : new Set<string>();
-      return [...now.filter((id) => !siblings.has(id)), label.id];
-    });
+  const toggle = (label: LabelOption) => onChange(toggleLabel(chosen, label, all));
 
   const option = (label: LabelOption) => {
     const index = flat.indexOf(label);
@@ -310,7 +319,7 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
         onClick={() => toggle(label)}
         className={cn("flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-[13px]", index === active && "bg-veil-strong")}
       >
-        <Dot color={label.color} />
+        <LabelDot color={label.color} />
         <span className="min-w-0 flex-1 truncate">{label.name}</span>
         {on && <Check className="size-3.5 shrink-0 text-muted-foreground" />}
       </div>
@@ -322,7 +331,6 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
       <div className="flex items-center gap-1.5 border-b border-hairline px-2 pb-1.5">
         <Search className="size-3.5 shrink-0 text-faint" />
         <input
-          ref={searchBox}
           autoFocus
           aria-label="Search labels"
           placeholder="Search labels"
@@ -341,21 +349,21 @@ function LabelPicker({ edits, onClose }: { edits: IssueEdits; onClose: (change: 
         />
       </div>
       <div role="listbox" aria-label="Labels" aria-multiselectable className="min-h-0 flex-1 overflow-y-auto scrollbar-thin p-1">
-        {!edits.options && !edits.optionsError && (
+        {!labels && !error && (
           <div className="flex items-center gap-1.5 px-2 py-2 text-xs text-faint">
             <Loader2 className="size-3.5 animate-spin" /> Loading labels…
           </div>
         )}
-        {edits.optionsError && <div className="px-2 py-2 text-xs text-destructive">{edits.optionsError}</div>}
-        {edits.options && flat.length === 0 && <div className="px-2 py-2 text-xs text-muted-foreground">{all.length ? "No labels match." : "There are no labels here yet."}</div>}
+        {error && <div className="px-2 py-2 text-xs text-destructive">{error}</div>}
+        {labels && flat.length === 0 && <div className="px-2 py-2 text-xs text-muted-foreground">{all.length ? "No labels match." : "There are no labels here yet."}</div>}
         {rows.loose.map(option)}
-        {rows.grouped.map(({ group, labels }) => (
+        {rows.grouped.map(({ group, labels: inGroup }) => (
           <div key={group} role="group" aria-label={group}>
             <div className="flex items-center gap-1.5 px-2 pb-0.5 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-faint">
-              <Dot color={groups.get(group)?.color} />
+              <LabelDot color={groups.get(group)?.color} />
               {group}
             </div>
-            {labels.map(option)}
+            {inGroup.map(option)}
           </div>
         ))}
       </div>
@@ -414,7 +422,7 @@ export function IssueLabels({
     <div className="flex min-w-0 flex-wrap items-center gap-1" data-testid="issue-labels">
       {labels.map((label) => (
         <span key={labelId(label)} className="flex max-w-full items-center gap-1 rounded-full bg-veil-raised px-2 py-0.5 text-[11px] text-muted-foreground">
-          <Dot color={label.color} />
+          <LabelDot color={label.color} />
           <span className="truncate">{label.name}</span>
         </span>
       ))}
@@ -444,7 +452,7 @@ export function IssueLabels({
 
 // ------------------------------------------------------------------ priority
 
-const PRIORITY_NAMES = ["No priority", "Urgent", "High", "Medium", "Low"];
+export const PRIORITY_NAMES = ["No priority", "Urgent", "High", "Medium", "Low"];
 
 /** Linear's own marks: dashes for none, a filled square for urgent, three bars filled by how high. */
 export function PriorityIcon({ value, className }: { value: number; className?: string }) {

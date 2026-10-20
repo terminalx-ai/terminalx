@@ -1,10 +1,52 @@
 # Continue in New Session
 
-The active agent header opens a provider/context picker. “New session” here
+The active agent header opens the continuation dialog. “New session” here
 means a new `TabEntry` in the existing `SessionEntry`: the same checkout,
 branch, and uncommitted files, with a fresh provider identity. Creation uses
-`addTab` and the destination provider's ordinary model, effort, and permission
-preferences. It never invokes `fork_session` or `tab_handoff`.
+`addTab` with exactly the launch settings chosen in the dialog. It never
+invokes `fork_session` or `tab_handoff`.
+
+## Launch settings
+
+The dialog chooses agent, model, effort, and permission mode with
+`SessionAgentControls` and `useSessionAgent`, the same controls New Session and
+issue starts use, as a controlled form (`{ value, onChange }`). It starts from
+`handoffStart`: the source tab's own settings (a pending model, effort, or mode
+it was asked to switch to counts as its own), each kept only while it is valid:
+
+- The provider must be installed; otherwise the saved provider, then the first
+  installed one.
+- The model must be in that provider's current list. A retired model or another
+  provider's id falls back to the provider's saved model, then its default.
+- The effort must be one the model takes; otherwise the saved effort, then the
+  model's default.
+- The mode must be one the picker offers (older spellings are mapped). A mode
+  the agent reported that the picker does not offer (Claude Code's `dontAsk`,
+  a Codex approval and sandbox) starts as "Ask every time", never as the saved
+  mode, which could be looser than the source (Bypass).
+
+Switching provider falls back to that provider's saved model and effort. The
+mode is provider-independent and carries over. Bypass permissions goes through
+`chooseMode`, so it asks once, as everywhere else. The choices are this
+launch's own and are not saved as preferences, like the cloud forms' and
+unlike New Session's. The controls lock once the destination exists, so a
+retry never launches different settings.
+
+## Link a chat to a project
+
+“Link to a project” in a chat's row menu opens the same dialog with a
+destination: the project and, for a Git project, a worktree or the main
+checkout (switchable in the dialog). `moveChatToProject` creates a session in
+the project with the chosen settings, starts it, and only then archives the
+chat. If the start fails, the chat stays where it was and the error says so;
+Retry Start reuses the session already created. A chat that cannot be
+archived does not hold the handoff back: the context is still sent and the
+dialog says the chat is still listed, with nothing left to retry. The reader
+may open the new session while it is still starting; a failure after that
+reaches the sidebar's error banner. The prompt tells the agent its
+working directory changed, since the files the history mentions stay in the
+chat's folder. The dialog is mounted by the sidebar rather than the chat's row,
+because archiving removes the row.
 
 `prepare_continuation` runs on a blocking worker. It reads the source runtime's
 existing transcript tracking without instantiating a runtime; inactive tabs
@@ -39,6 +81,8 @@ Users can inspect the chat/terminal before retrying an uncertain delivery.
 - `pnpm check` covers selection, availability, cancellation, resetting the
   dialog, duplicate clicks, both prompt modes, and all eight provider/mode
   combinations at the launch boundary, including failures and retry defaults.
+  `useSessionAgent.test.ts` covers the source defaults and every fallback;
+  `moveChat.test.ts` covers the move's settings, archive ordering, and retry.
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib` covers bounded context
   preparation, original file preservation, missing/unreadable history, control
   sequences, and provider-echo confirmation, alongside the existing CLI launch

@@ -1673,6 +1673,10 @@ fn a_held_prompt_sent_now_is_typed_again_once_the_interrupted_turn_ends_and_the_
     let Engine::Cli(p) = &rt.engine else { panic!("a CLI tab") };
     assert_eq!(p.awaiting_delivery, Some(42));
     assert_eq!(p.held.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), vec![41], "the other one is held again, behind it");
-    assert_eq!(p.echoed.iter().map(|echo| (echo.seq, echo.queued)).collect::<Vec<_>>(), vec![(41, false), (42, false)], "both records stay; their echoes are awaited afresh");
+    assert_eq!(
+        p.echoed.iter().map(|echo| (echo.seq, echo.queued, echo.resent)).collect::<Vec<_>>(),
+        vec![(42, false, true), (41, true, false)],
+        "both records stay; their echoes are awaited afresh, in the order they are typed: the chosen one as a prompt of its own, the other still queued"
+    );
     assert!(p.resend_after_abort.is_none());
 }

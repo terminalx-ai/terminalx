@@ -24,6 +24,7 @@ import type {
   IssueOpErrorKind,
   IssueOptions,
   IssueProvider,
+  IssueTemplate,
   IssueUser,
   StateChange,
 } from "@/lib/issueOps";
@@ -33,6 +34,12 @@ const alex: IssueUser = { id: "alex", name: "alex", login: "alex", avatarUrl: "h
 const kim: IssueUser = { id: "kim", name: "kim", login: "kim", avatarUrl: "https://avatars.githubusercontent.com/u/11?v=4" };
 const linearSam: IssueUser = { id: "user-sam", name: "Sam", avatarUrl: "https://example.com/sam.png" };
 const linearKim: IssueUser = { id: "user-kim", name: "Kim" };
+
+/** As `.github/ISSUE_TEMPLATE/*.md` in this repository has them. */
+export const issueTemplatesFixture = (): IssueTemplate[] => [
+  { file: "bug_report.md", name: "Bug report", about: "Something does not do what it says", title: null, labels: ["bug"], assignees: [], body: "**What happened, and what you expected instead**\n\n**Steps to reproduce**\n1.\n" },
+  { file: "feature_request.md", name: "Feature request", about: "Something it should do and does not", title: null, labels: ["enhancement"], assignees: [], body: "**What are you trying to do?**\n" },
+];
 
 export const githubIssueFixture = (): IssueDetails => ({
   provider: "github",
@@ -158,6 +165,8 @@ export interface IssueOpsMock {
   /** Who `issue_viewer` says the reader is. */
   viewer: Record<IssueProvider, IssueUser>;
   /** Comments per page of `issue_comments`. */
+  /** The project's GitHub issue templates. */
+  templates: IssueTemplate[];
   pageSize: number;
   calls: { command: string; args: Record<string, unknown> }[];
   /** The next call of `command` rejects with this kind. */
@@ -183,6 +192,7 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
     issues,
     options: { github: githubOptionsFixture(), linear: linearOptionsFixture() },
     viewer: { github: kim, linear: linearKim },
+    templates: issueTemplatesFixture(),
     pageSize: 50,
     calls: [],
     fail(command, kind, message) {
@@ -319,6 +329,8 @@ export function createIssueOpsMock(seed: { issues?: IssueDetails[]; comments?: R
         entry.issue.body = edit.description;
         return touched(entry);
       }
+      case "issue_templates":
+        return clone(mock.templates);
       case "issue_create": {
         const provider = args.provider as IssueProvider;
         const input = args.input as IssueCreate;

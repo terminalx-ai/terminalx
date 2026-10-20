@@ -6,7 +6,7 @@ import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChevronUp, FileText, Paperclip, Radio, Send, X } from "lucide-react-native";
-import { buildTranscript, type PendingAsk, type Turn } from "@terminalx/portable/transcript";
+import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
 import { watchTranscript } from "@mobile/data/transcript-sync";
@@ -18,8 +18,7 @@ import { agentConversations } from "@mobile/data/session-navigation";
 import { ConversationPicker } from "@mobile/ui/ConversationPicker";
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { PermissionCard, TranscriptRow } from "@mobile/ui/transcript";
-import { turnRows, type TurnRow } from "@mobile/ui/transcript-rows";
-import { textChunks } from "@mobile/ui/markdown-blocks";
+import { conversationItems } from "@mobile/ui/conversation-items";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useConversationState } from "@mobile/state/conversation-state";
 
@@ -194,25 +193,18 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
       app.connection.reportError("Session message failed", message);
     };
     try {
-      const inputs = attachments.map(({ mediaType, data, name }) => ({ mediaType, data, name }));
-      if (sendToAgent && !text) {
-        const sent = await app.api.sendSession(tabId, "", inputs);
+      // A message for the agent is one request, and the transcript shows it
+      // as the turn's prompt. Saving it as a note first showed it twice, and
+      // a failed promotion left a note behind for every retry (#541).
+      if (sendToAgent) {
+        const inputs = attachments.map(({ mediaType, data, name }) => ({ mediaType, data, name }));
+        const sent = await app.api.sendSession(tabId, text, inputs);
         if (!sent.sent) return showError(sent.message);
         setSendFeedback({ kind: "success", message: sent.queued ? "Queued for the agent." : "Sent to the agent." });
-        setDraft("");
-        setAttachments([]);
-        setAttachmentError(null);
-        await AsyncStorage.removeItem(cacheKey);
-        return;
-      }
-      const posted = await app.api.postNote(sessionId, text);
-      if (!posted.sent) return showError(posted.message);
-      setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
-      if (sendToAgent) {
-        const promoted = await app.api.promoteNote(sessionId, tabId, posted.note.id, inputs);
-        if (!promoted.sent) return showError(promoted.message);
-        setSendFeedback({ kind: "success", message: promoted.queued ? "Queued for the agent." : "Sent to the agent." });
       } else {
+        const posted = await app.api.postNote(sessionId, text);
+        if (!posted.sent) return showError(posted.message);
+        setNotes((current) => [...current.filter((note) => note.id !== posted.note.id), posted.note].sort((left, right) => left.createdAt - right.createdAt));
         setSendFeedback({ kind: "success", message: "Note added." });
       }
       setDraft("");
@@ -271,16 +263,7 @@ function ChatPane({ hostId, sessionId, tabId, connected, epoch }: { hostId: stri
     }
   };
 
-  type Item = { key: string; kind: "turn"; row: TurnRow } | { key: string; kind: "note"; note: ChatNote; first: boolean };
-  const items = useMemo(() => {
-    const groups: ({ kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote })[] = [
-      ...transcript.turns.map((turn) => ({ kind: "turn" as const, turn })),
-      ...notes.map((note) => ({ kind: "note" as const, note })),
-    ].sort((left, right) => itemTime(left) - itemTime(right));
-    return groups.flatMap<Item>((group) => group.kind === "turn"
-      ? turnRows(group.turn).map((row) => ({ key: row.key, kind: "turn" as const, row }))
-      : textChunks(group.note.body).map((body, index) => ({ key: `note-${group.note.id}:${index}`, kind: "note" as const, note: { ...group.note, body }, first: index === 0 })));
-  }, [notes, transcript.turns]);
+  const items = useMemo(() => conversationItems(transcript.turns, notes, tabId), [notes, tabId, transcript.turns]);
 
   const respondPermission = async (ask: PendingAsk, optionId: string) => {
     if (!connected || answeringPermission) return;
@@ -377,8 +360,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected }: { hostId: string;
     <View style={[styles.terminalInputBar, { backgroundColor: palette.card, borderColor: palette.border }]}><TextInput value={input} onChangeText={(value) => { if (mode === "direct" && connected && inputEnabled) { const addition = value.startsWith(input) ? value.slice(input.length) : value; setInput(""); void write(addition); } else setInput(value); }} onKeyPress={({ nativeEvent }) => { if (mode === "direct" && connected && inputEnabled && nativeEvent.key === "Backspace" && input.length === 0) void write("\x7f"); }} onSubmitEditing={() => { if (mode === "direct") void write("\r"); }} multiline={mode === "buffered"} autoCapitalize="none" autoCorrect={false} placeholder={mode === "direct" ? "Tap to type directly" : "Command"} placeholderTextColor={palette.faint} style={[styles.terminalInput, { color: palette.ink, borderColor: palette.border }]} />{mode === "buffered" || input.length > 0 ? <Pressable accessibilityRole="button" accessibilityLabel="Send terminal input" disabled={!connected || !inputEnabled || !input} onPress={() => void write(input).then((accepted) => { if (accepted) setInput(""); })} style={[styles.send, { backgroundColor: palette.accent, opacity: !connected || !inputEnabled || !input ? 0.38 : 1 }]}><ChevronUp size={19} color={palette.accentInk} /></Pressable> : null}</View>
   </View>;
 }
-
-function itemTime(item: { kind: "turn"; turn: Turn } | { kind: "note"; note: ChatNote }) { return item.kind === "turn" ? Date.parse(item.turn.ts) : item.note.createdAt; }
 
 const styles = StyleSheet.create({
   transcriptRows: { gap: 0 },

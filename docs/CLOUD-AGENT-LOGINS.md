@@ -1,10 +1,61 @@
-# Agent logins for cloud workspaces, from the desktop (PRO-79)
+# Agent logins for cloud workspaces, from the desktop (PRO-79, PRO-107)
 
-An organization stores one login per agent (Claude Code, Codex, Cursor) for
+Each organization stores one login per agent (Claude Code, Codex, Cursor) for
 its cloud workspaces. The account service owns them: it validates a login with
 the provider, encrypts it, refreshes it, and hands workspace machines only
-short-lived access made from it (PRO-17). This page is about the desktop side:
-Settings → Account → **Agent logins**.
+short-lived access made from it (PRO-17). Nothing is stored per user. This
+page is about the desktop side: each organization's page in Settings →
+Organizations → **Agent logins**, and the Agent logins step of organization
+setup.
+
+## Where they are set (PRO-107)
+
+Agent logins are a setting of each organization, not of the account.
+
+- **The organization's page.** Settings → Organizations lists every
+  organization the person belongs to, each with a **Settings** button that
+  opens its page. The page names the organization in its heading, in "Agent
+  logins for …", and in every consent, confirmation and native dialog. Its
+  agent logins work for **any** organization the person belongs to, chosen
+  explicitly: the active (default) one is never switched for it, and another
+  organization's logins are never touched.
+- The page also holds the organization's other settings (members, compute,
+  GitHub, workspace settings, environment, diagnostics, teardown). The
+  service keeps those on the active organization, so they are shown on the
+  active organization's page; another organization's page says so and offers
+  to make it the active (default) organization.
+- **Settings → Account** no longer has the section. It links to the active
+  organization's page instead.
+- **Organization setup.** Organization details → Compute connection → **Agent
+  logins** → Setup completion. Right after the cloud is chosen, the setup
+  shows the same Agent logins section for the new organization. **Continue**
+  needs at least one agent connected; connecting one does not leave the step
+  by itself, so several can be connected. **Set up later** skips it. After a skip,
+  the later steps and setup completion say which agents have no login and
+  link to the organization's page; a setup that went on with a login says
+  nothing more about them. The setup's repository step likewise links to the
+  organization's page, where GitHub is. A setup record from before
+  the step goes back to it only when no agent has a login and its setup
+  workspace was not chosen to run without an agent. The choice is
+  kept in the setup record (`logins: "connected" | "later"`).
+
+How the organization travels: every agent-login command takes it
+(`orgId`, or `organizationId` in the consent; none is the active one).
+`agent_login_context` in `cloud_workspaces.rs` checks the page's context
+revision against the active context (same account, same generation, same
+default organization as when the person chose), then takes the named
+organization by membership (`context_in`, CS-18). Requests go to
+`/v1/desktop/orgs/{that organization}/cloud-workspace-credentials…`, and an
+answer is fenced by that membership, not by which organization is active: a
+default switch does not drop a request in flight for another organization,
+leaving it does.
+
+The server authorizes these routes by membership and the owner or admin role
+in the path organization (terminalx-saas, PRO-107). A server from before
+answers `active_organization_required` for a non-active organization; the
+page says the server changes logins only in the active organization and
+offers to make it active. A server without the multi-organization capability
+is refused locally with `cloud_organization_unavailable`.
 
 ## What the section does
 
@@ -19,14 +70,18 @@ Settings → Account → **Agent logins**.
   account service runs the sign-in and keeps a login it renews. See below.
 - **Connect / replace with an API key.** A native secure dialog collects the
   key (`secure_prompt` in `commands.rs`, the same one provider keys use).
-- **Use this Mac's Claude Code login.** The app lends the short-lived access
-  token of the Claude Code sign-in on this computer. See below.
-- **Disconnect**, after a confirmation.
+- **Log in with ChatGPT** (the first way offered for Codex, PRO-79). Codex's
+  own device-code login runs on this Mac in a throwaway home; the one-time
+  code is shown in the page's dialog and nowhere else, and the login Codex
+  writes is uploaded by the app and the home deleted.
+- **Lend this Mac's Claude Code or Codex sign-in.** The app lends the
+  short-lived access token of the sign-in on this computer. See below.
+- **Disconnect**, after a confirmation that names the organization and says
+  it reaches every workspace of it.
 
-"Log in with Claude" is PRO-82's server-side sign-in and the lasting way to
-connect a subscription; lending this Mac's sign-in is the secondary,
-temporary one. Codex's "Sign in with ChatGPT" (also PRO-82) is not on the
-desktop yet.
+"Log in with Claude" (PRO-82's server-side sign-in) and "Log in with
+ChatGPT" are the lasting ways to connect a subscription; lending this Mac's
+sign-in is the secondary, temporary one. Cursor connects with an API key.
 
 ## Who may do it
 
@@ -48,8 +103,12 @@ service did not say".
 A first prompt refused for lack of a login
 (`cloud_workspace_agent_credential_required`), a launch that failed with
 `agent-sign-in-required`, and an agent tab that needs sign-in all name
-Settings → Account → Agent logins and carry an "Open Agent logins" button
-that opens it. The create refusal is one code for two causes (see above):
+Settings → Organizations → Agent logins and carry an "Open Agent logins"
+button (`AgentLoginsLink`). It opens the page of the organization the
+workspace belongs to (the create form's, the workspace's, the tab's), not the
+active one, with its Agent logins scrolled into view (`openAgentLogins` in
+`settingsLinks.ts`). The same holds in the new-session view and in the setup
+step's create check. The create refusal is one code for two causes (see above):
 an owner or admin is never held back by the managers-only limit, so they are
 told the login is missing or revoked; anyone else is told it is one of the
 two and that an owner or admin can see which.
@@ -100,8 +159,9 @@ again.
   Rust collects the login, sends it once from one zeroized buffer and clears
   it. The answer type (`AgentLogin`) has no field for a login.
 - Nothing is collected or read before `authorize_agent_login` passes: both
-  consents given, the request is for the organization active now, and the
-  service answered the list (so the person is an owner or admin).
+  consents given, the request is for the organization the page names in the
+  account the page knew, and the service answered that organization's list
+  (so the person is an owner or admin there).
 - A login is never logged. Failures are codes.
 - **A refresh token never leaves this Mac.**
 
@@ -135,7 +195,7 @@ Disconnect removes the stored login and does not sign the account out at the pro
 says so; a login stays when the admin who made it leaves, until an owner or
 admin disconnects it (flagging it to owners is the service's part).
 
-## "Use this Mac's Claude Code login"
+## "Lend this Mac's sign-in"
 
 What is uploaded is the access token of the local sign-in, with its expiry
 and scopes (`agent_local_login.rs`). Not the refresh token: a refresh token
@@ -163,7 +223,7 @@ in every workspace stop when the lent sign-in expires.
 The steps, in order:
 
 1. The page's consent: two checkboxes, with text naming the organization.
-2. `authorize_agent_login`: consent, active organization, owner or admin.
+2. `authorize_agent_login`: consent, the named organization, owner or admin there.
 3. The sign-in is read. Claude Code keeps it in the Keychain item
    `Claude Code-credentials`; the account's address comes from `.claude.json`.
    A sign-in that has expired, or has no expiry, is not lent.
@@ -177,8 +237,10 @@ The steps, in order:
    a control, because the app already reads that item for the usage display.
 5. Only then is the access token uploaded.
 
-Codex has no such option: its `auth.json` is not usable without its refresh
-token.
+Codex's lend works the same way: its access token and ID token (which names
+the account and plan), never the refresh token (`codex_from_raw` in
+`agent_local_login.rs`). Only a ChatGPT sign-in is lent; an API key kept in
+`auth.json` is connected as an API key.
 
 ### What the person is told
 

@@ -1,7 +1,13 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { api, type ModelInfo } from "@/lib/api";
+// First, as the app loads it: the session store reached earlier would load the
+// real account module inside its mock, and the cloud catalog would keep that one.
 import { CloudCreateWorkspace } from "./CloudCreateWorkspace";
+import { getPrefs, setPrefs } from "@/lib/prefs";
+import { refreshHarnesses } from "@/lib/sessions";
+import { BypassDialog } from "@/components/session/BypassDialog";
+import type { HarnessInfo } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -14,6 +20,7 @@ vi.mock("@/lib/api", () => ({
     cloudWorkspaceOperation: vi.fn(),
     cloudWorkspaceOperationCancel: vi.fn(),
     cloudWorkspaceResume: vi.fn(),
+    listHarnesses: vi.fn(),
   },
 }));
 const account = vi.hoisted(() => ({ multiOrg: false }));
@@ -21,13 +28,29 @@ vi.mock("@/lib/account", async (original) => ({
   ...(await original<typeof import("@/lib/account")>()),
   getAccount: () => ({ status: { state: "signed-in", identity: { email: "a@example.com", organizationId: "org-1" }, multiOrg: account.multiOrg }, ready: true, busy: false }),
 }));
+const catalog = vi.hoisted(() => ({ models: [] as ModelInfo[] }));
 vi.mock("@/lib/models", async (original) => ({
   ...(await original<typeof import("@/lib/models")>()),
-  useModels: (harness: string) =>
-    harness === "claude"
-      ? [{ id: "sonnet", label: "Sonnet", harness: "claude", alias: true, efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]
-      : [],
+  useModels: (harness: string) => catalog.models.filter((m) => m.harness === harness),
 }));
+
+const model = (id: string, label: string, harness: string, extra: Partial<ModelInfo> = {}): ModelInfo => ({
+  id, label, harness, efforts: [], defaultEffort: null, acceptsImages: true, isDefault: false, upgrade: null, description: null, ...extra,
+});
+const MODELS = [
+  model("sonnet", "Sonnet", "claude", { alias: true, isDefault: true, efforts: ["low", "high"], defaultEffort: "high" }),
+  model("opus", "Opus", "claude", { alias: true, resolved: "claude-opus-5-5", efforts: ["low", "high", "max"], defaultEffort: "high" }),
+  model("haiku", "Haiku", "claude", { alias: true }),
+  // Pinned on this computer: a new workspace's CLI may not run it.
+  model("claude-opus-5", "Opus 5", "claude"),
+  model("gpt-6-astra", "GPT-6 Astra", "codex", { isDefault: true, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "medium" }),
+  model("gpt-5.6-sol", "GPT-5.6 Sol", "codex", { efforts: ["medium", "high"], defaultEffort: "high" }),
+];
+// Claude Code is not installed on this computer; the workspace runs it.
+const HARNESSES = [
+  { id: "claude", name: "Claude Code", available: false },
+  { id: "codex", name: "Codex", available: true },
+] as HarnessInfo[];
 
 const mocked = api as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -58,10 +81,14 @@ const snapshot = (phase: string, patch: { workspace?: object; operation?: object
   },
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   account.multiOrg = false;
   localStorage.clear();
   for (const fn of Object.values(mocked)) fn.mockReset();
+  catalog.models = MODELS;
+  mocked.listHarnesses.mockResolvedValue(HARNESSES);
+  await refreshHarnesses();
+  setPrefs({ lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", bypassConfirmed: false });
   mocked.cloudProviders.mockResolvedValue({ providers: [{ id: "box", displayName: "Boat", availability: "available", canManage: true, connection: null, capabilities: {} }] });
   mocked.cloudWorkspaceRepositories.mockResolvedValue({
     configured: true,
@@ -82,15 +109,35 @@ afterEach(() => {
 });
 
 async function fill() {
-  render(<CloudCreateWorkspace organizationId="org-1" onOpen={vi.fn()} />);
+  // The bypass confirmation is the app's, mounted beside the form as AppShell mounts it.
+  render(
+    <>
+      <CloudCreateWorkspace organizationId="org-1" onOpen={vi.fn()} />
+      <BypassDialog />
+    </>,
+  );
   await screen.findByRole("option", { name: "acme/app" });
   fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "https://github.com/acme/app.git" } });
   fireEvent.change(screen.getByLabelText("Additional repository"), { target: { value: "https://github.com/acme/lib.git" } });
   fireEvent.change(screen.getByLabelText("Base branch of acme/app"), { target: { value: "feature/login" } });
   fireEvent.change(screen.getByLabelText("Initial prompt"), { target: { value: "Fix the login" } });
-  fireEvent.change(screen.getByLabelText("Model"), { target: { value: "sonnet" } });
-  fireEvent.change(screen.getByLabelText("Effort"), { target: { value: "high" } });
   fireEvent.click(screen.getByRole("radio", { name: "Organization" }));
+}
+
+/** Open one of the shared launch pickers by its title and choose an item. */
+async function choose(picker: string, name: string | RegExp, role: "menuitem" | "menuitemradio" = "menuitemradio") {
+  fireEvent.click(screen.getByTitle(picker));
+  fireEvent.click(await screen.findByRole(role, { name }));
+}
+
+const pill = (title: string) => screen.getByTitle(title).textContent;
+
+/** The launch intent of the one workspace created. */
+async function createdLaunch() {
+  await create();
+  await screen.findByTestId("cloud-create-progress");
+  expect(mocked.cloudWorkspaceCreate).toHaveBeenCalledTimes(1);
+  return mocked.cloudWorkspaceCreate.mock.calls[0][0].launch;
 }
 
 describe("CloudCreateWorkspace", () => {
@@ -308,5 +355,93 @@ describe("CloudCreateWorkspace repository list", () => {
     expect(loadPending("org-1")).toBeNull();
     expect(localStorage.getItem(key)).toBeNull();
     setPendingCreateUser(null);
+  });
+});
+
+describe("CloudCreateWorkspace launch settings", () => {
+  beforeEach(() => mocked.cloudWorkspaceCreate.mockResolvedValue(snapshot("allocating")));
+
+  it("starts from what New Session would launch with, in the shared pickers, and saves nothing it picks", async () => {
+    setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
+    await fill();
+    const launch = screen.getByTestId("cloud-create-launch");
+    expect(["Agent", "Model", "Effort", "Permissions"].map((title) => within(launch).getByTitle(title).textContent)).toEqual(["Codex", "GPT-5.6 Sol", "Medium", "Ask every time"]);
+    // No copy of the pickers is left on the form.
+    for (const name of ["Agent", "Model", "Effort", "Permission mode"]) expect(screen.queryByRole("combobox", { name })).toBeNull();
+    await choose("Effort", "High");
+    expect(await createdLaunch()).toMatchObject({ agent: "codex", model: "gpt-5.6-sol", effort: "high", mode: "manual" });
+    expect(mocked.cloudWorkspacePreflight).toHaveBeenCalledWith(expect.any(Array), null, "codex");
+    expect(getPrefs()).toMatchObject({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "medium" }, lastMode: "manual" });
+  });
+
+  it("offers the agents New Session offers for a cloud project, installed on this computer or not", async () => {
+    await fill();
+    fireEvent.click(screen.getByTitle("Agent"));
+    const agents = await screen.findAllByRole("menuitem");
+    expect(agents.map((item) => item.textContent)).toEqual(HARNESSES.map((h) => h.name));
+    // The agent runs on the workspace, so one missing here is still offered.
+    expect(agents.map((item) => item.getAttribute("aria-disabled"))).toEqual([null, null]);
+  });
+
+  it("offers the cloud's aliases, never a version pinned on this computer", async () => {
+    await fill();
+    expect(pill("Model")).toBe("Sonnet (latest)");
+    fireEvent.click(screen.getByTitle("Model"));
+    const offered = await screen.findAllByRole("menuitemradio");
+    expect(offered.map((item) => item.firstChild?.textContent)).toEqual(["Sonnet", "Opus", "Haiku"]);
+  });
+
+  it("switches agent to that agent's saved model and effort, and never keeps an effort a model does not take", async () => {
+    setPrefs({ lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
+    await fill();
+    expect([pill("Agent"), pill("Model"), pill("Effort")]).toEqual(["Claude Code", "Sonnet (latest)", "High"]);
+
+    await choose("Agent", "Codex", "menuitem");
+    expect([pill("Model"), pill("Effort")]).toEqual(["GPT-5.6 Sol", "High"]);
+    // GPT-6 Astra takes High too, so it stays.
+    await choose("Model", "GPT-6 Astra");
+    expect(pill("Effort")).toBe("High");
+
+    await choose("Agent", "Claude Code", "menuitem");
+    await choose("Model", /^Opus/);
+    await choose("Effort", "Max");
+    // Sonnet has no Max: its own default, not the one picked for Opus.
+    await choose("Model", /^Sonnet/);
+    expect(pill("Effort")).toBe("High");
+    await choose("Model", /^Haiku/);
+    expect(screen.queryByTitle("Effort")).toBeNull();
+
+    expect(await createdLaunch()).toMatchObject({ agent: "claude", model: "haiku", effort: null, mode: "bypassPermissions" });
+    expect(getPrefs()).toMatchObject({ lastAgent: "claude", lastModel: { codex: "gpt-5.6-sol" }, lastEffort: { codex: "high" } });
+  });
+
+  it("asks before bypass as New Session does, and keeps the answer to this workspace", async () => {
+    setPrefs({ lastMode: "manual" });
+    await fill();
+    expect(pill("Permissions")).toBe("Ask every time");
+
+    await choose("Permissions", /^Bypass permissions/);
+    const dialog = await screen.findByRole("dialog", { name: "Let Claude Code run without asking?" });
+    // Nothing changes until it is agreed to.
+    expect(pill("Permissions")).toBe("Ask every time");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pill("Permissions")).toBe("Ask every time");
+
+    await choose("Permissions", /^Bypass permissions/);
+    fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Bypass permissions" }));
+    await waitFor(() => expect(pill("Permissions")).toBe("Bypass permissions"));
+
+    expect((await createdLaunch()).mode).toBe("bypassPermissions");
+    expect(getPrefs().lastMode).toBe("manual");
+  });
+
+  it("takes bypass at once after the reader said not to ask again", async () => {
+    setPrefs({ lastMode: "manual", bypassConfirmed: true });
+    await fill();
+    await choose("Permissions", /^Bypass permissions/);
+    expect(pill("Permissions")).toBe("Bypass permissions");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect((await createdLaunch()).mode).toBe("bypassPermissions");
   });
 });

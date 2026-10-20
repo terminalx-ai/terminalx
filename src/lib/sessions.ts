@@ -32,6 +32,8 @@ interface State {
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
   view: "new" | "issues" | "agents" | "automations" | "skills" | "stats";
+  /** The issues browser opens its new-issue form when it next shows; it sets this back. */
+  newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
   selectedAutomationId: string | null;
   /** A tab menu can open Skills already narrowed to that tab's reach. */
@@ -71,6 +73,7 @@ let state: State = {
   selectedSessionId: null,
   navigationVersion: 0,
   view: "new",
+  newIssueRequested: false,
   selectedAutomationId: null,
   skillsFilter: null,
   showArchived: false,
@@ -267,6 +270,16 @@ export function selectCloudSession(key: string) {
 /** The issues browser takes the workspace; no session stays selected. */
 export function openIssues() {
   set({ selectedSessionId: null, view: "issues", selectedAutomationId: null });
+}
+
+/** The issues browser with its new-issue form open (the command palette's "New issue…"). */
+export function openNewIssue() {
+  set({ selectedSessionId: null, view: "issues", selectedAutomationId: null, newIssueRequested: true });
+}
+
+/** The issues browser has opened the form it was asked for. */
+export function takeNewIssueRequest() {
+  if (state.newIssueRequested) set({ newIssueRequested: false });
 }
 
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */

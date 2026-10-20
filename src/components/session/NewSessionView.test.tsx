@@ -1,5 +1,5 @@
 import "@testing-library/dom";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HarnessInfo, Project, SessionEntry } from "@/types/session";
 
@@ -31,10 +31,16 @@ vi.mock("@/lib/models", async (original) => ({
   useModels: () => [],
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
+// Settings → Autocorrect is read through the store's subscription, so this one is live.
+const autocorrect = vi.hoisted(() => ({ on: false, listeners: new Set<() => void>() }));
 vi.mock("@/lib/prefs", () => ({
   usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: {}, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
-  getPrefs: () => ({}),
+  getPrefs: () => ({ autocorrect: autocorrect.on }),
   setPrefs: vi.fn(),
+  subscribePrefs: (listener: () => void) => {
+    autocorrect.listeners.add(listener);
+    return () => autocorrect.listeners.delete(listener);
+  },
 }));
 
 const project = { path: "/repos/raccoon", name: "raccoon" } as Project;
@@ -224,5 +230,30 @@ describe("starting a quick chat", () => {
     expect(await screen.findByText("Not a directory: /nope")).toBeTruthy();
     expect(prompt.value).toBe("hello");
     expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
+describe("autocorrect in the new-session prompt (#525)", () => {
+  afterEach(() => {
+    autocorrect.on = false;
+  });
+
+  function turnAutocorrect(on: boolean) {
+    act(() => {
+      autocorrect.on = on;
+      for (const listener of autocorrect.listeners) listener();
+    });
+  }
+
+  it("leaves what is typed alone while the setting is off, and follows it at once when it changes", () => {
+    renderView();
+    const prompt = document.querySelector<HTMLTextAreaElement>("[data-new-session-prompt]")!;
+    expect([prompt.getAttribute("spellcheck"), prompt.getAttribute("autocorrect"), prompt.getAttribute("autocapitalize")]).toEqual(["false", "off", "off"]);
+
+    turnAutocorrect(true);
+    expect(["spellcheck", "autocorrect", "autocapitalize"].filter((name) => prompt.hasAttribute(name))).toEqual([]);
+
+    turnAutocorrect(false);
+    expect(prompt.getAttribute("spellcheck")).toBe("false");
   });
 });
