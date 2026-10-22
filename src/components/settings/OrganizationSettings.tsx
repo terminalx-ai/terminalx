@@ -9,6 +9,7 @@ import { organizationName } from "@/lib/organizationVisibility";
 import { OrganizationAgentLogins } from "./OrganizationAgentLogins";
 import { OrganizationAgentRoutes } from "./OrganizationAgentRoutes";
 import { OrganizationCloudTeardown } from "./OrganizationCloudTeardown";
+import { OrganizationConsoleLink } from "./OrganizationConsoleLink";
 import { OrganizationCompute } from "./OrganizationCompute";
 import { OrganizationDiagnostics } from "./OrganizationDiagnostics";
 import { OrganizationEnvironment } from "./OrganizationEnvironment";
@@ -26,9 +27,10 @@ const ROLE: Record<string, string> = { owner: "an owner", admin: "an administrat
  * environment, diagnostics and teardown. The page names the organization it
  * changes everywhere.
  *
- * Agent logins and work status (#441) belong to each organization and are
- * changed here for any one the person belongs to, whichever is active, and
- * so is the person's own model access there (PRO-18). The
+ * Agent logins, work status (#441) and the console link to API keys and
+ * webhooks (PRO-40) belong to each organization and are changed here for
+ * any one the person belongs to, whichever is active, and so is the
+ * person's own model access there (PRO-18). The
  * other sections still act on the active organization only (the service
  * keeps them there), so another organization's page offers to make it the
  * active one for them.
@@ -61,6 +63,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
   const logins = <OrganizationAgentLogins key={organization.id} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
   const routes = <OrganizationAgentRoutes key={`routes-${organization.id}`} contextRevision={contextRevision} organizationId={organization.id} organizationName={name} />;
   const workStatus = <OrganizationWorkStatusSettings key={organization.id} organization={organization} />;
+  const consoleLink = <OrganizationConsoleLink organizationId={organization.id} organizationName={name} member={member} />;
 
   return (
     <div className="flex flex-col gap-4" data-testid="organization-settings" data-organization={organization.id}>
@@ -82,6 +85,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
           <OrganizationCompute contextRevision={contextRevision} />
           {logins}
           {routes}
+          {consoleLink}
           <OrganizationGithubApp contextRevision={contextRevision} />
           {workStatus}
           <OrganizationWorkspaceConfig contextRevision={contextRevision} />
@@ -93,6 +97,7 @@ export function OrganizationSettings({ organization, onBack }: { organization: O
         <>
           {logins}
           {routes}
+          {consoleLink}
           {workStatus}
           <div className="rounded-lg border border-hairline p-3" data-testid="organization-settings-inactive">
             <div className="text-sm font-medium">Other settings of {name}</div>

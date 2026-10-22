@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
     cloudDiagnostics: vi.fn(),
     cloudConnectionDiagnostics: vi.fn(),
     cloudDiagnosticsExport: vi.fn(),
+    organizationConsoleOpen: vi.fn(),
   },
   workStatus: {
     organization: vi.fn(),
@@ -180,6 +181,43 @@ describe("an organization's settings page (PRO-107)", () => {
     expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
     expect(mocks.api.cloudConnectionDiagnostics).toHaveBeenCalled();
     expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
+  });
+});
+
+describe("the link to the organization's API keys and webhooks in the console (PRO-40)", () => {
+  it("opens the active organization's console page for an owner", async () => {
+    mocks.api.organizationConsoleOpen.mockResolvedValue(undefined);
+    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    const link = await screen.findByTestId("organization-console-link");
+    expect(link.textContent).toContain("API keys and webhooks");
+    fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
+    await waitFor(() => expect(mocks.api.organizationConsoleOpen).toHaveBeenCalledWith("a"));
+  });
+
+  it("opens another organization's page by its own id, for its administrator, without switching", async () => {
+    mocks.api.organizationConsoleOpen.mockResolvedValue(undefined);
+    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
+    const link = await screen.findByTestId("organization-console-link");
+    expect(link.textContent).toContain("Beta");
+    fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
+    await waitFor(() => expect(mocks.api.organizationConsoleOpen).toHaveBeenCalledWith("b"));
+    expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing to a member", async () => {
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onBack={vi.fn()} />);
+    await screen.findByTestId("organization-settings");
+    expect(screen.queryByTestId("organization-console-link")).toBeNull();
+    render(<OrganizationSettings organization={{ ...acme, role: "member" }} onBack={vi.fn()} />);
+    expect(screen.queryByTestId("organization-console-link")).toBeNull();
+  });
+
+  it("says so when the browser could not be opened", async () => {
+    mocks.api.organizationConsoleOpen.mockRejectedValue(new Error("No browser is available."));
+    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    const link = await screen.findByTestId("organization-console-link");
+    fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
+    expect((await within(link).findByRole("alert")).textContent).toContain("No browser is available.");
   });
 });
 

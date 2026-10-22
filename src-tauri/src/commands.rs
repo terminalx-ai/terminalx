@@ -101,6 +101,15 @@ pub async fn account_sign_in(
     tauri::async_runtime::spawn_blocking(move || account.begin_sign_in(&app)).await.map_err(err)?.map_err(err)
 }
 
+/// Opens an organization's page in the web console in the system browser
+/// (PRO-40: API keys and webhooks are managed there).
+#[tauri::command]
+pub fn organization_console_open(app: AppHandle, organization_id: String) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = crate::account::organization_console_url(&organization_id).map_err(err)?;
+    app.opener().open_url(url.as_str(), None::<&str>).map_err(err)
+}
+
 #[tauri::command]
 pub async fn account_sign_out(
     app: AppHandle,

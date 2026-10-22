@@ -320,6 +320,8 @@ export const api = {
    */
   accountRefreshRoles: (force: boolean) => invoke<{ status: AccountStatus; fresh: boolean }>("account_refresh_roles", { force }),
   accountSignIn: () => invoke<AccountStatus>("account_sign_in"),
+  /** Opens the organization's page in the web console, in the system browser. */
+  organizationConsoleOpen: (organizationId: string) => invoke<void>("organization_console_open", { organizationId }),
   accountSignOut: () => invoke<AccountStatus>("account_sign_out"),
   /** `selected: false`: created, but selecting it failed. Select it by id; never create again. */
   organizationCreate: (name: string, idempotencyKey: string) =>

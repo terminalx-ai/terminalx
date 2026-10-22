@@ -74,6 +74,10 @@ pub(crate) fn dev_origin(debug_build: bool, name: &str, value: Option<&str>) -> 
     Some(url.origin().ascii_serialization())
 }
 const AUTHORIZE_PATH: &str = "/v1/desktop/auth/authorize";
+/// The account service redirects this to the organization's page in its web
+/// console (PRO-40), the way the sign-in page is handed to the console: the
+/// service owns the console's address, so the app never hard-codes one.
+const CONSOLE_ORGANIZATION_PATH: &str = "/v1/desktop/console/organizations";
 const SESSION_PATH: &str = "/v1/desktop/auth/session";
 const REFRESH_PATH: &str = "/v1/desktop/auth/refresh";
 /// The session body (identity, organizations with roles, capabilities) with no
@@ -1412,6 +1416,18 @@ fn authorize_url(pending: &PendingAuth, links: DesktopLinks) -> Result<Url> {
     Ok(url)
 }
 
+/// The account-service link that opens one organization's page in the web
+/// console. The id goes in as one percent-encoded path segment.
+pub(crate) fn organization_console_url(organization_id: &str) -> Result<Url> {
+    let id = organization_id.trim();
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("invalid organization id");
+    }
+    let mut url = Url::parse(&format!("{}{CONSOLE_ORGANIZATION_PATH}", api_base_url()))?;
+    url.path_segments_mut().map_err(|_| anyhow::anyhow!("account service URL cannot take a path"))?.push(id);
+    Ok(url)
+}
+
 fn endpoint(path: &str) -> String {
     format!("{}{path}", api_base_url())
 }
@@ -1594,6 +1610,18 @@ fn should_refresh(expires_at: i64, now: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn organization_console_url_is_on_the_account_service_with_the_id_as_one_segment() {
+        let url = organization_console_url("org_123").unwrap();
+        assert_eq!(url.as_str(), format!("{}/v1/desktop/console/organizations/org_123", api_base_url()));
+        let encoded = organization_console_url("a/b?c#d").unwrap();
+        assert!(encoded.as_str().ends_with("/v1/desktop/console/organizations/a%2Fb%3Fc%23d"), "{encoded}");
+        assert_eq!(encoded.query(), None);
+        assert_eq!(encoded.fragment(), None);
+        assert!(organization_console_url(" ").is_err());
+        assert!(organization_console_url(&"x".repeat(129)).is_err());
+    }
 
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
