@@ -7,6 +7,9 @@ pub mod audio;
 pub mod catalog;
 pub mod download;
 pub mod engine;
+pub mod commands;
+pub mod context;
+pub mod personalization;
 
 use std::sync::Arc;
 
@@ -175,3 +178,6 @@ mod tests {
         assert_eq!(gateway.calls.load(Ordering::SeqCst), 1);
     }
 }
+
+#[cfg(test)]
+mod evaluation;

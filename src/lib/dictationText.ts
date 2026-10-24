@@ -271,3 +271,9 @@ export function insertSpoken(anchor: DictationAnchor, spoken: string): { text: s
   const tail = anchor.after && !/^\s/.test(anchor.after) ? " " + anchor.after : anchor.after;
   return { text: head + spoken + tail, caret: head.length + spoken.length };
 }
+
+/** Keep both surrounding anchors exact; ambiguity means no learning. */
+export function correctedSegment(before: string, after: string, sent: string): string | null {
+  if (!sent.startsWith(before) || !sent.endsWith(after) || sent.length < before.length + after.length) return null;
+  return sent.slice(before.length, sent.length - after.length || undefined);
+}

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Offline dictation
+
+- Add opt-in local transcription context, scoped dictionary spellings,
+  replacements and snippets, conservative cleanup and learned corrections.
+  Settings → Transcription includes import/export, sensitive-tab exclusions,
+  language hints and a microphone test showing raw/final text and bias terms.
+  Whisper and Apple receive vocabulary hints; other models use deterministic
+  replacements. Apple refuses network fallback when on-device recognition is
+  unavailable. Dictation event logs retain lengths rather than spoken text.
+  Add an explicit-audio evaluation harness and recording protocol; recognition
+  improvement remains unmeasured pending donated recordings. (#439)
+
 ### Welcome
 
 - Show a resting welcome screen when nothing is selected, with the app mark,

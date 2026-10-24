@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { DictationContext } from "@/lib/dictationContext";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ExternalLink, Mic } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -6,7 +8,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
-import { anchorAt, insertSpoken, spokenSince, type DictationAnchor } from "@/lib/dictationText";
+import { anchorAt, insertSpoken, spokenSince, correctedSegment, type DictationAnchor } from "@/lib/dictationText";
 import { useTranscriptionInput } from "@/lib/transcriptionInput";
 
 /**
@@ -35,6 +37,8 @@ export interface Dictation {
   stop: () => void;
   /** This dictation runs while a key is held, and stops when it is released. */
   held: boolean;
+  /** Observe a successful send without changing insertion or send behavior. */
+  sent: (text: string) => void;
 }
 
 /** How many drafts on their way back to the composer are remembered, so that a draft which lags cannot grow the list for ever. */
@@ -65,8 +69,13 @@ const EXPECTED_DRAFTS = 8;
  * The hook owns the draft only while its dictation runs. Once the mic has
  * closed and the last words are in, the draft is the reader's alone again.
  */
-export function useDictationInto(target: string, draft: string, onDraftChange: (v: string) => void, field?: RefObject<HTMLTextAreaElement | null>): Dictation {
+export function useDictationInto(target: string, draft: string, onDraftChange: (v: string) => void, field?: RefObject<HTMLTextAreaElement | null>, context?: () => DictationContext): Dictation {
   const state = useDictation();
+  const source = useRef(context);
+  source.current = context;
+  const learning = useRef<{ before: string; after: string; spoken: string; request: DictationContext } | null>(null);
+  const learnable = useRef(true);
+  const request = useRef<DictationContext | null>(null);
   const dictating = state.target === target && state.phase !== "idle";
   const [available, setAvailable] = useState<boolean | null>(null);
   useEffect(() => {
@@ -124,6 +133,9 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     const edited = () => {
       remember();
       if (session.current !== heard.current.session || over.current) return;
+      // An edit while results are still settling has uncertain provenance.
+      learnable.current = false;
+      learning.current = null;
       const at = el.selectionEnd ?? el.value.length;
       split(el.value, at, at, heard.current.text);
       expected.current = [el.value];
@@ -156,6 +168,10 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
   const write = useCallback((spoken: string) => {
     const next = insertSpoken(anchor.current, spoken);
     last.current = next.text;
+    if (learnable.current && request.current && spoken) {
+      const end = next.caret;
+      learning.current = { before: next.text.slice(0, end - spoken.length), after: next.text.slice(end), spoken, request: request.current };
+    }
     if (next.text === current.current) return;
     caret.current = next.caret;
     if (expected.current[expected.current.length - 1] !== next.text) expected.current = [...expected.current.slice(1 - EXPECTED_DRAFTS), next.text];
@@ -177,7 +193,11 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     if (draft !== seen.current) {
       seen.current = draft;
       const at = expected.current.indexOf(draft);
-      if (at < 0) reanchor(state.text);
+      if (at < 0) {
+        learnable.current = false;
+        learning.current = null;
+        reanchor(state.text);
+      }
       else expected.current = expected.current.slice(at + 1);
     }
     // What is left is what the reader has not already got.
@@ -213,8 +233,12 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
   const [held, setHeld] = useState(false);
   const start = useCallback(
     (opts?: { held?: boolean }) => {
-      const id = startDictation(target);
+      const prepared = source.current?.();
+      const id = prepared ? startDictation(target, prepared) : startDictation(target);
       if (id == null) return false;
+      request.current = prepared?.learn && !prepared.sensitive && !prepared.remote ? prepared : null;
+      learning.current = null;
+      learnable.current = true;
       session.current = id;
       over.current = false;
       setHeld(!!opts?.held);
@@ -229,7 +253,16 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     else start();
   }, [dictating, start, stop]);
 
-  return { state, dictating, available, toggle, start, stop, held: held && dictating };
+  const sent = useCallback((text: string) => {
+    const candidate = learning.current;
+    learning.current = null;
+    if (!candidate || !over.current) return;
+    const corrected = correctedSegment(candidate.before.trimStart(), candidate.after.trimEnd(), text.trim());
+    if (corrected == null || corrected === candidate.spoken) return;
+    void invoke("transcription_learn", { request: candidate.request, before: candidate.spoken, after: corrected }).catch(() => {});
+  }, []);
+
+  return { state, dictating, available, toggle, start, stop, held: held && dictating, sent };
 }
 
 /**

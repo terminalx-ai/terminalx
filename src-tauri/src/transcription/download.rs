@@ -185,7 +185,7 @@ mod tests {
         // One second of a 440 Hz tone: the engine must load and answer, even
         // if the answer is empty.
         let tone: Vec<f32> = (0..16_000).map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 16_000.0).sin() * 0.2).collect();
-        let text = engine.transcribe(spec.id, &model_path(spec).unwrap(), &tone).expect("transcribe");
+        let text = engine.transcribe(spec.id, &model_path(spec).unwrap(), &tone, &super::super::context::RunContext::default()).expect("transcribe");
         eprintln!("tone transcribed as: {text:?}");
     }
 }

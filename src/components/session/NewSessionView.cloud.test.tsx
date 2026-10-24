@@ -128,14 +128,14 @@ afterEach(() => cleanup());
 const type = (text: string) => fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
 
 describe("new session in a cloud project", () => {
-  it("says where it runs, keeps the worktree toggle on from the local preference, and runs no local command", () => {
+  it("says where it runs, keeps the worktree toggle on from the local preference, and reads only local transcription preferences", () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     expect(screen.getByTestId("cloud-runs-in").textContent?.trim()).toBe("Runs in: Acme cloud");
     expect(screen.getByText("acme/api", { selector: "span" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "New worktree on the cloud workspace" }).getAttribute("aria-checked")).toBe("true");
     // An agent not installed here still runs there.
     expect(screen.queryByText(/isn't installed/)).toBeNull();
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
   });
 
   it("starts in an existing workspace (a wake for a stopped one) with the prompt and the worktree preference", async () => {
@@ -150,7 +150,7 @@ describe("new session in a cloud project", () => {
     expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
-    expect(invoke).not.toHaveBeenCalled();
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
   });
 
   it("uses the existing workspace's versions, and falls back to aliases when it stops", async () => {

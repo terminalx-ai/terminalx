@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
+import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -283,7 +284,8 @@ export function Composer({
     };
   }, [commandSource]);
 
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
+  const dictationContext = useDictationContext(tab.id, cwd, remote, draft, caret);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref, dictationContext);
   useDictationShortcuts(dictation, !!autoFocus);
   const keysOf = useShortcutKeycaps();
 
@@ -391,6 +393,7 @@ export function Composer({
     setSending(true);
     try {
       await onSend(text, attach.images);
+      dictation.sent(text);
     } catch {
       // The owning tab renders the send error. Keep the draft and attachments
       // here so the reader can retry without selecting them again.
@@ -402,7 +405,7 @@ export function Composer({
     onDraftChange(recall.sent());
     attach.clear();
     ref.current?.focus({ preventScroll: true });
-  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent]);
+  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent, dictation.sent]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {

@@ -69,3 +69,67 @@ Ideas were reviewed in [Juno](https://github.com/Cassini-Research/Juno) revision
 `217c7e71e7e6e737749bfa389621f2fa469b3144`, particularly prompt_builder.py,
 context/redaction.py, memory/correction_diff.py and dictation/self_corrections.py.
 TerminalX implements its own Rust/TypeScript logic and ships no Python runtime.
+
+## Native paired-run harness
+
+The ignored Rust test runs an installed catalog model directly, without the app,
+microphone, downloads or user-store lookup. Prepare an explicitly donated audio
+file as **headerless little-endian IEEE 754 float32 PCM, one channel, 16000 samples
+per second**. Every sample must be finite and between -1 and 1. The file must be
+nonempty, a multiple of four bytes, and no longer than 60 seconds (3,840,000
+bytes). A WAV container is not accepted directly: export the raw PCM format with
+your audio tool and retain the source WAV separately. Verify its export settings;
+renaming a WAV file does not convert it.
+
+Create a private manifest with these exact keys and absolute paths:
+
+```json
+{
+  "model": "parakeet-unified-en-0.6b",
+  "modelPath": "/private/evaluation/parakeet-unified-en-0.6b-Q8_0.gguf",
+  "audioPath": "/private/evaluation/take-01.f32le",
+  "personalizationPath": "/private/evaluation/options.json",
+  "outputPath": "/private/evaluation/take-01-result.json",
+  "terms": ["Parakeet", "DictationEngine.rs"],
+  "reference": "Open DictationEngine.rs with Parakeet."
+}
+```
+
+`personalizationPath` is the exported personalization JSON (`options` and
+`entries`), validated by the same rules as Settings import. Optional `project`
+selects the project ID used for scoped entries. `terms` supplies both context
+candidates and target terms for scoring; enable context in the options to bias
+with these candidates. Dictionary terms still require the dictionary switch.
+No project files are traversed by this harness.
+
+Run from `src-tauri`, using private disposable state directories:
+
+```sh
+TX_EVAL_STATE=$(mktemp -d)
+CARGO_BUILD_JOBS=2 SDKROOT=$(xcrun --sdk macosx --show-sdk-path) \
+  TERMINALX_HOME="$TX_EVAL_STATE/terminalx" \
+  CLAUDE_CONFIG_DIR="$TX_EVAL_STATE/claude" \
+  TX_DICTATION_EVAL_MANIFEST=/private/evaluation/manifest.json \
+  cargo test transcription::evaluation::real_model_pair -- --ignored --exact
+```
+
+The destination must not exist. It is created with owner-only permissions; a
+failed run can leave an empty file, so choose a new destination before retrying.
+The report includes both raw/final transcripts, WER, exact case-sensitive target
+term accuracy with word boundaries, candidate terms, actual model bias terms,
+and inference/processing durations. WER is case-insensitive and strips outer
+punctuation. Terms absent from the reference do not affect term accuracy; no
+applicable terms gives `null`. An empty reference yields zero for silence or the
+number of inserted words for nonempty output, which should be reported separately.
+
+Actual `biasTerms` is empty for Parakeet, Nemotron and Canary because these
+engines do not receive vocabulary hints. Their `candidateTerms` can still be
+present; dictionary/replacement/cleanup processing runs after recognition.
+Prompt-echo removal only receives hints actually supplied to Whisper.
+
+Baseline inference includes cold model loading; the personalized run reuses
+weights. Do not compare these timings as a latency benchmark. Direct-engine
+silence runs deliberately bypass microphone capture guards and therefore assess
+the recognizer itself. This harness does not evaluate Apple, microphone behavior,
+composer insertion, or the Settings display. One paired recording is not an
+aggregate improvement claim; complete the matrix above before claiming accuracy.

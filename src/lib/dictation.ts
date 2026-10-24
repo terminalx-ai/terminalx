@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { DictationContext } from "./dictationContext";
 import { isTranscriptionInputSaving } from "./transcriptionInput";
 import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, type DictationBuffer } from "./dictationText";
 
@@ -73,9 +74,8 @@ interface DictationEvent {
  */
 function trace(e: DictationEvent) {
   const text = e.text ?? "";
-  const head = text.length > 40 ? `${text.slice(0, 40)}…` : text;
   const segment = e.segment == null ? "" : ` segment=${e.segment}`;
-  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length} ${JSON.stringify(head)}`;
+  const detail = e.kind === "error" ? ` ${e.message ?? ""}` : `${segment} len=${text.length}`;
   void invoke("frontend_log", { level: "debug", message: `dictation ${e.kind}${detail}` }).catch(() => {});
 }
 
@@ -164,7 +164,7 @@ export async function refreshDictationEngine() {
  * tell its own text from a later one's. `null` if dictation is already going
  * or the next recording's input preference is still being saved.
  */
-export function startDictation(target: string): number | null {
+export function startDictation(target: string, personalization?: DictationContext): number | null {
   if (state.phase !== "idle" || isTranscriptionInputSaving()) return null;
   buffer = EMPTY_BUFFER;
   previousPartialAt = null;
@@ -177,7 +177,7 @@ export function startDictation(target: string): number | null {
     await subscribe();
     if (state.session !== session) return;
     try {
-      await invoke("dictation_start");
+      await invoke("dictation_start", { personalization: personalization ?? { target } });
     } catch (e) {
       stopping = false;
       set({ phase: "idle", target: null, error: String(e) });

@@ -20,7 +20,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   DictationStatus: () => null,
   // Only what the composer hands it: whether dictating into this composer is off.
   MicButton: ({ disabled }: { disabled?: boolean }) => (disabled === undefined ? null : <button aria-label="Dictate" disabled={disabled} />),
-  useDictationInto: () => ({ dictating: false, toggle: vi.fn() }),
+  useDictationInto: () => ({ dictating: false, toggle: vi.fn(), sent: vi.fn() }),
   useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));

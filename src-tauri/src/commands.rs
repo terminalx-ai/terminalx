@@ -3246,9 +3246,12 @@ pub fn dictation_available() -> bool {
 // — so these hop onto the blocking pool and return as soon as the work is
 // handed over.
 #[tauri::command]
-pub async fn dictation_start(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn dictation_start(app: AppHandle, state: State<'_, AppState>, personalization: Option<crate::transcription::context::ContextRequest>) -> CmdResult<()> {
     let (dictation, transcription) = (state.dictation.clone(), state.transcription.clone());
-    tauri::async_runtime::spawn_blocking(move || dictation.start(app, transcription)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        let context = crate::transcription::context::RunContext::prepare(personalization.unwrap_or_default());
+        dictation.start(app, transcription, context)
+    }).await.map_err(err)?
 }
 
 #[tauri::command]
