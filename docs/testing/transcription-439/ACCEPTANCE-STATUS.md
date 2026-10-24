@@ -18,6 +18,7 @@ independent review, publication, CI/private-CI exception and cleanup gates.
 | Audio/context/personalization stays local | In-process local recognition, explicit pinned model provisioning, bounded ephemeral context and local store | End-to-end native network observation from the protocol remains pending |
 | Dictation UI unchanged; options in Settings | Existing settings UI evidence; production integration keeps capture/insertion routes | Human mic/shortcut/hold-to-talk and Apple partial-deletion observations |
 | Test panel raw/final/bias terms | Implemented diagnostic event and settings tests | Successful native recognition diagnostic capture |
+| Context does not delay recording start; added stages do not noticeably delay final insertion | Backend context measurements and file timing proxies only; [PRODUCTION-DETECTOR.md](PRODUCTION-DETECTOR.md) explicitly excludes performance acceptance | Pending native context-preparation/start-of-recording and microphone stop-to-final/insertion latency observations under the [HANDOFF.md](HANDOFF.md) protocol |
 | Attribution | Juno ideas documented; native detector attribution and pinned model provenance retained | Final independent attribution review |
 
 The host candidate at `/tmp/tx439-kmesvcjt/presence-4c85ecd6` remains under the
