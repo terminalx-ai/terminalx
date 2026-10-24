@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Agent sessions
+
+- Keep macOS browser-use MCP helpers out of the Dock and app switcher while
+  preserving screen detection and usable browser windows. Close agent PTYs on
+  Cmd+Q and relaunch so their session-owned MCP helpers receive EOF. (PRO-116)
+
 ### Chat
 
 - Keep table Copy/Download menus readable and inside the window, and expand tables

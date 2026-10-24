@@ -820,6 +820,14 @@ pub fn run() {
                 commands::shutdown_codex_sign_in();
                 let state = app.state::<AppState>();
                 state.stats_usage.shutdown();
+                // Cmd+Q/relaunch need not destroy a window first. Close the
+                // agent PTYs here too so their MCP pipes receive EOF, just as
+                // they do when an individual session is stopped (PRO-116).
+                if let Some(manager) = state.manager() {
+                    manager.closing();
+                }
+                state.host.kill_all();
+                state.terminals.kill_all();
                 // Cmd+Q and `relaunch()` end the run loop without necessarily
                 // destroying the window first; the computer-use helper must
                 // not outlive the app on either path.

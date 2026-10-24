@@ -9,6 +9,8 @@
 
 pub mod appserver;
 pub mod by_hand;
+#[cfg(target_os = "macos")]
+mod browser_use_macos;
 pub mod home;
 pub mod models;
 pub mod pty;
