@@ -61,7 +61,7 @@ const unmerged: Landed = { ...safe, digest: "unmerged-digest", merged: null, unm
 const unverified: Landed = { ...safe, digest: "unverified-digest", merged: "ancestor", notVerified: "origin/main could not be fetched (timed out).", safe: false, losses: ["Not verified: origin/main could not be fetched (timed out)."] };
 const unchecked: Landed = { ...safe, digest: "unchecked-digest", checked: false, clean: false, merged: null, safe: false, losses: ["This folder is not a working git checkout of this project, so it cannot be checked for uncommitted or unmerged work."] };
 
-const removeButton = () => screen.getByRole("button", { name: /^(Delete|Settle) (workspace|anyway…)$/ }) as HTMLButtonElement;
+const removeButton = () => screen.getByRole("button", { name: /^(Remove workspace|Remove anyway…|Delete anyway…|Delete conversations and workspace)$/ }) as HTMLButtonElement;
 const openDelete = () => act(() => openWorkspaceDelete("/p", path, "quiet-amber-fox"));
 
 beforeEach(() => {
@@ -88,6 +88,7 @@ describe("WorkspaceRemoveDialog", () => {
   it("reads and removes a cloud worktree on the host that owns it, with the same check and the sessions named (#411)", async () => {
     const host = {
       key: "cloud:org-1:ws-1|s1",
+      keepConversationsUnavailable: "Use Clean up worktrees to keep cloud conversations.",
       disposition: vi.fn(async () => workspace(dirty)),
       remove: vi.fn(async () => ({ keptBranch: null, rescuedBranch: null })),
       turnRunning: () => false,
@@ -99,6 +100,8 @@ describe("WorkspaceRemoveDialog", () => {
     expect(host.disposition).toHaveBeenCalledWith({ fetch: true });
     expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
 
+    expect(removeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("Permanently delete conversations too"));
     fireEvent.click(removeButton());
     await waitFor(() => expect(host.remove).toHaveBeenCalledWith({ keepSessions: false, deleteBranch: false, confirmedDigest: "dirty-digest", expectedSessions: ["s1", "s9"] }));
     // Nothing of it is read or removed on this computer.
@@ -106,24 +109,24 @@ describe("WorkspaceRemoveDialog", () => {
     expect(mocks.removeWorkspace).not.toHaveBeenCalled();
   });
 
-  it("deletes a clean, merged workspace with one confirmation, naming the sessions that go", async () => {
+  it("keeps conversations by default when removing a clean, merged workspace", async () => {
     mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
     render(<WorkspaceRemoveDialog />);
     openDelete();
     await screen.findByText("Clean and merged: safe to remove.");
     expect(screen.getByText("Merged: the branch was squash-merged into origin/main.")).toBeTruthy();
-    expect(screen.getByText("2 sessions and their transcripts will be deleted:")).toBeTruthy();
+    expect(screen.getByText("2 sessions are kept and move to the project:")).toBeTruthy();
     const sessions = within(screen.getByRole("list", { name: "Sessions in this workspace" }));
     expect(sessions.getByText("Fix login")).toBeTruthy();
     expect(sessions.getByText("Review the fix")).toBeTruthy();
-    expect(removeButton().textContent).toContain("Delete workspace");
+    expect(removeButton().textContent).toContain("Remove workspace");
     // This dialog is the caller that asks for the fetch.
     expect(mocks.workspaceDisposition).toHaveBeenCalledWith("/p", path, { fetch: true });
 
     fireEvent.click(removeButton());
     // The sessions it named are the ones the removal is told to expect.
     await waitFor(() =>
-      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
+      expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: true, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"] }),
     );
     expect(mocks.ask).not.toHaveBeenCalled();
   });
@@ -141,7 +144,7 @@ describe("WorkspaceRemoveDialog", () => {
       openDelete();
       await screen.findByText("Removing it now needs a second confirmation.");
       expect(within(screen.getByRole("list", { name: "What would be lost" })).getByText(line)).toBeTruthy();
-      expect(removeButton().textContent).toContain("Delete anyway…");
+      expect(removeButton().textContent).toContain("Remove anyway…");
 
       // Declining the second confirmation removes nothing.
       fireEvent.click(removeButton());
@@ -158,10 +161,39 @@ describe("WorkspaceRemoveDialog", () => {
       fireEvent.click(removeButton());
       // The second confirmation is sent as the digest of what was shown.
       await waitFor(() =>
-        expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: false, deleteBranch: false, confirmedDigest: landed.digest, expectedSessions: ["s1", "s9"] }),
+        expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, { keepSessions: true, deleteBranch: false, confirmedDigest: landed.digest, expectedSessions: ["s1", "s9"] }),
       );
     });
   }
+
+  it("deletes conversations only after the separate destructive choice, and resets it on reopening", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(safe));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText("Clean and merged: safe to remove.");
+    fireEvent.click(screen.getByLabelText("Permanently delete conversations too"));
+    expect(screen.getByText(/owned Claude Code transcripts and managed Codex rollout files/)).toBeTruthy();
+    expect(screen.getByText(/no Trash, undo, or automatic export/)).toBeTruthy();
+    expect(screen.getByText(/does not refund tokens/)).toBeTruthy();
+    fireEvent.click(removeButton());
+    await waitFor(() => expect(mocks.removeWorkspace).toHaveBeenCalledWith("/p", path, {
+      keepSessions: false, deleteBranch: true, confirmedDigest: null, expectedSessions: ["s1", "s9"],
+    }));
+    openDelete();
+    await screen.findByText("Clean and merged: safe to remove.");
+    expect((screen.getByRole("radio", { name: "Remove workspace, keep conversations" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("never enables removal of the main directory for either conversation choice", async () => {
+    mocks.workspaceDisposition.mockResolvedValue(workspace(safe, { isMain: true }));
+    render(<WorkspaceRemoveDialog />);
+    openDelete();
+    await screen.findByText("Clean and merged: safe to remove.");
+    expect(removeButton().disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("Permanently delete conversations too"));
+    expect(removeButton().disabled).toBe(true);
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled();
+  });
 
   it("removes nothing when the check fails outright: there is nothing to confirm against", async () => {
     mocks.workspaceDisposition.mockRejectedValue(new Error("git exploded"));
@@ -179,7 +211,7 @@ describe("WorkspaceRemoveDialog", () => {
     openDelete();
     await screen.findByText(/The workspace folder is not on disk/);
     expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
-    expect(removeButton().textContent).toContain("Delete anyway…");
+    expect(removeButton().textContent).toContain("Remove anyway…");
     fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
     expect(mocks.removeWorkspace).not.toHaveBeenCalled();
@@ -191,10 +223,10 @@ describe("WorkspaceRemoveDialog", () => {
     render(<WorkspaceRemoveDialog />);
     act(() => openSettle(session));
     await screen.findByText("Clean and merged: safe to remove.");
-    expect(screen.getByText(/its sessions are kept, with their conversations/)).toBeTruthy();
-    expect(screen.getByText(/Deleting the workspace instead would delete its sessions too/)).toBeTruthy();
+    expect(screen.getByText(/Conversations and their original workspace context stay readable/)).toBeTruthy();
+    expect(screen.getByText(/resume in the project folder/)).toBeTruthy();
     expect(screen.getByText("2 sessions are kept and move to the project:")).toBeTruthy();
-    expect(removeButton().textContent).toContain("Settle workspace");
+    expect(removeButton().textContent).toContain("Remove workspace");
 
     fireEvent.click(removeButton());
     await waitFor(() =>
@@ -211,7 +243,7 @@ describe("WorkspaceRemoveDialog", () => {
     render(<WorkspaceRemoveDialog />);
     act(() => openSettle(session));
     await screen.findByText("Removing it now needs a second confirmation.");
-    expect(removeButton().textContent).toContain("Settle anyway…");
+    expect(removeButton().textContent).toContain("Remove anyway…");
     fireEvent.click(removeButton());
     await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
     expect(mocks.removeWorkspace).not.toHaveBeenCalled();
@@ -245,6 +277,6 @@ describe("WorkspaceRemoveDialog", () => {
     fireEvent.click(removeButton());
     await screen.findByText(/needs a second confirmation before it is removed/);
     expect(mocks.workspaceDisposition).toHaveBeenCalledTimes(2);
-    expect(removeButton().textContent).toContain("Delete anyway…");
+    expect(removeButton().textContent).toContain("Remove anyway…");
   });
 });

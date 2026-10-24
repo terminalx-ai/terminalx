@@ -20,7 +20,7 @@ vi.mock("@/lib/sessions", () => ({ selectSession, useSessionStore: () => session
 const { IssuePipelinePanel } = await import("./IssuePipelinePanel");
 
 const C1 = "1111111111111111111111111111111111111111";
-const MERGE_SWITCH = "Merge automatically when the review is addressed";
+const MERGE_SWITCH = "Merge when green";
 
 function pipeline(patch: Partial<IssuePipeline> = {}): IssuePipeline {
   return {

@@ -170,6 +170,8 @@ pub struct Automation {
     pub last_outcome: Option<AutomationRunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    #[serde(default)]
+    pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
     pub created: String,
     pub modified: String,
     #[serde(flatten, default)]
@@ -207,6 +209,8 @@ pub struct AutomationInput {
     pub run_timeout_minutes: Option<u32>,
     #[serde(default)]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    #[serde(default)]
+    pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
 }
 
 fn yes() -> bool {
@@ -303,6 +307,7 @@ pub fn definition_from_input(
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
         issue_trigger: input.issue_trigger,
+        pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
             .unwrap_or_else(|| stamp.clone()),
@@ -813,6 +818,14 @@ fn start_run(
             .state::<crate::AppState>()
             .manager()
             .context("session manager is not ready")?;
+        let mut prompt = prompt;
+        if let Some(options) = automation.pipeline.as_ref().filter(|options| options.auto_merge || options.resolve_conflicts) {
+            let host = crate::issue_pipeline::desktop::host(app)?;
+            let pipeline = crate::issue_pipeline::engine::start(&host, &entry.id, &tab.id, Some(options.auto_merge), None)?;
+            crate::issue_pipeline::engine::set_resolve_conflicts(&host, &pipeline.id, options.resolve_conflicts)?;
+            prompt.push_str("\n\n");
+            prompt.push_str(&crate::issue_pipeline::prompts::author_brief());
+        }
         manager.send(&entry.id, &tab.id, prompt, Vec::new())?;
         Ok(())
     })();
@@ -1627,6 +1640,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            pipeline: None,
             created: "2026-09-01T00:00:00Z".into(),
             modified: "2026-09-01T00:00:00Z".into(),
             unknown: BTreeMap::new(),

@@ -118,6 +118,7 @@ pub fn commit(working: &mut Pipeline) -> Result<bool> {
     let mut pipelines = list()?;
     let stored = pipelines.iter_mut().find(|pipeline| pipeline.id == working.id).ok_or_else(|| anyhow!("issue pipeline {} not found", working.id))?;
     working.auto_merge = stored.auto_merge;
+    working.resolve_conflicts = stored.resolve_conflicts;
     working.stopped = stored.stopped;
     working.modified = stored.modified.clone();
     if *stored == *working {
@@ -146,7 +147,7 @@ pub fn set_switches(id: &str, change: impl FnOnce(&mut Pipeline)) -> Result<Pipe
 /// The pipeline a session takes part in, as its author or its reviewer.
 /// The newest one, for a session whose earlier pipeline was replaced.
 pub fn for_session(session_id: &str) -> Result<Option<Pipeline>> {
-    Ok(list()?.into_iter().rev().find(|pipeline| pipeline.author.session_id == session_id || pipeline.reviewer.as_ref().is_some_and(|reviewer| reviewer.session_id == session_id)))
+    Ok(list()?.into_iter().rev().find(|pipeline| pipeline.author.session_id == session_id || pipeline.reviewer.as_ref().is_some_and(|reviewer| reviewer.session_id == session_id) || pipeline.resolver.as_ref().is_some_and(|resolver| resolver.session_id == session_id)))
 }
 
 /// Whether a tab is the author or the reviewer of some pipeline. Asked on

@@ -264,6 +264,19 @@ fn gating_checks(pr: &PrSnapshot, ignored_checks: &[String]) -> (Vec<String>, Ve
 /// Decide. The order is the order a reader would want the reasons in: what is
 /// wrong with the change first, then what GitHub still has to say, and only
 /// then the switches that hold back a change with nothing wrong with it.
+/// Explicit local-only policy substitutes local evidence only when GitHub
+/// positively reports no required checks. Unreadable protection, blocked
+/// merges and required hosted checks still use the unchanged gate.
+pub fn decide_with_local(facts: &Facts<'_>, local_only_passed: bool) -> Gate {
+    if local_only_passed && !facts.pr.checks_unread && facts.pr.required_checks.as_ref().is_some_and(Vec::is_empty) && facts.pr.validation.is_some() {
+        let mut pr = facts.pr.clone();
+        pr.checks.clear();
+        pr.validation = Some(Vec::new());
+        return decide(&Facts { pr: &pr, allow_no_ci: true, ..*facts });
+    }
+    decide(facts)
+}
+
 pub fn decide(facts: &Facts<'_>) -> Gate {
     let pr = facts.pr;
     match pr.state.as_str() {
@@ -435,6 +448,28 @@ pub(crate) mod tests {
                 allow_no_ci: self.allow_no_ci,
             })
         }
+    }
+
+    #[test]
+    fn local_only_validation_never_bypasses_required_checks_or_unknown_protection() {
+        let mut case = Case::clean();
+        let local_decision = |case: &Case| decide_with_local(&Facts {
+            auto_merge: case.auto_merge, require_person: case.require_person, cloud: case.cloud,
+            verdict: case.verdict.as_ref(), pr: &case.pr, security_areas: &case.security_areas,
+            protected: &case.protected, ignored_checks: &case.ignored_checks, allow_no_ci: false,
+        }, true);
+        case.pr.checks = vec![check("build", "failure")];
+        case.pr.required_checks = Some(vec!["build".into()]);
+        assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::ChecksFailed { .. })));
+        case.pr.required_checks = None;
+        assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::ChecksFailed { .. })));
+        case.pr.required_checks = Some(Vec::new());
+        assert!(matches!(local_decision(&case), Gate::Merge { .. }));
+        case.pr.merge_state = "BLOCKED".into();
+        assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::Blocked)));
+        case.pr.merge_state = "CLEAN".into();
+        case.pr.checks_unread = true;
+        assert!(matches!(local_decision(&case), Gate::NeedsYou(StopReason::ChecksUnreadable { .. })));
     }
 
     #[test]

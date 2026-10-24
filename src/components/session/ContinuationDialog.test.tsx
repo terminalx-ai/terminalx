@@ -30,7 +30,7 @@ const source = { id: "source", harness: "claude", title: "Fix issue", status: "w
 const session = { id: "workspace", cwd: "/same/cwd", title: "Workspace" } as SessionEntry;
 const context: ContinuationContext = { sessionId: session.id, tabId: source.id, title: "Fix issue", cwd: session.cwd, provider: "claude", providerSessionId: "original", sourceActive: true, transcriptPath: "/history.jsonl", fullUnavailableReason: null, lastPrompt: "Fix issue", lastUpdate: "Halfway", partialCapture: null };
 const providers = [{ id: "claude", name: "Claude Code", available: true }, { id: "codex", name: "Codex", available: true }];
-const sourceSettings = { harness: "claude", model: "sonnet", effort: "low", permissionMode: "plan" };
+const sourceSettings = { harness: "claude", model: "sonnet", effort: "low", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } };
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.prepare.mockResolvedValue(context);
@@ -66,7 +66,7 @@ it("switches provider to that provider's saved settings, keeps the mode, and lau
   expect(shown()).toEqual(["Codex", "GPT-6 Mini", "Medium", "Plan"]);
   fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan" }, continuationPrompt(context, "full"), expect.any(Function), undefined));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, continuationPrompt(context, "full"), expect.any(Function), undefined));
 });
 it("keeps the dialog's choices to this launch, leaving the saved preferences as they were", async () => {
   mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
@@ -77,7 +77,7 @@ it("keeps the dialog's choices to this launch, leaving the saved preferences as 
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-6" }));
   expect(shown()).toEqual(["Codex", "GPT-6", "Medium", "Plan"]);
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6", effort: "medium", permissionMode: "plan" }, expect.any(String), expect.any(Function), undefined));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, expect.any(String), expect.any(Function), undefined));
   expect(getPrefs()).toMatchObject(saved);
 });
 it("falls back to the configured provider and disables full mode with an explanation", async () => {
@@ -258,7 +258,7 @@ describe("linking a chat to a project", () => {
     fireEvent.click(screen.getByRole("button", { name: "Link and Start" }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/The chat has not been archived/);
     expect(screen.getByTitle("Agent").hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("switch", { name: "Start on a new branch in a worktree" }).hasAttribute("disabled")).toBe(true);
     mocks.move.mockResolvedValueOnce({ stage: "delivered", launched });
     fireEvent.click(screen.getByRole("button", { name: "Retry Start" }));
     await waitFor(() => expect(view.onClose).toHaveBeenCalled());

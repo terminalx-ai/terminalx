@@ -624,3 +624,70 @@ fn unreparsed_legacy_records_keep_tokens_but_remain_unpriced_after_upgrade() {
         );
     }
 }
+
+#[test]
+fn both_providers_keep_prompt_free_accounting_after_shared_histories_are_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let cwd = dir.path().join("removed-worktree");
+    let claude = dir.path().join("claude.jsonl");
+    let codex = dir.path().join("codex.jsonl");
+    let copy = dir.path().join("claude-fork.jsonl");
+    let timestamp = Local::now().to_rfc3339();
+    let mut row = claude_row(&cwd, &timestamp, "shared-request", 9);
+    row["message"]["content"] = json!([{"type":"text","text":"PRIVATE_PROMPT_SENTINEL"}]);
+    write_rows(&claude, &[row], false);
+    fs::copy(&claude, &copy).unwrap();
+    write_rows(
+        &codex,
+        &[
+            json!({"type":"session_meta","payload":{"id":"codex","cwd":cwd}}),
+            json!({"type":"turn_context","payload":{"model":"gpt-6-astra"}}),
+            token_row(&timestamp, counts(100, 80, 25, 10), counts(100, 80, 25, 10)),
+        ],
+        false,
+    );
+    let inputs = || Ok((AppStats::default(), UsageScope::from_paths([cwd.clone()])));
+    let baseline = scan_snapshot_with(
+        &store,
+        || {
+            Ok(vec![
+                (claude.clone(), Provider::Claude),
+                (copy.clone(), Provider::Claude),
+                (codex.clone(), Provider::Codex),
+            ])
+        },
+        inputs,
+    )
+    .unwrap();
+    assert_eq!(baseline.total_tokens, 159);
+    assert!(baseline.estimated_cost_usd.unwrap() > 0.0);
+    for path in [&claude, &copy, &codex] {
+        fs::remove_file(path).unwrap();
+    }
+    // Every call reloads the durable projection, as a fresh process does.
+    for _ in 0..2 {
+        let restored = scan_snapshot_with(&store, || Ok(vec![]), inputs).unwrap();
+        assert_eq!(restored.total_tokens, baseline.total_tokens);
+        assert_eq!(restored.estimated_cost_usd, baseline.estimated_cost_usd);
+        assert_eq!(restored.providers[0].activity_count, 1);
+        assert_eq!(restored.providers[1].activity_count, 1);
+    }
+    assert!(!fs::read_to_string(store.join(CACHE_FILE))
+        .unwrap()
+        .contains("PRIVATE_PROMPT_SENTINEL"));
+    // A shared history restored later is still the same recorded request.
+    write_rows(
+        &copy,
+        &[claude_row(&cwd, &timestamp, "shared-request", 9)],
+        false,
+    );
+    let restored = scan_snapshot_with(
+        &store,
+        || Ok(vec![(copy.clone(), Provider::Claude)]),
+        inputs,
+    )
+    .unwrap();
+    assert_eq!(restored.total_tokens, baseline.total_tokens);
+}

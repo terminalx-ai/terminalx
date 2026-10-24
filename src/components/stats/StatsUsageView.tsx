@@ -40,7 +40,7 @@ export function StatsUsageView() {
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold tracking-tight">Stats &amp; Usage</h1>
             <p className="mt-1 text-[13px] text-muted-foreground">
-              TerminalX activity plus local Claude and Codex token analytics.
+              TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here.
             </p>
           </div>
           <span role="status" aria-live="polite" className="ml-auto self-center text-xs text-muted-foreground">

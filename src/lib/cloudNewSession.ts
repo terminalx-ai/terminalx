@@ -42,6 +42,8 @@ import { cloudSessionKey, type CloudProject, type CloudWorkspaceNode } from "@/t
  */
 
 export interface CloudSessionRequest {
+  pipeline?: import("@/lib/pipelineLaunch").PipelineLaunch;
+  pipelineSettings?: IssuePipelineSettings;
   agent: string;
   model: string;
   effort: string | null;
@@ -172,8 +174,10 @@ export async function startInWorkspace(
       title: request.title || titleOf(request.prompt) || undefined,
       prompt: request.prompt.trim() ? request.prompt : undefined,
       useWorktree: request.useWorktree,
+      ...(request.pipeline?.resolveConflicts ? { pipeline: true, pipelineOptions: { ...request.pipeline, autoMerge: false }, pipelineSettings: request.pipelineSettings as unknown as Record<string, unknown> } : {}),
       ...(issue
-        ? { issue: issue.ref, issueBody: issue.body, worktreeName: issue.worktreeName, pipeline: issue.pipeline, pipelineSettings: issue.settings as unknown as Record<string, unknown> }
+        ? { issue: issue.ref, issueBody: issue.body, worktreeName: issue.worktreeName, pipeline: issue.pipeline, pipelineSettings: issue.settings as unknown as Record<string, unknown>,
+            ...(issue.pipeline && request.pipeline ? { pipelineOptions: { ...request.pipeline, autoMerge: false } } : {}) }
         : {}),
     };
     let created: Awaited<ReturnType<typeof newCloudAgentTab>>;

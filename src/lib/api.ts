@@ -2277,6 +2277,8 @@ export const issuePipelines = {
   list: () => invoke<IssuePipeline[]>("issue_pipelines_list"),
   /** Rejects, with the reason, for a session the pipeline cannot serve (one on the default branch, a project that turned it off). */
   start: (sessionId: string, tabId: string, autoMerge: boolean | null) => invoke<StartedIssuePipeline>("issue_pipeline_start", { sessionId, tabId, autoMerge }),
+  continue: (sessionId: string, tabId: string, options: { autoMerge: boolean; resolveConflicts: boolean }) => invoke<StartedIssuePipeline | null>("issue_pipeline_continue", { sessionId, tabId, options }),
+  setResolveConflicts: (id: string, value: boolean) => invoke<IssuePipeline>("issue_pipeline_set_resolve_conflicts", { id, value }),
   setAutoMerge: (id: string, value: boolean) => invoke<IssuePipeline>("issue_pipeline_set_auto_merge", { id, value }),
   act: (id: string, action: PipelineAction) => invoke<IssuePipeline>("issue_pipeline_act", { id, action }),
   /** Merge a cloud workspace's pull request with the reader's own `gh`, pinned to the reviewed commit; `repository` is the cloud project's own. */

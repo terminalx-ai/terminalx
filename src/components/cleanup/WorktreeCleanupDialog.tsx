@@ -1,3 +1,4 @@
+import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CleanupCandidate, CleanupVerdict } from "@terminalx/portable/workspace";
 import { Cloud, Loader2, Lock, Monitor, RefreshCw, Trash2 } from "@/icons";
@@ -308,7 +309,7 @@ export function WorktreeCleanupDialog() {
             <p className="mt-3 shrink-0 text-xs leading-relaxed text-muted-foreground">
               {plural(chosen.length, "worktree", "worktrees")} will be deleted from disk ({unsized ? "at least " : ""}
               {formatSize(chosenBytes)}); nothing is moved to the Trash. Branches are kept.{" "}
-              {deleteSessions ? "The conversations listed above are deleted too. " : "Conversations are kept and stay under their project, marked as from a removed workspace. "}
+              {deleteSessions ? `${CONVERSATION_DELETION} ` : "Conversations are kept and stay under their project, marked as from a removed workspace. "}
               Main directories, their sessions and everything not listed here are left untouched.
             </p>
             <DialogFooter>

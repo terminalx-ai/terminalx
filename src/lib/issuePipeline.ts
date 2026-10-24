@@ -89,6 +89,18 @@ export async function startPipeline(sessionId: string, tabId: string, autoMerge:
   return started;
 }
 
+export async function continuePipeline(sessionId: string, tabId: string, options: { autoMerge: boolean; resolveConflicts: boolean }): Promise<StartedIssuePipeline | null> {
+  const started = await pipelinesApi.continue(sessionId, tabId, options);
+  if (started) upsertPipeline(started.pipeline);
+  return started;
+}
+
+export async function setPipelineResolveConflicts(id: string, value: boolean): Promise<IssuePipeline> {
+  const pipeline = await pipelinesApi.setResolveConflicts(id, value);
+  upsertPipeline(pipeline);
+  return pipeline;
+}
+
 export async function setPipelineAutoMerge(id: string, value: boolean): Promise<IssuePipeline> {
   const pipeline = await pipelinesApi.setAutoMerge(id, value);
   upsertPipeline(pipeline);
@@ -123,7 +135,7 @@ const newest = (a: IssuePipeline, b: IssuePipeline) => (a.created < b.created ? 
 
 /** The pipeline of an issue in a project: the newest, when it was worked on more than once. */
 export function pipelineForIssue(pipelines: IssuePipeline[], projectPath: string, issueUrl: string): IssuePipeline | null {
-  return pipelines.filter((value) => value.projectPath === projectPath && value.issue.url === issueUrl).sort(newest)[0] ?? null;
+  return pipelines.filter((value) => value.projectPath === projectPath && value.issue?.url === issueUrl).sort(newest)[0] ?? null;
 }
 
 /**
@@ -131,11 +143,11 @@ export function pipelineForIssue(pipelines: IssuePipeline[], projectPath: string
  * issue, newest first. A merge closes its issue, and a closed issue leaves a
  * list of open ones, while its page is where the record of that merge is read.
  */
-export function unlistedPipelines(pipelines: IssuePipeline[], projectPath: string, provider: IssuePipeline["issue"]["provider"], listedUrls: Iterable<string>, limit = 20): IssuePipeline[] {
+export function unlistedPipelines(pipelines: IssuePipeline[], projectPath: string, provider: NonNullable<IssuePipeline["issue"]>["provider"], listedUrls: Iterable<string>, limit = 20): IssuePipeline[] {
   const seen = new Set(listedUrls);
   const found: IssuePipeline[] = [];
-  for (const value of pipelines.filter((value) => value.projectPath === projectPath && value.issue.provider === provider).sort(newest)) {
-    if (seen.has(value.issue.url)) continue;
+  for (const value of pipelines.filter((value) => value.projectPath === projectPath && value.issue?.provider === provider).sort(newest)) {
+    if (!value.issue || seen.has(value.issue.url)) continue;
     seen.add(value.issue.url);
     found.push(value);
   }
@@ -165,7 +177,7 @@ export function pipelineHeadline(pipeline: IssuePipeline): { label: string; tone
       // Checks running, or not listed yet; otherwise it is GitHub itself: mergeability, a merge queue.
       return { label: pipeline.note?.includes("checks") ? "Waiting for checks" : "Waiting for GitHub", tone: "info" };
     case "working":
-      return { label: WORKING[pipeline.stage], tone: "info" };
+      return { label: pipeline.note === "Merging the pull request." ? "Merging" : WORKING[pipeline.stage], tone: "info" };
   }
 }
 
@@ -174,6 +186,7 @@ const WORKING: Record<PipelineStage, string> = {
   pullRequest: "Opening pull request",
   review: "In review",
   address: "Addressing findings",
+  resolve: "Resolving conflicts",
   merge: "Checking",
 };
 
@@ -201,10 +214,12 @@ export interface PipelineStep {
  * pipeline that went straight from its first review to the merge skipped it.
  */
 export function pipelineSteps(pipeline: IssuePipeline): PipelineStep[] {
-  const at = PIPELINE_STAGES.findIndex((value) => value.stage === pipeline.stage);
+  const stages = pipeline.stage === "resolve" || pipeline.resolutions ? [...PIPELINE_STAGES.slice(0, -1), { stage: "resolve" as const, label: "Resolve" }, PIPELINE_STAGES[PIPELINE_STAGES.length - 1]] : PIPELINE_STAGES;
+  const at = stages.findIndex((value) => value.stage === pipeline.stage);
   const here: StepStatus = pipeline.state === "needsYou" ? "attention" : pipeline.state === "stopped" ? "stopped" : pipeline.state === "merged" || pipeline.state === "readyToMerge" ? "done" : "current";
-  return PIPELINE_STAGES.map(({ stage, label }, index) => {
+  return stages.map(({ stage, label }, index) => {
     let status: StepStatus = index < at ? "done" : index === at ? here : "pending";
+    if (stage === "resolve" && pipeline.stage !== "resolve") status = pipeline.resolutions ? "done" : index < at ? "skipped" : "pending";
     // Past the reviews without ever sending findings back.
     if (stage === "address" && index < at && pipeline.round <= 1) status = "skipped";
     // In a later review, the round of fixes before it is behind us.
@@ -280,12 +295,15 @@ const ADVANCE: Record<PipelineStage, string> = {
   pullRequest: "Try again",
   review: "Review again",
   address: "Review the changes",
+  resolve: "Inspect resolution",
   merge: "Check again",
 };
 
 export const DEFAULT_PIPELINE_SETTINGS: IssuePipelineSettings = {
   enabled: true,
   autoMerge: false,
+  resolveConflicts: false,
+  maxResolutions: 3,
   requirePerson: false,
   maxRounds: 3,
   mergeMethod: "merge",

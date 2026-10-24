@@ -33,6 +33,8 @@ export function offersWorkspaceDelete(disposition: WorkspaceDisposition | null, 
 export interface WorkspaceHost {
   /** Changes whenever what it points at does; effects key on it. */
   key: string;
+  /** A host must refuse retention when its removal API cannot honor it. */
+  keepConversationsUnavailable?: string;
   /** `fetch` asks for the clean-and-merged verdict the removal dialog shows; without it the read is quick. */
   disposition(options?: { fetch?: boolean }): Promise<WorkspaceDisposition>;
   remove(options: WorkspaceRemoveOptions): Promise<BranchOutcome>;

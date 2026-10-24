@@ -1,3 +1,4 @@
+import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Loader2, Undo2 } from "@/icons";
@@ -282,7 +283,7 @@ export function MergedCleanupSettings() {
       />
       <SettingRow
         label="Also delete its conversations"
-        description="Off: the conversations of its sessions are kept and filed under the project as from a removed workspace."
+        description={`Off: conversations stay under the project with their original workspace context. On: ${CONVERSATION_DELETION}`}
         disabled={!anywhere}
         control={<Switch aria-label="Also delete its conversations" checked={settings.deleteConversations} disabled={!ready || !anywhere} onCheckedChange={(deleteConversations) => save({ deleteConversations })} />}
       />

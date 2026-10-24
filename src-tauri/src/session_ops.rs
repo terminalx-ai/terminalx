@@ -1830,6 +1830,51 @@ mod tests {
     }
 
     #[test]
+    fn keeping_workspaces_preserves_both_provider_resume_files_and_original_context() {
+        for missing in [false, true] {
+            let _home = crate::store::temp_home();
+            let dir = repo();
+            let session = worktree_session(dir.path());
+            let claude = claude_transcript(&session, CONVERSATION);
+            let codex_session = session_in(dir.path(), &session.cwd, "Codex companion");
+            let codex_id = "22222222-2222-4222-8222-222222222222";
+            let codex_tab = add_tab_entry(&codex_session.id, &NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }).unwrap();
+            index::update_tab(&codex_session.id, &codex_tab.id, |tab| {
+                tab.provider_session_id = Some(codex_id.into());
+                Ok(())
+            })
+            .unwrap();
+            let home = crate::agent_data::codex_managed_root().unwrap();
+            let rollout = home.join("sessions/2026/10/24").join(format!("rollout-{codex_id}.jsonl"));
+            std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+            let content = include_str!("harness/codex/fixtures/rollout.jsonl");
+            std::fs::write(&rollout, content).unwrap();
+            let claude_before = std::fs::read(&claude).unwrap();
+            if missing {
+                std::fs::remove_dir_all(&session.cwd).unwrap();
+            }
+            remove(&session, SessionsFate::Keep, git::DirectDelete::Never, &|_| {}).unwrap();
+            // Reload persisted entries and resolve exactly the files used by resume.
+            let kept = index::get(&session.id).unwrap();
+            let codex_kept = index::get(&codex_session.id).unwrap();
+            assert_eq!(kept.cwd, kept.project_path);
+            assert_eq!(kept.removed_workspace.as_ref().unwrap().path, session.cwd);
+            assert_eq!(kept.removed_workspace.as_ref().unwrap().branch, session.branch);
+            let found = crate::harness::claude::transcript::locate_in(&crate::agent_data::claude_projects_root().unwrap(), &kept.cwd, CONVERSATION);
+            assert_eq!(std::fs::read(found).unwrap(), claude_before);
+            assert_eq!(codex_kept.tabs[0].provider_session_id.as_deref(), Some(codex_id));
+            assert_eq!(crate::harness::codex::home::find_rollout(&home, codex_id), Some(rollout.clone()));
+            assert_eq!(std::fs::read_to_string(&rollout).unwrap(), content);
+            delete_session_blocking(&sink(), &session.id, &|_| {}).unwrap();
+            assert!(!claude.exists());
+            assert!(rollout.exists());
+            delete_session_blocking(&sink(), &codex_session.id, &|_| {}).unwrap();
+            assert!(!rollout.exists());
+            assert!(dir.path().join("a.txt").exists());
+        }
+    }
+
+    #[test]
     fn an_unsafe_workspace_is_left_alone_without_the_second_confirmation() {
         let _home = crate::store::temp_home();
         let dir = repo();
@@ -2065,7 +2110,9 @@ mod tests {
         let _home = crate::store::temp_home();
         let dir = repo();
         let at_root = session_in(dir.path(), &dir.path().to_string_lossy(), "Root");
-        assert!(remove(&at_root, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).is_err());
+        for fate in [SessionsFate::Delete, SessionsFate::Keep] {
+            assert!(remove(&at_root, fate, git::DirectDelete::Allowed, &|_| {}).is_err());
+        }
         assert!(dir.path().join("a.txt").exists());
         assert!(index::get(&at_root.id).is_ok());
     }

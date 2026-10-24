@@ -45,6 +45,7 @@ pub enum Place {
 /// The host for the workspaces of one machine. It needs only what the
 /// control socket also holds, so the window and the `terminalx` CLI drive the
 /// same one, and a cloud workspace's runtime builds it the same way.
+#[derive(Clone)]
 pub struct LocalHost {
     sink: Arc<dyn EventSink>,
     manager: SessionManager,
@@ -158,6 +159,49 @@ fn push(cwd: &Path) -> Result<()> {
     })
 }
 
+fn verify_resolution(cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
+        // Exactly one merge, with the two pinned inputs. An extra author or
+        // human commit changes the parents and is never silently pushed.
+        let parents = crate::git::run(cwd, &["show", "-s", "--format=%P", head, "--"])?;
+        if parents.split_whitespace().collect::<Vec<_>>() != [resolution.head.as_str(), resolution.base_commit.as_str()] {
+            bail!("The checkout changed during resolution, or the result is not one merge of the pinned inputs. Review the commits manually.");
+        }
+        if remote_head(cwd, branch)? != resolution.remote_head {
+            bail!("Someone pushed to this branch during conflict resolution. Nothing was pushed; reconcile the new remote head manually.");
+        }
+        Ok(())
+}
+
+fn remote_head(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    let reference = format!("refs/heads/{branch}");
+    let mut command = std::process::Command::new("git");
+    command.args(["ls-remote", "--heads", "origin", &reference]).current_dir(cwd);
+    let output = crate::git::output_within(command, std::time::Duration::from_secs(30)).map_err(|error| anyhow!("Reading the remote branch failed: {error:?}"))?;
+    Ok(output.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name == reference).then(|| sha.to_string())
+    }))
+}
+
+fn resolution_needed(cwd: &Path, branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
+    crate::git::run_within(cwd, &["fetch", "--no-tags", "origin"], PUSH_TIMEOUT, &|| false).map_err(|error| anyhow!("Fetching the base failed: {error:?}"))?;
+    let base_ref = format!("refs/remotes/origin/{base}");
+    let base_commit = crate::git::run(cwd, &["rev-parse", "--verify", &base_ref])?.trim().to_string();
+    let head = crate::git::run(cwd, &["rev-parse", "HEAD"])?.trim().to_string();
+    let ahead = crate::git::run(cwd, &["rev-list", "--count", &format!("{base_commit}..{head}")])?;
+    let behind_count = crate::git::run(cwd, &["rev-list", "--count", &format!("{head}..{base_commit}")])?;
+    if ahead.trim() == "0" || behind_count.trim() == "0" { return Ok(None); }
+    // merge-tree computes conflicts without changing the index or checkout.
+    let output = std::process::Command::new("git").args(["merge-tree", "--write-tree", &head, &base_commit]).current_dir(cwd).output()?;
+    let conflicting = match output.status.code() {
+        Some(0) => false,
+        Some(1) => true,
+        _ => bail!("Could not compare the branch with its base: {}", String::from_utf8_lossy(&output.stderr)),
+    };
+    if !conflicting && !behind { return Ok(None); }
+    Ok(Some(super::Resolution { head, remote_head: remote_head(cwd, branch)?, base: base.to_string(), base_commit, return_stage: super::Stage::Work }))
+}
+
 impl Host for LocalHost {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -204,6 +248,50 @@ impl Host for LocalHost {
         Ok(SessionRef { session_id: author.id.clone(), tab_id: reviewer.id })
     }
 
+    fn workspace_idle(&self, _pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
+        let cwd = cwd.canonicalize()?;
+        for session in index::load()? {
+            if Path::new(&session.cwd).canonicalize().ok().as_ref() != Some(&cwd) { continue; }
+            for tab in &session.tabs {
+                if !matches!(tab.status, index::TabStatus::Idle | index::TabStatus::Completed)
+                    || !self.manager.pipeline_idle(&session.id, &tab.id) { return Ok(false); }
+            }
+        }
+        Ok(true)
+    }
+
+    fn resolution_needed(&self, cwd: &Path, branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
+        resolution_needed(cwd, branch, base, behind)
+    }
+
+    fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        let resolver = self.open_reviewer(pipeline, author)?;
+        crate::session_ops::rename_tab_entry(&author.id, &resolver.tab_id, Some("Conflict resolver".into())).map_err(anyhow::Error::msg)?;
+        self.sink.emit("session_updated", &index::get(&author.id)?);
+        Ok(resolver)
+    }
+
+    fn verify_resolution(&self, cwd: &Path, resolution: &super::Resolution, head: &str, branch: &str) -> Result<()> {
+        verify_resolution(cwd, resolution, head, branch)
+    }
+
+    fn defer_local_check(&self, pipeline_id: &str) -> bool {
+        let host = self.clone();
+        let id = pipeline_id.to_string();
+        std::thread::Builder::new().name("pipeline-local-checks".into()).spawn(move || super::engine::run_local_checks(&host, &id)).is_ok()
+    }
+
+    fn run_local_check(&self, cwd: &Path, command: &str) -> Result<()> {
+        let mut process = std::process::Command::new("/bin/sh");
+        process.args(["-c", command]).current_dir(cwd);
+        crate::git::output_within(process, std::time::Duration::from_secs(1800))
+            .map(|_| ())
+            .map_err(|error| match error {
+                crate::git::RunError::TimedOut => anyhow!("The local check command exceeded 30 minutes."),
+                _ => anyhow!("The local check command failed. Run the configured command in the workspace to inspect its output."),
+            })
+    }
+
     fn workspace(&self, cwd: &Path) -> Result<Workspace> {
         workspace(cwd)
     }
@@ -218,6 +306,14 @@ impl Host for LocalHost {
 
     fn push(&self, cwd: &Path) -> Result<()> {
         push(cwd)
+    }
+
+    fn push_resolution(&self, cwd: &Path, branch: &str, head: &str) -> Result<()> {
+        // Neither a changed checkout nor Git's push.default/upstream settings
+        // may redirect this push. The exact verified commit goes to one ref.
+        let target = format!("{head}:refs/heads/{branch}");
+        crate::git::run_within(cwd, &["push", "origin", &target], PUSH_TIMEOUT, &|| false)
+            .map_err(|error| anyhow!("Pushing the verified resolution failed: {error:?}"))
     }
 
     fn open_pull_request(&self, cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>> {
@@ -354,6 +450,44 @@ mod tests {
         git(root, &["commit", "-q", "-m", "first"]);
         git(root, &["checkout", "-q", "-b", "raccoon/433-work"]);
         dir
+    }
+
+    #[test]
+    fn conflicts_are_detected_without_editing_and_resolution_inputs_are_verified() {
+        let dir = repository();
+        let root = dir.path();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(root, &["push", "-q", "origin", "main"]);
+        std::fs::write(root.join("README.md"), "branch intent\n").unwrap();
+        git(root, &["commit", "-qam", "branch"]);
+        push(root).unwrap();
+        let original = workspace(root).unwrap();
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("README.md"), "base intent\n").unwrap();
+        git(root, &["commit", "-qam", "base"]);
+        git(root, &["push", "-q", "origin", "main"]);
+        git(root, &["checkout", "-q", "raccoon/433-work"]);
+        let resolution = resolution_needed(root, "raccoon/433-work", "main", false).unwrap().unwrap();
+        assert_eq!(workspace(root).unwrap().head, original.head);
+        assert!(workspace(root).unwrap().dirty.is_empty());
+        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "branch intent\n");
+        let merge = std::process::Command::new("git").current_dir(root).args(["-c", "user.name=T", "-c", "user.email=t@example.test", "merge", "--no-ff", "--no-commit", &resolution.base_commit]).output().unwrap();
+        assert!(!merge.status.success());
+        std::fs::write(root.join("README.md"), "branch intent\nbase intent\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-qm", "preserve both intents"]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        verify_resolution(root, &resolution, &head, "raccoon/433-work").unwrap();
+        // A remote writer invalidates even an otherwise valid merge.
+        git(remote.path(), &["update-ref", "refs/heads/raccoon/433-work", &resolution.base_commit]);
+        assert!(verify_resolution(root, &resolution, &head, "raccoon/433-work").unwrap_err().to_string().contains("Someone pushed"));
+        // Another local commit invalidates the exact merge-parent contract.
+        std::fs::write(root.join("extra.txt"), "another writer").unwrap();
+        git(root, &["add", "extra.txt"]);
+        git(root, &["commit", "-qm", "another writer"]);
+        assert!(verify_resolution(root, &resolution, &git(root, &["rev-parse", "HEAD"]), "raccoon/433-work").is_err());
     }
 
     #[test]

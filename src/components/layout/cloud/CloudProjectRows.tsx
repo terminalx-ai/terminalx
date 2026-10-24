@@ -524,7 +524,7 @@ function CloudSessionItem({ row, status, manage, selected }: { row: CloudSession
     if (next && next !== row.title) void act(() => updateCloudSession(row, { title: next }));
   };
   const remove = async () => {
-    const yes = await ask(`Delete "${row.title}"? Its transcript is removed from the cloud workspace.${row.worktreeName ? " Its worktree goes with it when no other session uses it." : ""}`, {
+    const yes = await ask(`Delete "${row.title}"? Its transcript and owned provider-native resume files may be permanently removed from the cloud workspace. This is not hiding the session. There is no conversation undo or automatic export; save needed copies first. Deletion does not refund tokens or reset provider usage. Local Stats & Usage does not scan this cloud history.${row.worktreeName ? " Its worktree goes with it when no other session uses it." : ""}`, {
       title: "Delete session",
       kind: "warning",
       okLabel: "Delete",

@@ -117,7 +117,17 @@ try {
       }, detail);
       if (shots) await page.screenshot({ path: join(shots, `issue-work-detail-${mode}-${width}.png`) });
 
-      await page.getByRole("button", { name: "Start session", exact: true }).click();
+      const start = page.getByRole("button", { name: "Start session", exact: true });
+      await start.scrollIntoViewIfNeeded();
+      const launch = await start.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        const pane = button.closest('[data-testid="issue-detail"]').getBoundingClientRect();
+        return { inside: box.top >= pane.top && box.bottom <= Math.min(pane.bottom, innerHeight) && box.left >= pane.left && box.right <= pane.right, documentScrolled: document.scrollingElement.scrollTop !== 0 };
+      });
+      failed += report(`${mode}, ${width}px`, {
+        "Start session scrolls fully into view without scrolling the document": launch.inside && !launch.documentScrolled,
+      }, launch);
+      await start.click();
       const dialog = page.getByRole("dialog");
       await dialog.getByTestId("taken-issue-warning").waitFor();
       const warning = await dialog.evaluate((node) => {

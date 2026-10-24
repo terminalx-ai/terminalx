@@ -34,6 +34,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
   const settings = draft ?? stored;
   const [paths, setPaths] = useState(settings.protected.paths.join("\n"));
   const [ignored, setIgnored] = useState(settings.ignoredChecks.join("\n"));
+  const [localCommand, setLocalCommand] = useState(settings.localCheckCommand ?? "");
   const [error, setError] = useState<string | null>(null);
 
   // The text boxes follow the project when the dialog is opened for it, not while someone types.
@@ -42,6 +43,7 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
     const current = pipelineSettings(project);
     setPaths(current.protected.paths.join("\n"));
     setIgnored(current.ignoredChecks.join("\n"));
+    setLocalCommand(current.localCheckCommand ?? "");
     setError(null);
   }, [open, project.path]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -67,8 +69,8 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
     const nextPaths = lines(paths, false);
     const nextIgnored = lines(ignored, true);
     const same = (a: string[], b: string[]) => a.length === b.length && a.every((value, index) => value === b[index]);
-    if (same(nextPaths, current.protected.paths) && same(nextIgnored, current.ignoredChecks)) return;
-    save({ protected: { ...current.protected, paths: nextPaths }, ignoredChecks: nextIgnored });
+    if (same(nextPaths, current.protected.paths) && same(nextIgnored, current.ignoredChecks) && localCommand.trim() === (current.localCheckCommand ?? "")) return;
+    save({ protected: { ...current.protected, paths: nextPaths }, ignoredChecks: nextIgnored, ...(localCommand.trim() !== (current.localCheckCommand ?? "") ? { localCheckCommand: localCommand.trim() || null } : {}) });
   };
   const off = !settings.enabled;
   // Not part of the pipeline: what agents may do to this project's issues on their own.
@@ -108,12 +110,20 @@ export function IssuePipelineSettingsDialog({ project, open, onOpenChange }: { p
             description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
             control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
           />
+          <SettingRow label="Resolve conflicts automatically by default" description="Wait for idle conversations, merge the base, run checks and review the new head."
+            control={<Switch aria-label="Resolve conflicts automatically by default" disabled={off} checked={settings.resolveConflicts ?? false} onCheckedChange={(resolveConflicts) => save({ resolveConflicts })} />} />
+          <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts per pull request."
+            control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
           <SettingRow
             disabled={off}
             label="Merge automatically by default"
             description="What “Merge automatically when the review is addressed” starts at for a new issue. Each issue keeps its own switch."
             control={<Switch aria-label="Merge automatically by default" disabled={off || settings.requirePerson} checked={settings.autoMerge} onCheckedChange={(autoMerge) => save({ autoMerge })} />}
           />
+          <SettingRow label="Local check command" description="TerminalX runs this command on the final reviewed head, with a 30-minute timeout. Leave empty to use hosted checks."
+            control={<input aria-label="Local check command" className="rounded bg-well px-2 py-1 text-xs" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveLists} />} />
+          <SettingRow label="Use local checks instead of optional hosted checks" description="Required GitHub checks and repository rules still apply. Requires a local check command."
+            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={!settings.localCheckCommand} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => save({ localChecksOnly })} />} />
           <SettingRow
             disabled={off}
             label="A person does the merge"
@@ -230,8 +240,13 @@ export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }
   const prefs = usePrefs();
   const settings = cloudPipelineSettings(project.key, prefs);
   const [ignored, setIgnored] = useState(settings.ignoredChecks.join("\n"));
+  const [localCommand, setLocalCommand] = useState(settings.localCheckCommand ?? "");
   useEffect(() => {
-    if (open) setIgnored(cloudPipelineSettings(project.key).ignoredChecks.join("\n"));
+    if (open) {
+      const current = cloudPipelineSettings(project.key);
+      setIgnored(current.ignoredChecks.join("\n"));
+      setLocalCommand(current.localCheckCommand ?? "");
+    }
   }, [open, project.key]);
   const save = (patch: Partial<IssuePipelineSettings>) => {
     const current = getPrefs().cloudIssuePipelines;
@@ -240,7 +255,7 @@ export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }
   const saveIgnored = () => {
     const next = lines(ignored, true);
     const current = cloudPipelineSettings(project.key).ignoredChecks;
-    if (next.length !== current.length || next.some((value, index) => value !== current[index])) save({ ignoredChecks: next });
+    if (next.length !== current.length || next.some((value, index) => value !== current[index]) || localCommand.trim() !== (settings.localCheckCommand ?? "")) save({ ignoredChecks: next, localCheckCommand: localCommand.trim() || null });
   };
   const off = !settings.enabled;
   return (
@@ -264,6 +279,14 @@ export function CloudIssuePipelineSettingsDialog({ project, open, onOpenChange }
             description="Off leaves a session started from an issue as it was: the agent writes code and nothing follows."
             control={<Switch aria-label="Open a pull request and review it" checked={settings.enabled} onCheckedChange={(enabled) => save({ enabled })} />}
           />
+          <SettingRow label="Resolve conflicts automatically by default" description="A resolver waits for idle conversations and reviews each changed head. Cloud merges still require a person."
+            control={<Switch aria-label="Resolve conflicts automatically by default" disabled={off} checked={settings.resolveConflicts ?? false} onCheckedChange={(resolveConflicts) => save({ resolveConflicts })} />} />
+          <SettingRow label="Conflict resolution limit" description="Stop for a person after this many attempts."
+            control={<Segmented aria-label="Conflict resolution limit" value={String(settings.maxResolutions ?? 3)} options={ROUNDS.map((value) => ({ value, label: value }))} onChange={(value) => save({ maxResolutions: Number(value) })} />} />
+          <SettingRow label="Local check command" description="The runtime runs this command on the final reviewed head with a 30-minute timeout."
+            control={<input aria-label="Local check command" className="rounded bg-well px-2 py-1 text-xs" value={localCommand} onChange={(event) => setLocalCommand(event.target.value)} onBlur={saveIgnored} />} />
+          <SettingRow label="Use local checks instead of optional hosted checks" description="Required hosted checks and repository rules still apply."
+            control={<Switch aria-label="Use local checks instead of optional hosted checks" disabled={!settings.localCheckCommand} checked={settings.localChecksOnly ?? false} onCheckedChange={(localChecksOnly) => save({ localChecksOnly })} />} />
           <SettingRow
             disabled={off}
             label="Review rounds"

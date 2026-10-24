@@ -1,3 +1,4 @@
+import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft } from "@/icons";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
@@ -77,6 +78,7 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
       missedRunGraceMinutes: automation.missedRunGraceMinutes,
       runTimeoutMinutes: automation.runTimeoutMinutes ?? null,
       issueTrigger: automation.issueTrigger ?? null,
+      pipeline: automation.pipeline,
     };
   }
   return {
@@ -171,6 +173,10 @@ export function AutomationEditor({
     }
   }, [isGit, input.workspace, input.issueTrigger]);
   const patch = (next: Partial<AutomationInput>) => setInput((current) => ({ ...current, ...next }));
+  const pipelineProject = store.projects.find((project) => project.path === input.projectPath);
+  const defaults = pipelineSettings(pipelineProject);
+  const pipelineChoice = usePipelineLaunch(input.projectPath, defaults, !isGit ? "Automation needs a Git branch." : undefined);
+  const pipelineLaunch = { ...pipelineChoice, value: input.pipeline ?? pipelineChoice.value, change: (value: Partial<import("@/lib/pipelineLaunch").PipelineLaunch>) => patch({ pipeline: { ...(input.pipeline ?? pipelineChoice.value), ...value } }) };
   const selection = useSessionAgent(store.harnesses, true, null, {
     value: { harness: input.harness, model: input.model, effort: input.effort ?? null, permissionMode: input.mode },
     onChange: (next) => patch({ harness: next.harness, model: next.model, effort: next.effort, mode: next.permissionMode }),
@@ -256,7 +262,7 @@ export function AutomationEditor({
     setSaving(true);
     setError(null);
     try {
-      const validated = { ...input, model: selection.modelId, effort: selection.effort };
+      const validated = { ...input, pipeline: pipelineLaunch.value, model: selection.modelId, effort: selection.effort };
       const saved = automation ? await updateAutomation(automation.id, validated) : await createAutomation(validated);
       onSaved(saved);
       onOpenChange(false);
@@ -321,7 +327,7 @@ export function AutomationEditor({
           </label>
 
           <div className="col-span-2 flex flex-wrap gap-2">
-            <SessionAgentControls selection={selection} disabled={saving} />
+            <SessionAgentControls selection={selection} pipeline={pipelineLaunch} disabled={saving} />
           </div>
           {selection.unavailableModel && (
             <div role="alert" className={WARNING_NOTE}>

@@ -164,10 +164,10 @@ function manages(client: WorkspaceRpcClient): boolean {
 async function moveLinearToReview(target: CloudTarget, client: WorkspaceRpcClient, raw: RuntimeIssuePipeline) {
   const pipeline = raw as unknown as IssuePipeline;
   const due = pipeline.issue?.provider === "linear" && !!pipeline.pr && pipeline.state !== "merged" && !pipeline.stopped && !(pipeline.events ?? []).some((event) => event.kind === "tracker");
-  if (!due || !manages(client) || movedToReview.has(raw.id)) return;
+  if (!due || !pipeline.issue || !manages(client) || movedToReview.has(raw.id)) return;
   movedToReview.add(raw.id);
   try {
-    const message = await pipelinesApi.linearToReview(pipeline.issue.id, pipeline.issue.identifier);
+    const message = await pipelinesApi.linearToReview(pipeline.issue.id, (pipeline.issue?.identifier ?? pipeline.branch));
     takeOne(target, await client.noteTracker(raw.id, message));
   } catch {
     /* no Linear key here, or the workspace refused: the next desktop that can, does */
@@ -241,7 +241,7 @@ export function resetCloudPipelines() {
 }
 
 function targetOf(pipeline: IssuePipeline): CloudTarget {
-  if (!pipeline.place) throw new Error(`${pipeline.issue.identifier} is not carried by a cloud workspace.`);
+  if (!pipeline.place) throw new Error(`${(pipeline.issue?.identifier ?? pipeline.branch)} is not carried by a cloud workspace.`);
   return { orgId: pipeline.place.orgId, workspaceId: pipeline.place.workspaceId };
 }
 
@@ -250,6 +250,15 @@ function targetOf(pipeline: IssuePipeline): CloudTarget {
  * workspace's runtime. Pressing one is an action, so a workspace that is
  * asleep is woken for it.
  */
+export async function setCloudPipelineResolveConflicts(pipeline: IssuePipeline, value: boolean): Promise<void> {
+  const target = targetOf(pipeline);
+  const lease = await wakeCloudConnection(target);
+  try {
+    const client = await waitCloudConnected(lease, WAKE_WITHIN_MS);
+    takeOne(target, await client.setPipelineResolveConflicts(pipeline.id, value));
+  } finally { lease.release(); }
+}
+
 export async function actOnCloudPipeline(pipeline: IssuePipeline, action: Exclude<PipelineAction, "merge">): Promise<void> {
   const target = targetOf(pipeline);
   const lease = await wakeCloudConnection(target);

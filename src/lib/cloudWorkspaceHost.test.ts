@@ -28,6 +28,13 @@ beforeEach(() => {
 
 // #411: a cloud session's worktree is read and removed by its runtime, named by the session.
 describe("cloudWorkspaceHost", () => {
+  it("refuses retention instead of silently deleting conversations", async () => {
+    expect(host().keepConversationsUnavailable).toContain("Clean up worktrees");
+    await expect(host().remove({ keepSessions: true, deleteBranch: false, confirmedDigest: null, expectedSessions: ["s1"] })).rejects.toThrow("cannot keep conversations");
+    expect(client.removeSessionWorkspace).not.toHaveBeenCalled();
+    expect(mocks.forgetCloudSessions).not.toHaveBeenCalled();
+  });
+
   it("asks the runtime about the session's worktree, and for the verdict only when the dialog does", async () => {
     await host().disposition();
     await host().disposition({ fetch: true });

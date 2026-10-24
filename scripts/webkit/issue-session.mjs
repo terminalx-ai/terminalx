@@ -66,6 +66,10 @@ try {
             return { path, name: "local-0", kind: "git", ...patch };
           },
           issue_pipeline_act: () => window.__PIPELINE__,
+          issue_pipeline_set_resolve_conflicts: (args) => {
+            window.__RESOLVE_CHOICE__ = args;
+            return (window.__PIPELINE__ = { ...window.__PIPELINE__, resolveConflicts: args.value });
+          },
           issue_pipeline_set_auto_merge: (args) => (window.__PIPELINE__ = { ...window.__PIPELINE__, autoMerge: args.value }),
           create_session: ({ req }) => {
             window.__ISSUE_REQUEST__ = req;
@@ -99,31 +103,43 @@ try {
       const layout = await page.getByTitle("Model", { exact: true }).evaluate((button) => {
         const row = button.parentElement;
         const bounds = row.getBoundingClientRect();
-        const boxes = [...row.querySelectorAll("button")].map((node) => node.getBoundingClientRect());
+        const buttons = [...row.querySelectorAll("button")];
+        const boxes = buttons.map((node) => node.getBoundingClientRect());
+        const agentBoxes = buttons.filter((node) => ["Agent", "Model", "Effort", "Permissions"].includes(node.title)).map((node) => node.getBoundingClientRect());
         return {
-          count: boxes.length,
+          count: agentBoxes.length,
+          allControls: boxes.length,
           inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
           overlaps: boxes.some((box, index) => boxes.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
-          rows: new Set(boxes.map((box) => box.top)).size,
+          rows: new Set(agentBoxes.map((box) => box.top)).size,
           scrolls: row.scrollWidth > row.clientWidth,
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "agent, model, effort and permission controls fit": layout.count === 4 && layout.inside && !layout.overlaps && !layout.scrolls,
+        "agent, model, effort and permission controls fit": layout.count === 4 && layout.allControls === 7 && layout.inside && !layout.overlaps && !layout.scrolls,
         "the model menu fits within the viewport": !!menu && menu.x >= 0 && menu.x + menu.width <= width,
         ...(width === 800 ? { "controls wrap in the narrow detail pane": layout.rows > 1 } : {}),
       }, layout);
-      // The issue's own switch sits in the same narrow pane as the controls above it.
-      const mergeSwitch = page.getByRole("switch", { name: "Merge automatically when the review is addressed", exact: true });
-      const startRow = await mergeSwitch.evaluate((toggle) => {
-        const pane = toggle.closest("label").parentElement;
-        const label = toggle.closest("label").getBoundingClientRect();
+      // Check the new automation group separately, including both label texts,
+      // switches and cleanup link. Agent rows must still wrap independently.
+      const automation = page.getByRole("group", { name: "Session automation", exact: true });
+      const startRow = await automation.evaluate((pane) => {
         const bounds = pane.getBoundingClientRect();
-        return { inside: label.left >= bounds.left - 1 && label.right <= bounds.right + 1, scrolls: pane.scrollWidth > pane.clientWidth, checked: toggle.getAttribute("aria-checked") };
+        const boxes = [...pane.querySelectorAll("label, label > *, p, button")].map((node) => node.getBoundingClientRect());
+        const buttons = [...pane.querySelectorAll("button")].map((node) => node.getBoundingClientRect());
+        return {
+          inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
+          overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
+          scrolls: pane.scrollWidth > pane.clientWidth,
+          switches: [...pane.querySelectorAll('[role="switch"]')].map((toggle) => [toggle.getAttribute("aria-label"), toggle.getAttribute("aria-checked")]),
+          cleanup: pane.textContent.includes("Delete the workspace after merge:"),
+        };
       });
+      assert.deepEqual(startRow.switches, [["Resolve conflicts automatically", "false"], ["Merge when green", "false"]]);
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "the merge switch is offered, off, and fits the detail pane": startRow.inside && !startRow.scrolls && startRow.checked === "false",
+        "both automation switches and cleanup setting fit without overlaps": startRow.inside && !startRow.overlaps && !startRow.scrolls && startRow.cleanup,
       }, startRow);
+      await automation.getByRole("switch", { name: "Resolve conflicts automatically", exact: true }).click();
       // The thread sits under the description, inside the same pane, without a sideways scroll.
       await page.getByText("Synthetic comment: keep Home and End working too.", { exact: true }).waitFor();
       const thread = await page.getByRole("region", { name: "Comments", exact: true }).evaluate((section) => {
@@ -150,6 +166,7 @@ try {
       assert.ok(started.prompt.startsWith(`Work on ${provider === "github" ? "GitHub" : "Linear"} issue `), started.prompt);
       assert.ok(started.prompt.endsWith("\n\nEnd every reply with a status block."), started.prompt);
       assert.ok(started.prompt.includes("## Comments\n\n**kim** (2026-10-01):\nSynthetic comment: keep Home and End working too."), started.prompt);
+      assert.deepEqual(await page.evaluate(() => window.__RESOLVE_CHOICE__), { id: "demo-pipeline", value: true });
       await page.getByTestId("session-pipeline").waitFor();
       failed += report(`${mode}, ${provider}, ${width}px`, {
         "the session header says where its pipeline stands": (await page.getByTestId("session-pipeline").textContent()).trim() === "Working",
@@ -218,7 +235,7 @@ try {
           overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
           stages: node.querySelectorAll('ol[aria-label="Stages"] > li').length,
           findings: [...node.querySelectorAll("ul > li")].map((item) => item.textContent.slice(0, 14)),
-          switches: document.querySelectorAll('[role="switch"][aria-label="Merge automatically when the review is addressed"]').length,
+          switches: document.querySelectorAll('[role="switch"][aria-label="Merge when green"]').length,
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
@@ -242,13 +259,13 @@ try {
       const saved = await page.evaluate(() => window.__PROJECT_PATCH__);
       assert.equal(saved.path, "/repos/p0");
       assert.deepEqual(saved.patch.issuePipeline, {
-        enabled: true, autoMerge: false, requirePerson: true, maxRounds: 3, mergeMethod: "merge",
+        enabled: true, autoMerge: false, resolveConflicts: false, maxResolutions: 3, requirePerson: true, maxRounds: 3, mergeMethod: "merge",
         protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
       });
       const dialogLayout = await dialog.evaluate((node) => {
         const bounds = node.getBoundingClientRect();
         const switches = Object.fromEntries([...node.querySelectorAll('[role="switch"]')].map((toggle) => [toggle.getAttribute("aria-label"), `${toggle.getAttribute("aria-checked")}${toggle.disabled ? " disabled" : ""}`]));
-        const controls = [...node.querySelectorAll('[role="switch"], [role="radiogroup"], textarea')].map((child) => child.getBoundingClientRect());
+        const controls = [...node.querySelectorAll('[role="switch"], [role="radiogroup"], textarea, input')].map((child) => child.getBoundingClientRect());
         return {
           inWindow: bounds.left >= 0 && bounds.right <= window.innerWidth && bounds.top >= 0 && bounds.bottom <= window.innerHeight,
           inside: controls.every((box) => box.left >= bounds.left && box.right <= bounds.right),
@@ -263,7 +280,7 @@ try {
       // A dialog opened from a menu must hand the page back when it closes.
       const released = await page.evaluate(() => getComputedStyle(document.body).pointerEvents !== "none");
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 11 && dialogLayout.switches["Agents comment and change status without asking"] === "false",
+        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 15 && dialogLayout.switches["Agents comment and change status without asking"] === "false",
         // Saved, and shown as saved: the switch that was turned on is on, and the default it overrides is held off.
         "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.switches["Merge automatically by default"] === "false disabled",
         "closing the settings leaves the page usable": released,
@@ -382,7 +399,7 @@ try {
           overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
           asleep: node.querySelector('[data-testid="pipeline-asleep"]')?.textContent ?? null,
           personMerges: node.querySelector('[data-testid="pipeline-cloud-merge"]') != null,
-          switches: document.querySelectorAll('[role="switch"][aria-label="Merge automatically when the review is addressed"]').length,
+          switches: document.querySelectorAll('[role="switch"][aria-label="Merge when green"]').length,
         };
       });
       if (shots) await page.screenshot({ path: join(shots, `issue-cloud-${mode}-${width}.png`) });

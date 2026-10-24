@@ -80,6 +80,7 @@ beforeEach(() => {
   store.projects = [project];
   store.selectedProject = project.path;
   project.kind = "git";
+  delete project.issuePipeline;
   vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "attachment-1") });
   vi.stubGlobal("URL", { ...URL, createObjectURL: vi.fn(() => "blob:preview"), revokeObjectURL: vi.fn() });
 });
@@ -171,7 +172,7 @@ describe("folder projects", () => {
       if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
     });
     render(<NewSessionView />);
-    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("switch", { name: /worktree/i }).getAttribute("aria-checked")).toBe("true");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
     expect(screen.queryByText("Folder · no Git")).toBeNull();
   });
@@ -256,4 +257,27 @@ describe("autocorrect in the new-session prompt (#525)", () => {
     turnAutocorrect(false);
     expect(prompt.getAttribute("spellcheck")).toBe("false");
   });
+});
+
+it("launches a non-issue branch with project automation defaults and the handoff brief", async () => {
+  const { DEFAULT_PIPELINE_SETTINGS } = await import("@/lib/issuePipeline");
+  project.issuePipeline = { ...DEFAULT_PIPELINE_SETTINGS, autoMerge: true, resolveConflicts: true };
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "preview_workspace_name") return "quiet-fox";
+    if (command === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
+    if (command === "create_session") return created;
+    if (command === "issue_pipeline_start") return { pipeline: { id: "p1", resolveConflicts: true }, authorBrief: "HANDOFF BRIEF" };
+    if (command === "issue_pipeline_set_resolve_conflicts") return { id: "p1", resolveConflicts: true };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  const onCreated = vi.fn();
+  render(<NewSessionView onCreated={onCreated} />);
+  expect(screen.getByRole("switch", { name: "Merge when green" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("switch", { name: "Resolve conflicts automatically" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Improve the parser" } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Start" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
+  expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
+  expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "Improve the parser\n\nHANDOFF BRIEF", []);
 });

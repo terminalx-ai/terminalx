@@ -1227,6 +1227,18 @@ impl SessionManager {
         self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).is_some_and(|runtime| runtime.lock().unwrap().turn_open)
     }
 
+    /// A pipeline may borrow a checkout only after all accepted or queued
+    /// prompts have settled, including prompts held by a PTY-first provider.
+    pub fn pipeline_idle(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
+        let runtime = runtime.lock().unwrap();
+        !runtime.turn_open && !runtime.stopping && runtime.pending.is_empty() && runtime.queued.is_empty()
+            && match &runtime.engine {
+                Engine::Cli(cli) => cli.held.is_empty() && cli.awaiting_delivery.is_none() && cli.resend_after_abort.is_none(),
+                _ => true,
+            }
+    }
+
     /// Publish into a tab's transcript from outside its harness: the cloud
     /// runtime's own notes (a follow-up dropped by a stop, a turn that ended
     /// with the runtime).
@@ -1455,6 +1467,8 @@ impl SessionManager {
         &self, session_id: &str, tab_id: &str, prompt: PromptText,
         images: Vec<ImageInput>, receipt: Option<DeliveryReceipt>,
     ) -> Result<SendOutcome> {
+        let _admission = crate::issue_pipeline::admission::lock();
+        crate::issue_pipeline::admission::check(session_id, tab_id)?;
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut entry = index::get(session_id)?;
         let mut tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab not found"))?.clone();
@@ -3423,6 +3437,12 @@ impl SessionManager {
         // answering it would let one tab decide another tab's permissions.
         if !origin.accepts(&frame) {
             return refuse("the frame's token is not the one this tab's CLI launch was given".into());
+        }
+        // Direct terminal prompts also reach tool hooks. A resolver's
+        // reservation prevents another managed agent from editing even if
+        // its prompt did not go through the app's composer.
+        if frame.event == "PreToolUse" && crate::issue_pipeline::admission::check(&frame.session, &frame.tab).is_err() {
+            return reply_for(kind, "PreToolUse", Decision::Deny);
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {

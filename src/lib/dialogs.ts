@@ -6,8 +6,9 @@ import type { WorkspaceHost } from "./workspaceRemoval";
 
 /** App-level dialogs opened from anywhere (menus, panels, hotkeys). */
 /**
- * A workspace about to be removed. `settle` keeps its sessions (the work has
- * landed, the conversations stay); `delete` removes them with it.
+ * A workspace about to be removed. The mode records the entry point for
+ * compatibility; the dialog defaults to keeping conversations from either one.
+ * Permanent deletion is chosen separately in the dialog.
  */
 export interface WorkspaceRemoveRequest {
   projectPath: string;
@@ -16,7 +17,7 @@ export interface WorkspaceRemoveRequest {
   mode: "delete" | "settle";
   /** Settling was started from this session; "Move session to project" applies to it. */
   sessionId?: string;
-  /** Where the workspace is read and removed; this computer when absent. A cloud worktree is only ever deleted, not settled. */
+  /** Where the workspace is read and removed; this computer when absent. Hosts that cannot keep conversations explain that limitation in the dialog. */
   host?: WorkspaceHost;
 }
 

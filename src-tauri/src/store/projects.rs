@@ -79,6 +79,9 @@ pub struct IssuePipelineSettings {
     /// What "Merge automatically when the review is addressed" starts at for
     /// a new issue session. Each issue has its own switch after that.
     pub auto_merge: bool,
+    pub resolve_conflicts: bool,
+    #[serde(deserialize_with = "review_rounds")]
+    pub max_resolutions: u32,
     /// A person presses merge whatever the switch says: for a repository that
     /// deploys from its default branch.
     pub require_person: bool,
@@ -95,6 +98,8 @@ pub struct IssuePipelineSettings {
     /// Explicit opt-in for repositories without CI. Never overrides reported
     /// checks, pending workflows/suites, required checks or unreadable evidence.
     pub allow_no_ci: bool,
+    pub local_check_command: Option<String>,
+    pub local_checks_only: bool,
 }
 
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
@@ -116,12 +121,16 @@ impl Default for IssuePipelineSettings {
         Self {
             enabled: true,
             auto_merge: false,
+            resolve_conflicts: false,
+            max_resolutions: 3,
             require_person: false,
             max_rounds: DEFAULT_REVIEW_ROUNDS,
             merge_method: "merge".into(),
             protected: ProtectedCategories::default(),
             ignored_checks: Vec::new(),
             allow_no_ci: false,
+            local_check_command: None,
+            local_checks_only: false,
         }
     }
 }

@@ -1,7 +1,7 @@
 import type { IssueRef } from "@/types/session";
 
-/** The five stages a session started from an issue goes through. */
-export type PipelineStage = "work" | "pullRequest" | "review" | "address" | "merge";
+/** Work, review, conflict resolution, and merge stages for a Git branch session. */
+export type PipelineStage = "work" | "pullRequest" | "review" | "address" | "resolve" | "merge";
 export type PipelineState = "working" | "waiting" | "readyToMerge" | "needsYou" | "merged" | "stopped";
 export type FindingSeverity = "nit" | "low" | "medium" | "high" | "critical";
 
@@ -50,7 +50,7 @@ export interface PipelineStopReason {
 export interface IssuePipeline {
   id: string;
   projectPath: string;
-  issue: IssueRef;
+  issue?: IssueRef | null;
   /** The branch the pull request is opened from. */
   branch: string;
   author: PipelineSessionRef;
@@ -58,6 +58,8 @@ export interface IssuePipeline {
   reviewer?: PipelineSessionRef | null;
   /** "Merge automatically when the review is addressed", for this issue. Never on in a cloud workspace. */
   autoMerge: boolean;
+  resolveConflicts?: boolean;
+  resolutions?: number;
   /** Carried by a cloud workspace's runtime, which stops at Ready to merge: the merge is made here, with the reader's own `gh`. */
   cloud?: boolean;
   /** Where a cloud workspace's pipeline is, as this desktop placed it; absent for one on this computer. */
@@ -75,6 +77,8 @@ export interface IssuePipeline {
   verdict?: PipelineVerdict | null;
   /** Author-reported local failures, pinned to commits until explicitly passed. */
   failedLocalChecks?: string[];
+  localCheck?: { head: string; command: string } | null;
+  checkingLocally?: boolean;
   securityAreas: string[];
   merged?: { commit: string; at: string; by: "pipeline" | "person" | "elsewhere" } | null;
   events: PipelineEvent[];
@@ -121,6 +125,8 @@ export interface IssuePipelineSettings {
   enabled: boolean;
   /** What the issue's own switch starts at. */
   autoMerge: boolean;
+  resolveConflicts?: boolean;
+  maxResolutions?: number;
   /** A person merges whatever the switch says. */
   requirePerson: boolean;
   maxRounds: number;
@@ -130,4 +136,6 @@ export interface IssuePipelineSettings {
   ignoredChecks: string[];
   /** Explicit opt-in for repositories without CI; does not bypass reported validation. */
   allowNoCi?: boolean;
+  localCheckCommand?: string | null;
+  localChecksOnly?: boolean;
 }

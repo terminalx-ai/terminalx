@@ -1,3 +1,4 @@
+import { preparePipelineLaunch, preparePipelineContinuation } from "@/lib/pipelineLaunch";
 import { agent, api, errorMessage } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
 import { getDraft, setDraft } from "@/lib/drafts";
@@ -106,6 +107,7 @@ export async function launchContinuation(
       setDraft(tab.id, prompt);
       onCreated(launched);
     }
+    prompt = await preparePipelineContinuation(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
     await agent.ensureStarted(launched.sessionId, launched.tab.id);
   } catch (e) {
     return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
@@ -149,6 +151,7 @@ export async function moveChatToProject(
       setDraft(tab.id, prompt);
       onCreated(launched);
     }
+    prompt = await preparePipelineLaunch(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
     await agent.ensureStarted(launched.sessionId, launched.tab.id);
   } catch (e) {
     const kept = launched ? " The chat has not been archived." : "";

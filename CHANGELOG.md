@@ -18,6 +18,47 @@
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
+### Session automation
+
+- Allow continuing a merged pipeline's conversation with both automation switches
+  off, including after workspace cleanup, without changing its completed history.
+  Active and stopped pipelines still revoke explicitly disabled permissions.
+
+- Carry both-off continuation choices to the backend, revoking existing merge
+  and conflict-resolution permissions before handoff. Do not create a pipeline
+  for an unautomated session with both switches off; refuse launch on lookup or
+  handoff errors instead of retaining prior authorization silently.
+
+- Group session automation controls accessibly and validate both launch switches,
+  cleanup settings, and agent controls in WebKit without relaxing overflow,
+  overlap, or narrow-pane wrapping checks. Keep tall issue launch settings and
+  Start session reachable by scrolling them with the issue content.
+
+- Preserve explicit merge and conflict-resolution launch choices when continuing
+  local work or starting cloud issue sessions. Release a stopped resolver’s
+  checkout reservation when its agent terminates.
+
+- Add shared launch controls for automatic conflict resolution and merging
+  after review and final-head checks, with project defaults and session controls.
+  Branch sessions without an issue can now use the same pipeline without tracker
+  updates. Conflict resolution waits for idle conversations, reserves the checkout,
+  verifies one merge of pinned inputs, pushes without force, and requests a fresh
+  independent review. Attempts are bounded and concurrent changes stop for a person.
+- Allow a project check command to run under TerminalX on the final reviewed head.
+  Explicit local-only policy still honors required hosted checks and repository
+  rules. Cloud workspaces still require a desktop-authorized merge. Workspace
+  removal continues to use the existing merged-cleanup policy and grace period.
+
+### Workspace cleanup
+
+- Make keeping conversations the default in workspace removal, using the existing
+  settle flow and naming the project folder where agents resume. Keep original
+  workspace provenance visible and separate from live checkouts in the sidebar. Require a separate
+  permanent-deletion choice and explain provider resume files, recovery and recorded
+  usage. Refuse unsupported cloud retention rather than silently deleting sessions;
+  direct cloud users to the existing worktree cleanup flow. Document and regress
+  the existing prompt-free, deduplicated historical accounting. (#464)
+
 ### Welcome
 
 - Show a resting welcome screen when nothing is selected, with the app mark,

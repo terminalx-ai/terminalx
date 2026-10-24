@@ -161,7 +161,7 @@ describe("where a pipeline stands", () => {
     const second = pipeline({ id: "new", created: "2026-10-12T00:00:00.000Z", author: { sessionId: "author-2", tabId: "t1" }, reviewer: { sessionId: "reviewer", tabId: "t1" } });
     const elsewhere = pipeline({ id: "other-project", projectPath: "/other", created: "2026-10-13T00:00:00.000Z" });
     const all = [first, second, elsewhere];
-    expect(pipelineForIssue(all, "/repo", first.issue.url)?.id).toBe("new");
+    expect(pipelineForIssue(all, "/repo", first.issue!.url)?.id).toBe("new");
     expect(pipelineForIssue(all, "/repo", "https://github.com/acme/widgets/issues/1")).toBeNull();
     expect(pipelineForSession(all, "reviewer")).toEqual({ pipeline: second, role: "reviewer" });
     expect(pipelineForSession(all, "author-2")?.role).toBe("author");
@@ -175,10 +175,10 @@ describe("where a pipeline stands", () => {
       return pipeline({ id: `p${number}`, issue, created: `2026-10-${String(number).padStart(2, "0")}T00:00:00.000Z`, ...patch });
     };
     const again = on(3, { id: "p3-again", created: "2026-10-20T00:00:00.000Z" });
-    const all = [on(1), on(2), on(3), again, on(4, { projectPath: "/other" }), on(5, { issue: { ...on(5).issue, provider: "linear" } })];
+    const all = [on(1), on(2), on(3), again, on(4, { projectPath: "/other" }), on(5, { issue: { ...on(5).issue!, provider: "linear" } })];
     const ids = (found: IssuePipeline[]) => found.map((value) => value.id);
     // Issue 2 is still listed; 4 is another project's; 5 is on the other tracker.
-    expect(ids(unlistedPipelines(all, "/repo", "github", [on(2).issue.url]))).toEqual(["p3-again", "p1"]);
+    expect(ids(unlistedPipelines(all, "/repo", "github", [on(2).issue!.url]))).toEqual(["p3-again", "p1"]);
     expect(ids(unlistedPipelines(all, "/repo", "linear", []))).toEqual(["p5"]);
     expect(ids(unlistedPipelines(all, "/repo", "github", [], 1))).toEqual(["p3-again"]);
     // Asking does not reorder what the window holds.
@@ -235,6 +235,7 @@ describe("a pipeline as the app stores it", () => {
     const declared: (keyof IssuePipeline)[] = [
       "id", "projectPath", "issue", "branch", "author", "reviewer", "autoMerge", "stopped", "stage", "state", "reason", "note", "pr",
       "round", "maxRounds", "reviewCommit", "verdict", "securityAreas", "merged", "events", "created", "modified",
+      "resolveConflicts", "resolutions", "checkingLocally", "localCheck", "failedLocalChecks",
     ];
     const engineOnly = ["summary", "reminded", "reviewRequestedAt", "findingsSentRound", "waitingSince", "mergeRequested", "mergeRefused"];
     expect(Object.keys(fixture).filter((key) => !(declared as string[]).includes(key) && !engineOnly.includes(key))).toEqual([]);

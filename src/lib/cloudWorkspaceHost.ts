@@ -13,8 +13,10 @@ export function cloudWorkspaceHost(input: { orgId: string; workspaceId: string; 
   const { orgId, workspaceId, sessionId, client } = input;
   return {
     key: `${input.workspaceKey}|${sessionId}`,
+    keepConversationsUnavailable: "This cloud action cannot keep conversations. Use Clean up worktrees to keep conversations on a connected runtime with cleanup support, or cancel and leave this workspace intact. Local Stats & Usage does not scan cloud histories.",
     disposition: (options) => client.workspaceDisposition<WorkspaceDisposition>(sessionId, options),
     remove: async (options): Promise<BranchOutcome> => {
+      if (options.keepSessions) throw new Error("This cloud action cannot keep conversations. Use Clean up worktrees instead.");
       const removed = await client
         .removeSessionWorkspace(sessionId, {
           deleteBranch: options.deleteBranch,

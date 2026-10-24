@@ -1,3 +1,5 @@
+import { usePipelineLaunch } from "@/lib/pipelineLaunch";
+import { setPipelineResolveConflicts } from "@/lib/issuePipeline";
 import { EmptyView } from "@/components/start/EmptyView";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Check, ChevronDown, Cloud, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
@@ -87,7 +89,7 @@ const AFTER_MERGE_MS = [3000, 12000];
  * issue is opened, so the row claims no state.
  */
 function issueOfPipeline(pipeline: IssuePipeline): Issue {
-  const { provider, id, identifier, title, url } = pipeline.issue;
+  const { provider, id, identifier, title, url } = pipeline.issue!;
   return { provider: provider === "linear" ? "linear" : "github", id, identifier, number: Number(id) || 0, title, url, state: "", stateType: "completed", labels: [], updatedAt: pipeline.modified };
 }
 
@@ -232,13 +234,13 @@ export function IssuesView({
   const pipelines = useIssuePipelines();
   const pipelineDefaults = cloud ? cloudPipelineSettings(cloud.project.key, prefs) : pipelineSettings(project?.local);
   // The issue's own switch, before its session exists. It starts at the project's default.
-  const [autoMerge, setAutoMerge] = useState(pipelineDefaults.autoMerge);
+
   // A pull request needs a branch of its own, so a session on the project's checkout ends at the code.
   const pipelineOffered = isGit && useWorktree && pipelineDefaults.enabled;
   const pipeline = selected && projectPath ? pipelineForIssue(pipelines, projectPath, selected.url) : null;
   // Once an issue has a pipeline its switch is the pipeline's, on the panel
   // below; a session started on it again keeps what was chosen there.
-  const mergeChoice = pipeline ? pipeline.autoMerge : autoMerge;
+
   // Read again when the Linear key or its connection changes, and on a refresh (another `gh` login, or a failed read).
   const viewer = useIssueViewer(projectPath ?? undefined, provider, provider === "linear" ? `${linear?.connected}:${linear?.viewer ?? ""}` : `${ghOk}:${tick}`);
   // A cloud session runs the agents and models installed in its workspace, not this computer's. They are
@@ -247,9 +249,10 @@ export function IssuesView({
   const modelClient = useCloudModelClient(cloudPlan?.kind === "reuse" && selected ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort, mode } = agentSelection;
+  const pipelineLaunch = usePipelineLaunch(projectPath, pipelineDefaults, !cloud && !pipelineOffered ? "Start on a worktree branch to automate this session." : undefined, cloud ? "Cloud workspaces require a person to merge." : undefined);
   const [startNote, setStartNote] = useState<string | null>(null);
   const linkedIssueUrls = useMemo(
-    () => new Set([...store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : []), ...pipelines.filter((value) => value.projectPath === projectPath).map((value) => value.issue.url)]),
+    () => new Set([...store.sessions.flatMap((session) => session.issue?.url ? [session.issue.url] : []), ...pipelines.filter((value) => value.projectPath === projectPath).flatMap((value) => value.issue ? [value.issue.url] : [])]),
     [store.sessions, pipelines, projectPath],
   );
   // Who works on each listed issue: this Mac's sessions, the reader's other machines, teammates.
@@ -266,7 +269,7 @@ export function IssuesView({
     if (!projectPath || listOf !== `${projectPath}\n${provider}`) return [];
     const words = search.trim().toLowerCase();
     return unlistedPipelines(pipelines, projectPath, provider, list.map((issue) => issue.url))
-      .filter((value) => !words || `${value.issue.identifier} ${value.issue.title}`.toLowerCase().includes(words))
+      .filter((value) => !words || `${value.issue?.identifier} ${value.issue?.title}`.toLowerCase().includes(words))
       .map((value) => ({ issue: issueOfPipeline(value), pipeline: value }));
   }, [pipelines, projectPath, provider, list, listOf, search]);
   // A merge closes the issue on the tracker. The list and the open issue are
@@ -460,6 +463,8 @@ export function IssuesView({
             mode,
             prompt,
             useWorktree: true,
+            pipeline: pipelineLaunch.value,
+            pipelineSettings: pipelineDefaults,
             title: `${issue.identifier} ${issue.title}`.slice(0, 80),
             issue: {
               ref: { provider: issue.provider, id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url },
@@ -493,7 +498,8 @@ export function IssuesView({
       // its work over. A session it cannot serve still starts, as it always did.
       if (pipelineOffered) {
         try {
-          const started = await startPipeline(s.id, s.tabs[0].id, mergeChoice && !pipelineDefaults.requirePerson);
+          const started = await startPipeline(s.id, s.tabs[0].id, (pipeline?.autoMerge ?? pipelineLaunch.value.autoMerge) && !pipelineDefaults.requirePerson);
+          if ((started.pipeline.resolveConflicts ?? false) !== pipelineLaunch.value.resolveConflicts) await setPipelineResolveConflicts(started.pipeline.id, pipelineLaunch.value.resolveConflicts);
           prompt = `${prompt}\n\n${started.authorBrief}`;
         } catch (e) {
           console.error("issue pipeline did not start", e);
@@ -509,7 +515,7 @@ export function IssuesView({
     } finally {
       setStarting(false);
     }
-  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, mergeChoice, pipelineDefaults, work.byIssue]);
+  }, [detail, selected, projectPath, cloud, harness, modelId, effort, mode, useWorktree, isGit, onCreated, pipelineOffered, pipelineDefaults, pipeline?.autoMerge, pipelineLaunch.value, work.byIssue]);
 
   const emptyReason = useMemo(() => {
     if (!projectPath) return "Add a project to see its issues.";
@@ -523,6 +529,7 @@ export function IssuesView({
   }, [projectPath, provider, ghOk, repo, linear]);
 
   const open = (issue: Issue) => {
+    pipelineLaunch.reset();
     setComposing(false);
     setSelected(issue);
     setStatusOpen(false);
@@ -530,7 +537,7 @@ export function IssuesView({
     setLabelsOpen(false);
     setStartNote(null);
     setUseWorktree(prefs.useWorktree);
-    setAutoMerge(pipelineDefaults.autoMerge);
+
   };
   // The description alone: a Linear issue read whole carries its first comments pasted under its body, and the thread shows them.
   const detailText = detail ? ((detail as Partial<IssueDetails>).description ?? detail.body ?? "") : null;
@@ -879,8 +886,8 @@ export function IssuesView({
             </div>
           </EmptyView>
         ) : (
-          <>
-            <div className="flex shrink-0 flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
+          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+            <div className="flex flex-col gap-2 border-b border-hairline px-5 pb-3 pt-4">
               <div className="flex items-baseline gap-2">
                 <WithTooltip label={copied ? "Copied" : "Copy identifier"}>
                   <button
@@ -930,7 +937,7 @@ export function IssuesView({
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
               {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <SessionAgentControls selection={agentSelection} />
+                <SessionAgentControls selection={agentSelection} pipeline={!pipeline && (cloud || pipelineOffered) ? pipelineLaunch : undefined} />
               </div>
               {/* Where it runs, and the buttons. The buttons take a line of their own
                   when the pane is too narrow for both, rather than sit on the words. */}
@@ -990,31 +997,13 @@ export function IssuesView({
                     A pull request is opened and reviewed in the workspace when the work is done. It stops at Ready to merge, and you merge it here.
                   </span>
                 )
-              ) : pipelineOffered ? (
-                <label className="flex min-w-0 items-start gap-2 text-[11px] text-faint">
-                  <Switch
-                    aria-label="Merge automatically when the review is addressed"
-                    size="sm"
-                    className="mt-px shrink-0"
-                    checked={autoMerge && !pipelineDefaults.requirePerson}
-                    disabled={pipelineDefaults.requirePerson}
-                    onCheckedChange={setAutoMerge}
-                  />
-                  <span className="min-w-0 text-muted-foreground">
-                    Merge automatically when the review is addressed
-                    <span className="block text-faint">
-                      {pipelineDefaults.requirePerson
-                        ? "A pull request is opened and reviewed when the work is done. This project has a person do the merge."
-                        : "A pull request is opened and reviewed when the work is done. Off, it stops at Ready to merge."}
-                    </span>
-                  </span>
-                </label>
               ) : (
                 isGit && pipelineDefaults.enabled && <span className="text-[11px] text-faint">No pull request is opened for a session on the project’s own checkout.</span>
               )}
             </div>
-            {/* The pipeline scrolls with the issue: its findings and record can be long. */}
-            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+            {/* Launch controls, findings and comments share a scroll region so
+                a tall header cannot strand Start session below the viewport. */}
+            <div>
               {pipeline && <IssuePipelinePanel key={pipeline.id} pipeline={pipeline} />}
               <div className="px-5 py-4">
                 {detailLoading && <div className="text-xs text-faint">Loading…</div>}
@@ -1047,7 +1036,7 @@ export function IssuesView({
                 </div>
               )}
             </div>
-          </>
+          </div>
         )}
       </div>
       {takenBy && (

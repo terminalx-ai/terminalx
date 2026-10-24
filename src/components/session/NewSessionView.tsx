@@ -1,4 +1,6 @@
 import { useDictationContext } from "@/lib/dictationContext";
+import { cloudPipelineSettings } from "@/lib/issuePipeline";
+import { usePipelineLaunch, pipelineSettings, preparePipelineLaunch } from "@/lib/pipelineLaunch";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Cloud, FolderOpen, FolderGit2, GitBranch, Loader2, MessageCircle } from "@/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -104,6 +106,10 @@ export function NewSessionView({
     ? { orgId: cloudPlan.node.item.workspace.orgId, workspaceId: cloudPlan.node.item.workspace.id } : null);
   const agentSelection = useSessionAgent(store.harnesses, !cloud, modelClient);
   const { harness, modelId, effort, mode } = agentSelection;
+  const pipelineLaunch = usePipelineLaunch(cloud?.project?.key ?? project?.path ?? null,
+    cloud?.project ? cloudPipelineSettings(cloud.project.key) : pipelineSettings(project),
+    quick ? "Attach a Git project to automate this session." : !isGit || (!useWorktree && !preset?.cwd) ? "Start on a worktree branch to automate this session." : cloudPlan?.kind === "create" ? "The first cloud session starts on the base branch. Automate a worktree session after the workspace starts." : undefined,
+    cloud ? "Cloud workspaces require a person to merge." : undefined);
   // A cloud session runs the agent installed on the workspace, not on this computer.
   const available = cloud ? !!harness : (harness?.available ?? false);
   const workspace = preset?.cwd ? (store.workspaces[preset.projectPath] ?? []).find((w) => w.path === preset.cwd) ?? null : null;
@@ -170,6 +176,7 @@ export function NewSessionView({
     mode,
     prompt: text,
     useWorktree,
+    ...(pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value, pipelineSettings: pipelineLaunch.settings } : {}),
   });
 
   /**
@@ -284,10 +291,11 @@ export function NewSessionView({
         tab: { harness: harness.id, model: modelId, effort, permissionMode: mode },
       });
       upsertSession(s);
+      const prompt = await preparePipelineLaunch(s.id, s.tabs[0].id, text, pipelineLaunch.value);
       setText("");
       attach.clear();
       selectSession(s.id);
-      onCreated?.(s.id, s.tabs[0].id, text, images);
+      onCreated?.(s.id, s.tabs[0].id, prompt, images);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -412,7 +420,7 @@ export function NewSessionView({
             </DropdownMenu>
             )}
 
-            <SessionAgentControls selection={agentSelection} />
+            <SessionAgentControls selection={agentSelection} pipeline={!quick && isGit ? pipelineLaunch : undefined} />
 
             {quick ? null : cloud ? (
               <>
@@ -438,7 +446,7 @@ export function NewSessionView({
               </span>
             ) : (
               <div className="ml-1 flex items-center gap-2 text-xs text-muted-foreground">
-                <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
+                <Switch size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} aria-label="Start on a new branch in a worktree" />
                 <span className="flex items-center gap-1">
                   <GitBranch className="size-3.5" />
                   {useWorktree ? (

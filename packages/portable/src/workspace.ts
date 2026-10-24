@@ -68,6 +68,7 @@ export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number];
 export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> = {
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
+  "pipeline.resolveConflicts": "pipeline/1",
   "pipeline.noteMerge": "pipeline/1",
   "pipeline.noteTracker": "pipeline/1",
   "pipeline.reviewers": "pipeline/2",
@@ -121,6 +122,7 @@ export const MUTATING_METHODS = new Set([
   "workspace.holdMerged",
   "workspace.restoreRemoved",
   "pipeline.act",
+  "pipeline.resolveConflicts",
   "pipeline.noteMerge",
   "pipeline.noteTracker",
   "pty.create",
@@ -1002,6 +1004,7 @@ export class WorkspaceRpcClient {
     issue?: RuntimeIssueRef;
     issueBody?: string | null;
     pipeline?: boolean;
+    pipelineOptions?: { autoMerge: boolean; resolveConflicts: boolean };
     pipelineSettings?: Record<string, unknown>;
     worktreeName?: string | null;
   }): Promise<{ sessionId: string; tabId: string; tab?: AgentTabInfo; session?: RuntimeSession; pipeline?: RuntimeIssuePipeline | null; pipelineNote?: string | null; startError?: string | null }> {
@@ -1192,6 +1195,11 @@ export class WorkspaceRpcClient {
   }
 
   /** `pipeline/1`: stop, resume, carry on, review again or look again. Never a merge: a runtime makes none. */
+  async setPipelineResolveConflicts(pipeline: string, value: boolean): Promise<RuntimeIssuePipeline> {
+    const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.resolveConflicts", { pipeline, value });
+    return result.pipeline;
+  }
+
   async actOnPipeline(pipeline: string, action: "stop" | "resume" | "advance" | "review" | "refresh"): Promise<RuntimeIssuePipeline> {
     const result = await this.mutate<{ pipeline: RuntimeIssuePipeline }>("pipeline.act", { pipeline, action });
     return result.pipeline;

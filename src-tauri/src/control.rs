@@ -583,8 +583,8 @@ impl ControlService {
         if p.prompt.trim().is_empty() && p.issue.is_none() {
             return Err(ControlError::invalid("--prompt cannot be empty."));
         }
-        if p.issue.is_none() && (p.provider.is_some() || p.auto_merge.is_some() || p.no_pipeline) {
-            return Err(ControlError::invalid("--provider, --auto-merge, --no-auto-merge and --no-pipeline apply to a session started with --issue."));
+        if p.issue.is_none() && p.provider.is_some() {
+            return Err(ControlError::invalid("--provider applies to a session started with --issue."));
         }
         if p.auto_merge.is_some() && (p.no_pipeline || p.on_main) {
             return Err(ControlError::invalid("--auto-merge needs the pipeline and a worktree: it cannot be combined with --no-pipeline or --on-main."));
@@ -675,7 +675,8 @@ impl ControlService {
         };
         let mut pipeline = Value::Null;
         let mut pipeline_note = Value::Null;
-        if issue.is_some() && !p.no_pipeline {
+        let pipeline_default = crate::store::projects::issue_pipeline_settings(&entry.project_path).is_ok_and(|settings| settings.enabled && (settings.auto_merge || settings.resolve_conflicts));
+        if (issue.is_some() || p.auto_merge.is_some() || pipeline_default) && !p.no_pipeline {
             match self.start_pipeline(&entry.id, &tab.id, p.auto_merge) {
                 Ok((started, brief)) => {
                     prompt = format!("{prompt}\n\n{brief}");
@@ -1129,7 +1130,7 @@ fn resolve_pipeline(selector: &str, project: Option<&Project>) -> Result<crate::
     }
     // `#433` starts a comment in most shells, so the bare number names it too.
     let named = selector.trim_start_matches('#');
-    let by_issue: Vec<&crate::issue_pipeline::Pipeline> = pipelines.iter().filter(|pipeline| pipeline.issue.identifier.trim_start_matches('#').eq_ignore_ascii_case(named) || pipeline.issue.url == selector).collect();
+    let by_issue: Vec<&crate::issue_pipeline::Pipeline> = pipelines.iter().filter(|pipeline| pipeline.issue.as_ref().is_some_and(|issue| issue.identifier.trim_start_matches('#').eq_ignore_ascii_case(named) || issue.url == selector)).collect();
     let projects: std::collections::BTreeSet<&str> = by_issue.iter().map(|pipeline| pipeline.project_path.as_str()).collect();
     if projects.len() > 1 {
         return Err(ControlError::new(

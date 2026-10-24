@@ -261,11 +261,11 @@ export function noteAutomationFailure(name: string, run: AutomationRun) {
  * the session that is working on the issue.
  */
 export function notePipelineState(pipeline: IssuePipeline) {
-  const kind: NoticeKind | null = pipeline.state === "needsYou" ? "waiting" : pipeline.state === "readyToMerge" || pipeline.state === "merged" ? "done" : null;
+  const kind: NoticeKind | null = pipeline.state === "needsYou" ? "waiting" : null;
   if (!kind) return;
   const what = pipeline.state === "needsYou" ? "needs you" : pipeline.state === "merged" ? "merged" : "is ready to merge";
-  const title = `${pipeline.issue.identifier} ${what}`;
-  const body = pipeline.note ?? pipeline.issue.title;
+  const title = `${(pipeline.issue?.identifier ?? pipeline.branch)} ${what}`;
+  const body = pipeline.note ?? (pipeline.issue?.title ?? pipeline.branch);
   const { sessionId, tabId } = pipeline.author;
   if (!looking()) {
     if (!sendsBanner()) return;

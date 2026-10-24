@@ -1,3 +1,4 @@
+import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Circle, GitBranch, Loader2, Plus, RotateCcw, X } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -91,6 +92,7 @@ export function CloudCreateWorkspace({
   const [launch, setLaunch] = useState(launchDefaults);
   // No workspace runs yet to ask: the cloud's aliases, never a version pinned on this computer.
   const agent = useSessionAgent(harnesses, false, null, { value: launch, onChange: setLaunch });
+  const pipelineLaunch = usePipelineLaunch(null, pipelineSettings(null), "This session starts on the base checkout. Start a worktree session from the cloud project to automate conflicts.", "Cloud workspaces require a person to merge.");
   const agentId = agent.harness?.id ?? "";
   // What is checked, priced and created: the settings as the pickers show them, never a model or effort they dropped.
   const request = useMemo<CreateForm>(
@@ -331,7 +333,7 @@ export function CloudCreateWorkspace({
       <fieldset className="flex flex-col gap-1 text-xs">
         <legend className="mb-1 font-medium">Agent</legend>
         <div className="flex flex-wrap items-center gap-1.5" data-testid="cloud-create-launch">
-          <SessionAgentControls selection={agent} />
+          <SessionAgentControls selection={agent} pipeline={pipelineLaunch} />
         </div>
       </fieldset>
 

@@ -1,3 +1,5 @@
+import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
+import { useSessionStore } from "@/lib/sessions";
 import { useEffect, useRef, useState } from "react";
 import { GitBranch, LoaderCircle } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -49,8 +51,11 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   // Until the reader changes something, the source conversation's own settings, as valid as they can be made.
   const value = chosen ?? (loading ? null : handoffStart(launchSettingsOf(source), providers, models, prefs));
   const selection = useSessionAgent(providers, true, null, value ? { value, onChange: setChosen } : undefined);
+  const store = useSessionStore();
+  const project = into?.project ?? store.projects.find((project) => project.path === session.projectPath);
+  const pipelineLaunch = usePipelineLaunch(project?.path ?? null, pipelineSettings(project), !project || (into && !worktree) ? "Choose a worktree branch to automate this session." : undefined);
   const settings = value && selection.harness
-    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode }
+    ? { harness: selection.harness.id, model: selection.modelId, effort: selection.effort, permissionMode: selection.mode, ...(!into || pipelineLaunch.value.autoMerge || pipelineLaunch.value.resolveConflicts ? { pipeline: pipelineLaunch.value } : {}) }
     : null;
 
   useEffect(() => {
@@ -156,7 +161,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           <div role="group" aria-label="New session settings" className="mt-4 flex flex-col gap-1.5">
             <span className="text-sm font-medium">New session</span>
             <div className="flex flex-wrap items-center gap-1.5">
-              <SessionAgentControls selection={selection} disabled={locked} />
+              <SessionAgentControls selection={selection} pipeline={project?.kind !== "folder" && project ? pipelineLaunch : undefined} disabled={locked} />
             </div>
           </div>
           <fieldset disabled={locked} className="mt-4 space-y-3">

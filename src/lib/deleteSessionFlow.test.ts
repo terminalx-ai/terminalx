@@ -19,6 +19,7 @@ vi.mock("@/lib/api", () => ({
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
+import { CONVERSATION_DELETION } from "./conversationRetention";
 import { confirmDeleteSession } from "./deleteSessionFlow";
 
 const cwd = "/p/.raccoon/worktrees/quiet-amber-fox";
@@ -38,6 +39,8 @@ describe("confirmDeleteSession", () => {
     ask.mockResolvedValue(true);
     await confirmDeleteSession(session);
     expect(soleWorkspaceOf).toHaveBeenCalledWith("s1");
+    expect(ask.mock.calls[0][0]).toContain("provider-side usage");
+    expect(ask.mock.calls[0][0]).toContain("managed Codex rollout files");
     expect(ask.mock.calls[0][0]).toContain("Its workspace quiet-amber-fox stays, with the other sessions in it.");
     expect(message).not.toHaveBeenCalled();
     expect(deleteSession).toHaveBeenCalledWith("s1");
@@ -111,7 +114,7 @@ describe("confirmDeleteSession", () => {
       expect(quickChatScratch).toHaveBeenCalledWith("q1");
       expect(soleWorkspaceOf).not.toHaveBeenCalled();
       const [text, options] = ask.mock.calls[0];
-      expect(text).toBe('Delete "What is a monad?"? Its transcript and attachments are removed.');
+      expect(text).toBe(`Delete "What is a monad?"? Its transcript and attachments are removed.\n\n${CONVERSATION_DELETION}`);
       expect(options).toMatchObject({ title: "Delete quick chat", okLabel: "Delete" });
       expect(deleteSession).toHaveBeenCalledWith("q1");
     });

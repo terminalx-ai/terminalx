@@ -1,3 +1,4 @@
+import { usePipelineLaunch, pipelineSettings } from "@/lib/pipelineLaunch";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Loader2, Plus, X } from "@/icons";
 import type { AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
@@ -437,6 +438,7 @@ function NewAgentForm({
   const [launch, setLaunch] = useState(launchDefaults);
   // The workspace's own models once it answers; until then the cloud's aliases.
   const selection = useSessionAgent(harnesses, false, client, { value: launch, onChange: setLaunch });
+  const pipelineLaunch = usePipelineLaunch(null, pipelineSettings(null), "This session starts on the base checkout. Start a worktree session from the cloud project to automate conflicts.", "Cloud workspaces require a person to merge.");
   const { harness, modelId, effort, mode } = selection;
   const [busy, setBusy] = useState(false);
   return (
@@ -450,7 +452,7 @@ function NewAgentForm({
         void onCreate({ agent: harness.id, model: modelId || undefined, effort, mode }).finally(() => setBusy(false));
       }}
     >
-      <SessionAgentControls selection={selection} />
+      <SessionAgentControls selection={selection} pipeline={pipelineLaunch} />
       <Button size="sm" type="submit" disabled={busy || !harness}>
         Start agent
       </Button>

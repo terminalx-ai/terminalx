@@ -15,6 +15,7 @@ import { isUnread } from "@/lib/dashboard";
 import { usePrefs } from "@/lib/prefs";
 import { addProject, archiveSession, pinSession, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
 import { useSessionSummaries, type Summaries } from "@/lib/summaries";
+import { openSettle } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { relativeTime } from "@/lib/time";
 import type { Project } from "@/types/session";
@@ -162,7 +163,7 @@ function ChatRow({
       <DropdownMenu>
         <div
           className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50")}
-          title={[title, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
+          title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
         >
           <button
             type="button"
@@ -176,6 +177,7 @@ function ChatRow({
               <span className="flex items-center gap-1.5">
                 {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
                 <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
+                {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>{relativeTime(conversationTime(session))}</span>
               </span>
               <span className="flex items-center gap-2">
@@ -204,6 +206,11 @@ function ChatRow({
             <Archive /> {session.archived ? "Unarchive" : "Archive"}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {session.worktreeName && !session.worktreeRemoved && (
+            <DropdownMenuItem onSelect={() => openSettle(session)}>
+              <GitBranch /> Remove workspace, keep conversations…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
             <Trash2 /> Delete…
           </DropdownMenuItem>

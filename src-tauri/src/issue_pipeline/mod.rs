@@ -28,6 +28,7 @@
 //! cloud workspace never merges by itself: it stops at *Ready to merge*, and
 //! a person merges from the issue page with their own `gh`, pinned the same way.
 
+pub mod admission;
 pub mod categories;
 pub mod cloud_merge;
 #[cfg(feature = "desktop")]
@@ -55,6 +56,7 @@ pub enum Stage {
     PullRequest,
     Review,
     Address,
+    Resolve,
     Merge,
 }
 
@@ -144,7 +146,8 @@ pub struct Event {
 pub struct Pipeline {
     pub id: String,
     pub project_path: String,
-    pub issue: IssueRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<IssueRef>,
     /// The branch the pull request is opened from: the one the author's
     /// session was on when the pipeline started. Nothing is pushed from any other.
     pub branch: String,
@@ -156,6 +159,14 @@ pub struct Pipeline {
     /// Never on in a cloud workspace.
     #[serde(default)]
     pub auto_merge: bool,
+    #[serde(default)]
+    pub resolve_conflicts: bool,
+    #[serde(default)]
+    pub resolutions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolver: Option<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<Resolution>,
     /// Run by a cloud workspace's runtime, which stops at *Ready to merge*:
     /// the merge is a person's, made from their computer with their own `gh`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -196,6 +207,10 @@ pub struct Pipeline {
     /// report for the same commit clears one; review and CI cannot certify it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_local_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_check: Option<LocalCheck>,
+    #[serde(default)]
+    pub checking_locally: bool,
     /// The areas of the reviewed diff that called for a security pass.
     #[serde(default)]
     pub security_areas: Vec<String>,
@@ -220,10 +235,39 @@ pub struct Pipeline {
     pub modified: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCheck {
+    pub head: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LaunchOptions {
+    pub auto_merge: bool,
+    pub resolve_conflicts: bool,
+}
+
+/// The exact inputs of a resolution. A remote writer moving the head invalidates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resolution {
+    pub head: String,
+    pub remote_head: Option<String>,
+    pub base: String,
+    pub base_commit: String,
+    pub return_stage: Stage,
+}
+
 /// The newest lines of the record kept per pipeline.
 const EVENT_LIMIT: usize = 200;
 
 impl Pipeline {
+    pub fn label(&self) -> &str {
+        self.issue.as_ref().map(|issue| issue.identifier.as_str()).unwrap_or(&self.branch)
+    }
+
     pub(crate) fn record(&mut self, at: &str, kind: &str, message: impl Into<String>) -> &mut Event {
         if self.events.len() >= EVENT_LIMIT {
             let over = self.events.len() + 1 - EVENT_LIMIT;
@@ -238,6 +282,7 @@ impl Pipeline {
         if self.author.session_id == session_id && self.author.tab_id == tab_id {
             return Some(Role::Author);
         }
+        if self.resolver.as_ref().is_some_and(|resolver| resolver.session_id == session_id && resolver.tab_id == tab_id) { return Some(Role::Resolver); }
         self.reviewer.as_ref().filter(|reviewer| reviewer.session_id == session_id && reviewer.tab_id == tab_id).map(|_| Role::Reviewer)
     }
 }
@@ -246,6 +291,7 @@ impl Pipeline {
 pub enum Role {
     Author,
     Reviewer,
+    Resolver,
 }
 
 impl Role {
@@ -253,6 +299,7 @@ impl Role {
         match self {
             Self::Author => "author",
             Self::Reviewer => "reviewer",
+            Self::Resolver => "conflict resolver",
         }
     }
 }

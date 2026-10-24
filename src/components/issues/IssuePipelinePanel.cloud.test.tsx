@@ -67,7 +67,7 @@ afterEach(cleanup);
 describe("a cloud workspace's pipeline on its issue's page", () => {
   it("has no switch to merge by itself, and says who merges", () => {
     render(<IssuePipelinePanel pipeline={pipeline()} />);
-    expect(screen.queryByRole("switch", { name: "Merge automatically when the review is addressed" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Merge when green" })).toBeNull();
     expect(screen.getByTestId("pipeline-cloud-merge").textContent).toContain("Merge here uses your own GitHub sign-in");
     expect(screen.getByText("Ready to merge")).toBeTruthy();
   });

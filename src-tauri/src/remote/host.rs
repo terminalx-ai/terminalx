@@ -68,6 +68,7 @@ const SLOW_METHODS: &[&str] = &[
     "session.close",
     // A step of an issue's pipeline pushes and asks GitHub, or starts a review.
     "pipeline.act",
+    "pipeline.resolveConflicts",
     "pipeline.noteMerge",
     // Starts the tab's CLI to ask it for its commands, which takes seconds on
     // a machine that just woke and 15 s when the CLI never answers. In order

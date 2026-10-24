@@ -17,6 +17,7 @@ import { branchMerged, checkoutLabel, worktreeCheckout } from "@/lib/checkout";
 import { START_ACTIONS, type StartAction } from "@/lib/projectStart";
 import { addProject, archiveSession, openProjectOverview, pinSession, removeProject, selectSession, startChat, startSessionIn, updateProject, useSessionStore } from "@/lib/sessions";
 import { ContinuationDialog } from "@/components/session/ContinuationDialog";
+import { openSettle } from "@/lib/dialogs";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
 import { setSidebarFilter, useSidebarFilter } from "@/lib/sidebarFilter";
 import type { Project, TabEntry, Workspace } from "@/types/session";
@@ -74,7 +75,9 @@ export function conversationLink(
   // branch its agent last worked on (or started on), not wherever another
   // conversation has since switched it.
   const own = worktreeCheckout(session, workspaces);
-  const branch = session.worktreeName && !session.worktreeRemoved
+  const branch = session.worktreeRemoved
+    ? (session.removedWorkspace?.branch ?? null)
+    : session.worktreeName
     ? ((own && checkoutLabel(own)) ?? session.branch ?? session.worktreeName)
     : (session.link?.branch ?? session.branch ?? checkout?.branch ?? null);
   return { path: session.projectPath, project, name: project?.name ?? (path.split("/").pop() || path), branch };
@@ -398,6 +401,7 @@ function ProjectGroup({
   // moved on since). One checked out nowhere (its worktree gone, the
   // checkout moved on) gets a new workspace branched from it instead.
   const newSessionOn = (branch: string, sessions: SessionEntry[]): NewSessionAction | null => {
+    if (sessions.every((session) => session.worktreeRemoved)) return null;
     const checkout = workspaces.find((workspace) => workspace.branch === branch)?.path ?? sessions.find((session) => session.worktreeName && !session.worktreeRemoved)?.cwd;
     if (checkout) return { label: `New session on ${branch || "this branch"}`, run: () => onNewSession({ cwd: checkout }) };
     if (!branch) return null;
@@ -420,12 +424,17 @@ function ProjectGroup({
   const asTabs = branchSessionsAsTabs(prefs);
   // One row per branch, newest work first; the conversations come in that order already.
   const branches = useMemo(() => {
-    const byBranch = new Map<string, SessionEntry[]>();
+    const byBranch = new Map<string, { key: string; branch: string; sessions: SessionEntry[] }>();
     for (const session of group.sessions) {
       const branch = group.branches[session.id] ?? "";
-      byBranch.set(branch, [...(byBranch.get(branch) ?? []), session]);
+      // A retained history must not join a live checkout merely because its
+      // original branch name has been reused (or it now resumes on main).
+      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : `branch:${branch}`;
+      const entry = byBranch.get(key) ?? { key, branch, sessions: [] };
+      entry.sessions.push(session);
+      byBranch.set(key, entry);
     }
-    return [...byBranch.entries()].map(([branch, sessions]) => ({ branch, sessions }));
+    return [...byBranch.values()];
   }, [group]);
   const shown = all || filtered ? branches : branches.filter((entry, index) => index < PEEK || entry.sessions.some((session) => session.id === selectedId));
   const more = !filtered && (branches.length > shown.length || (all && branches.length > PEEK));
@@ -520,22 +529,22 @@ function ProjectGroup({
       >
         <div className="min-h-0 overflow-hidden">
       <ul className="ml-[15px] flex flex-col gap-px pl-1.5">
-        {shown.map(({ branch, sessions }) =>
+        {shown.map(({ key, branch, sessions }) =>
           sessions.length === 1 || asTabs ? (
             <ConversationRow
-              key={branch}
+              key={key}
               // The branch's row opens the session that is open on it, else its latest.
               session={sessions.find((session) => session.id === selectedId) ?? sessions[0]}
               peers={sessions}
               selected={sessions.some((session) => session.id === selectedId)}
-              branch={placeholders.has(branch) ? null : branch || null}
-              named={placeholders.has(branch) ? "title" : "branch"}
-              merged={merged.has(branch)}
+              branch={!sessions[0].worktreeRemoved && placeholders.has(branch) ? null : branch || null}
+              named={!sessions[0].worktreeRemoved && placeholders.has(branch) ? "title" : "branch"}
+              merged={!sessions[0].worktreeRemoved && merged.has(branch)}
               onNewSession={newSessionOn(branch, sessions)}
               linkTo={null}
             />
           ) : (
-            <BranchRow key={branch} path={group.path} branch={branch} sessions={sessions} selectedId={selectedId} opened={filtered} merged={merged.has(branch)} onNewSession={newSessionOn(branch, sessions)} />
+            <BranchRow key={key} path={group.path} branch={branch} sessions={sessions} selectedId={selectedId} opened={filtered} merged={!sessions[0].worktreeRemoved && merged.has(branch)} onNewSession={newSessionOn(branch, sessions)} />
           ),
         )}
         {branches.length === 0 && <li className="flex h-7 items-center px-2 text-[12px] text-faint">No chats yet</li>}
@@ -578,9 +587,11 @@ function BranchRow({
   onNewSession: NewSessionAction | null;
 }) {
   const holdsSelected = sessions.some((session) => session.id === selectedId);
-  const [open, toggle] = useFold(`branch:${canon(path)}:${branch}`, false);
+  const removed = sessions.every((session) => session.worktreeRemoved);
+  const foldKey = removed ? `removed:${sessions[0].removedWorkspace?.path ?? sessions[0].id}` : branch;
+  const [open, toggle] = useFold(`branch:${canon(path)}:${foldKey}`, false);
   const expanded = open || holdsSelected || opened;
-  const label = branch || "No branch";
+  const label = `${branch || "No branch"}${removed ? " (workspace removed)" : ""}`;
   return (
     <li>
       <div className={cn(actionRow, "relative flex h-8 items-center rounded-md pr-1 text-foreground/85 hover:bg-selected/50")}>
@@ -592,7 +603,8 @@ function BranchRow({
           className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md pl-2 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         >
           <BranchGlyph merged={merged} />
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{label}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch || "No branch"}</span>
+          {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
           <span className={cn("shrink-0 text-[11px] tabular-nums text-faint", yieldsToRowActions)}>{sessions.length}</span>
           <ChevronDown className={cn("size-3 shrink-0 text-faint transition-transform", !expanded && "-rotate-90")} />
         </button>
@@ -701,6 +713,8 @@ function ConversationRow({
   linkTo: { projects: Project[]; onMove: (project: Project, worktree: boolean) => void; onAddProject: (worktree: boolean) => void } | null;
 }) {
   const title = named === "branch" && peers.length > 1 ? `${peers.length} sessions` : conversationTitle(session);
+  const removed = session.worktreeRemoved;
+  const location = removed ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null;
   const status = pressingStatus(peers.map(sessionStatus));
   const agent = useContext(ShowAgents) ? conversationAgent(session) : null;
   const mark = agent && <AgentMark id={agent} className={cn("size-3 text-faint", yieldsToRowActions)} />;
@@ -709,13 +723,13 @@ function ConversationRow({
       <DropdownMenu>
         <div
           className={cn(actionRow, "relative flex h-8 items-center gap-2 rounded-md pl-2 pr-1", selected ? "bg-selected text-foreground" : "text-foreground/85 hover:bg-selected/50")}
-          title={branch ? `${branch} · ${title}` : title}
+          title={location ?? (branch ? `${branch} · ${title}` : title)}
         >
           <button
             type="button"
             onClick={() => selectSession(session.id)}
             aria-current={selected ? "true" : undefined}
-            aria-label={named === "branch" ? `${branch ?? "No branch"}${merged ? " (merged)" : ""}, ${title}` : undefined}
+            aria-label={named === "branch" ? `${branch ?? "No branch"}${removed ? " (workspace removed)" : merged ? " (merged)" : ""}, ${title}` : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           >
             {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
@@ -723,6 +737,7 @@ function ConversationRow({
               <>
                 <BranchGlyph merged={merged} />
                 <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{branch ?? "No branch"}</span>
+                {removed && <span className="shrink-0 text-[10px] text-faint">removed</span>}
                 {mark}
                 {/* The row's state sits where the time does, at the end, so the row's own icon keeps its place; while working, the sign stands in for the time. */}
                 <StatusMark status={status} />
@@ -803,6 +818,11 @@ function ConversationRow({
           </DropdownMenuItem>
           <IssueLinkMenuItems session={session} />
           <DropdownMenuSeparator />
+          {session.worktreeName && !session.worktreeRemoved && (
+            <DropdownMenuItem onSelect={() => openSettle(session)}>
+              <Folder /> Remove workspace, keep conversations…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem destructive onSelect={() => void confirmDeleteSession(session)}>
             <Trash2 /> Delete…
           </DropdownMenuItem>

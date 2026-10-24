@@ -228,7 +228,8 @@ describe("WorktreeCleanupDialog", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Also delete conversation history" }));
     fireEvent.click(screen.getByRole("button", { name: /Review 1 worktree/ }));
     expect(screen.getByText("Ignored local files that will be deleted: .env")).toBeTruthy();
-    expect(screen.getByText(/The conversations listed above are deleted too/)).toBeTruthy();
+    expect(screen.getByText(/This permanently removes TerminalX transcripts and attachments/)).toBeTruthy();
+    expect(screen.getByText(/managed Codex rollout files needed to resume/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Remove 1 worktree/ }));
     await screen.findByText(/Removed 1/);
     expect(local.remove).toHaveBeenCalledWith([expect.objectContaining({ path: "/Users/me/alpha/.raccoon/worktrees/env-cat", deleteSessions: true, acceptIgnored: true })]);

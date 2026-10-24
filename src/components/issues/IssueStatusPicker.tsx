@@ -51,7 +51,7 @@ export function groupWorkflowStates(states: WorkflowState[]): { type: string; la
  * by hand before then may be moved again, though never backwards.
  */
 export function pipelineMayMoveIssue(pipeline: IssuePipeline | null | undefined): boolean {
-  if (!pipeline || pipeline.issue.provider !== "linear" || pipeline.stopped) return false;
+  if (!pipeline || pipeline.issue?.provider !== "linear" || pipeline.stopped) return false;
   if (pipeline.state === "merged" || pipeline.state === "stopped") return false;
   return !pipeline.events.some((event) => event.kind === "tracker");
 }

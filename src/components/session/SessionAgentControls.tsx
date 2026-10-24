@@ -1,3 +1,5 @@
+import { PipelineLaunchControls } from "./PipelineLaunchControls";
+import type { usePipelineLaunch } from "@/lib/pipelineLaunch";
 import { Fragment } from "react";
 import { ChevronDown } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
@@ -22,7 +24,7 @@ import type { useSessionAgent } from "@/lib/useSessionAgent";
  * to a project); the parent supplies a wrapping row. `disabled` holds the
  * choices once a launch has begun.
  */
-export function SessionAgentControls({ selection, disabled = false }: { selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
+export function SessionAgentControls({ selection, pipeline, disabled = false }: { pipeline?: ReturnType<typeof usePipelineLaunch>; selection: ReturnType<typeof useSessionAgent>; disabled?: boolean }) {
   const { harnesses, harness, here, models, refreshModels, model, modelId, effort, mode, selectHarness, selectModel, selectEffort, selectMode, unavailableModel, allowDefaultEffort } = selection;
   const agentMenu = useRowMenu();
   const modelMenu = useRowMenu({ onOpenChange: (open) => open && void refreshModels() });
@@ -123,6 +125,7 @@ export function SessionAgentControls({ selection, disabled = false }: { selectio
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+      {pipeline && <PipelineLaunchControls launch={pipeline} disabled={disabled} />}
     </>
   );
 }

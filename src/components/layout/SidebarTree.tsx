@@ -296,7 +296,7 @@ function WorkspaceNode({
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem destructive onSelect={() => openWorkspaceDelete(project.path, workspace.path, name)}>
-                      <Trash2 /> Delete workspace…
+                      <Trash2 /> Remove workspace…
                     </DropdownMenuItem>
                   </>
                 ) : null}
@@ -502,7 +502,7 @@ function SessionMenu({ session }: { session: SessionEntry }) {
       </DropdownMenuItem>
       {session.worktreeName && !session.worktreeRemoved ? (
         <DropdownMenuItem onSelect={() => openSettle(session)}>
-          <X /> Settle worktree…
+          <X /> Remove workspace, keep conversations…
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuSeparator />

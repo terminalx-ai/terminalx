@@ -571,8 +571,8 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 (false, false) => None,
             };
             let no_pipeline = tokens.flag("--no-pipeline")?;
-            if issue.is_none() && (provider.is_some() || auto_merge.is_some() || no_pipeline) {
-                return Err(invalid("--provider, --auto-merge, --no-auto-merge and --no-pipeline apply to a session started with --issue."));
+            if issue.is_none() && provider.is_some() {
+                return Err(invalid("--provider applies to a session started with --issue."));
             }
             let title = tokens.option("--title")?;
             let name = tokens.option("--name")?;
@@ -610,6 +610,8 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 // Reading the tracker comes before the session exists.
                 return Ok(Action::Rpc { command: "sessions.create".into(), params, timeout: Duration::from_secs(60) });
             }
+            if let Some(value) = auto_merge { params["autoMerge"] = json!(value); }
+            if no_pipeline { params["noPipeline"] = json!(true); }
             rpc("sessions.create", params, tokens)
         }
         other => Err(invalid(format!("Unknown sessions command {other}."))),
@@ -1231,12 +1233,13 @@ mod tests {
         let (_, params, _) = rpc_of(&["sessions", "create", "--issue", "433", "--no-auto-merge", "--no-pipeline", "--project", "raccoon", "--agent", "codex"]);
         assert_eq!((&params["autoMerge"], &params["noPipeline"]), (&json!(false), &json!(true)));
 
-        // Without an issue the request is word for word what it was, and the issue's flags are refused.
+        // Without flags the request stays unchanged; automation flags also serve non-issue branches.
         let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go"]);
         assert!(params.get("issue").is_none() && params.get("autoMerge").is_none() && params.get("noPipeline").is_none());
-        for flag in ["--auto-merge", "--no-auto-merge", "--no-pipeline"] {
-            let error = parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", flag])).unwrap_err();
-            assert!(error.message.contains("apply to a session started with --issue"), "{flag}: {}", error.message);
+        for (flag, field, expected) in [("--auto-merge", "autoMerge", true), ("--no-auto-merge", "autoMerge", false), ("--no-pipeline", "noPipeline", true)] {
+            let (_, params, _) = rpc_of(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", flag]);
+            assert_eq!(params[field], expected, "{flag}");
+            assert!(params.get("issue").is_none());
         }
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--prompt", "go", "--provider", "linear"])).is_err());
         assert!(parse(&args(&["sessions", "create", "--project", "raccoon", "--agent", "codex", "--issue", "433", "--auto-merge", "--no-auto-merge"])).is_err());

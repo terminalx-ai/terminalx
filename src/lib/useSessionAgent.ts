@@ -13,6 +13,7 @@ export interface LaunchSettings {
   model: string;
   effort: string | null;
   permissionMode: string;
+  pipeline?: import("@/lib/pipelineLaunch").PipelineLaunch;
 }
 
 /**

@@ -221,6 +221,7 @@ pub const METHODS: &[Method] = &[
     method("pipeline.reviewers", "pipeline/2", Participate, false),
     method("pipeline.list", "pipeline/1", Participate, false),
     method("pipeline.act", "pipeline/1", Manage, true),
+    method("pipeline.resolveConflicts", "pipeline/1", Manage, true),
     method("pipeline.noteMerge", "pipeline/1", Manage, true),
     method("pipeline.noteTracker", "pipeline/1", Manage, true),
     // PRO-34 facts before archive or delete (saas contract 10.2): read-only.
@@ -506,7 +507,7 @@ mod tests {
         assert_eq!(find_method("git.prLanded").unwrap().authority, Manage);
         // A pipeline is read by whoever sees the sessions and steered by the manager.
         assert_eq!(find_method("pipeline.list").map(|method| (method.capability, method.authority, method.idempotent)), Some(("pipeline/1", Participate, false)));
-        for name in ["pipeline.act", "pipeline.noteMerge", "pipeline.noteTracker"] {
+        for name in ["pipeline.act", "pipeline.resolveConflicts", "pipeline.noteMerge", "pipeline.noteTracker"] {
             let method = find_method(name).unwrap();
             assert_eq!((method.capability, method.authority, method.idempotent), ("pipeline/1", Manage, true), "{name}");
         }

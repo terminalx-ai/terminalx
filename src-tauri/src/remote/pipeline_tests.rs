@@ -148,6 +148,29 @@ fn issue() -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_non_issue_cloud_branch_uses_conflict_automation_but_never_workspace_auto_merge() {
+    let f = fixture();
+    let (manager, _) = peer(&f.rpc, "desktop", Authority::Manage, &["session/1", "pipeline/1"]).await;
+    let (viewer, _) = peer(&f.rpc, "phone", Authority::Participate, &["pipeline/1"]).await;
+    let created = call(&f.rpc, &manager, "session.create", json!({
+        "clientRequestId": "plain-automation", "agent": "claude", "useWorktree": true,
+        "title": "Improve the parser", "pipeline": true,
+        "pipelineOptions": { "autoMerge": true, "resolveConflicts": true },
+        "pipelineSettings": { "autoMerge": true }
+    })).await.unwrap();
+    let pipeline = &created["pipeline"];
+    assert!(pipeline.get("issue").is_none());
+    assert_eq!(pipeline["autoMerge"], false);
+    assert_eq!(pipeline["resolveConflicts"], true);
+    let id = pipeline["id"].as_str().unwrap();
+    let params = json!({"clientRequestId": "resolve-switch", "pipeline": id, "value": false});
+    assert!(call(&f.rpc, &viewer, "pipeline.resolveConflicts", params.clone()).await.is_err());
+    let changed = call(&f.rpc, &manager, "pipeline.resolveConflicts", params).await.unwrap();
+    assert_eq!(changed["pipeline"]["resolveConflicts"], false);
+    assert_eq!(changed["pipeline"]["autoMerge"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_and_steered_from_a_desktop() {
     let f = fixture();
     let members = json!({ "v": 1, "members": [{ "userId": "admin", "role": "manager" }, { "userId": "viewer", "role": "viewer" }] });

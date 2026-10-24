@@ -1,3 +1,4 @@
+import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "@/lib/api";
 import { openWorkspaceDelete } from "@/lib/dialogs";
@@ -26,7 +27,7 @@ export async function confirmDeleteSession(session: SessionEntry) {
     // the removal does. If it cannot say, the workspace is left alone.
     workspace = await api.soleWorkspaceOf(session.id).catch(() => null);
   }
-  const base = `Delete "${session.title}"? Its transcript and attachments are removed.`;
+  const base = `Delete "${session.title}"? Its transcript and attachments are removed.\n\n${CONVERSATION_DELETION}`;
   if (isQuickChat(session)) {
     // A quick chat's scratch folder goes with it. Files in it are named
     // before they are deleted; an empty one needs no mention.

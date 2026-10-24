@@ -18,7 +18,7 @@ The worker builds a candidate from all supported provider histories and the
 existing app-stat collector. It reuses `stats-usage-cache.json` projections by
 path, modification time, and size. Discovery, transcript I/O, worktree/scope reads,
 app reads, and persistence must succeed before publication. Confirmed missing
-sources are removed; other I/O errors abort the candidate. Existing parser rules
+sources retain their compact accounting projections; other I/O errors abort the candidate. Existing parser rules
 for unrelated/malformed transcript records, attribution, token accounting,
 deduplication, and provider scope remain in place. App activity is collected while
 this page is closed; its durable ledger is independent of either usage cache.
@@ -37,6 +37,26 @@ so even its padding remains stable until the next successful refresh. A new scan
 recomputes the local-day cutoff even when all transcript projections are reused.
 
 ## Persistence and scope
+
+`stats-usage-cache.json` is also durable accounting, despite its historical name.
+It retains per-event token counts, model/pricing inputs, timestamps, identities and
+attribution paths, never prompts or response bodies. Missing files and rewritten
+suffixes retain previously observed records. Shared, copied and forked provider
+histories are deduplicated by provider/event identity during aggregation, including
+when an archive reappears. Do not delete this file as a disposable scan cache.
+Version 3 projections upgrade idempotently: surviving files are reparsed and
+missing legacy records retain known tokens with uncertain prices marked unpriced.
+Corrupt or unsupported versions fail without replacing the retained accounting.
+A saved display aggregate alone cannot reconstruct missing per-event history.
+
+The overview covers the latest 30 local calendar dates at the successful refresh,
+for known TerminalX project/worktree paths (including remembered removed paths).
+Recorded events remain stored outside that display window. Costs are local API
+price estimates, not bills. Histories deleted before they were scanned cannot be
+reconstructed; refresh before deleting if the latest activity needs recording.
+Local Stats & Usage does not scan cloud runtimes. The independent activity ledger
+retains recorded starts, work time and PRs across conversation deletion. Deleting
+local history neither refunds tokens nor resets provider-side usage.
 
 `stats-usage-snapshot.json` lives under the active `TERMINALX_HOME`. It contains only
 display aggregates plus the display calculation schema, scanner schema, and source

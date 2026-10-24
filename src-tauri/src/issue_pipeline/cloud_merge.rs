@@ -57,7 +57,7 @@ fn short(commit: &str) -> &str {
 /// pressed Merge. `repository` is the cloud project's own (`owner/name`): a
 /// pull request anywhere else is refused, whatever the workspace reports.
 pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, settings: &IssuePipelineSettings) -> Result<CloudMerge> {
-    let issue = &pipeline.issue.identifier;
+    let issue = pipeline.label();
     if !pipeline.cloud {
         bail!("{issue} is not carried by a cloud workspace.");
     }
@@ -82,9 +82,14 @@ pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, setting
     if pr.state == "OPEN" && pipeline.failed_local_checks.iter().any(|failed| super::gate::same_commit(failed, &pr.head_sha)) {
         return Ok(CloudMerge::NotMerged { reason: StopReason::LocalChecksFailed.describe() });
     }
+    let local_passed = settings.local_check_command.as_deref().filter(|command| !command.trim().is_empty()).is_some_and(|command|
+        pipeline.local_check.as_ref().is_some_and(|check| check.command == command && gate::same_commit(&check.head, &pr.head_sha)));
+    if pr.state == "OPEN" && settings.local_check_command.as_ref().is_some_and(|command| !command.trim().is_empty()) && !local_passed {
+        return Ok(CloudMerge::NotMerged { reason: "TerminalX has not passed the configured local check command on this final head.".into() });
+    }
     // As for a person pressing Merge on this computer: everything that makes
     // a merge wrong applies, none of the holds that wait for a person.
-    let decision = gate::decide(&Facts {
+    let decision = gate::decide_with_local(&Facts {
         auto_merge: true,
         require_person: false,
         cloud: false,
@@ -94,7 +99,7 @@ pub fn merge(github: &dyn Github, pipeline: &Pipeline, repository: &str, setting
         protected: &[],
         ignored_checks: &settings.ignored_checks,
         allow_no_ci: settings.allow_no_ci,
-    });
+    }, settings.local_checks_only && local_passed);
     let not_merged = |reason: StopReason| Ok(CloudMerge::NotMerged { reason: reason.describe() });
     match decision {
         Gate::Merged => Ok(CloudMerge::AlreadyMerged { commit: pr.head_sha }),
@@ -163,11 +168,15 @@ mod tests {
         Pipeline {
             id: "p1".into(),
             project_path: "/workspace".into(),
-            issue: IssueRef { provider: "github".into(), id: "433".into(), identifier: "#433".into(), title: "Pipeline".into(), url: "https://github.com/acme/widgets/issues/433".into() },
+            issue: Some(IssueRef { provider: "github".into(), id: "433".into(), identifier: "#433".into(), title: "Pipeline".into(), url: "https://github.com/acme/widgets/issues/433".into() }),
             branch: "raccoon/11-fix-login-timeout".into(),
             author: SessionRef { session_id: "author".into(), tab_id: "t1".into() },
             reviewer: Some(SessionRef { session_id: "reviewer".into(), tab_id: "t1".into() }),
             auto_merge: false,
+            resolver: None,
+            resolution: None,
+            resolutions: 0,
+            resolve_conflicts: false,
             cloud: true,
             issue_body: None,
             stopped: false,
@@ -183,6 +192,8 @@ mod tests {
             findings_sent_round: 0,
             verdict: Some(merge_verdict(HEAD)),
             failed_local_checks: Vec::new(),
+        local_check: None,
+        checking_locally: false,
             security_areas: Vec::new(),
             summary: None,
             reminded: false,

@@ -4,8 +4,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/controls";
+import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
 import { errorMessage } from "@/lib/api";
-import { closeWorkspaceRemove, useDialogs } from "@/lib/dialogs";
+import { closeWorkspaceRemove, openWorktreeCleanup, useDialogs } from "@/lib/dialogs";
 import { relocateSession } from "@/lib/sessions";
 import { localWorkspaceHost, type WorkspaceHost } from "@/lib/workspaceRemoval";
 import { confirmRiskyRemoval, reportBranchOutcome } from "@/lib/worktreeConfirm";
@@ -21,9 +22,9 @@ const MERGED_HOW: Record<NonNullable<Landed["merged"]>, string> = {
 /**
  * The one dialog for removing a workspace, whichever way it was started: the
  * workspace menu, the right panel, settling, or deleting a workspace's last
- * session. A workspace owns its sessions, so deleting it deletes them, and
- * they are named. Settling removes the workspace too but keeps the
- * conversations, because the work has landed.
+ * session. Removing the checkout keeps conversations by default through the
+ * existing settle transition. Permanent conversation deletion is a separate
+ * explicit choice, regardless of whether the checkout is clean and merged.
  *
  * One check decides how much confirmation is needed: the workspace is safe
  * when it is clean and its work is merged into the default branch. Then the
@@ -39,6 +40,7 @@ export function WorkspaceRemoveDialog() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"remove" | "relocate" | null>(null);
   const [deleteBranch, setDeleteBranch] = useState(true);
+  const [deleteConversations, setDeleteConversations] = useState(false);
 
   const check = useCallback(async (host: WorkspaceHost, isLive: () => boolean = () => true) => {
     setDisp(null);
@@ -66,6 +68,7 @@ export function WorkspaceRemoveDialog() {
   useEffect(() => {
     if (!host) return;
     setError(null);
+    setDeleteConversations(false);
     setDeleteBranch(false);
     let live = true;
     void check(host, () => live);
@@ -75,7 +78,8 @@ export function WorkspaceRemoveDialog() {
   }, [host, check]);
 
   if (!request || !host) return null;
-  const settle = request.mode === "settle";
+  const settle = !deleteConversations;
+  const keepUnavailable = host.keepConversationsUnavailable;
   const landed = disp?.landed ?? null;
   // A folder that is not on disk (removed by hand, or on a volume that is not
   // mounted) cannot be checked, so it is never "safe".
@@ -88,9 +92,10 @@ export function WorkspaceRemoveDialog() {
   const confirmable = !!landed;
   const losses = landed?.losses ?? [];
   const pr = disp?.pr ?? null;
-  const verb = settle ? "Settle" : "Delete";
+  const verb = settle ? "Remove" : "Delete";
 
   const remove = async () => {
+    if (settle && keepUnavailable) return;
     if (risky && !(await confirmRiskyRemoval(request.path, losses))) return;
     setBusy("remove");
     setError(null);
@@ -131,7 +136,7 @@ export function WorkspaceRemoveDialog() {
     <Dialog open onOpenChange={(o) => !o && closeWorkspaceRemove()}>
       <DialogContent width="max-w-[30rem]">
         <DialogHeader>
-          <DialogTitle>{settle ? "Settle this workspace" : "Delete this workspace"}</DialogTitle>
+          <DialogTitle className="pr-6">{settle ? "Remove workspace, keep conversations" : "Permanently delete conversations and workspace"}</DialogTitle>
           <DialogDescription>
             <span className="font-mono text-foreground">{request.name}</span>
             {disp?.branch && (
@@ -141,12 +146,26 @@ export function WorkspaceRemoveDialog() {
               </>
             )}
             .{" "}
-            {settle
-              ? "Settling is for work that has landed: the workspace is removed and its sessions are kept, with their conversations, and run in the project from now on. Deleting the workspace instead would delete its sessions too."
-              : "A workspace owns its sessions: they are stopped and deleted with it, transcripts included."}{" "}
-            The directory is deleted; it is not moved to the Trash.
+            The directory is deleted; it is not moved to the Trash. Choose separately what happens to its conversations.
           </DialogDescription>
         </DialogHeader>
+
+        <fieldset className="mt-3 space-y-2 text-xs" disabled={!!busy}>
+          <legend className="mb-2 font-medium">Conversations</legend>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="conversation-retention" checked={settle} onChange={() => setDeleteConversations(false)} />
+            Remove workspace, keep conversations
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="conversation-retention" checked={!settle} onChange={() => setDeleteConversations(true)} />
+            Permanently delete conversations too
+          </label>
+          <p className="wrap-anywhere text-muted-foreground">
+            {settle
+              ? keepUnavailable ?? `Conversations and their original workspace context stay readable. Agents stop and resume in the project folder (${request.projectPath}) when opened again. Keep the workspace instead if you do not want agents to run there. Claude Code and Codex need their provider-native files to resume; missing files cannot be reconstructed from accounting.`
+              : CONVERSATION_DELETION}
+          </p>
+        </fieldset>
 
         <div className="mt-3 flex flex-col gap-1.5 rounded-lg bg-well px-3 py-2 text-xs">
           {!known && (
@@ -212,13 +231,18 @@ export function WorkspaceRemoveDialog() {
           <Button variant="ghost" onClick={closeWorkspaceRemove} disabled={!!busy}>
             {settle ? "Keep as is" : "Cancel"}
           </Button>
+          {settle && keepUnavailable && (
+            <Button variant="outline" disabled={!!busy} onClick={() => { closeWorkspaceRemove(); openWorktreeCleanup(); }}>
+              Clean up worktrees…
+            </Button>
+          )}
           {settle && request.sessionId && (
             <Button variant="outline" onClick={() => void relocate()} disabled={!!busy}>
               {busy === "relocate" ? <Loader2 className="animate-spin" /> : <FolderInput />} Move session to project
             </Button>
           )}
-          <Button variant={risky ? "destructive" : "default"} onClick={() => void remove()} disabled={!!busy || !known || !confirmable || !!disp?.isMain}>
-            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {risky ? `${verb} anyway…` : `${verb} workspace`}
+          <Button variant={risky || !settle ? "destructive" : "default"} onClick={() => void remove()} disabled={!!busy || !known || !confirmable || !!disp?.isMain || (settle && !!keepUnavailable)}>
+            {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {risky ? `${verb} anyway…` : settle ? "Remove workspace" : "Delete conversations and workspace"}
           </Button>
         </DialogFooter>
       </DialogContent>

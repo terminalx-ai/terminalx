@@ -1,3 +1,5 @@
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { SessionPipelineControls } from "./SessionPipelineControls";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "@/icons";
@@ -370,6 +372,7 @@ export function SessionView({
   const showPorts = cloud?.ports.offered && !compact ? () => showPanelTab("ports") : undefined;
   const isGit = useSessionIsGit(session);
   const quick = isQuickChat(session);
+  const [pipelineOpen, setPipelineOpen] = useState(false);
   const pipelineRole = pipelineForSession(useIssuePipelines(), session.id);
   const prefs = usePrefs();
   const store = useSessionStore();
@@ -591,12 +594,13 @@ export function SessionView({
             )}
             {/* Who else works on the issue now (#441). It is the first to go when the header narrows. */}
             {session.issue && <SessionIssueWork session={session} sessions={store.sessions} className={cn("ml-1 max-w-48 shrink", HEADER_TIGHT)} />}
+            {!pipelineRole && !cloud && !quick && isGit && <button type="button" className="ml-1 text-xs text-muted-foreground" onClick={() => setPipelineOpen(true)}>Automation</button>}
             {pipelineRole && (
               // The issue pipeline this session is part of, as its author or its reviewer.
-              <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${pipelineRole.pipeline.issue.identifier} · ${pipelineRole.pipeline.note ?? pipelineRole.pipeline.issue.title}`}>
+              <WithTooltip label={`${pipelineRole.role === "reviewer" ? "Reviewing" : "Working on"} ${(pipelineRole.pipeline.issue?.identifier ?? pipelineRole.pipeline.branch)} · ${pipelineRole.pipeline.note ?? (pipelineRole.pipeline.issue?.title ?? pipelineRole.pipeline.branch)}`}>
                 <button
                   type="button"
-                  onClick={() => (pipelineRole.pipeline.pr ? void openUrl(pipelineRole.pipeline.pr.url) : void openUrl(pipelineRole.pipeline.issue.url))}
+                  onClick={() => setPipelineOpen(true)}
                   // It gives way like the other chips, down to the dot that says where the pipeline stands (#584 left it rigid, and it ran under the actions).
                   className={cn("ml-1 flex max-w-48 items-center overflow-hidden rounded-md bg-veil-raised px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground", HEADER_CHIP_YIELDS, HEADER_TIGHT, "gap-x-1.5")}
                   data-testid="session-pipeline"
@@ -752,6 +756,7 @@ export function SessionView({
         )}
         {cloud && !cloud.locked && <CloudResourceNotice workspaceKey={cloud.workspaceKey} turn={session.tabs.some((t) => t.status === "in_progress")} manage={cloud.manage} />}
 
+        {(pipelineRole || (!cloud && !quick && isGit)) && <Dialog open={pipelineOpen} onOpenChange={setPipelineOpen}><DialogContent><DialogHeader><DialogTitle>Session pipeline</DialogTitle></DialogHeader><SessionPipelineControls session={session} tabId={activeTab?.id} project={store.projects.find((project) => project.path === session.projectPath)} pipeline={pipelineRole?.pipeline} /></DialogContent></Dialog>}
         {continuationSource && <ContinuationDialog session={session} source={continuationSource} onClose={() => setContinuationSource(null)} />}
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="@container/editor-host relative flex min-h-0 flex-1">

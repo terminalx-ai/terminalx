@@ -487,3 +487,25 @@ describe("every organization live (CS-18)", () => {
     expect(mocks.api.cloudWorkspaceSetup).toHaveBeenCalledWith("box", ORG);
   });
 });
+
+it("sends an explicit conflict opt-out for an issue whose project default is on", async () => {
+  const { DEFAULT_PIPELINE_SETTINGS } = await import("./issuePipeline");
+  await place([item("issue-work", { repositories: [api] })]);
+  const plan = flow.planCloudStart(project("github.com/acme/api"));
+  const runtime = fakeRuntime("issue-work", { ...connected, capabilities: ["session/1", "session/2", "pipeline/1"] });
+  runtimes.set("issue-work", runtime);
+  await flow.startInWorkspace(plan as never, {
+    ...request,
+    pipeline: { autoMerge: false, resolveConflicts: false },
+    issue: {
+      ref: { provider: "github", id: "567", identifier: "#567", title: "Session automation", url: "https://github.com/acme/api/issues/567" },
+      body: "Implement automation", worktreeName: "issue-567", pipeline: true,
+      settings: { ...DEFAULT_PIPELINE_SETTINGS, resolveConflicts: true },
+    },
+  });
+  expect(runtime.created[0]).toMatchObject({
+    pipeline: true,
+    pipelineSettings: { resolveConflicts: true },
+    pipelineOptions: { autoMerge: false, resolveConflicts: false },
+  });
+});

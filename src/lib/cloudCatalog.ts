@@ -1053,7 +1053,7 @@ function parsePipelines(value: unknown, workspaces: ReadonlySet<string>): Record
   if (!isObject(value)) return out;
   for (const [workspaceId, raw] of Object.entries(value)) {
     if (!workspaces.has(workspaceId) || !isObject(raw) || !Array.isArray(raw.pipelines)) continue;
-    const pipelines = raw.pipelines.filter((pipeline): pipeline is RuntimeIssuePipeline => isObject(pipeline) && typeof pipeline.id === "string" && isObject(pipeline.issue));
+    const pipelines = raw.pipelines.filter((pipeline): pipeline is RuntimeIssuePipeline => isObject(pipeline) && typeof pipeline.id === "string" && (pipeline.issue == null || isObject(pipeline.issue)));
     const reviewerSessionIds = Array.isArray(raw.reviewerSessionIds) ? raw.reviewerSessionIds.filter((id): id is string => typeof id === "string") : [];
     out[workspaceId] = { pipelines, reviewerSessionIds: pipelineReviewerIds(pipelines, reviewerSessionIds), at: typeof raw.at === "number" ? raw.at : 0 };
   }

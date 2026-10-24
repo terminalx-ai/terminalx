@@ -57,7 +57,7 @@ vi.mock("@/lib/models", async (original) => ({
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 vi.mock("@/lib/prefs", () => ({
   usePrefs: () => ({ useWorktree: true, lastAgent: "claude", lastModel: { claude: "claude-opus-5" }, lastEffort: {}, lastMode: "bypassPermissions", lastProject: null }),
-  getPrefs: () => ({}),
+  getPrefs: () => ({ cloudIssuePipelines: {} }),
   setPrefs: vi.fn(),
   subscribePrefs: () => () => {},
 }));

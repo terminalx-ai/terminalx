@@ -16,6 +16,7 @@ use crate::store::projects::IssuePipelineSettings;
 use super::engine::{self, act, note_merge, note_tracker, poll, recover, resume, set_auto_merge, start, turn_completed, turn_failed, Action, Diff, Host, Workspace};
 use super::gate::StopReason;
 use super::verdict::Severity;
+use super::engine::set_resolve_conflicts;
 use super::{store, MergedBy, Pipeline, SessionRef, Stage, State};
 
 const C1: &str = "1111111111111111111111111111111111111111";
@@ -44,6 +45,11 @@ struct World {
     merges: Vec<(String, String)>,
     moved_to_review: Vec<String>,
     reviewers: u32,
+    conflict: bool,
+    local_runs: Vec<(String, String)>,
+    local_error: bool,
+    during_local: Option<Hook>,
+    resolution_error: Option<String>,
     reviewer_tabs: bool,
     announced: u32,
     issue_body: Option<String>,
@@ -109,6 +115,11 @@ impl FakeHost {
             merges: Vec::new(),
             moved_to_review: Vec::new(),
             reviewers: 0,
+            conflict: false,
+            local_runs: Vec::new(),
+            local_error: false,
+            during_local: None,
+            resolution_error: None,
             reviewer_tabs: false,
             announced: 0,
             issue_body: Some("Sessions stop at code.".into()),
@@ -196,6 +207,36 @@ impl Host for FakeHost {
         entry.cwd = author.cwd.clone();
         world.sessions.insert(id.clone(), entry);
         Ok(SessionRef { session_id: id, tab_id: "t1".into() })
+    }
+
+    fn run_local_check(&self, _cwd: &Path, command: &str) -> Result<()> {
+        let hook = {
+            let mut world = self.world();
+            let head = world.workspace.head.clone();
+            world.local_runs.push((head, command.into()));
+            if world.local_error { bail!("Local check command failed"); }
+            world.during_local.take()
+        };
+        if let Some(hook) = hook { hook(); }
+        Ok(())
+    }
+
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, base: &str, behind: bool) -> Result<Option<super::Resolution>> {
+        let world = self.world();
+        Ok((world.conflict || behind).then(|| super::Resolution { head: world.workspace.head.clone(), remote_head: world.pr.as_ref().map(|pr| pr.head_sha.clone()), base: base.into(), base_commit: "base-moved".into(), return_stage: Stage::Work }))
+    }
+    fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        let mut resolver = session("resolver", None);
+        resolver.cwd = author.cwd.clone();
+        self.world().sessions.insert(resolver.id.clone(), resolver);
+        Ok(SessionRef { session_id: "resolver".into(), tab_id: "t1".into() })
+    }
+    fn verify_resolution(&self, _cwd: &Path, resolution: &super::Resolution, head: &str, _branch: &str) -> Result<()> {
+        let world = self.world();
+        if let Some(error) = &world.resolution_error { bail!("{error}"); }
+        if resolution.remote_head != world.pr.as_ref().map(|pr| pr.head_sha.clone()) { bail!("Someone pushed during resolution"); }
+        if head == resolution.head { bail!("No merge commit was made"); }
+        Ok(())
     }
 
     fn workspace(&self, _cwd: &Path) -> Result<Workspace> {
@@ -474,6 +515,19 @@ fn with_the_switch_off_an_issue_session_ends_reviewed_and_ready_and_nothing_merg
     assert_eq!(record[2].url.as_deref(), Some("https://github.com/acme/widgets/pull/7"));
     assert_eq!((record[3].session_id.as_deref(), record[3].commit.as_deref()), (Some(reviewer.session_id.as_str()), Some(C1)));
     assert_eq!(record[5].url.as_deref(), Some("https://github.com/acme/widgets/pull/7#issuecomment-1"));
+}
+
+#[test]
+fn a_session_without_an_issue_opens_reviews_and_merges_without_tracker_updates() {
+    let host = FakeHost::new(&github_issue());
+    host.world().sessions.get_mut("author").unwrap().issue = None;
+    let run = Run::start_in(host, true);
+    assert!(run.pipeline().issue.is_none());
+    run.to_review();
+    assert_eq!(run.host.world().created, [("Work".to_string(), "Pads the minutes.".to_string())]);
+    assert!(run.host.world().moved_to_review.is_empty());
+    let merged = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(merged.state, State::Merged);
 }
 
 // ---- acceptance: the switch on --------------------------------------------------
@@ -1301,7 +1355,7 @@ fn github_being_unreachable_for_a_look_changes_nothing() {
 // ---- starting, and starting again -------------------------------------------------
 
 #[test]
-fn a_pipeline_starts_only_for_an_issue_session_on_a_branch_of_its_own() {
+fn a_pipeline_starts_for_any_session_on_a_branch_of_its_own() {
     let _home = crate::store::temp_home();
     let host = FakeHost::new(&github_issue());
     // The project's default for the switch is what an issue starts at.
@@ -1316,7 +1370,7 @@ fn a_pipeline_starts_only_for_an_issue_session_on_a_branch_of_its_own() {
     assert_eq!(store::list().unwrap().len(), 1);
 
     host.world().sessions.insert("plain".into(), session("plain", None));
-    assert!(start(&host, "plain", "t1", None, None).unwrap_err().to_string().contains("not started from an issue"));
+    assert!(start(&host, "plain", "t1", None, None).unwrap().issue.is_none());
     assert!(start(&host, "author", "nope", None, None).is_err());
 
     host.world().sessions.insert("main".into(), session("main", Some(&github_issue())));
@@ -1326,7 +1380,7 @@ fn a_pipeline_starts_only_for_an_issue_session_on_a_branch_of_its_own() {
     host.world().workspace.branch = Some("raccoon/other".into());
     host.world().settings.enabled = false;
     assert!(start(&host, "main", "t1", None, None).unwrap_err().to_string().contains("turned off for this project"));
-    assert_eq!(store::list().unwrap().len(), 1);
+    assert_eq!(store::list().unwrap().len(), 2);
 }
 
 #[test]
@@ -2033,4 +2087,314 @@ fn a_clean_verdict_cannot_override_a_local_failure_reported_during_review() {
         assert_eq!(blocked.reason, Some(StopReason::LocalChecksFailed));
     }
     assert!(run.merges().is_empty());
+}
+
+#[test]
+fn conflict_resolution_waits_for_author_then_reviews_and_checks_the_new_head() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    {
+        let mut world = run.host.world();
+        world.conflict = true;
+        world.pr.as_mut().unwrap().merge_state = "DIRTY".into();
+        world.sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    }
+    assert_eq!(run.poll().stage, Stage::Review);
+    assert!(run.host.prompts_to("resolver").is_empty());
+    run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Completed;
+    assert_eq!(run.poll().stage, Stage::Resolve);
+    assert_eq!(run.host.prompts_to("resolver").len(), 1);
+    run.host.commit(C2);
+    {
+        let mut world = run.host.world();
+        world.conflict = false;
+        world.pr.as_mut().unwrap().merge_state = "CLEAN".into();
+        world.checks = vec![check("build", "pending")];
+    }
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged the base.")));
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    assert_eq!(run.pipeline().review_commit.as_deref(), Some(C2));
+    assert!(run.pipeline().resolution.is_none());
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Waiting);
+    assert!(run.merges().is_empty());
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success")];
+    assert_eq!(run.poll().state, State::Merged);
+    assert_eq!(run.merges()[0].1, C2);
+}
+
+#[test]
+fn a_resolution_limit_dirty_checkout_and_remote_writer_stop_without_push() {
+    for stop in ["limit", "dirty", "writer", "failed"] {
+        let run = Run::start(&github_issue(), false);
+        run.to_review();
+        set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+        {
+            let mut world = run.host.world();
+            world.conflict = true;
+            world.pr.as_mut().unwrap().merge_state = "DIRTY".into();
+            if stop == "limit" { world.settings.max_resolutions = 1; }
+            if stop == "dirty" { world.workspace.dirty.push("work.txt".into()); }
+        }
+        if stop == "limit" {
+            let mut pipeline = run.pipeline();
+            pipeline.resolutions = 1;
+            store::commit(&mut pipeline).unwrap();
+        }
+        let state = run.poll();
+        if matches!(stop, "writer" | "failed") {
+            assert_eq!(state.stage, Stage::Resolve);
+            run.host.commit(C2);
+            if stop == "writer" { run.host.world().pr.as_mut().unwrap().head_sha = "someone-else".into(); }
+            let report = if stop == "failed" { "```terminalx-status\n{\"status\":\"blocked\",\"checks\":\"failed\",\"reason\":\"Intent is ambiguous\"}\n```".into() } else { done("Resolved") };
+            turn_completed(&run.host, "resolver", "t1", Some(&report));
+        }
+        assert_eq!(run.pipeline().state, State::NeedsYou, "{stop}");
+        assert_eq!(run.host.world().pushes, [C1], "{stop}");
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn conflicts_are_watched_before_a_pull_request_exists() {
+    let run = Run::start(&github_issue(), false);
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    run.host.world().conflict = true;
+    assert_eq!(run.poll().stage, Stage::Resolve);
+    assert!(run.pipeline().pr.is_none());
+    run.host.commit(C2);
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Resolved")));
+    assert_eq!(run.pipeline().stage, Stage::Work);
+    assert!(run.pipeline().pr.is_none());
+}
+
+#[test]
+fn local_checks_are_run_by_terminalx_again_for_each_head_and_policy_change() {
+    let run = Run::start(&github_issue(), false);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    assert_eq!(run.to_gate().state, State::ReadyToMerge);
+    assert_eq!(run.host.world().local_runs, [(C1.into(), "project-check".into())]);
+    run.poll();
+    assert_eq!(run.host.world().local_runs.len(), 1);
+    run.host.world().settings.local_check_command = Some("new-project-check".into());
+    run.poll();
+    assert_eq!(run.host.world().local_runs.len(), 2);
+    run.host.commit(C2);
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    run.poll();
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!(run.host.world().local_runs.last(), Some(&(C2.into(), "new-project-check".into())));
+}
+
+#[test]
+fn failed_local_command_does_not_merge_even_with_successful_hosted_checks() {
+    let run = Run::start(&github_issue(), true);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.host.world().local_error = true;
+    assert_eq!(run.to_gate().state, State::NeedsYou);
+    assert!(!run.pipeline().checking_locally);
+    assert!(run.pipeline().local_check.is_none());
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn local_checks_wait_for_an_active_author_then_resume_on_the_next_poll() {
+    let run = Run::start(&github_issue(), false);
+    run.host.world().settings.local_check_command = Some("project-check".into());
+    run.to_review();
+    run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    let waiting = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((waiting.stage, waiting.state), (Stage::Merge, State::Waiting));
+    assert!(run.host.world().local_runs.is_empty());
+    run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Completed;
+    assert_eq!(run.poll().state, State::ReadyToMerge);
+    assert_eq!(run.host.world().local_runs.len(), 1);
+}
+
+#[test]
+fn a_resolver_never_runs_beside_a_reviewer_or_discards_its_security_findings() {
+    let run = Run::start(&github_issue(), false);
+    run.to_review();
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    let reviewer = run.pipeline().reviewer.unwrap();
+    {
+        let mut world = run.host.world();
+        world.conflict = true;
+        world.pr.as_mut().unwrap().merge_state = "DIRTY".into();
+        world.sessions.get_mut(&reviewer.session_id).unwrap().tabs[0].status = crate::store::index::TabStatus::InProgress;
+    }
+    assert_eq!(run.poll().stage, Stage::Review);
+    assert!(run.host.prompts_to("resolver").is_empty());
+    run.host.world().sessions.get_mut(&reviewer.session_id).unwrap().tabs[0].status = crate::store::index::TabStatus::Completed;
+    let findings = r#"[{"severity":"high","title":"Authorization bypass","security":true}]"#;
+    run.reviewer(&reviewed_with(C1, "changes", findings, "flagged"));
+    let verdict = run.pipeline().verdict;
+    run.poll();
+    assert_eq!(run.pipeline().stage, Stage::Resolve);
+    assert_eq!(run.pipeline().verdict, verdict);
+    run.host.commit(C2);
+    run.host.world().conflict = false;
+    run.host.world().pr.as_mut().unwrap().merge_state = "CLEAN".into();
+    turn_completed(&run.host, "resolver", "t1", Some(&done("Merged the base")));
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    assert_eq!(run.pipeline().verdict, verdict);
+    assert!(run.merges().is_empty());
+}
+
+#[test]
+fn an_author_handoff_requires_an_idle_resumed_pipeline_and_preserves_review_evidence() {
+    let run = Run::start(&github_issue(), false);
+    let reviewed = run.to_gate().verdict;
+    {
+        let mut world = run.host.world();
+        let author = world.sessions.get_mut("author").unwrap();
+        let mut tab = author.tabs[0].clone();
+        tab.id = "continuation".into();
+        author.tabs.push(tab);
+        author.tabs[0].status = crate::store::index::TabStatus::InProgress;
+    }
+    assert!(start(&run.host, "author", "continuation", Some(false), None).is_err());
+    assert_eq!(run.pipeline().author.tab_id, "t1");
+    run.host.world().sessions.get_mut("author").unwrap().tabs[0].status = crate::store::index::TabStatus::Completed;
+    act(&run.host, &run.id, Action::Stop).unwrap();
+    assert!(start(&run.host, "author", "continuation", Some(false), None).unwrap_err().to_string().contains("Resume"));
+    store::set_switches(&run.id, |pipeline| { pipeline.stopped = false; }).unwrap();
+    let continued = start(&run.host, "author", "continuation", Some(false), None).unwrap();
+    assert_eq!(continued.author.tab_id, "continuation");
+    assert_eq!(continued.stage, Stage::Work);
+    assert_eq!(continued.verdict, reviewed);
+    assert_eq!(run.host.world().sessions.get("author").unwrap().tabs[0].id, "t1");
+}
+
+#[test]
+fn a_continuation_persists_its_explicit_merge_choice_without_merging() {
+    for (before, choice, cloud, expected) in [(true, false, false, false), (false, true, false, true), (false, true, true, false)] {
+        let run = Run::start(&github_issue(), before);
+        set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+        let mut pipeline = run.pipeline();
+        pipeline.cloud = cloud;
+        store::commit(&mut pipeline).unwrap();
+        {
+            let mut world = run.host.world();
+            let author = world.sessions.get_mut("author").unwrap();
+            let mut tab = author.tabs[0].clone();
+            tab.id = "continuation".into();
+            author.tabs.push(tab);
+        }
+        let continued = start(&run.host, "author", "continuation", Some(choice), None).unwrap();
+        assert_eq!(continued.auto_merge, expected);
+        assert_eq!(run.pipeline().auto_merge, expected);
+        assert!(continued.resolve_conflicts);
+        assert_eq!(continued.author.tab_id, "continuation");
+        assert!(run.merges().is_empty());
+    }
+}
+
+#[test]
+fn resolver_termination_releases_a_stopped_pipelines_checkout() {
+    for interrupted in [true, false] {
+        let run = Run::start(&github_issue(), false);
+        set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+        run.host.world().conflict = true;
+        assert_eq!(run.poll().stage, Stage::Resolve);
+        act(&run.host, &run.id, Action::Stop).unwrap();
+        assert!(run.pipeline().resolution.is_some(), "Stop cannot release a still-running resolver");
+        turn_failed(&run.host, "resolver", "t1", engine::turn_failure(interrupted));
+        let stopped = run.pipeline();
+        assert!(stopped.stopped);
+        assert_eq!(stopped.state, State::Stopped);
+        assert!(stopped.resolution.is_none());
+        assert!(stopped.events.iter().any(|event| event.kind == "resolutionStopped"));
+        assert!(super::admission::check("author", "t1").is_ok());
+        assert!(run.merges().is_empty());
+        assert!(run.host.world().pushes.is_empty());
+    }
+}
+
+#[test]
+fn all_off_continuation_revokes_both_permissions_and_hands_over_the_existing_pipeline() {
+    let run = Run::start(&github_issue(), true);
+    set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+    {
+        let mut world = run.host.world();
+        let author = world.sessions.get_mut("author").unwrap();
+        let mut tab = author.tabs[0].clone();
+        tab.id = "continuation".into();
+        author.tabs.push(tab);
+    }
+    let continued = engine::continue_launch(&run.host, "author", "continuation", &super::LaunchOptions::default()).unwrap().unwrap();
+    assert_eq!(continued.id, run.id);
+    assert_eq!(continued.author.tab_id, "continuation");
+    assert!(!continued.auto_merge && !continued.resolve_conflicts);
+    assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
+    assert_eq!(store::list().unwrap().len(), 1);
+    assert!(run.merges().is_empty());
+    // Retry on the already-created destination must apply revocations too.
+    store::set_switches(&run.id, |pipeline| { pipeline.auto_merge = true; pipeline.resolve_conflicts = true; }).unwrap();
+    engine::continue_launch(&run.host, "author", "continuation", &super::LaunchOptions::default()).unwrap();
+    assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
+}
+
+#[test]
+fn all_off_continuation_does_not_create_a_pipeline_and_read_errors_are_not_absence() {
+    let _home = crate::store::temp_home();
+    let host = FakeHost::new(&github_issue());
+    assert!(engine::continue_launch(&host, "author", "t1", &super::LaunchOptions::default()).unwrap().is_none());
+    assert!(store::list().unwrap().is_empty());
+    std::fs::write(crate::store::root().unwrap().join("issue-pipelines.json"), "not valid JSON").unwrap();
+    assert!(engine::continue_launch(&host, "author", "t1", &super::LaunchOptions::default()).is_err());
+}
+
+#[test]
+fn all_off_continuation_preserves_a_merged_pipeline_even_after_workspace_cleanup() {
+    for cleaned in [false, true] {
+        let run = Run::start(&github_issue(), true);
+        set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+        let completed = run.to_gate();
+        assert_eq!(completed.state, State::Merged);
+        assert!(completed.auto_merge && completed.resolve_conflicts);
+        let (announced, sent, pushes, merges) = {
+            let mut world = run.host.world();
+            let author = world.sessions.get_mut("author").unwrap();
+            if cleaned {
+                crate::store::index::mark_workspace_removed(author, Some("main".into()));
+                assert_eq!(author.cwd, author.project_path);
+                assert!(author.worktree_removed);
+            }
+            let mut tab = author.tabs[0].clone();
+            tab.id = "continuation".into();
+            author.tabs.push(tab);
+            (world.announced, world.sent.clone(), world.pushes.clone(), world.merges.clone())
+        };
+        assert!(engine::continue_launch(&run.host, "author", "continuation", &super::LaunchOptions::default()).unwrap().is_none());
+        assert_eq!(run.pipeline(), completed, "Completed author, permissions, review and history must stay unchanged");
+        assert_eq!(store::list().unwrap().len(), 1);
+        let world = run.host.world();
+        assert_eq!(world.announced, announced);
+        assert_eq!(world.sent, sent);
+        assert_eq!(world.pushes, pushes);
+        assert_eq!(world.merges, merges);
+    }
+}
+
+#[test]
+fn refused_continuation_still_revokes_explicit_off_permissions() {
+    for stopped in [false, true] {
+        let run = Run::start(&github_issue(), true);
+        set_resolve_conflicts(&run.host, &run.id, true).unwrap();
+        {
+            let mut world = run.host.world();
+            let author = world.sessions.get_mut("author").unwrap();
+            let mut tab = author.tabs[0].clone();
+            tab.id = "continuation".into();
+            author.tabs.push(tab);
+            author.tabs[0].status = crate::store::index::TabStatus::InProgress;
+        }
+        if stopped { act(&run.host, &run.id, Action::Stop).unwrap(); }
+        assert!(engine::continue_launch(&run.host, "author", "continuation", &super::LaunchOptions::default()).is_err());
+        assert_eq!(run.pipeline().author.tab_id, "t1");
+        assert!(!run.pipeline().auto_merge && !run.pipeline().resolve_conflicts);
+        assert!(run.merges().is_empty());
+    }
 }

@@ -380,3 +380,47 @@ it("orders by messages through background updates, metadata edits, persistence, 
   expect(ids()).toEqual(["new", "middle", "old"]);
   expect(ids([...list].reverse())).toEqual(ids());
 });
+
+it("offers checkout cleanup separately from conversation deletion in the active sidebar", async () => {
+  await boot([session("cleanup", "/repos/web", new Date().toISOString(), { cwd: "/repos/web/.raccoon/worktrees/cleanup", worktreeName: "cleanup" })]);
+  mount();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk cleanup" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  const item = await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" });
+  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+  fireEvent.click(item);
+  const dialogs = await import("@/lib/dialogs");
+  const Probe = () => <div data-testid="cleanup-request">{JSON.stringify(dialogs.useDialogs().workspaceRemove)}</div>;
+  render(<Probe />);
+  expect(JSON.parse(screen.getByTestId("cleanup-request").textContent!)).toMatchObject({ mode: "settle", sessionId: "cleanup", path: "/repos/web/.raccoon/worktrees/cleanup" });
+  act(() => dialogs.closeWorkspaceRemove());
+});
+
+
+it("keeps removed-workspace provenance separate from a live checkout on the same branch", async () => {
+  prefs.setPrefs({ branchSessions: "tabs" });
+  await boot([
+    session("old", "/repos/web", new Date().toISOString(), { branch: "main", worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } }),
+    session("live", "/repos/web", new Date().toISOString(), { branch: "topic", worktreeName: "live", cwd: "/repos/web/.raccoon/worktrees/live" }),
+  ]);
+  mount();
+  const kept = screen.getByRole("button", { name: "topic (workspace removed), Talk old" });
+  expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
+  expect(screen.getByRole("button", { name: "topic, Talk live" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /main.*Talk old/ })).toBeNull();
+});
+
+
+it("marks a collapsed group of kept conversations as a removed workspace", async () => {
+  const removed = { branch: "main", worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } };
+  await boot([
+    session("old1", "/repos/web", new Date().toISOString(), removed),
+    session("old2", "/repos/web", new Date().toISOString(), removed),
+  ]);
+  mount();
+  const group = screen.getByTitle("topic (workspace removed)");
+  expect(group.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(group);
+  expect(screen.getByRole("button", { name: /^Talk old1/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /^Talk old2/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /New (session|workspace).*topic/ })).toBeNull();
+});

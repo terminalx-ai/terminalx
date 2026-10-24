@@ -206,7 +206,7 @@ function issueSwitch() {
   return screen.getByRole("switch", { name: "Start issue in a new worktree" });
 }
 
-const MERGE_SWITCH = "Merge automatically when the review is addressed";
+const MERGE_SWITCH = "Merge when green";
 const BRIEF = "End every reply with a status block.";
 
 function pipelineOf(issue: Pick<(typeof issues)[number], "provider" | "id" | "identifier" | "title" | "url">, patch: Partial<IssuePipeline> = {}): IssuePipeline {
@@ -278,7 +278,7 @@ describe("issue session targets", () => {
 
   it("ignores a composer's one-off choice and resets the choice for the next issue", async () => {
     const composer = render(<NewSessionView />);
-    const composerSwitch = screen.getByRole("switch");
+    const composerSwitch = screen.getByRole("switch", { name: /worktree/i });
     fireEvent.click(composerSwitch);
     expect(composerSwitch.getAttribute("aria-checked")).toBe("false");
     expect(getPrefs().useWorktree).toBe(true);
@@ -440,7 +440,7 @@ describe("the pipeline an issue session starts", () => {
   it("is off for the merge by default, and carries the issue's own switch when it is turned on", async () => {
     const onCreated = await open();
     expect(mergeSwitch().getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByText("A pull request is opened and reviewed when the work is done. Off, it stops at Ready to merge.")).toBeTruthy();
+    expect(screen.getByText("With automation enabled, TerminalX opens a pull request and reviews it. With merge off, it stops at Ready to merge.")).toBeTruthy();
     fireEvent.click(mergeSwitch());
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", true);
@@ -468,7 +468,7 @@ describe("the pipeline an issue session starts", () => {
     await open();
     expect(mergeSwitch().getAttribute("aria-checked")).toBe("false");
     expect(mergeSwitch().hasAttribute("disabled")).toBe(true);
-    expect(screen.getByText("A pull request is opened and reviewed when the work is done. This project has a person do the merge.")).toBeTruthy();
+    expect(screen.getByText("This project requires a person to merge.")).toBeTruthy();
     await start();
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
   });

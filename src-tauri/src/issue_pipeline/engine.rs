@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::github::{PinnedMerge, PrSnapshot};
@@ -80,12 +80,22 @@ pub trait Host: Send + Sync {
     }
     /// An independent tab in the author's session, for the review.
     fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef>;
+    fn workspace_idle(&self, pipeline: &Pipeline, _cwd: &Path) -> Result<bool> {
+        Ok([Some(&pipeline.author), pipeline.reviewer.as_ref(), pipeline.resolver.as_ref()].into_iter().flatten().all(|who|
+            self.session(&who.session_id).is_ok_and(|session| session.tab(&who.tab_id).is_some_and(|tab| matches!(tab.status, crate::store::index::TabStatus::Idle | crate::store::index::TabStatus::Completed)))))
+    }
+    fn resolution_needed(&self, _cwd: &Path, _branch: &str, _base: &str, _behind: bool) -> Result<Option<super::Resolution>> { Ok(None) }
+    fn open_resolver(&self, _pipeline: &Pipeline, _author: &SessionEntry) -> Result<SessionRef> { bail!("Conflict resolution is not available on this host") }
+    fn verify_resolution(&self, _cwd: &Path, _resolution: &super::Resolution, _head: &str, _branch: &str) -> Result<()> { bail!("Resolution verification is not available on this host") }
+    fn defer_local_check(&self, _pipeline_id: &str) -> bool { false }
+    fn run_local_check(&self, _cwd: &Path, _command: &str) -> Result<()> { bail!("Local check execution is unavailable on this host") }
     fn workspace(&self, cwd: &Path) -> Result<Workspace>;
     /// What this checkout calls the branch a pull request merges into.
     fn base_ref(&self, cwd: &Path, base_branch: &str) -> String;
     /// What `head` changes relative to where it left `base`.
     fn diff(&self, cwd: &Path, base: &str, head: &str) -> Result<Diff>;
     fn push(&self, cwd: &Path) -> Result<()>;
+    fn push_resolution(&self, cwd: &Path, _branch: &str, _head: &str) -> Result<()> { self.push(cwd) }
     /// The open pull request whose head is `branch`, if there is one.
     fn open_pull_request(&self, cwd: &Path, branch: &str) -> Result<Option<PrSnapshot>>;
     /// Open a pull request for the current branch; its number.
@@ -180,6 +190,8 @@ enum OnError {
     NeedsYou,
     /// A look at GitHub failed: nothing changed, and the caller hears why.
     Report,
+    /// A timer pass may skip a busy pipeline and retry next time.
+    Background,
 }
 
 struct Step<'a> {
@@ -193,15 +205,22 @@ struct Step<'a> {
     settings_error: Option<String>,
     /// The part of the stage in hand, for the reason if it fails.
     doing: &'static str,
+    background: bool,
 }
 
 /// Run one step on a pipeline. A stopped pipeline takes no step unless a
 /// person's own action asks for one.
 fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, action: impl FnOnce(&mut Step<'_>) -> Result<()>) -> Result<Pipeline> {
-    // A stage's work, not a look at GitHub (`OnError::Report`), which the poller takes every few minutes.
+    // Track stage work separately from read-only requests and timer passes.
     let _running = (on_error == OnError::NeedsYou).then(Running::start);
     let lock = step_lock(id);
-    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = if on_error == OnError::Background {
+        match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return store::get(id),
+        }
+    } else { lock.lock().unwrap_or_else(|error| error.into_inner()) };
     let pipeline = store::get(id)?;
     if pipeline.stopped && !even_if_stopped {
         return Ok(pipeline);
@@ -212,10 +231,10 @@ fn run(host: &dyn Host, id: &str, even_if_stopped: bool, on_error: OnError, acti
         Ok(settings) => (settings, None),
         Err(error) => (IssuePipelineSettings::default(), Some(format!("{error:#}"))),
     };
-    let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step" };
+    let mut step = Step { host, p: pipeline, cwd, author, settings, settings_error, doing: "This step", background: on_error == OnError::Background };
     if let Err(error) = action(&mut step) {
         match on_error {
-            OnError::Report => return Err(error),
+            OnError::Report | OnError::Background => return Err(error),
             OnError::NeedsYou => {
                 let reason = StopReason::Failed { step: step.doing.to_string(), message: format!("{error:#}") };
                 step.needs_you(reason);
@@ -405,6 +424,7 @@ impl Step<'_> {
         let to = match role {
             Role::Author => self.p.author.clone(),
             Role::Reviewer => self.p.reviewer.clone().context("the pipeline has no reviewer session")?,
+            Role::Resolver => self.p.resolver.clone().context("the pipeline has no resolver")?,
         };
         self.doing = "Asking the session again";
         self.p.reminded = true;
@@ -489,6 +509,97 @@ impl Step<'_> {
         }
     }
 
+    /// Detect early, but reserve the checkout only at a quiet turn boundary.
+    fn watch_conflicts(&mut self) -> Result<bool> {
+        if self.p.stage == Stage::Resolve { return Ok(true); }
+        let enabled = store::get(&self.p.id)?.resolve_conflicts;
+        if !enabled || self.p.stopped || self.p.state == State::Merged || self.settings_error.is_some() { return Ok(false); }
+        if self.p.state == State::NeedsYou && !matches!(self.p.reason, Some(StopReason::Conflicts | StopReason::Behind)) { return Ok(false); }
+        let workspace = self.host.workspace(&self.cwd)?;
+        if workspace.branch.as_deref() != Some(self.p.branch.as_str()) || workspace.ahead_of_base == 0 { return Ok(false); }
+        let (base, behind, remote) = if let Some(link) = &self.p.pr {
+            let pr = self.host.pull_request(&self.cwd, link.number)?;
+            if pr.state != "OPEN" { self.notice_outcome()?; return Ok(true); }
+            let conflict = pr.mergeable == "CONFLICTING" || pr.merge_state == "DIRTY";
+            let behind = pr.merge_state == "BEHIND";
+            if !conflict && !behind { return Ok(false); }
+            (pr.base, behind, Some(pr.head_sha))
+        } else {
+            let Some(base) = workspace.default_branch else { return Ok(false) };
+            (base, false, None)
+        };
+        // Checking active turns before fetching avoids needless work, but the
+        // reservation repeats this under the same lock as prompt admission.
+        if !self.host.workspace_idle(&self.p, &self.cwd)? {
+            return Ok(false);
+        }
+        if !workspace.dirty.is_empty() {
+            self.needs_you(StopReason::UncommittedChanges { files: workspace.dirty });
+            return Ok(true);
+        }
+        let Some(mut resolution) = self.host.resolution_needed(&self.cwd, &self.p.branch, &base, behind)? else { return Ok(false) };
+        if remote.as_ref().is_some_and(|head| !same_commit(head, &resolution.head)) {
+            self.needs_you(StopReason::HeadMoved { reviewed: resolution.head, head: remote.unwrap() });
+            return Ok(true);
+        }
+        if self.p.resolutions >= self.settings.max_resolutions {
+            self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: format!("The limit of {} resolutions has been reached. Review this branch manually.", self.settings.max_resolutions) });
+            return Ok(true);
+        }
+        let author = self.author.clone().context("The author session is gone")?;
+        let resolver = match self.p.resolver.clone() {
+            Some(resolver) if self.host.session(&resolver.session_id).is_ok_and(|session| session.tab(&resolver.tab_id).is_some()) => resolver,
+            _ => self.host.open_resolver(&self.p, &author)?,
+        };
+        if resolver == self.p.author || self.p.reviewer.as_ref() == Some(&resolver) { bail!("The conflict resolver must be independent of the author and reviewer"); }
+        {
+            let _admission = super::admission::lock();
+            if !self.host.workspace_idle(&self.p, &self.cwd)? || self.halted() || !store::get(&self.p.id)?.resolve_conflicts { return Ok(false); }
+            let Some(current) = self.clean_workspace()? else { return Ok(true) };
+            if !same_commit(&current.head, &resolution.head) { return Ok(false); }
+            resolution.return_stage = self.p.stage;
+            self.p.resolver = Some(resolver.clone());
+            self.p.resolution = Some(resolution.clone());
+            self.p.resolutions += 1;
+            self.enter(Stage::Resolve, format!("Resolving conflicts with {base}."));
+            self.save()?;
+        }
+        self.doing = "Starting the conflict resolver";
+        if let Err(error) = self.host.send(&resolver, &prompts::resolve(&resolution)) {
+            self.p.resolution = None;
+            self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
+            self.save()?;
+            return Ok(true);
+        }
+        self.record("resolutionRequested", format!("Resolution {} with {base} at {}.", self.p.resolutions, short(&resolution.base_commit))).commit = Some(resolution.head);
+        Ok(true)
+    }
+
+    fn resolver_turn(&mut self, message: &str) -> Result<()> {
+        if self.p.stage != Stage::Resolve { return Ok(()); }
+        let Some(resolution) = self.p.resolution.clone() else { return Ok(()) };
+        // The resolver has ended: release admission even if verification fails.
+        self.p.resolution = None;
+        match verdict::author_report(message) {
+            AuthorReport::Done { checks: LocalChecks::Passed | LocalChecks::None, .. } => {}
+            AuthorReport::Done { checks: LocalChecks::Failed, .. } => { self.needs_you(StopReason::LocalChecksFailed); return Ok(()); }
+            AuthorReport::NotDone { reason } => { self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: reason.unwrap_or_else(|| "The resolver could not complete the merge.".into()) }); return Ok(()); }
+            AuthorReport::Missing => { self.needs_you(StopReason::Failed { step: "Resolving conflicts".into(), message: "The resolver ended without a status block.".into() }); return Ok(()); }
+        }
+        self.doing = "Verifying conflict resolution";
+        if !self.host.workspace_idle(&self.p, &self.cwd)? { bail!("Another conversation became active during resolution. Nothing was pushed."); }
+        let Some(workspace) = self.clean_workspace()? else { return Ok(()) };
+        self.host.verify_resolution(&self.cwd, &resolution, &workspace.head, &self.p.branch)?;
+        if self.halted() { return Ok(()); }
+        self.doing = "Pushing conflict resolution";
+        self.host.push_resolution(&self.cwd, &self.p.branch, &workspace.head)?;
+        self.record("resolved", format!("Resolved conflicts with {}; requesting review of the new head.", resolution.base)).commit = Some(workspace.head);
+        // Keep the previous verdict and findings until a fresh independent
+        // review explicitly replaces them. They never authorize the new head.
+        if self.p.pr.is_some() { self.request_review(false) }
+        else { self.enter(resolution.return_stage, "Base updated. Waiting for the author to finish the work."); Ok(()) }
+    }
+
     // ---- the stages ------------------------------------------------------
 
     fn open_pull_request(&mut self) -> Result<()> {
@@ -512,8 +623,8 @@ impl Step<'_> {
             Some(existing) => {
                 // Opened by the session, or by an earlier try: it still has to
                 // link the issue so that merging closes it.
-                if !prompts::links_issue(&existing.body, &issue) {
-                    let body = format!("{}\n\n{}", existing.body.trim_end(), prompts::closing_line(&issue));
+                if let Some(issue) = issue.as_ref().filter(|issue| !prompts::links_issue(&existing.body, issue)) {
+                    let body = format!("{}\n\n{}", existing.body.trim_end(), prompts::closing_line(issue));
                     if let Err(error) = self.host.edit_pull_request_body(&self.cwd, existing.number, body.trim_start()) {
                         self.record("note", format!("Pull request #{} could not be linked to {}: {error:#}", existing.number, issue.identifier));
                     }
@@ -522,10 +633,11 @@ impl Step<'_> {
                 existing
             }
             None => {
-                let body = prompts::pull_request_body(&issue, self.p.summary.as_deref());
-                let number = self.host.create_pull_request(&self.cwd, &issue.title, &body)?;
+                let title = issue.as_ref().map(|issue| issue.title.as_str()).or_else(|| self.author.as_ref().map(|author| author.title.as_str())).unwrap_or(&self.p.branch);
+                let body = prompts::session_pull_request_body(issue.as_ref(), title, self.p.summary.as_deref());
+                let number = self.host.create_pull_request(&self.cwd, title, &body)?;
                 let pr = self.host.pull_request(&self.cwd, number)?;
-                self.record("pullRequest", format!("Opened pull request #{number}. Merging it closes {}.", issue.identifier)).url = Some(pr.url.clone());
+                self.record("pullRequest", format!("Opened pull request #{number}.")).url = Some(pr.url.clone());
                 pr
             }
         };
@@ -541,7 +653,7 @@ impl Step<'_> {
         if self.p.events.iter().any(|event| event.kind == "tracker") {
             return;
         }
-        let issue = self.p.issue.clone();
+        let Some(issue) = self.p.issue.clone() else { return };
         match self.host.move_to_review(&issue) {
             Ok(Some(message)) => self.record("tracker", message).url = Some(issue.url),
             Ok(None) => {}
@@ -554,6 +666,7 @@ impl Step<'_> {
     /// Have the reviewer read the pull request's head. `by_person` is a
     /// review someone asked for by hand, which the round limit does not refuse.
     fn request_review(&mut self, by_person: bool) -> Result<()> {
+        if self.p.stage != Stage::Resolve && self.watch_conflicts()? { return Ok(()); }
         let link = self.p.pr.clone().context("There is no pull request to review yet.")?;
         self.doing = "Reading the pull request";
         let mut pr = self.host.pull_request(&self.cwd, link.number)?;
@@ -620,8 +733,8 @@ impl Step<'_> {
             }
         };
         let previous = self.p.review_commit.clone().filter(|_| !first);
-        let issue_body = if first { self.p.issue_body.clone().or_else(|| self.host.issue_body(&self.p.project_path, &self.p.issue)) } else { None };
-        let request = prompts::ReviewRequest { issue: &self.p.issue, issue_body: issue_body.as_deref(), pr_number: pr.number, pr_url: &pr.url, commit: &pr.head_sha, base: &base, security_areas: &self.p.security_areas };
+        let issue_body = if first { self.p.issue_body.clone().or_else(|| self.p.issue.as_ref().and_then(|issue| self.host.issue_body(&self.p.project_path, issue))) } else { None };
+        let request = prompts::ReviewRequest { issue: self.p.issue.as_ref(), issue_body: issue_body.as_deref(), pr_number: pr.number, pr_url: &pr.url, commit: &pr.head_sha, base: &base, security_areas: &self.p.security_areas };
         let prompt = if first { prompts::review(&request) } else { prompts::review_again(&request, previous.as_deref()) };
 
         let before = (self.p.round, self.p.review_commit.clone(), self.p.review_requested_at.clone());
@@ -713,7 +826,52 @@ impl Step<'_> {
         Ok(workspace.dirty.is_empty() && workspace.branch.as_deref() == Some(self.p.branch.as_str()) && same_commit(&workspace.head, head))
     }
 
+    fn check_locally(&mut self, head: &str) -> Result<bool> {
+        let Some(command) = self.settings.local_check_command.clone().filter(|command| !command.trim().is_empty()) else { return Ok(true) };
+        if self.p.local_check.as_ref().is_some_and(|checked| checked.command == command && same_commit(&checked.head, head)) { return Ok(true); }
+        if self.background && self.host.defer_local_check(&self.p.id) {
+            self.p.stage = Stage::Merge;
+            self.settle(State::Waiting, None, "Waiting for local checks.");
+            return Ok(false);
+        }
+        {
+            let _admission = super::admission::lock();
+            if !self.host.workspace_idle(&self.p, &self.cwd)? {
+                self.p.stage = Stage::Merge;
+                self.settle(State::Waiting, None, "Waiting for conversations to finish before local checks.");
+                return Ok(false);
+            }
+            let Some(workspace) = self.clean_workspace()? else { return Ok(false) };
+            if !same_commit(&workspace.head, head) {
+                self.p.stage = Stage::Merge;
+                self.needs_you(StopReason::HeadMoved { reviewed: head.into(), head: workspace.head });
+                return Ok(false);
+            }
+            self.p.checking_locally = true;
+            self.settle(State::Working, None, format!("Running local checks on {}.", short(head)));
+            self.save()?;
+        }
+        self.doing = "Running local checks";
+        let result = self.host.run_local_check(&self.cwd, &command);
+        self.p.checking_locally = false;
+        self.save()?;
+        if let Err(error) = result {
+            if !self.p.failed_local_checks.iter().any(|failed| same_commit(failed, head)) { self.p.failed_local_checks.push(head.into()); }
+            self.needs_you(StopReason::Failed { step: self.doing.into(), message: format!("{error:#}") });
+            return Ok(false);
+        }
+        let Some(workspace) = self.clean_workspace()? else { return Ok(false) };
+        if !same_commit(&workspace.head, head) || !self.host.workspace_idle(&self.p, &self.cwd)? {
+            bail!("The checkout changed while local checks ran. Their result does not certify the final head.");
+        }
+        self.p.local_check = Some(super::LocalCheck { head: head.into(), command });
+        self.record("localChecks", format!("TerminalX ran the project's local check command successfully on {}.", short(head))).commit = Some(head.into());
+        self.save()?;
+        Ok(true)
+    }
+
     fn evaluate_snapshot(&mut self, pr: PrSnapshot, merger: Merger) -> Result<()> {
+        if merger == Merger::Pipeline && pr.state == "OPEN" && self.p.stage != Stage::Resolve && self.watch_conflicts()? { return Ok(()); }
         if pr.state == "OPEN" && self.local_checks_failed(&pr.head_sha) {
             self.needs_you(StopReason::LocalChecksFailed);
             return Ok(());
@@ -735,6 +893,14 @@ impl Step<'_> {
                 return Ok(());
             }
         }
+        let checked_before = self.p.local_check.clone();
+        if pr.state == "OPEN" && self.p.verdict.as_ref().is_some_and(|verdict| same_commit(&verdict.commit, &pr.head_sha)) && !self.check_locally(&pr.head_sha)? { return Ok(()); }
+        if checked_before != self.p.local_check {
+            // A local command may take minutes: CI and project policy must be
+            // read again after it, before deciding whether to merge.
+            self.settings = self.host.settings(&self.p.project_path)?;
+            return self.evaluate(merger);
+        }
         let link = PrLink { number: pr.number, url: pr.url.clone(), base: pr.base.clone() };
         let verdict = self.p.verdict.clone();
         let reviewed_head = verdict.as_ref().is_some_and(|verdict| same_commit(&verdict.commit, &pr.head_sha));
@@ -752,7 +918,7 @@ impl Step<'_> {
         // everything that makes a merge wrong still applies to them.
         let by_person = merger == Merger::Person;
         let (auto_merge, _) = self.switches();
-        let decision = gate::decide(&Facts {
+        let decision = gate::decide_with_local(&Facts {
             auto_merge: merger == Merger::Agent || by_person || auto_merge,
             require_person: !by_person && self.settings.require_person,
             cloud: !by_person && self.p.cloud,
@@ -762,7 +928,7 @@ impl Step<'_> {
             protected: if by_person { &[] } else { &protected },
             ignored_checks: &self.settings.ignored_checks,
             allow_no_ci: self.settings.allow_no_ci,
-        });
+        }, self.settings.local_checks_only && self.p.local_check.as_ref().is_some_and(|check| same_commit(&check.head, &pr.head_sha) && self.settings.local_check_command.as_deref() == Some(check.command.as_str())));
         self.p.stage = Stage::Merge;
         self.p.pr = Some(link.clone());
         if !matches!(decision, Gate::Wait(_)) {
@@ -844,6 +1010,9 @@ impl Step<'_> {
         // merge is still known to have been asked for, and by whom.
         self.p.merge_requested = Some(MergeRequest { commit: commit.to_string(), by, at: self.stamp() });
         self.p.merge_refused = None;
+        self.p.state = State::Working;
+        self.p.note = Some("Merging the pull request.".into());
+        self.save()?;
         match self.host.merge(&self.cwd, link.number, &self.settings.merge_method, commit) {
             Ok(PinnedMerge::Merged) => self.merged(link, commit, by),
             Ok(PinnedMerge::Accepted) => {
@@ -923,6 +1092,10 @@ impl Step<'_> {
                 self.record("workDone", "Taken as addressed by a person.");
                 self.push_and_review()
             }
+            Stage::Resolve => {
+                if self.p.resolution.is_some() { bail!("The conflict resolver is still running."); }
+                if self.p.pr.is_some() { self.push_and_review() } else { self.open_pull_request() }
+            },
             Stage::Merge => {
                 // A person asking is reason to put a refused merge to GitHub once more.
                 self.p.merge_refused = None;
@@ -958,18 +1131,75 @@ fn verdict_line(verdict: &Verdict, max_rounds: u32) -> String {
 
 // ---- what moves a pipeline -------------------------------------------------
 
+/// Apply continuation launch choices, including explicit revocations. An
+/// all-off launch without an existing pipeline leaves the session unautomated.
+pub fn continue_launch(host: &dyn Host, session_id: &str, tab_id: &str, options: &super::LaunchOptions) -> Result<Option<Pipeline>> {
+    let session = host.session(session_id)?;
+    if session.tab(tab_id).is_none() { bail!("tab {tab_id} not found in session {session_id}"); }
+    let existing = store::for_session(session_id)?.filter(|pipeline| pipeline.author.session_id == session_id);
+    if let Some(existing) = existing {
+        // Completed automation is history, not an author handoff. This also
+        // allows retained conversations whose checkout has already been removed.
+        // Active/stopped pipelines must still revoke permissions below.
+        if existing.state == State::Merged && !options.auto_merge && !options.resolve_conflicts {
+            return Ok(None);
+        }
+        // Revocations take effect even if the author is busy or the pipeline
+        // is stopped and the handoff must be refused. Never grant permission
+        // until the handoff has succeeded, and never evaluate the merge gate here.
+        let revoked = store::set_switches(&existing.id, |pipeline| {
+            if !options.auto_merge { pipeline.auto_merge = false; }
+            if !options.resolve_conflicts { pipeline.resolve_conflicts = false; }
+        })?;
+        host.changed(&revoked);
+    } else if !options.auto_merge && !options.resolve_conflicts {
+        return Ok(None);
+    }
+    let pipeline = start(host, session_id, tab_id, Some(options.auto_merge), None)?;
+    let pipeline = store::set_switches(&pipeline.id, |pipeline| {
+        pipeline.auto_merge = options.auto_merge && !pipeline.cloud && !host.cloud();
+        pipeline.resolve_conflicts = options.resolve_conflicts;
+    })?;
+    host.changed(&pipeline);
+    Ok(Some(pipeline))
+}
+
 /// Start a pipeline for a session that was started from an issue.
 /// `auto_merge` is the issue's own switch; `None` takes the project's default.
 /// `issue_body` is the issue's text as the session was started with it, kept
 /// for the reviewer where the tracker cannot be read again (a cloud workspace).
 pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option<bool>, issue_body: Option<&str>) -> Result<Pipeline> {
     let session = host.session(session_id)?;
-    let issue = session.issue.clone().ok_or_else(|| anyhow!("This session was not started from an issue."))?;
+    let issue = session.issue.clone();
     if session.tab(tab_id).is_none() {
         bail!("tab {tab_id} not found in session {session_id}");
     }
     if let Some(existing) = store::for_session(session_id)?.filter(|pipeline| pipeline.author.session_id == session_id) {
-        return Ok(existing);
+        if existing.author.tab_id == tab_id { return Ok(existing); }
+        if existing.stopped { bail!("Resume this pipeline before handing it to a new author conversation."); }
+        return run(host, &existing.id, true, OnError::Report, |step| {
+            if step.p.stopped { bail!("Resume this pipeline before handing it to a new author conversation."); }
+            let _admission = super::admission::lock();
+            let next = SessionRef { session_id: session_id.into(), tab_id: tab_id.into() };
+            if step.p.reviewer.as_ref() == Some(&next) || step.p.resolver.as_ref() == Some(&next) {
+                bail!("An independent reviewer or resolver cannot become this pipeline's author.");
+            }
+            if step.p.resolution.is_some() || step.p.checking_locally || !host.workspace_idle(&step.p, &step.cwd)? {
+                bail!("Wait for the existing conversations to finish before handing over this pipeline.");
+            }
+            if step.p.state == State::Merged { bail!("This branch's pipeline has merged. Start new work on a new branch."); }
+            // Launch choices are authorization, not merely defaults. Persist
+            // through the switch writer so save() cannot restore the old value.
+            if let Some(value) = auto_merge {
+                let value = value && !step.p.cloud && !host.cloud();
+                store::set_switches(&step.p.id, |pipeline| pipeline.auto_merge = value)?;
+                step.record("autoMerge", if value { "Automatic merge enabled for the new author." } else { "Automatic merge disabled for the new author." });
+            }
+            step.p.author = next;
+            step.enter(Stage::Work, "The new author conversation is continuing the work.");
+            step.record("handoff", "Pipeline ownership moved to a new conversation in this session; the original history was left unchanged.");
+            Ok(())
+        });
     }
     let settings = host.settings(&session.project_path).context("The project's issue pipeline settings could not be read.")?;
     if !settings.enabled {
@@ -1001,13 +1231,17 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         author: SessionRef { session_id: session_id.to_string(), tab_id: tab_id.to_string() },
         reviewer: None,
         auto_merge,
+        resolve_conflicts: settings.resolve_conflicts,
+        resolutions: 0,
+        resolver: None,
+        resolution: None,
         cloud,
         issue_body,
         stopped: false,
         stage: Stage::Work,
         state: State::Working,
         reason: None,
-        note: Some("The author session is working on the issue.".into()),
+        note: Some("The author session is working on the branch.".into()),
         pr: None,
         round: 0,
         max_rounds: settings.max_rounds,
@@ -1016,6 +1250,8 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         findings_sent_round: 0,
         verdict: None,
         failed_local_checks: Vec::new(),
+        local_check: None,
+        checking_locally: false,
         security_areas: Vec::new(),
         summary: None,
         reminded: false,
@@ -1027,7 +1263,7 @@ pub fn start(host: &dyn Host, session_id: &str, tab_id: &str, auto_merge: Option
         created: now.clone(),
         modified: now.clone(),
     };
-    pipeline.record(&now, "started", format!("Session started on {} {}.", issue.identifier, issue.title)).session_id = Some(session_id.to_string());
+    pipeline.record(&now, "started", format!("Session started on {}.", session.title)).session_id = Some(session_id.to_string());
     if auto_merge {
         pipeline.record(&now, "autoMerge", "Automatic merge is on for this issue.");
     }
@@ -1046,9 +1282,10 @@ pub fn turn_completed(host: &dyn Host, session_id: &str, tab_id: &str, final_mes
         return;
     };
     let message = final_message.unwrap_or_default();
-    let result = run(host, &pipeline.id, false, OnError::NeedsYou, |step| match role {
+    let result = run(host, &pipeline.id, role == Role::Resolver, OnError::NeedsYou, |step| match role {
         Role::Author => step.author_turn(message),
         Role::Reviewer => step.reviewer_turn(message),
+        Role::Resolver => step.resolver_turn(message),
     });
     if let Err(error) = result {
         log::warn!("issue pipeline {}: {error:#}", pipeline.id);
@@ -1069,12 +1306,21 @@ pub fn turn_failed(host: &dyn Host, session_id: &str, tab_id: &str, detail: &str
     let Some((pipeline, role)) = taking_part(session_id, tab_id) else {
         return;
     };
-    let result = run(host, &pipeline.id, false, OnError::NeedsYou, |step| {
+    let result = run(host, &pipeline.id, role == Role::Resolver, OnError::NeedsYou, |step| {
         let waiting_on_it = match role {
             Role::Author => matches!(step.p.stage, Stage::Work | Stage::Address),
             Role::Reviewer => step.p.stage == Stage::Review,
+            Role::Resolver => step.p.stage == Stage::Resolve,
         };
-        if waiting_on_it && step.p.state == State::Working {
+        // Termination releases the checkout even if Stop changed the state
+        // while the resolver was still running. Stop itself must not release it.
+        if role == Role::Resolver && step.p.resolution.take().is_some() {
+            if step.p.stopped {
+                step.record("resolutionStopped", format!("{detail} The conflict resolver released the checkout; inspect its changes before continuing."));
+            } else {
+                step.needs_you(StopReason::SessionStopped { role: role.label().into(), detail: detail.to_string() });
+            }
+        } else if waiting_on_it && step.p.state == State::Working {
             step.needs_you(StopReason::SessionStopped { role: role.label().into(), detail: detail.to_string() });
         }
         Ok(())
@@ -1090,13 +1336,25 @@ fn taking_part(session_id: &str, tab_id: &str) -> Option<(Pipeline, Role)> {
     Some((pipeline, role))
 }
 
+pub fn run_local_checks(host: &dyn Host, id: &str) {
+    if let Err(error) = run(host, id, false, OnError::NeedsYou, |step| step.evaluate(Merger::Pipeline)) {
+        log::warn!("pipeline local checks {id}: {error:#}");
+    }
+}
+
+pub fn set_resolve_conflicts(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline> {
+    let pipeline = store::set_switches(id, |pipeline| { pipeline.resolve_conflicts = value; })?;
+    host.changed(&pipeline);
+    Ok(pipeline)
+}
+
 /// Flip "Merge automatically when the review is addressed" for one issue.
 /// Off takes effect at once, even against a step that is about to merge. On
 /// merges a pull request that was only waiting for the switch.
 pub fn set_auto_merge(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline> {
     let stored = store::get(id)?;
     if value && (stored.cloud || host.cloud()) {
-        bail!("{} is in a cloud workspace, which never merges by itself. Merge it from the issue page once it is ready.", stored.issue.identifier);
+        bail!("{} is in a cloud workspace, which never merges by itself. Merge it from the issue page once it is ready.", stored.label());
     }
     let was = stored.auto_merge;
     let switched = store::set_switches(id, |pipeline| pipeline.auto_merge = value)?;
@@ -1146,15 +1404,15 @@ pub enum Action {
 /// What an action needs before it may touch anything. Asking for something
 /// the pipeline is not in a position to do is refused and changes nothing.
 fn refuse(pipeline: &Pipeline, action: Action) -> Result<()> {
-    let reviewing = pipeline.stage == Stage::Review && pipeline.state == State::Working;
+    let reviewing = matches!(pipeline.stage, Stage::Review | Stage::Resolve) && pipeline.state == State::Working;
     match action {
         // Made on the reader's computer, with their own `gh` (`note_merge`).
-        Action::Merge if pipeline.cloud => bail!("{} is in a cloud workspace: it is merged from the issue page in TerminalX on your computer, with your own GitHub sign-in.", pipeline.issue.identifier),
-        Action::Merge if pipeline.state != State::ReadyToMerge => bail!("{} is not at Ready to merge.", pipeline.issue.identifier),
-        Action::Review if pipeline.pr.is_none() => bail!("{} has no pull request to review yet.", pipeline.issue.identifier),
-        Action::Review | Action::Advance if reviewing => bail!("A review of {} is already under way.", pipeline.issue.identifier),
-        Action::Review | Action::Advance | Action::Stop | Action::Refresh if pipeline.state == State::Merged => bail!("{} is merged.", pipeline.issue.identifier),
-        Action::Review | Action::Advance | Action::Merge if pipeline.stopped => bail!("{} is stopped. Resume it first.", pipeline.issue.identifier),
+        Action::Merge if pipeline.cloud => bail!("{} is in a cloud workspace: it is merged from the issue page in TerminalX on your computer, with your own GitHub sign-in.", pipeline.label()),
+        Action::Merge if pipeline.state != State::ReadyToMerge => bail!("{} is not at Ready to merge.", pipeline.label()),
+        Action::Review if pipeline.pr.is_none() => bail!("{} has no pull request to review yet.", pipeline.label()),
+        Action::Review | Action::Advance if reviewing => bail!("A review of {} is already under way.", pipeline.label()),
+        Action::Review | Action::Advance | Action::Stop | Action::Refresh if pipeline.state == State::Merged => bail!("{} is merged.", pipeline.label()),
+        Action::Review | Action::Advance | Action::Merge if pipeline.stopped => bail!("{} is stopped. Resume it first.", pipeline.label()),
         _ => Ok(()),
     }
 }
@@ -1192,6 +1450,7 @@ pub fn act(host: &dyn Host, id: &str, action: Action) -> Result<Pipeline> {
                     }
                     Stage::PullRequest => step.open_pull_request(),
                     Stage::Review => step.request_review(true),
+                    Stage::Resolve => bail!("Inspect the interrupted resolution before resuming."),
                     Stage::Merge => step.evaluate(Merger::Pipeline),
                 }
             })
@@ -1242,16 +1501,16 @@ pub fn note_merge(host: &dyn Host, id: &str, commit: &str) -> Result<Pipeline> {
 /// of the pull request stage.
 pub fn note_tracker(host: &dyn Host, id: &str, message: &str) -> Result<Pipeline> {
     run(host, id, true, OnError::Report, |step| {
-        if !step.p.cloud || step.p.issue.provider != "linear" {
-            bail!("{} is not a Linear issue carried by a cloud workspace.", step.p.issue.identifier);
+        if !step.p.cloud || !step.p.issue.as_ref().is_some_and(|issue| issue.provider == "linear") {
+            bail!("{} is not a Linear issue carried by a cloud workspace.", step.p.label());
         }
         if step.p.pr.is_none() {
-            bail!("{} has no pull request yet.", step.p.issue.identifier);
+            bail!("{} has no pull request yet.", step.p.label());
         }
         if step.p.events.iter().any(|event| event.kind == "tracker") {
             return Ok(());
         }
-        let url = step.p.issue.url.clone();
+        let url = step.p.issue.as_ref().context("No issue to move")?.url.clone();
         step.record("tracker", message).url = Some(url);
         Ok(())
     })
@@ -1274,16 +1533,17 @@ pub fn poll(host: &dyn Host) {
     };
     let now = host.now();
     let mut parked = 0;
-    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.pr.is_some()) {
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && (pipeline.pr.is_some() || pipeline.resolve_conflicts)) {
         let at_gate = pipeline.stage == Stage::Merge;
         let due = match pipeline.state {
-            State::Waiting | State::Working => at_gate,
+            State::Waiting | State::Working => at_gate || pipeline.resolve_conflicts,
             // Parked on a person, at any stage: they may have merged or
             // closed the pull request by hand.
             State::ReadyToMerge | State::NeedsYou => {
                 let recent = DateTime::parse_from_rfc3339(&pipeline.modified).is_ok_and(|modified| (now - modified.with_timezone(&Utc)).num_days() < PARKED_FOR_DAYS);
                 let looked = LOOKED.lock().unwrap_or_else(|error| error.into_inner()).get(&pipeline.id).copied();
-                let due = recent && parked < PARKED_PER_PASS && looked.is_none_or(|looked| (now - looked).num_minutes() >= PARKED_EVERY_MINUTES);
+                let resolving = pipeline.resolve_conflicts && matches!(pipeline.reason, Some(StopReason::Conflicts | StopReason::Behind));
+                let due = resolving || (recent && parked < PARKED_PER_PASS && looked.is_none_or(|looked| (now - looked).num_minutes() >= PARKED_EVERY_MINUTES));
                 parked += usize::from(due);
                 due
             }
@@ -1294,8 +1554,12 @@ pub fn poll(host: &dyn Host) {
         }
         LOOKED.lock().unwrap_or_else(|error| error.into_inner()).insert(pipeline.id.clone(), now);
         // GitHub being unreachable for a pass changes nothing and is tried again.
-        let look = |step: &mut Step<'_>| if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) } else { step.notice_outcome() };
-        if let Err(error) = run(host, &pipeline.id, false, OnError::Report, look) {
+        let look = |step: &mut Step<'_>| {
+            if step.watch_conflicts()? { return Ok(()); }
+            if step.p.stage == Stage::Merge { step.evaluate(Merger::Pipeline) }
+            else if step.p.pr.is_some() { step.notice_outcome() } else { Ok(()) }
+        };
+        if let Err(error) = run(host, &pipeline.id, false, OnError::Background, look) {
             log::warn!("issue pipeline {}: {error:#}", pipeline.id);
             // But not for ever: a wait that has run out stops for a person
             // even while GitHub cannot be read, as it would once it could.
@@ -1316,17 +1580,31 @@ pub fn poll(host: &dyn Host) {
     }
 }
 
+fn recover_reservations(host: &dyn Host, pipelines: &[Pipeline]) {
+    for pipeline in pipelines.iter().filter(|pipeline| pipeline.resolution.is_some() || pipeline.checking_locally) {
+        let _ = run(host, &pipeline.id, true, OnError::NeedsYou, |step| {
+            step.p.resolution = None;
+            step.p.checking_locally = false;
+            step.needs_you(StopReason::Failed { step: "Recovering checkout automation".into(), message: "TerminalX restarted during resolution or local checks. Inspect the checkout and any remaining processes before continuing; no result was accepted.".into() });
+            Ok(())
+        });
+    }
+}
+
 /// After the app starts: whatever a pipeline was in the middle of did not
 /// survive the restart, and it says so rather than showing "working" for ever.
 pub fn recover(host: &dyn Host) {
     let Ok(pipelines) = store::list() else {
         return;
     };
-    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.stage != Stage::Merge) {
+    recover_reservations(host, &pipelines);
+
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.stage != Stage::Merge && pipeline.resolution.is_none() && !pipeline.checking_locally) {
         let result = run(host, &pipeline.id, false, OnError::NeedsYou, |step| {
             let closed = "TerminalX was closed before it finished.";
             let reason = match step.p.stage {
                 Stage::Work | Stage::Address => StopReason::SessionStopped { role: Role::Author.label().into(), detail: closed.into() },
+                Stage::Resolve => { step.p.resolution = None; StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: closed.into() } },
                 Stage::Review => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: closed.into() },
                 Stage::PullRequest | Stage::Merge => StopReason::Failed { step: "Opening the pull request".into(), message: closed.into() },
             };
@@ -1351,12 +1629,14 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
     let Ok(pipelines) = store::list() else {
         return;
     };
+    recover_reservations(host, &pipelines);
     let ended = |session: &SessionRef| interrupted.iter().any(|(session_id, tab_id)| *session_id == session.session_id && *tab_id == session.tab_id);
     let restarted = "The workspace's runtime restarted during its turn.";
-    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working) {
+    for pipeline in pipelines.into_iter().filter(|pipeline| !pipeline.stopped && pipeline.state == State::Working && pipeline.resolution.is_none() && !pipeline.checking_locally) {
         let waits_on = match pipeline.stage {
             Stage::Work | Stage::Address => Some(pipeline.author.clone()),
             Stage::Review => pipeline.reviewer.clone(),
+            Stage::Resolve => pipeline.resolver.clone(),
             Stage::PullRequest | Stage::Merge => None,
         };
         if let Some(session) = waits_on.filter(|session| !ended(session)) {
@@ -1369,6 +1649,7 @@ pub fn resume(host: &dyn Host, interrupted: &[(String, String)]) {
         let reason = match pipeline.stage {
             Stage::Work | Stage::Address if ended(&pipeline.author) => StopReason::SessionStopped { role: Role::Author.label().into(), detail: restarted.into() },
             Stage::Review if pipeline.reviewer.as_ref().is_some_and(ended) => StopReason::SessionStopped { role: Role::Reviewer.label().into(), detail: restarted.into() },
+            Stage::Resolve => StopReason::SessionStopped { role: Role::Resolver.label().into(), detail: restarted.into() },
             Stage::PullRequest => StopReason::Failed { step: "Opening the pull request".into(), message: "The workspace's runtime restarted before it finished.".into() },
             _ => continue,
         };

@@ -252,7 +252,7 @@ export function cloudWorkers(input: CloudWorkInput, now = Date.now()): Map<strin
     const issue = list?.find((session) => session.id === row.sessionId)?.issue;
     if (issue) candidates.set(row.key, { issue });
   }
-  for (const pipeline of pipelines) candidates.set(pipeline.author.sessionId, { issue: pipeline.issue, pipeline });
+  for (const pipeline of pipelines) if (pipeline.issue) candidates.set(pipeline.author.sessionId, { issue: pipeline.issue, pipeline });
   for (const started of input.started.filter((entry) => entry.projectPath === input.projectPath)) candidates.set(started.key, { ...candidates.get(started.key), issue: started.issue, started });
   for (const [key, candidate] of candidates) {
     const target = parseCloudWorkspaceKey(key);

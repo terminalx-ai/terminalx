@@ -1,6 +1,6 @@
 import "@testing-library/dom";
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IssuePipelineSettings } from "@/types/issuePipeline";
 import type { Project, ProjectPatch } from "@/types/session";
@@ -15,7 +15,7 @@ vi.mock("@/lib/sessions", () => ({ updateProject }));
 const { IssuePipelineSettingsDialog } = await import("./IssuePipelineSettingsDialog");
 
 const defaults: IssuePipelineSettings = {
-  enabled: true, autoMerge: false, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
+  enabled: true, autoMerge: false, resolveConflicts: false, maxResolutions: 3, requirePerson: false, maxRounds: 3, mergeMethod: "merge",
   protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
 };
 const project = (issuePipeline?: IssuePipelineSettings): Project => ({ path: "/repo", name: "Widgets", issuePipeline });
@@ -57,7 +57,7 @@ describe("a project's issue pipeline settings", () => {
     expect(screen.getByRole("dialog", { name: "Issue pipeline · Widgets" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Open a pull request and review it" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("switch", { name: "Merge automatically by default" }).getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByRole("radio", { name: "3" }).getAttribute("aria-checked")).toBe("true");
+    expect(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "3" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: "Merge commit" }).getAttribute("aria-checked")).toBe("true");
 
     fireEvent.click(screen.getByRole("radio", { name: "Squash" }));
@@ -71,12 +71,12 @@ describe("a project's issue pipeline settings", () => {
     fireEvent.click(screen.getByRole("switch", { name: "A person does the merge" }));
     // Shown as chosen before the app has answered.
     expect(screen.getByRole("switch", { name: "A person does the merge" }).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(screen.getByRole("radio", { name: "5" }));
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "5" }));
     expect(updateProject).toHaveBeenCalledTimes(2);
     // The second save carries the first change too: it does not put the switch back.
     expect(saved()).toEqual({ ...defaults, requirePerson: true, maxRounds: 5 });
     finish({ ...project({ ...defaults, requirePerson: true }) });
-    await waitFor(() => expect(screen.getByRole("radio", { name: "5" }).getAttribute("aria-checked")).toBe("true"));
+    await waitFor(() => expect(within(screen.getByRole("radiogroup", { name: "Review rounds" })).getByRole("radio", { name: "5" }).getAttribute("aria-checked")).toBe("true"));
   });
 
   it("holds the default off, and says nothing can merge, where a person does the merge", () => {

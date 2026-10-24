@@ -1,3 +1,4 @@
+import { setCloudPipelineResolveConflicts } from "@/lib/cloudPipelines";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { Check, ChevronRight, CircleAlert, Cloud, ExternalLink, GitMerge, GitPullRequest, Loader2, MessageSquare, Pause } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -8,7 +9,7 @@ import { cn } from "@/lib/cn";
 import { findCloudWorkspace, useCloudCatalog } from "@/lib/cloudCatalog";
 import { openCloudSession } from "@/lib/cloudDashboard";
 import { lookAtCloudPipeline } from "@/lib/cloudPipelines";
-import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, setPipelineAutoMerge, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
+import { actOnAnyPipeline, actOnPipeline, countOf, pipelineActions, pipelineHeadline, pipelineSettings, pipelineSteps, setPipelineAutoMerge, setPipelineResolveConflicts, type PipelineStep, type PipelineTone } from "@/lib/issuePipeline";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { FindingSeverity, IssuePipeline, PipelineAction, PipelineFinding } from "@/types/issuePipeline";
@@ -109,7 +110,7 @@ function Finding({ finding }: { finding: PipelineFinding }) {
 export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const store = useSessionStore();
   const catalog = useCloudCatalog();
-  const [busy, setBusy] = useState<PipelineAction | "autoMerge" | null>(null);
+  const [busy, setBusy] = useState<PipelineAction | "autoMerge" | "resolveConflicts" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
 
@@ -129,7 +130,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
   const done = pipeline.state === "merged";
 
   const run = useCallback(
-    async (what: PipelineAction | "autoMerge", work: () => Promise<unknown>) => {
+    async (what: PipelineAction | "autoMerge" | "resolveConflicts", work: () => Promise<unknown>) => {
       setBusy(what);
       setError(null);
       try {
@@ -213,10 +214,16 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
         </p>
       )}
 
+      {!done && <label className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2 text-xs">
+        <span>Resolve conflicts automatically</span>
+        <Switch aria-label="Resolve conflicts automatically" size="sm" checked={pipeline.resolveConflicts ?? false} disabled={busy != null}
+          onCheckedChange={(value) => void run("resolveConflicts", () => place ? setCloudPipelineResolveConflicts(pipeline, value) : setPipelineResolveConflicts(pipeline.id, value))} />
+      </label>}
+
       {!done && !place && (
         <label className="flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2 text-xs">
           <span className="min-w-0">
-            <span className="block font-medium">Merge automatically when the review is addressed</span>
+            <span className="block font-medium">Merge when green</span>
             <span className="text-faint">
               {settings.requirePerson
                 ? "This project has a person do the merge, whatever this is set to."
@@ -224,7 +231,7 @@ export function IssuePipelinePanel({ pipeline }: { pipeline: IssuePipeline }) {
             </span>
           </span>
           <Switch
-            aria-label="Merge automatically when the review is addressed"
+            aria-label="Merge when green"
             size="sm"
             checked={pipeline.autoMerge}
             disabled={busy != null || settings.requirePerson}

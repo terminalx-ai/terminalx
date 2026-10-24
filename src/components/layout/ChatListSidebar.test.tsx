@@ -162,3 +162,18 @@ describe("a bot's face", () => {
     expect(botColor("one")).toBe(botColor("one"));
   });
 });
+
+
+it("offers conversation-preserving cleanup in the list view and marks kept history", async () => {
+  await boot([
+    session("live", "/repos/web", at(2), { worktreeName: "live", cwd: "/repos/web/.raccoon/worktrees/live" }),
+    session("kept", "/repos/web", at(1), { worktreeRemoved: true, removedWorkspace: { name: "old", path: "/repos/web/.raccoon/worktrees/old", branch: "topic" } }),
+  ]);
+  mount();
+  const kept = screen.getByRole("button", { name: "Talk kept" });
+  expect(within(kept).getByText("removed")).toBeTruthy();
+  expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+});

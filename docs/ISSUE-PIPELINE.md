@@ -1,4 +1,69 @@
-# Issue pipeline
+# Session pipeline
+
+The shared launch settings offer **Resolve conflicts automatically** and **Merge
+when green** on Git worktree branches. Both default to the project's pipeline
+settings and can be changed from the session's pipeline panel. The read-only
+cleanup line follows the existing merged-cleanup settings; its link opens those
+settings. There is no per-session cleanup override or second deletion engine.
+Continuing a session applies both launch switches even when both are off.
+Existing permissions are revoked before attempting the author handoff, so a
+busy or stopped author cannot leave an explicit opt-out enabled. With both
+switches off and no existing pipeline, continuation creates no pipeline. A
+lookup or handoff failure prevents the new conversation from starting.
+With both switches off, a merged pipeline also allows an unautomated continuation,
+including after workspace cleanup. Its completed author, review and history stay
+unchanged; there is no handoff or new pipeline.
+
+Folder projects and quick chats have no Git pipeline. A cloud workspace's first
+session and its agent-tab form use the base checkout; create a worktree session
+from the cloud project to use conflict automation. Cloud merging always remains
+with a person using desktop credentials.
+
+A pipeline's `issue` is optional. Existing issue records deserialize unchanged;
+a session without an issue uses its title and completion summary for the PR,
+with no issue-closing reference and no tracker update. Launching automation
+supplies the same explicit status-block handoff as issue work.
+
+## Conflict resolution
+
+Opt-in pipelines are checked every 30 seconds, including before a PR exists.
+The watcher fetches origin and uses `git merge-tree` without modifying the
+checkout. With a PR, GitHub's `CONFLICTING`, `DIRTY`, or required-up-to-date
+`BEHIND` state triggers the comparison. It does nothing while an author or
+reviewer has an active or queued turn. Dirty workspaces stop for a person.
+
+A fresh resolver conversation reserves the checkout. App prompt admission and
+managed agents' tool hooks refuse another conversation while it is reserved.
+The resolver merges the pinned base commit, preserving both sides' intent,
+runs project checks, and makes one merge commit. TerminalX verifies the exact
+parents and unchanged remote head before a normal, never forced, push. A changed
+remote, unexpected commit, failed check, ambiguous resolution, or exhausted
+`maxResolutions` stops at **Needs you**. Direct external Git writes cannot be
+prevented; their changed heads invalidate verification. A restart discards an
+unfinished resolution/check result and asks for inspection before continuing.
+
+Every changed head gets an independent review and fresh checks. Prior findings
+and security verdicts remain recorded until that review explicitly replaces
+them. Resolver attempts and review rounds have separate bounds (three each by
+default). The implementation uses merges, preserving published history.
+
+## TerminalX-run local checks
+
+`localCheckCommand` runs through `/bin/sh` in the checkout, with a 30-minute
+timeout and checkout admission held for its duration. Success is bound to both
+the head and command; a dirty or moved checkout invalidates it. GitHub and project
+policy are reread after the command finishes. By default these checks supplement
+hosted CI. `localChecksOnly` may replace optional hosted checks only when GitHub
+positively reports no required checks and protection/validation is readable.
+Required hosted checks, blocked branches, review identity, security categories,
+and commit-pinned merges remain enforced. A cloud merge also requires the
+runtime's successful command evidence for the final head.
+
+Only transitions to **Needs you** raise a pipeline notification. The session
+badge opens the pipeline panel, where its state, findings, and controls remain
+available after an issue leaves the tracker list.
+
+## Existing issue workflow
 
 A session started from a GitHub or Linear issue used to end at "the agent wrote
 some code". It now goes on through five stages, each shown on the issue's page:

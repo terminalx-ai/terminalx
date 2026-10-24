@@ -54,6 +54,7 @@ export type AutomationRunStatus =
   | "skippedUnavailable";
 
 export interface Automation {
+  pipeline?: import("@/lib/pipelineLaunch").PipelineLaunch | null;
   id: string;
   name: string;
   enabled: boolean;
