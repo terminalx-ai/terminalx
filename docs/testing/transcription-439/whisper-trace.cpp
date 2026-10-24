@@ -3,6 +3,7 @@
 #include <transcribe.h>
 #include <transcribe/whisper.h>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -11,8 +12,17 @@
 int main(int argc, char **argv) {
     if (argc < 4) return 1;
     if (transcribe_init_backends_default() != TRANSCRIBE_OK) return 2;
+    transcribe_model_load_params load;
+    transcribe_model_load_params_init(&load);
+    // Diagnostic override only. Reject typos instead of silently using AUTO.
+    if (const char *backend = std::getenv("TX439_TRACE_BACKEND")) {
+        if (std::strcmp(backend, "cpu") == 0) load.backend = TRANSCRIBE_BACKEND_CPU;
+        else if (std::strcmp(backend, "metal") == 0) load.backend = TRANSCRIBE_BACKEND_METAL;
+        else return 8;
+    }
     transcribe_model *model = nullptr;
-    if (transcribe_model_load_file(argv[1], nullptr, &model) != TRANSCRIBE_OK) return 3;
+    if (transcribe_model_load_file(argv[1], &load, &model) != TRANSCRIBE_OK) return 3;
+    std::cerr << "TRACE_BACKEND\t" << transcribe_model_backend(model) << '\n';
     bool failed = false;
     for (int file = 3; file < argc; file++) {
         std::ifstream input(argv[file], std::ios::binary);

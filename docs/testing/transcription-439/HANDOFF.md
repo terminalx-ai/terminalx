@@ -5,7 +5,9 @@ recorded in [NATIVE-RESULTS.md](NATIVE-RESULTS.md). The post-merge guest UI pass
 public runtime telemetry and precise remaining gaps are in
 [GUEST-RESULTS.md](GUEST-RESULTS.md). These are not human microphone
 accuracy evidence. The independent detector experiment and rejected candidate
-are recorded in [VAD-RESULTS.md](VAD-RESULTS.md). Do not close #439 until
+are recorded in [VAD-RESULTS.md](VAD-RESULTS.md). The follow-up
+[CPU/Metal comparison](BACKEND-RESULTS.md) rules out switching to CPU as a
+remedy for the tested failures. Do not close #439 until
 the paired measurements and Apple observations below are collected.
 
 1. Recording script: `docs/testing/transcription-439/sentences.json`. Ask for

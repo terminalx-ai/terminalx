@@ -19,6 +19,8 @@
   including quiet-speech failures that rule out a no-speech-only filter.
   Retain a reproducible independent detector experiment and its negative controls;
   its observed speech loss prevents adopting it as an automatic filter.
+  Compare strict CPU/Metal decoding with pinned fixtures; both reproduce the
+  noise failures, ruling out a backend switch as a remedy for those cases.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
