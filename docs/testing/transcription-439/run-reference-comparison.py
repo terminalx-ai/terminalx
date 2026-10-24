@@ -23,10 +23,10 @@ def main():
     inputs = [next(r for r in rows if r['id'] == item) for item in ids]
     models = json.loads((reference_dir / 'models.json').read_text())
     for m in models:
-        m['id'] = m['filename'].removeprefix('ggml-').removesuffix('-q8_0.bin')
+        m.setdefault('id', m['filename'].removeprefix('ggml-').removesuffix('-q8_0.bin'))
         m['path'] = str(reference_dir / m['filename'])
-    if len(models) != 2:
-        raise SystemExit('Expected both catalog Whisper models')
+    if not models or len({m['id'] for m in models}) != len(models):
+        raise SystemExit('Expected a nonempty model manifest with unique IDs')
     for item in inputs + models:
         path = Path(item.get('audioPath', item.get('path')))
         digest = hashlib.sha256()

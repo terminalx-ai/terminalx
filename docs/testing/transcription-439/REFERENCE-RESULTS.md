@@ -185,3 +185,8 @@ there was no second full inference pass. No audio or context left the machine.
 No guest/host app was launched, no TCC setting was changed, and no shared
 integration or store paths were edited. The guest lane can be released.
 Acceptance remains open; this evidence does not justify issue closure.
+
+Follow-up: [FP16 comparison](F16-RESULTS.md) reproduces the failures without Q8.
+[Detector-only normalization](SILERO-NORMALIZED-RESULTS.md) records a promising
+controlled candidate, its full negative controls and the runtime integration gap.
+Neither is microphone acceptance.

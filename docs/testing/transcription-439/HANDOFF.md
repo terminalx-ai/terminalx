@@ -96,3 +96,8 @@ feature. This shortest first pass tests Apple contextual strings from the
 global dictionary. It does **not** replace project-context, correction-learning,
 partial-deletion or full model-matrix rows above. The coordinator records those
 remaining rows explicitly and arranges follow-up only after this first pass.
+
+Follow-up: [FP16 comparison](F16-RESULTS.md) reproduces the failures without Q8.
+[Detector-only normalization](SILERO-NORMALIZED-RESULTS.md) records a promising
+controlled candidate, its full negative controls and the runtime integration gap.
+Neither is microphone acceptance.

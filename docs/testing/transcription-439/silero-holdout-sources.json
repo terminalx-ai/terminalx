@@ -1,0 +1,642 @@
+[
+  {
+    "repo": "snakers4/silero-vad",
+    "revision": "066409f3d9db45a30d21dfcbf9147826ffdd7052",
+    "sourcePath": "LICENSE",
+    "url": "https://raw.githubusercontent.com/snakers4/silero-vad/066409f3d9db45a30d21dfcbf9147826ffdd7052/LICENSE",
+    "gitBlob": "0bf5e90cac691b999d4a35044f97167d7bbbf0b9",
+    "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b",
+    "sizeBytes": 1075,
+    "local": "silero/LICENSE"
+  },
+  {
+    "repo": "snakers4/silero-vad",
+    "revision": "066409f3d9db45a30d21dfcbf9147826ffdd7052",
+    "sourcePath": "src/silero_vad/data/silero_vad.onnx",
+    "url": "https://raw.githubusercontent.com/snakers4/silero-vad/066409f3d9db45a30d21dfcbf9147826ffdd7052/src/silero_vad/data/silero_vad.onnx",
+    "gitBlob": "80c5592ef1f4c9ede3e357bbd02eb863358a6a9d",
+    "sha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+    "sizeBytes": 2327524,
+    "local": "silero/src/silero_vad/data/silero_vad.onnx"
+  },
+  {
+    "repo": "snakers4/silero-vad",
+    "revision": "066409f3d9db45a30d21dfcbf9147826ffdd7052",
+    "sourcePath": "src/silero_vad/utils_vad.py",
+    "url": "https://raw.githubusercontent.com/snakers4/silero-vad/066409f3d9db45a30d21dfcbf9147826ffdd7052/src/silero_vad/utils_vad.py",
+    "gitBlob": "4b3bef714cae87a44381077ac0519fd1a0f45089",
+    "sha256": "7e0f9b3334ee4feb79abcf2251be12458329077bce28c8540878ed9d35e5aa6b",
+    "sizeBytes": 31474,
+    "local": "silero/src/silero_vad/utils_vad.py"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "README.md",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/README.md",
+    "gitBlob": "789c61b8f0a142c6522d0e791a9fd11e906856c4",
+    "sha256": "523de3cafa0f54707a0ab2760a2d32b640ccfe834a081d7d35c894f1fb6d79f5",
+    "sizeBytes": 3977,
+    "local": "fsdd/README.md"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_george_1.wav",
+    "gitBlob": "4f7738875be73265f2107da4d507fb221df3d0cb",
+    "sha256": "239d40931baf4e9b482361abb6e021439eca20f2e95f039b1bdddae04ef0b83c",
+    "sizeBytes": 9498,
+    "local": "fsdd/recordings/0_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_jackson_1.wav",
+    "gitBlob": "852bfb9ee6d79b85ef3a475ef9f324144eb0d47a",
+    "sha256": "6df040b19b0a7a7433e6185c10d2df5e71a78fb272be472a98ce670378871b44",
+    "sizeBytes": 8566,
+    "local": "fsdd/recordings/0_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_lucas_1.wav",
+    "gitBlob": "5f0614fda15b86cf115f56a3466d258bf8d47129",
+    "sha256": "9c2bb9ff24714b163c681d82c4ed99339c9408e9a126c04e6a1de63774704b05",
+    "sizeBytes": 10994,
+    "local": "fsdd/recordings/0_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_nicolas_1.wav",
+    "gitBlob": "f3ccfdbb00bb74218bff790902eefd677e74b740",
+    "sha256": "3d567d30e25cc721277603d4eab78ab4a5b5fdc2d39f919ce8147b6cf8ae4490",
+    "sizeBytes": 7546,
+    "local": "fsdd/recordings/0_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_theo_1.wav",
+    "gitBlob": "f845c4cde2f1441e12c1ed6fc275ae0a158d04f5",
+    "sha256": "3dafef6bfb96c18486594a339d9e65f579d1f98531dac9eafe39e8165f87aca9",
+    "sizeBytes": 5660,
+    "local": "fsdd/recordings/0_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/0_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_yweweler_1.wav",
+    "gitBlob": "64c229a3c648abc54b46aea8e4c2eb3228765f3b",
+    "sha256": "af6a132fd59cad50dbd2c9a156edac88dac349c34f98827c136c5cd93129a9c5",
+    "sizeBytes": 5332,
+    "local": "fsdd/recordings/0_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_george_1.wav",
+    "gitBlob": "189e41338262ee7b12a75514c9ecec811258b45f",
+    "sha256": "ff6e88d6ea38bbdfe4ece00e25afddeedc5cda45d2494de802b838ce4c90a542",
+    "sizeBytes": 8006,
+    "local": "fsdd/recordings/1_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_jackson_1.wav",
+    "gitBlob": "9c271d33b720e78bdc319b4131b3074fe5167ab8",
+    "sha256": "5a5b281a28fa451318629ea46eea07465543acfaa92d3ec8deac3c4a971a03d3",
+    "sizeBytes": 8528,
+    "local": "fsdd/recordings/1_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_lucas_1.wav",
+    "gitBlob": "ca6e9794c56b42476afa474bd2cda4e8ffe81346",
+    "sha256": "ad1caca4abb84a074da3ab0521ea32dd904909d997acfe4e9f30022241f94db6",
+    "sizeBytes": 6444,
+    "local": "fsdd/recordings/1_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_nicolas_1.wav",
+    "gitBlob": "af4a21095bbfa5ab8f00e9cef23360ec0a1ff5c1",
+    "sha256": "ab699c577558d9b17afbf3714ae7484195ce93d855d9bfb43151ad573689e15a",
+    "sizeBytes": 4692,
+    "local": "fsdd/recordings/1_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_theo_1.wav",
+    "gitBlob": "bd28b5c09e672f32d559dcb86b9409e9194cb485",
+    "sha256": "067eb9f036e0d05e4967a0e7c910131d92d2493b52cb527bacc001229765ac1f",
+    "sizeBytes": 3728,
+    "local": "fsdd/recordings/1_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/1_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_yweweler_1.wav",
+    "gitBlob": "4f9853fdd0b0ae9025ab5ccc24a9cc127d8af793",
+    "sha256": "8779a19c2a5d439627998f5fc57db0fd95be2500cba5c637a7ecaf88fa9aac16",
+    "sizeBytes": 3614,
+    "local": "fsdd/recordings/1_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_george_1.wav",
+    "gitBlob": "3517640e8cb7d713a070672d7392cec3b1755da4",
+    "sha256": "6ce4f75e7a3467a9aec1c0e142a0412e4ada61903dc5f626ea19c0d5bd501641",
+    "sizeBytes": 9130,
+    "local": "fsdd/recordings/2_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_jackson_1.wav",
+    "gitBlob": "9588ab0c61f604690e94a19980fa6d6930f6e134",
+    "sha256": "d2422f0c91208802a0daab5ee36ef661fa166cfcfa380791a5e1d866481ee594",
+    "sizeBytes": 8892,
+    "local": "fsdd/recordings/2_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_lucas_1.wav",
+    "gitBlob": "912d85d75e55cd44bc636329ae239124ad098ca7",
+    "sha256": "2fc0b8646d1fc0f1931a40c8b34a726970798241d95ceb14eef4291902f47af6",
+    "sizeBytes": 6742,
+    "local": "fsdd/recordings/2_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_nicolas_1.wav",
+    "gitBlob": "2e61543f01858ba50e8f4794eea545e07bd6e771",
+    "sha256": "dc2ed3a0d4350a248e1ea2cdcf6ba32b8173eb583dbaccb0150353bb74bfd3d6",
+    "sizeBytes": 4814,
+    "local": "fsdd/recordings/2_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_theo_1.wav",
+    "gitBlob": "b87dafa3a7d560d1443eafe1a39e3041c7340913",
+    "sha256": "62a0ab262652b3dad25a6553950f2d7490c5f7e89468bb7616d457ddffca5f1d",
+    "sizeBytes": 3682,
+    "local": "fsdd/recordings/2_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/2_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_yweweler_1.wav",
+    "gitBlob": "e067c80c187082d134f95befe9bbcaf73c3b1b44",
+    "sha256": "3f62bc025335cb887215510406d3de03decba8014734654b044a1538457e1b8a",
+    "sizeBytes": 4904,
+    "local": "fsdd/recordings/2_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_george_1.wav",
+    "gitBlob": "6a67e2d34a399a693b276cb1d2dab5e081c87bb7",
+    "sha256": "c406ea9e28a76b128a27542760a36c05f90f747aeee63225fbf927b0e0b8a537",
+    "sizeBytes": 8034,
+    "local": "fsdd/recordings/3_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_jackson_1.wav",
+    "gitBlob": "9613dc615e57bd3a6747e5e511633d74d6eb9b8d",
+    "sha256": "963b2bb960f4844804c0f2d019f2b3ff294bd8f803ced8c7ca36f6074ba1ad8e",
+    "sizeBytes": 7556,
+    "local": "fsdd/recordings/3_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_lucas_1.wav",
+    "gitBlob": "8c80bff07e730e7d6dd09168a998fa2648471fa8",
+    "sha256": "b380b61e138887b3371b1f27aec7eaa462ac9bd931b7c6a5e01c0815776bbdad",
+    "sizeBytes": 9770,
+    "local": "fsdd/recordings/3_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_nicolas_1.wav",
+    "gitBlob": "6115c80ddd9c3b0f5aaf7d13b6579200e34f2402",
+    "sha256": "e7cd3cd43f90f802b03308720b4be3d43d77395a6d47f6df850fe6c22b0fbccd",
+    "sizeBytes": 5274,
+    "local": "fsdd/recordings/3_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_theo_1.wav",
+    "gitBlob": "14ee160c971c4ce3f5e69ca273c77049e0d41288",
+    "sha256": "0e5645df3753e57d909aa3f2b58c04c9f65416634823a6d43f9abb47b48eb980",
+    "sizeBytes": 4490,
+    "local": "fsdd/recordings/3_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/3_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_yweweler_1.wav",
+    "gitBlob": "cf48aa12092610ce3ee62973d06b4a6c6cb4e188",
+    "sha256": "2a47fc283011862ed6df60b0ce155c713ebfa639fd857e7f6cfa7f5cfe683b3b",
+    "sizeBytes": 5066,
+    "local": "fsdd/recordings/3_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_george_1.wav",
+    "gitBlob": "9ccfb97319a8c76c899f16431245e9638b282ece",
+    "sha256": "1be0fe488bc928edc0ed9496fbffac6386ed6831b9f3b5fa796e5ad48b27e02b",
+    "sizeBytes": 8666,
+    "local": "fsdd/recordings/4_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_jackson_1.wav",
+    "gitBlob": "1cad981165b2e07b7919e37da913adb7db02e5e4",
+    "sha256": "e3432e1b1863239d3e310791f117c707ca995915f1e36f433cf0c1ec3a013e9a",
+    "sizeBytes": 6742,
+    "local": "fsdd/recordings/4_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_lucas_1.wav",
+    "gitBlob": "1ebb31133ad79c5d69e6481a25f25492f69467ea",
+    "sha256": "02bf2849a8d6c632be881a7f08ae61972dc7713b475fe41a524b73f3a6211204",
+    "sizeBytes": 6620,
+    "local": "fsdd/recordings/4_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_nicolas_1.wav",
+    "gitBlob": "f7ff45affe2d45e157aba0fdea5e9082a8a58304",
+    "sha256": "7bd06ab2ccf69d142dd9410ee3d2416cdd733593cdaa9fce39561a5d8cf15333",
+    "sizeBytes": 5644,
+    "local": "fsdd/recordings/4_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_theo_1.wav",
+    "gitBlob": "81aa384536b2aa4e57bfb9404fce7adc3c0b7ade",
+    "sha256": "3cca39a735cd2c06ead7607dce81efadc5c32163a4b5e6386143880951d6aaad",
+    "sizeBytes": 4122,
+    "local": "fsdd/recordings/4_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/4_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_yweweler_1.wav",
+    "gitBlob": "06142204711dbdfff32a5e1366d4d153ed59876d",
+    "sha256": "4bf751e079153ca5108dfc68c1ab74ff475a7cd3a11929370e8aff16c2d45109",
+    "sizeBytes": 6320,
+    "local": "fsdd/recordings/4_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_george_1.wav",
+    "gitBlob": "c9e6fab3e558bf12707281922465e3990f9827cf",
+    "sha256": "92c06a934a3905dba06b9085def638070916896397740ca26f326fc78addfbba",
+    "sizeBytes": 9266,
+    "local": "fsdd/recordings/5_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_jackson_1.wav",
+    "gitBlob": "843424d99a66f4d1120fb71562285f868594c2f1",
+    "sha256": "efd4a46bfcadc9f839f67a0c9d33e05c6d545851a690773ce651796edf74176d",
+    "sizeBytes": 6682,
+    "local": "fsdd/recordings/5_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_lucas_1.wav",
+    "gitBlob": "b52e3710cc6e986bc4ab29969a2c6cc83e5baae3",
+    "sha256": "dbf802c200643901bb891473fe356fdbf6473d12c6e8a98333b6a7e082068f1f",
+    "sizeBytes": 18400,
+    "local": "fsdd/recordings/5_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_nicolas_1.wav",
+    "gitBlob": "b35e86abb5ea6c2771e905472c463814f76505ed",
+    "sha256": "fafeb62089db6d12dff9fdc61fc510095f098b02758318d1720c108015bdc16a",
+    "sizeBytes": 6172,
+    "local": "fsdd/recordings/5_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_theo_1.wav",
+    "gitBlob": "33f4a6e3a35e45244e423ee6022a66735d93b24f",
+    "sha256": "c70cf66fe7c9f50a440c856432e630f662df83e741acb65f49ebecd777e3eeaf",
+    "sizeBytes": 4754,
+    "local": "fsdd/recordings/5_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/5_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_yweweler_1.wav",
+    "gitBlob": "9ab1dd373bbac549b57bef5018d978c269968e58",
+    "sha256": "5a18e46d445447169aa456a8577ad627be6dd12cd3d3788da7b8dde094cc9d94",
+    "sizeBytes": 6738,
+    "local": "fsdd/recordings/5_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_george_1.wav",
+    "gitBlob": "4d26aeb6dd179e639cbab82a1f2228d6037717e8",
+    "sha256": "7084ce484c7390bbf565b2f36ae0feea079a4cffec18ddbcc39f5a60fd4624aa",
+    "sizeBytes": 7536,
+    "local": "fsdd/recordings/6_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_jackson_1.wav",
+    "gitBlob": "329f5b6bd5c3fd270d30f568053fde084136d345",
+    "sha256": "3e63d1e2c56aa8190a04a854e534dce2f6a02bed0166a3a53830d480d76661f2",
+    "sizeBytes": 10334,
+    "local": "fsdd/recordings/6_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_lucas_1.wav",
+    "gitBlob": "ed60caa54e3f884e601a10a18d845e9a83799edd",
+    "sha256": "72cf6e1d443351eba90f5bd68b044ffbccc058f3cc8b5268020d2317a57b46c6",
+    "sizeBytes": 10000,
+    "local": "fsdd/recordings/6_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_nicolas_1.wav",
+    "gitBlob": "dabbbc249602a70dfcfb9566a855356c92465375",
+    "sha256": "ea67d991a682569b25ed717475afd47a5e3917cdda231e7b5f072f7ad7b46976",
+    "sizeBytes": 3744,
+    "local": "fsdd/recordings/6_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_theo_1.wav",
+    "gitBlob": "d82ceefe89cee9c63816fa0002090aaff10cfab4",
+    "sha256": "9eb5e686a073a9c9a5ddd1ad2d093d26298e8e1a55254d12cd89488b0450fb08",
+    "sizeBytes": 7742,
+    "local": "fsdd/recordings/6_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/6_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_yweweler_1.wav",
+    "gitBlob": "d98f84c124e242e3e3631e5ad4a012ad9b33cd4a",
+    "sha256": "f12a98590c716270613d497957c3d92a490b9f84a638787b2badf1af1a339a4c",
+    "sizeBytes": 2546,
+    "local": "fsdd/recordings/6_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_george_1.wav",
+    "gitBlob": "a626645e2d5723aa86cb1772eb4e0225f1a3ae71",
+    "sha256": "6cc744db751d36e75cef346fb0d963dc1448417dbbd85b2e229daff89189b205",
+    "sizeBytes": 9482,
+    "local": "fsdd/recordings/7_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_jackson_1.wav",
+    "gitBlob": "cb096a30dac918d0853c6d671dc30498bf20a9be",
+    "sha256": "762dfcc851874c662ab1b12e68d875733ee32bde15f8516cd491e058511c5ac8",
+    "sizeBytes": 7622,
+    "local": "fsdd/recordings/7_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_lucas_1.wav",
+    "gitBlob": "420f553505103827339aa744e21ad695bb046329",
+    "sha256": "b0966b0c861a85c10f8db2e328e5e3388808a4790a6f0ee38d8e7d621645da05",
+    "sizeBytes": 7260,
+    "local": "fsdd/recordings/7_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_nicolas_1.wav",
+    "gitBlob": "22328c92d4490a645961e3003b5c48e7e99a1ade",
+    "sha256": "8df620ef0ecf9ffaf962154d9eed7097811d743a1f50d607a3a91ffac14740dd",
+    "sizeBytes": 7462,
+    "local": "fsdd/recordings/7_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_theo_1.wav",
+    "gitBlob": "fd05c35b43d20f1d113ba1cb751451413a8a7cd5",
+    "sha256": "2dfca73538ec2a6b9f3c90bc3be1d5dd5ce19fb074f0a28768c91857dce2a58e",
+    "sizeBytes": 5828,
+    "local": "fsdd/recordings/7_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/7_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_yweweler_1.wav",
+    "gitBlob": "18640e03e0629dd3e0843e852648396643bede0d",
+    "sha256": "b8cf02e1dc6b3b639fe8bbcf439f5d12d269d02222320af22fdd013e8bc527d6",
+    "sizeBytes": 6306,
+    "local": "fsdd/recordings/7_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_george_1.wav",
+    "gitBlob": "e424e067a906b6e2b014fdcc4af4d1be56a3b22b",
+    "sha256": "98cc01b792b18fe78473cdceb14a82bea1162f3c4740801cdaf33f26caf53fb1",
+    "sizeBytes": 8266,
+    "local": "fsdd/recordings/8_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_jackson_1.wav",
+    "gitBlob": "d9d55bba4f73a1374a34f891305fb6a8e5fa9c58",
+    "sha256": "556a54cd75086379d90aee189965e7232b1cec94e4b37a22f711de618f3627d4",
+    "sizeBytes": 6502,
+    "local": "fsdd/recordings/8_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_lucas_1.wav",
+    "gitBlob": "197063eaf250e1b036e185f2734e9916dc6ac269",
+    "sha256": "bbef48359b1fd61a945058618c6edc28d4067bae7797387b9df491994ddb4f12",
+    "sizeBytes": 5470,
+    "local": "fsdd/recordings/8_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_nicolas_1.wav",
+    "gitBlob": "13f0b4a36dd844c9ebcd06f63ca7fd73ac1760b1",
+    "sha256": "7b549bf7ddc327e75fd056b7af1bf62480a031cec1b6c89a6b0ca08d9c8e6382",
+    "sizeBytes": 3654,
+    "local": "fsdd/recordings/8_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_theo_1.wav",
+    "gitBlob": "2b798b641e0fd8630acd2311d2c61995e1f1d483",
+    "sha256": "08587f2d2bc5b9ca91af4067d6c2f267c5d2dea13ffd9f7b1eb601f7d3bb2bda",
+    "sizeBytes": 5114,
+    "local": "fsdd/recordings/8_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/8_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_yweweler_1.wav",
+    "gitBlob": "c7f1a1a9ccc05b59ebc46313a66b1872474de8f1",
+    "sha256": "80e9f4e922055cf7d34a1ae4b83d7607b1e5d7370c39d6d57199fb1fff3e4f2d",
+    "sizeBytes": 5712,
+    "local": "fsdd/recordings/8_yweweler_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_george_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_george_1.wav",
+    "gitBlob": "39a0efa07a3ea8a4dadf3770744e922ef66883e9",
+    "sha256": "a66489d953f56adf6963a64f410c7a0d4ae76704684abb5165b8b03433b2b55c",
+    "sizeBytes": 8044,
+    "local": "fsdd/recordings/9_george_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_jackson_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_jackson_1.wav",
+    "gitBlob": "23d692e11384cc3de90c187fcee856b08b809056",
+    "sha256": "86eb4753f8231b049d4209b2a5458a1c8c888ba0283af25fb529309b15b29882",
+    "sizeBytes": 9090,
+    "local": "fsdd/recordings/9_jackson_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_lucas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_lucas_1.wav",
+    "gitBlob": "56e999ae2dd913b54a54bb45c3384fd0fdb5b2a2",
+    "sha256": "041cc6ed99d4c7a0f305c06d38876a91f51df819351ab4caf0b4c1c757093b8b",
+    "sizeBytes": 9012,
+    "local": "fsdd/recordings/9_lucas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_nicolas_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_nicolas_1.wav",
+    "gitBlob": "d60514ff8e24f3eaa2cec07e667f82fc2d8a3ede",
+    "sha256": "27321fdd3105d4ec80a6b9a8e6730d8c0c8ed91149bc14ecdc9c5773a9a86bce",
+    "sizeBytes": 7926,
+    "local": "fsdd/recordings/9_nicolas_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_theo_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_theo_1.wav",
+    "gitBlob": "3164c35c25457bcee7262b2a1ca7780df7bd3a24",
+    "sha256": "75cae59cea42e5845395e8395c329fa4643e0f2b6c84d2d24aacccd84a2a8a93",
+    "sizeBytes": 4696,
+    "local": "fsdd/recordings/9_theo_1.wav"
+  },
+  {
+    "repo": "Jakobovski/free-spoken-digit-dataset",
+    "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+    "sourcePath": "recordings/9_yweweler_1.wav",
+    "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_yweweler_1.wav",
+    "gitBlob": "2c14b3deb779bb6d8d20086a6e6361fc7c7e49ea",
+    "sha256": "2cd64a770143d60ebb669f2634df7d272572f5b7a48b844130c4a114d669902e",
+    "sizeBytes": 6246,
+    "local": "fsdd/recordings/9_yweweler_1.wav"
+  }
+]

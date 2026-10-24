@@ -23,6 +23,8 @@
   noise failures, ruling out a backend switch as a remedy for those cases.
   Add a pinned independent Whisper comparison using identical reference weights
   to distinguish app-specific behavior from upstream recognition limitations.
+  Retain full-precision comparison failures and paired detector normalization
+  evidence with public speech controls; no experimental runtime is shipped.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

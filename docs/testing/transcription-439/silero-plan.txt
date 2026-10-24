@@ -1,0 +1,6 @@
+Diagnostic only; do not integrate ONNX Runtime, Silero or a new gate into TerminalX.
+Pinned Silero model, public CPU inference, one thread. No gain normalization.
+Before inspecting predictions: use upstream documented threshold 0.5. Retain an input if ANY frame scores >=0.5, a conservative gate intended to minimize lost speech. This is not the upstream full timestamp segmentation algorithm. No minimum voiced-duration tuning.
+Fresh state for every input. Official 512/256 sample frames at 16/8 kHz and 64/32 preceding context samples. Zero-pad only an incomplete final frame.
+Controls: all existing 51 synthetic/stress inputs; all 60 FSDD test-index-0 digit recordings (10 digits x 6 speakers) at gains 1,0.03,0.001. Select every index-0 file before inference, without screening by score. Preserve every failure. No training or threshold tuning.
+This can falsify a candidate, but passing these controls alone cannot establish general microphone/noise accuracy or justify app integration.
