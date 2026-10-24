@@ -1,5 +1,11 @@
 # Native validation handoff
 
+Current criterion-by-criterion gaps are tracked in
+[ACCEPTANCE-STATUS.md](ACCEPTANCE-STATUS.md). The replacement-worker production
+matrix completed 255 pairs, retaining its strict mismatch and quiet recognition
+failures; see [PRODUCTION-DETECTOR.md](PRODUCTION-DETECTOR.md). This does not
+complete the human/Apple steps below.
+
 A five-model synthetic evaluation and isolated native settings pass are now
 recorded in [NATIVE-RESULTS.md](NATIVE-RESULTS.md). The post-merge guest UI pass,
 public runtime telemetry and precise remaining gaps are in

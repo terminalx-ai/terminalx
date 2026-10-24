@@ -1,8 +1,10 @@
 # Offline dictation personalization evaluation (#439)
 
 This protocol is written before tuning. Deterministic tests establish software
-behavior; they are not evidence of improved speech recognition. No recognition
-measurements have been collected yet.
+behavior; they are not evidence of improved speech recognition. Subsequent
+synthetic recognition measurements are in [NATIVE-RESULTS.md](NATIVE-RESULTS.md)
+and production detector evidence is in [PRODUCTION-DETECTOR.md](PRODUCTION-DETECTOR.md).
+Human microphone and Apple acceptance remain pending; see [HANDOFF.md](HANDOFF.md).
 
 ## Corpus and consent
 

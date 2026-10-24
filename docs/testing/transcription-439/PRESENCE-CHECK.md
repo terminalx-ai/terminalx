@@ -39,7 +39,8 @@ microphone input from Apple availability; it is not Apple success. No account,
 agent prompt or model download is required. Do not bypass native consent.
 
 This short presence check is still pending and is not statistical acceptance.
-The full recording matrix remains in HANDOFF.md; the production detector paired
-matrix is postponed while the user is available. All four checks passed before
+The full recording matrix remains in HANDOFF.md; the subsequently completed
+synthetic production detector matrix is recorded in PRODUCTION-DETECTOR.md and
+does not establish this microphone presence check. All four checks passed before
 packaging (2,243 Rust unit, six CLI, two integration; 3,370 frontend tests), plus
 three detector tests. Logs/hashes are in production-detector-checks.json.

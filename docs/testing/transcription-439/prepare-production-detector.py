@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Prepare explicit real-app OFF/ON matrices; never discovers user audio.
-Usage: prepare-production-detector.py PRESERVED_EVIDENCE_ROOT NEW_OUTPUT_DIR
+Usage: prepare-production-detector.py PRESERVED_EVIDENCE_ROOT NEW_OUTPUT_DIR [--quiet-only]
 All 19 original inputs on all five models, plus all 32 quiet controls on
 both Whisper models. No input/result is dropped or selected after scoring.
+--quiet-only prepares the complementary 32 quiet controls on the other three
+engines, without repeating or overwriting any original matrix measurements.
 """
 import hashlib
 import json
 from pathlib import Path
 import sys
 
-if len(sys.argv) != 3:
+quiet_only = len(sys.argv) == 4 and sys.argv[3] == '--quiet-only'
+if len(sys.argv) != 3 and not quiet_only:
     raise SystemExit(__doc__)
-root, output = map(lambda value: Path(value).resolve(), sys.argv[1:])
+root, output = map(lambda value: Path(value).resolve(), sys.argv[1:3])
 output.mkdir(mode=0o700, parents=False, exist_ok=False)
 models = json.loads((root / 'evaluation/models.json').read_text())
 corpus = json.loads((root / 'evaluation/corpus.json').read_text())
@@ -41,7 +44,9 @@ options = output / 'noise-only.json'
 options.write_text(json.dumps({'options': {'noiseGuard': True}, 'entries': []}, indent=2) + '\n')
 index = []
 for model in models:
-    selected = corpus + (stress if model['id'].startswith('whisper-') else [])
+    if quiet_only and model['id'].startswith('whisper-'):
+        continue
+    selected = stress if quiet_only else corpus + (stress if model['id'].startswith('whisper-') else [])
     manifests = []
     for row in selected:
         original = by_id[row.get('source', row['id'])]
@@ -56,7 +61,8 @@ for model in models:
     (output / f"{model['id']}-matrix.json").write_text(json.dumps(manifests, indent=2) + '\n')
 (output / 'index.json').write_text(json.dumps(index, indent=2) + '\n')
 (output / 'provenance.json').write_text(json.dumps({'model': pin, 'models': models,
-    'selection': 'all 19 base controls on five engines; all 32 quiet controls on both Whisper engines',
+    'selection': ('all 32 quiet controls on the three non-Whisper engines' if quiet_only else
+                  'all 19 base controls on five engines; all 32 quiet controls on both Whisper engines'),
     'pairs': len(index), 'recognitionAudioModified': False,
     'limitations': 'Synthetic file input; not microphone accuracy. Environmental detector false positives remain in the separate complete 322-condition evidence.'}, indent=2) + '\n')
 print(f'Prepared {len(index)} pairs in {output}')

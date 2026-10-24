@@ -69,8 +69,8 @@ latency is only a stop-to-final proxy. All four required application checks pass
 289 Vitest files / 3,370 tests, Clippy with all targets and warnings denied, and
 2,242 Rust unit tests plus six CLI and two integration tests (18 opt-in tests
 ignored). Logs and hashes are in `production-detector-checks.json`. The native
-suite exited successfully, observed by 14:18:47 UTC. Paired matrix results are
-still pending and will be recorded only after those processes finish.
+suite exited successfully, observed by 14:18:47 UTC. Paired matrix results
+were pending at that checkpoint; the replacement-worker measurements follow below.
 
 The assigned guest remains stopped during host-only work. #232's conditional
 quiet reservations are honored before starting any new model/build batch; an
@@ -80,3 +80,99 @@ The follow-up loader repair opens cache files without following symlinks or
 blocking on FIFOs. Its disposable FIFO/symlink regression passes; all four
 checks passed again (2,243 Rust unit tests), as did all three native detector
 tests including recovery after cancellation. Exact log hashes are retained.
+
+## Paired production results after recovery
+
+Measured production source remains **4c85ecd6**, with documentation recovery head
+**61eb29a6**. The existing candidate Rust test executable SHA-256 is
+`4dc4364a152c045460cf34ba37a84fa4d988cae32c5d6023e2d30827b65ad8c4`.
+No production source, recognition options, detector threshold or weights changed.
+
+All **255 pairs completed without runtime errors**: the original 159 pairs plus
+96 complementary quiet controls on Parakeet, Nemotron and Canary. Each engine
+therefore sees the same 51 inputs: 16 base speech, 32 quiet speech, and three
+non-speech controls. All weights, detector bytes and 51 PCM files were reverified
+against their existing checksums. The 32 quiet files also exactly reproduce
+their original PCM multiplied by the recorded gain and rounded to float32.
+No recordings were discovered, captured or downloaded.
+
+| Engine | Pairs | ON speech retained | ON non-speech suppressed | Raw OFF/ON mismatches | Speech with empty raw output in both arms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Parakeet Unified EN | 51 | 48 | 3 | 0 | 0 |
+| Nemotron Streaming | 51 | 48 | 3 | 0 | 5 |
+| Canary 180M Flash | 51 | 48 | 3 | 0 | 0 |
+| Whisper Small | 51 | 48 | 3 | 1 | 0 |
+| Whisper Large v3 Turbo | 51 | 48 | 3 | 0 | 0 |
+
+The unchanged strict summarizer reports **158/159** original pairs passing and
+**96/96** additional quiet pairs passing: **254/255**, not a blanket pass. Every
+OFF detector status is `disabled` with zero detector elapsed time. Every ON speech
+result preserves its own raw recognition text, including empty recognition.
+Five non-speech baseline outputs were nonempty; all 15 ON non-speech final outputs
+were empty. These direct-engine tests bypass the existing capture silence guard.
+
+The failing Small `tone` row has OFF raw “Please Remember To Subscribe My Channel”
+and ON raw “It may be the pressure upon something toフ surplus”. ON correctly
+reports `noSpeech` and returns empty final text, but raw equivalence fails.
+The row is retained in [production-detector-results.csv](production-detector-results.csv).
+The bounded same-condition follow-up is reported separately below; it does not
+replace the original pair or relax the strict criterion.
+
+Nemotron's five empty speech recognitions are all at gain .001:
+`samantha-project`, `samantha-literal`, `daniel-identifier`, `daniel-retake`, and
+`daniel-legitimate`. Detection retained them; it did not repair ASR accuracy.
+These adverse rows and all other quiet results remain in
+[production-detector-quiet-results.csv](production-detector-quiet-results.csv).
+CSV WER still uses the desired written reference, including collapsed code and
+retakes; it is not conventional verbatim-speech WER or proof of microphone quality.
+
+The coordinator authorized serial host computation without a quiet reservation.
+Each pair ran in a separate existing-binary test process, with the harness's
+untimed identical-input warmup; model and detector handles are not reused across
+pairs. `CARGO_BUILD_JOBS=2` and xcrun-derived `SDKROOT` were set per process, with
+private TerminalX/Claude state directories. Timings include contention and first
+enabled detector load and are **not performance acceptance**. The private runner
+checks a pause sentinel between pairs so a coordinated pause loses no active pair.
+
+Preparation is reproducible with the existing command for the 159-pair matrix and
+`prepare-production-detector.py ROOT NEW_OUTPUT --quiet-only` for the disjoint
+96-pair extension. Run each manifest through
+`transcription::evaluation::real_model_pair --ignored --exact --test-threads=1`;
+use new output paths and retain every exit/result. The audited runner, exact
+manifests, stdout/stderr, original JSON reports and result hashes remain under
+`/tmp/tx439-kmesvcjt/production-detector-*-execution` and the two matrix directories.
+
+Scoped recovery checks passed on the existing candidate binary: five noise,
+two engine, four context, one scorer and twelve personalization tests (**24**).
+Actual preparation verified the original and extended selections; disjointness,
+51 inputs per engine, unknown-option rejection and Python syntax also passed.
+The four prior application suites were not rerun for evidence-only changes.
+See [ACCEPTANCE-STATUS.md](ACCEPTANCE-STATUS.md) for remaining human/Apple/native
+gaps and coordinator review gates. The broader dog/sneezing false positives remain
+open; these 255 pairs do not turn the detector into a general noise guarantee.
+
+### Bounded tone repetition control
+
+After all 255 pairs finished, the coordinator authorized six additional pairs on
+the exact Small tone input: alternate OFF/OFF and OFF/ON three times. Each pair
+kept the original PCM, model, default recognition options and untimed warmup.
+The only second-arm option difference was `noiseGuard`; OFF/OFF used empty
+options and entries. No original matrix result was rerun or replaced.
+
+All six calls succeeded. **3/3 OFF/OFF pairs differed in raw text**, with the
+detector disabled and zero elapsed time in both arms. **3/3 OFF/ON pairs also
+differed**, and every ON result was `noSpeech` with empty final text. Full text,
+statuses and per-result hashes are in
+[production-detector-tone-control.csv](production-detector-tone-control.csv).
+For example, the first OFF/OFF pair emitted “Beeeeeeeee可 tai” then “BEEP”.
+
+This demonstrates ASR variation even without detector execution, consistent with
+the runtime's fallback sampling documented in GUEST-RESULTS.md. It does not prove
+that all possible integration effects are absent or grant bit-identical raw
+recognition. The original strict mismatch remains a failure. No detector tuning,
+phrase filtering, dependency change or production fix was made from these rows.
+
+[production-detector-recovery-evidence.json](production-detector-recovery-evidence.json)
+records execution metadata, summaries, scoped checks and hashes of retained
+private artifacts. The host compute slot was released after these controls;
+the candidate host app and both guests were untouched.
