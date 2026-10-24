@@ -7,7 +7,8 @@ public runtime telemetry and precise remaining gaps are in
 accuracy evidence. The independent detector experiment and rejected candidate
 are recorded in [VAD-RESULTS.md](VAD-RESULTS.md). The follow-up
 [CPU/Metal comparison](BACKEND-RESULTS.md) rules out switching to CPU as a
-remedy for the tested failures. Do not close #439 until
+remedy for the tested failures. The [independent reference comparison](REFERENCE-RESULTS.md)
+uses the same BIN weights across runtimes to further isolate those failures. Do not close #439 until
 the paired measurements and Apple observations below are collected.
 
 1. Recording script: `docs/testing/transcription-439/sentences.json`. Ask for

@@ -21,6 +21,8 @@
   its observed speech loss prevents adopting it as an automatic filter.
   Compare strict CPU/Metal decoding with pinned fixtures; both reproduce the
   noise failures, ruling out a backend switch as a remedy for those cases.
+  Add a pinned independent Whisper comparison using identical reference weights
+  to distinguish app-specific behavior from upstream recognition limitations.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

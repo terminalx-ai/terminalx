@@ -194,3 +194,6 @@ speech while retaining white noise. No production filter was added.
 
 A [strict CPU/Metal comparison](BACKEND-RESULTS.md) subsequently reproduced
 the failures on both backends using identical pinned weights and inputs.
+
+The [independent reference comparison](REFERENCE-RESULTS.md) runs public
+whisper.cpp and transcribe-cpp against identical reference-format weights.
