@@ -39,7 +39,7 @@ for item in index:
     rows.append(row)
 fields = list(dict.fromkeys(key for row in rows for key in row))
 with csv_path.open('x') as output:
-    writer = csv.DictWriter(output, fieldnames=fields)
+    writer = csv.DictWriter(output, fieldnames=fields, lineterminator='\n')
     writer.writeheader(); writer.writerows(rows)
 complete = [r for r in rows if not r['error']]
 times = sorted(r['noiseUs'] for r in complete)

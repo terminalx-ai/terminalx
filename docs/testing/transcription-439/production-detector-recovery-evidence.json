@@ -226,18 +226,18 @@
     },
     {
       "path": "docs/testing/transcription-439/production-detector-results.csv",
-      "sizeBytes": 49245,
-      "sha256": "966500d574a434137dd3a8d25496832a8c9afe39c28350a83fbaa0f20c41a661"
+      "sizeBytes": 49085,
+      "sha256": "f822e05322134ce66cdbef859d4ae31cc1e2abdcc8a5d2b579948d986d8c4d0d"
     },
     {
       "path": "docs/testing/transcription-439/production-detector-quiet-results.csv",
-      "sizeBytes": 31270,
-      "sha256": "03fec455700adbe5f47478f2fdc44f1dd8997273ce85fc3d5e665c758d73b505"
+      "sizeBytes": 31173,
+      "sha256": "0cc43c9b63707b2fe29eaac767b14fd7cc0575cf5ce1a9f9ac219b1848cc3d1f"
     },
     {
       "path": "docs/testing/transcription-439/production-detector-tone-control.csv",
-      "sizeBytes": 1019,
-      "sha256": "5e9523a67c2c53b3936fb7131eaed5e1a3f808eacc7e48e22b108551876471d4"
+      "sizeBytes": 1012,
+      "sha256": "f8535c0baca1a66c38957631668bd7c0861c9e01fd31291a21a19dc158b04136"
     },
     {
       "path": "docs/testing/transcription-439/prepare-production-detector.py",
@@ -246,8 +246,8 @@
     },
     {
       "path": "docs/testing/transcription-439/summarize-production-detector.py",
-      "sizeBytes": 3303,
-      "sha256": "4b0f7a843abdc9274e3818c1b4f83fe7fc7a6f22d8cecb0954def8ce2f5bf84c"
+      "sizeBytes": 3324,
+      "sha256": "915f35fd6c9ce0bec4e7fc59e1456503c5317b66911d39854be07a65cefe84fe"
     }
   ],
   "acceptanceComplete": false,
@@ -257,5 +257,6 @@
     "Original Small tone strict mismatch and five Nemotron empty quiet recognitions retained",
     "Dog and sneezing false positives remain in broader detector evidence",
     "No production code changed; prior full-suite results are not represented as new runs"
-  ]
+  ],
+  "reportEncoding": "Checked-in CSV line endings normalized to LF; parsed fields unchanged. Original CRLF matrix exports retained privately. Summarizer now emits LF."
 }
