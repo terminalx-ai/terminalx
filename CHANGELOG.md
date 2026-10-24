@@ -17,6 +17,8 @@
   Synthetic file-recognition results are kept separate from microphone acceptance.
   Record isolated guest settings validation and public-runtime Whisper telemetry,
   including quiet-speech failures that rule out a no-speech-only filter.
+  Retain a reproducible independent detector experiment and its negative controls;
+  its observed speech loss prevents adopting it as an automatic filter.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

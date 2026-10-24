@@ -187,3 +187,7 @@ unrelated filenames incidentally included in picker accessibility trees.
 
 Auto-merge remains off. Nothing was pushed, no PR was opened, and no issue
 closure or acceptance-complete result is justified yet.
+
+A subsequent headless [independent detector experiment](VAD-RESULTS.md) retains
+all 51 results and rejects a default-threshold gate because it loses quiet
+speech while retaining white noise. No production filter was added.
