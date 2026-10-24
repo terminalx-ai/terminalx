@@ -1,0 +1,11 @@
+{
+  "nativeSourceCommit": "5cd7945676eb32225748052e2e6a0580e4686a08",
+  "diagnosticSourceCommit": "066409f3d9db45a30d21dfcbf9147826ffdd7052",
+  "onnxPath": "src/silero_vad/data/silero_vad.onnx",
+  "diagnosticGitBlob": "80c5592ef1f4c9ede3e357bbd02eb863358a6a9d",
+  "nativeSourceGitBlob": "80c5592ef1f4c9ede3e357bbd02eb863358a6a9d",
+  "sameOnnxBlob": true,
+  "onnxSha256": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+  "nativeJitGitBlob": "5c6988d663950a93a5f0d6c38c2fe024653ec552",
+  "nativeJitSha256FromModelDocs": "e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720"
+}

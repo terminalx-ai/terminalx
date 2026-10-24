@@ -25,6 +25,9 @@
   to distinguish app-specific behavior from upstream recognition limitations.
   Retain full-precision comparison failures and paired detector normalization
   evidence with public speech controls; no experimental runtime is shipped.
+  Validate a static public-GGML detector prototype against multilingual speech
+  and environmental controls, preserving runtime-upgrade incompatibilities and
+  failed prototype evidence instead of changing existing recognition output.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
