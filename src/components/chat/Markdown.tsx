@@ -8,6 +8,7 @@ import { chatLinkComponent } from "./ChatLink";
 import { routeMarkdownLinks, type ChatLinkContext } from "@/lib/chatLinks";
 import { textLinks } from "@terminalx/portable/textLinks";
 import { LinkedText } from "./LinkedText";
+import { MarkdownTable } from "./MarkdownTable";
 import { LinkedCode } from "./LinkedCode";
 
 const codePlugin = createCodePlugin({ themes: ["github-light", "github-dark"] });
@@ -16,6 +17,7 @@ const routedRemarkPlugins = [...Object.values(defaultRemarkPlugins), routeMarkdo
 const Block = memo(function Block({ text, streaming, mode, linkContext }: { text: string; streaming: boolean; mode: string; linkContext?: ChatLinkContext }) {
   const components = useMemo(() => ({
     a: chatLinkComponent(linkContext),
+    table: MarkdownTable,
     inlineCode: ({ children }: { children?: ReactNode }) => <code className="rounded bg-well px-1 py-0.5 font-mono text-[0.9em]"><LinkedText text={String(children ?? "")} context={linkContext} /></code>,
     pre: ({ children }: { children?: ReactNode }) => {
       if (!isValidElement(children)) return children;

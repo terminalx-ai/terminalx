@@ -172,7 +172,7 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow }: { item: WorkItem; 
         <div className="my-3 flex items-center gap-2 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
           <Clock className="size-3.5 shrink-0" />
           {item.author && <span data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-          <div className="min-w-0 flex-1 whitespace-pre-wrap select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
+          <div className="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={item.text} context={linkContext} /><MessageTime ts={item.messageTs} /></div>
           {onSendQueuedNow && (
             <WithTooltip label="Interrupt the agent and send this now">
               <Button size="xs" variant="outline" className="shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
@@ -244,7 +244,7 @@ function ReaderMessage({
     <div className={cn(className, "flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
       <div
         className={cn(
-          "select-text whitespace-pre-wrap rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed shadow-card hairline",
+          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed shadow-card hairline",
           layout === "chat" ? "max-w-[85%]" : "w-full",
         )}
       >

@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Streamdown ships utility class names, not their generated CSS. */
+@source "../../node_modules/streamdown/dist/*.js";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
 @import "./tokens.css";
@@ -352,7 +354,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
 }
-.prose-chat [data-streamdown="code-block"] > div:not([data-streamdown]) {
+.prose-chat [data-streamdown="code-block"] > [data-streamdown="code-block-header"] + div:not([data-streamdown]) {
   margin-top: -28px !important;
   height: 28px !important;
   padding-right: 4px;
