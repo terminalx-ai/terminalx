@@ -13,10 +13,10 @@ vi.mock("@/lib/sessions", () => ({ useSessionStore: () => ({ projects: [{ path: 
 import { TranscriptionPersonalization } from "./TranscriptionPersonalization";
 
 let diagnostic: (event: { payload: TranscriptionDiagnostic }) => void;
-const initial = (): TranscriptionPersonalizationData => ({ options: { context: false, project: false, session: false, terminal: false, composer: false, remoteContext: false, dictionary: false, replacements: false, snippets: false, learn: false, guards: false, retakes: false, normalize: false, code: false, fillers: false, language: null, sensitiveTargets: [] }, entries: [] });
+const initial = (): TranscriptionPersonalizationData => ({ options: { context: false, project: false, session: false, terminal: false, composer: false, remoteContext: false, dictionary: false, replacements: false, snippets: false, learn: false, guards: false, noiseGuard: false, retakes: false, normalize: false, code: false, fillers: false, language: null, sensitiveTargets: [] }, entries: [] });
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.listen.mockImplementation(async (_event, callback) => { diagnostic = callback; return mocks.off; });
+  mocks.listen.mockImplementation(async (event, callback) => { if (event === "transcription_diagnostic") diagnostic = callback; return mocks.off; });
   mocks.invoke.mockImplementation(async (command, args) => command === "transcription_personalization_save" ? args.data : initial());
 });
 afterEach(cleanup);

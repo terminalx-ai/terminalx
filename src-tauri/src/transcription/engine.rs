@@ -25,6 +25,7 @@ unsafe impl Send for Loaded {}
 #[derive(Default)]
 pub struct Engine {
     loaded: Mutex<Option<Loaded>>,
+    pub noise: super::noise::NoiseGuard,
 }
 
 #[cfg(target_os = "macos")]
@@ -97,7 +98,7 @@ fn run_options(id: &str, context: &super::context::RunContext) -> Result<transcr
 #[cfg(not(target_os = "macos"))]
 #[derive(Default)]
 pub struct Engine {
-    _unavailable: (),
+    pub noise: super::noise::NoiseGuard,
 }
 
 #[cfg(not(target_os = "macos"))]

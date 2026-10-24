@@ -67,3 +67,13 @@ pub fn transcription_learn(
     }
     personalization::learn(&before, &after, request.project.as_deref()).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn transcription_detector(state: tauri::State<'_, crate::AppState>) -> super::ModelRow {
+    let spec = &super::catalog::DETECTOR;
+    super::ModelRow {
+        spec: spec.clone(), installed: super::download::is_installed(spec),
+        downloading: state.transcription.downloads.is_active(spec.id),
+        progress: state.transcription.downloads.snapshot(spec.id), page: spec.page(),
+    }
+}

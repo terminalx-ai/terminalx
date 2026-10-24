@@ -12,6 +12,7 @@ export interface TranscriptionOptions {
   snippets: boolean;
   learn: boolean;
   guards: boolean;
+  noiseGuard: boolean;
   retakes: boolean;
   normalize: boolean;
   code: boolean;
@@ -38,6 +39,7 @@ export interface TranscriptionDiagnostic {
   biasTerms: string[];
   engine: string;
   target?: string;
+  noise?: { status: "disabled" | "unsupported" | "unavailable" | "invalidModel" | "failed" | "cancelled" | "speech" | "noSpeech" | "noAudio"; elapsedUs: number };
 }
 
 /** These commands always execute locally, including for cloud tabs. */

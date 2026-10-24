@@ -28,6 +28,10 @@
   Validate a static public-GGML detector prototype against multilingual speech
   and environmental controls, preserving runtime-upgrade incompatibilities and
   failed prototype evidence instead of changing existing recognition output.
+  Add an opt-in local-model noise guard using the verified native detector,
+  explicit auxiliary-model download/delete controls and detector diagnostics.
+  Detection preserves original recognition audio, keeps text on model errors,
+  and supports cancellation; Apple retains its platform speech detection.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

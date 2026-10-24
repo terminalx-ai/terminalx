@@ -64,7 +64,7 @@ impl Downloads {
     }
 
     pub fn start(self: &Arc<Self>, app: AppHandle, id: &str) -> Result<()> {
-        let spec = catalog::find(id).ok_or_else(|| anyhow!("unknown model {id}"))?;
+        let spec = catalog::downloadable(id).ok_or_else(|| anyhow!("unknown model {id}"))?;
         if is_installed(spec) {
             return Ok(());
         }
@@ -120,10 +120,15 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let part = final_path.with_extension("gguf.part");
-    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).build();
+    if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(30)).build();
     let resp = agent.get(&spec.url()).call().map_err(|e| anyhow!("download failed: {e}"))?;
-    let mut reader = resp.into_reader();
+    receive(spec, resp.into_reader(), cancel, report, &final_path)
+}
+
+fn receive(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
+    report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
+    let part = final_path.with_extension("gguf.part");
     let mut file = std::fs::File::create(&part)?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
@@ -139,6 +144,11 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        if received.saturating_add(n as u64) > spec.size_bytes {
+            drop(file);
+            let _ = std::fs::remove_file(&part);
+            bail!("download exceeded the pinned model size");
         }
         file.write_all(&buf[..n])?;
         hasher.update(&buf[..n]);
@@ -159,13 +169,38 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
         let _ = std::fs::remove_file(&part);
         bail!("checksum did not match; the file was discarded");
     }
-    std::fs::rename(&part, &final_path)?;
+    if cancel.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_file(&part);
+        bail!("download cancelled");
+    }
+    std::fs::rename(&part, final_path)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_download_verifies_before_commit_and_honors_cancellation() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("model.gguf");
+        let mut spec = catalog::DETECTOR.clone();
+        spec.size_bytes = 3;
+        spec.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let cancel = AtomicBool::new(false);
+        for bytes in [b"abcd".as_slice(), b"ab".as_slice(), b"abd".as_slice()] {
+            assert!(receive(&spec, bytes, &cancel, &|_| {}, &path).is_err());
+            assert!(!path.exists());
+            assert!(!path.with_extension("gguf.part").exists());
+        }
+        cancel.store(true, Ordering::SeqCst);
+        assert!(receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).is_err());
+        assert!(!path.exists());
+        cancel.store(false, Ordering::SeqCst);
+        receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"abc");
+    }
 
     /// Pulls the smallest model for real and runs a tone through it. Network
     /// and a couple of hundred megabytes, so opt in with `--ignored`.

@@ -25,6 +25,7 @@ pub struct Options {
     pub snippets: bool,
     pub learn: bool,
     pub guards: bool,
+    pub noise_guard: bool,
     pub retakes: bool,
     pub normalize: bool,
     pub code: bool,

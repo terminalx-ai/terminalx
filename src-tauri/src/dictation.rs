@@ -581,7 +581,9 @@ mod mac {
         }
 
         fn clear_personalization(&self) {
-            *self.personalization.lock().unwrap() = crate::transcription::context::RunContext::default();
+            let mut context = self.personalization.lock().unwrap();
+            context.cancel();
+            *context = crate::transcription::context::RunContext::default();
         }
 
         fn begin(self: &Arc<Self>, app: AppHandle, model: &str) -> Result<(), String> {
@@ -909,34 +911,43 @@ mod mac {
             };
             if let Some((id, path, audio)) = local {
                 emit(&app, "transcribing", None, None);
+                let context = self.personalization.lock().unwrap().clone();
                 let me = self.clone();
                 std::thread::Builder::new()
                     .name("dictation-transcribe".into())
                     .spawn(move || {
                         // The pump may still be draining the last chunk.
                         std::thread::sleep(std::time::Duration::from_millis(60));
+                        if context.is_cancelled() { return; }
                         let samples = audio.lock().unwrap().clone();
                         if is_silent(&samples) {
-                            me.personalization.lock().unwrap().process("", &app, &id, true);
+                            let status = if context.data.options.noise_guard { crate::transcription::noise::NoiseStatus::NoAudio }
+                                else { crate::transcription::noise::NoiseStatus::Disabled };
+                            context.process_with_noise("", &app, &id, true, &crate::transcription::noise::NoiseResult::new(status));
                             emit(&app, "error", None, Some(NO_AUDIO.into()));
                         } else {
-                            let context = me.personalization.lock().unwrap().clone();
-                            match transcription.engine.transcribe(&id, &path, &samples, &context) {
-                                // A model can be handed real speech and still
-                                // make no words of it. An empty composer would
-                                // read as a dictation that quietly vanished.
-                                Ok(text) if text.trim().is_empty() => {
-                                    context.process(&text, &app, &id, true);
-                                    emit(&app, "error", None, Some(NOT_RECOGNISED.into()));
-                                },
+                            let result = transcription.engine.transcribe(&id, &path, &samples, &context);
+                            if context.is_cancelled() { return; }
+                            match result {
                                 Ok(text) => {
-                                    let text = context.process(&text, &app, &id, true);
-                                    emit(&app, "final", Some(text), None);
+                                    let detector_path = if context.data.options.noise_guard {
+                                        crate::transcription::download::model_path(&crate::transcription::catalog::DETECTOR).ok()
+                                    } else { None };
+                                    let noise = transcription.engine.noise.evaluate(context.data.options.noise_guard,
+                                        detector_path.as_deref(), &samples, &context.cancelled);
+                                    if context.is_cancelled() { return; }
+                                    let empty_raw = text.trim().is_empty();
+                                    let text = context.process_with_noise(&text, &app, &id, true, &noise);
+                                    if empty_raw && noise.status != crate::transcription::noise::NoiseStatus::NoSpeech {
+                                        emit(&app, "error", None, Some(NOT_RECOGNISED.into()));
+                                    } else {
+                                        emit(&app, "final", Some(text), None);
+                                    }
                                 },
                                 Err(e) => emit(&app, "error", None, Some(format!("{e:#}"))),
                             }
                         }
-                        me.finish(&app);
+                        if !context.is_cancelled() { me.finish(&app); }
                     })
                     .map_err(|e| e.to_string())?;
                 return Ok(());

@@ -1,6 +1,7 @@
 //! Ephemeral per-recording context. Never read file contents or provider logs.
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter};
 
 use super::personalization::{self, Personalization};
@@ -26,6 +27,7 @@ pub struct RunContext {
     pub bias: Vec<String>,
     pub target: String,
     pub suppressed: bool,
+    pub cancelled: Arc<AtomicBool>,
 }
 
 impl RunContext {
@@ -107,17 +109,29 @@ impl RunContext {
             bias,
             target: request.target,
             suppressed: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    pub fn cancel(&self) { self.cancelled.store(true, Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
+
+    pub fn finalize(&self, raw: &str, engine: &str, noise: &super::noise::NoiseResult) -> String {
+        let bias = if engine == "apple" || engine.starts_with("whisper-") { &self.bias[..] } else { &[] };
+        noise.apply(personalization::process(raw, &self.data, self.project.as_deref(), bias))
+    }
+
     pub fn process(&self, raw: &str, app: &AppHandle, engine: &str, diagnostic: bool) -> String {
-        let bias = if engine == "apple" || engine.starts_with("whisper-") {
-            self.bias.as_slice()
-        } else {
-            &[]
-        };
-        let final_text = personalization::process(raw, &self.data, self.project.as_deref(), bias);
-        if diagnostic && self.target == "transcription-test" && !self.suppressed {
+        let status = if self.data.options.noise_guard { super::noise::NoiseStatus::Unsupported }
+            else { super::noise::NoiseStatus::Disabled };
+        self.process_with_noise(raw, app, engine, diagnostic, &super::noise::NoiseResult::new(status))
+    }
+
+    pub fn process_with_noise(&self, raw: &str, app: &AppHandle, engine: &str, diagnostic: bool,
+        noise: &super::noise::NoiseResult) -> String {
+        let bias = if engine == "apple" || engine.starts_with("whisper-") { &self.bias[..] } else { &[] };
+        let final_text = self.finalize(raw, engine, noise);
+        if diagnostic && self.target == "transcription-test" && !self.suppressed && !self.is_cancelled() {
             #[derive(Clone, Serialize)]
             #[serde(rename_all = "camelCase")]
             struct Diagnostic<'a> {
@@ -126,20 +140,15 @@ impl RunContext {
                 final_text: &'a str,
                 bias_terms: &'a [String],
                 engine: &'a str,
+                noise: &'a super::noise::NoiseResult,
             }
-            let _ = app.emit(
-                "transcription_diagnostic",
-                Diagnostic {
-                    target: &self.target,
-                    raw,
-                    final_text: &final_text,
-                    bias_terms: bias,
-                    engine,
-                },
-            );
+            let _ = app.emit("transcription_diagnostic", Diagnostic {
+                target: &self.target, raw, final_text: &final_text, bias_terms: bias, engine, noise,
+            });
         }
         final_text
     }
+
 }
 
 /// Called ahead of recording, off the UI thread. Names only, no file contents,

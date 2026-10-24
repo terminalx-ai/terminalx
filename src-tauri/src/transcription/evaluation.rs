@@ -8,6 +8,9 @@ struct Manifest {
     /// Catalog ID; the weight path is explicit, never resolved from user state.
     model: String,
     model_path: std::path::PathBuf,
+    /// Explicit auxiliary model, never resolved from user stores.
+    #[serde(default)]
+    detector_path: Option<std::path::PathBuf>,
     /// Little-endian f32, mono, 16000 Hz, at most 60 seconds.
     audio_path: std::path::PathBuf,
     personalization_path: std::path::PathBuf,
@@ -81,6 +84,7 @@ struct Outcome {
     raw_score: Score,
     inference_ms: u128,
     processing_us: u128,
+    noise: super::noise::NoiseResult,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,12 +330,9 @@ fn evaluate(manifest: Manifest, engine: &super::engine::Engine) -> anyhow::Resul
         let raw = engine.transcribe(&manifest.model, &manifest.model_path, &samples, context)?;
         let inference_ms = started.elapsed().as_millis();
         let processing = Instant::now();
-        let final_text = personalization::process(
-            &raw,
-            &context.data,
-            context.project.as_deref(),
-            &context.bias,
-        );
+        let noise = engine.noise.evaluate(context.data.options.noise_guard,
+            manifest.detector_path.as_deref(), &samples, &context.cancelled);
+        let final_text = context.finalize(&raw, &manifest.model, &noise);
         let processing_us = processing.elapsed().as_micros();
         let score = score(&manifest.reference, &final_text, &manifest.terms);
         let raw_score = self::score(&manifest.reference, &raw, &manifest.terms);
@@ -342,6 +343,7 @@ fn evaluate(manifest: Manifest, engine: &super::engine::Engine) -> anyhow::Resul
             raw_score,
             inference_ms,
             processing_us,
+            noise,
         })
     };
     let baseline = run(&RunContext::default())?;

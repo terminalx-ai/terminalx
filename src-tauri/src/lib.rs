@@ -718,6 +718,7 @@ pub fn run() {
             commands::github_repo,
             commands::github_identity,
             transcription::commands::transcription_personalization_load,
+            transcription::commands::transcription_detector,
             transcription::commands::transcription_personalization_save,
             transcription::commands::transcription_personalization_reset,
             transcription::commands::transcription_personalization_export,
