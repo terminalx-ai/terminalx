@@ -225,6 +225,7 @@ impl Rig {
             stalled_at: None,
             last_settings_report: None,
             reported_mode_to_judge: None,
+            restart_claim: None,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -342,7 +343,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -445,14 +446,16 @@ fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
         let mut rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
         p.restart_when_idle = true;
-        // Exercise the real restart through releasing the old CLI, then
-        // refuse a new process instead of launching an installed agent.
-        rt.stopping = true;
     }
     let (sent, restarted) = std::sync::mpsc::channel();
+    let shutting_down = rig.manager.shutting_down.clone();
     rig.manager.sink.listen("tab_status", Box::new(move |payload| {
         let event: serde_json::Value = serde_json::from_str(payload).unwrap();
         if event["status"] == "idle" {
+            // Exercise the actual idle restart through releasing the CLI, then
+            // refuse startup through the shutdown gate. Marking the tab as
+            // already stopping would correctly cancel the idle dispatch itself.
+            shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = sent.send(());
         }
     }));
@@ -638,7 +641,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );

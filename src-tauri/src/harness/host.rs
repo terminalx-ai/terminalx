@@ -179,6 +179,34 @@ impl Host {
     pub fn is_live(&self, key: &str) -> bool {
         self.children.lock().unwrap().contains_key(key)
     }
+
+    /// A process that is about to exit cannot leave escalation on a detached
+    /// timer thread. Wait here, forcing stubborn children before returning.
+    pub(crate) fn kill_all_and_wait(&self, timeout: Duration) {
+        let pids: Vec<u32> = self.children.lock().unwrap().values().map(|child| child.pid).collect();
+        self.kill_all();
+        let started = std::time::Instant::now();
+        while pids.iter().copied().any(group_or_process_alive) && started.elapsed() < timeout {
+            if started.elapsed() >= Duration::from_millis(400) {
+                for pid in pids.iter().copied().filter(|pid| group_or_process_alive(*pid)) { kill_now(pid); }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// A child can exit before a descendant that ignored TERM. Its process group
+/// still belongs to this launch until its last member exits.
+pub(crate) fn group_or_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal zero observes the owned process group without mutation.
+        let group = unsafe { libc::kill(-(pid as i32), 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+        group || is_alive(pid)
+    }
+    #[cfg(not(unix))]
+    is_alive(pid)
 }
 
 fn wait_child(mut child: Child) -> Option<i32> {

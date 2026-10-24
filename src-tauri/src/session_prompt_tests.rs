@@ -78,7 +78,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -110,7 +110,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -188,9 +188,9 @@ fn revoked_sharing_cancels_the_waiting_writer_without_stalling_the_host_tab() {
         (cli.ready.clone(), cli.awaiting_delivery.unwrap())
     };
     // No share survives: this is the delayed writer after the kill switch.
-    let permit = crate::local_sharing::WritePermit { connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
+    let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "removed".into(), revision: 0, tab_epoch: 0 };
     rig.manager.type_prompt(&rig.rt, &rig.pane, "Undelivered guest input".into(), vec![], PromptDelivery {
-        ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
+        mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: Some((permit, SESSION.into(), TAB.into(), seq)),
     });
     let deadline = Instant::now() + Duration::from_secs(2);
     while rig.delivery_pending() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
@@ -598,7 +598,7 @@ sleep 600
         (cli.ready.clone(), cli.awaiting_delivery.unwrap())
     };
     ready.mark();
-    rig.manager.type_prompt(&rig.rt, &rig.pane, PROMPT.into(), vec![], PromptDelivery { ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
+    rig.manager.type_prompt(&rig.rt, &rig.pane, PROMPT.into(), vec![], PromptDelivery { mobile: None, ready: Some(ready), seq: Some(seq), queued: false, receipt: None, shared: None });
     assert_eq!(wait_for(&rig, &["PROMPT-SUBMITTED", "PROMPT-LEFT-IN-INPUT", "UNEXPECTED-INPUT"]), "PROMPT-SUBMITTED");
 
     // The writer is done once it lets go of the pane.
@@ -951,7 +951,7 @@ fn codex_readers_serialize_drain_through_application() {
             } else {
                 // Negative control: the former production ordering advanced
                 // the cursor before acquiring the runtime lock.
-                manager.pump_read(&rt, read());
+                manager.pump_read(&rt, &tail, read());
             }
         });
         drained_rx.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -1655,3 +1655,453 @@ mod interrupts;
 /// Turns the agent starts itself, and a message sent while one runs (#540).
 #[path = "session_self_started_tests.rs"]
 mod self_started;
+
+/// A drained read belongs to its launch, not to the tab slot that survives it.
+#[test]
+fn drained_old_launch_cannot_settle_successor() {
+    use std::io::Write;
+    for replace in [false, true] {
+        let rig = Rig::of(CliKind::Codex, "");
+        rig.compose("old turn", 0);
+        rig.cli_takes("old turn");
+        let captured = include_str!("harness/codex/fixtures/queued_escape.jsonl").lines().nth(2).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&rig.transcript).unwrap().write_all(format!("{captured}\n").as_bytes()).unwrap();
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let manager = rig.manager.clone();
+        let rt = rig.rt.clone();
+        let tail = rig.tail.clone();
+        let reader = std::thread::spawn(move || manager.pump_read_from(&rt, &tail, || {
+            let records = tail.drain_records();
+            drained_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            records
+        }));
+        drained_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if replace {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line).marking(codex::rollout::decode_marked));
+            p.generation += 1;
+            p.origin.token = crate::hooks::mint_token();
+            p.echoed.clear();
+            p.turn_tail = Default::default();
+            p.turn_tail.opened();
+            rt.turn_open = false;
+            rt.open_turn();
+        }
+        let receipt = rig.compose_confirmed("successor receipt");
+        rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+            request_id: "successor-approval".into(), tool_use_id: "successor-tool".into(), tool_name: "Bash".into(),
+            input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+        }, None);
+        let before = {
+            let mut rt = rig.rt.lock().unwrap();
+            rt.last_activity = Instant::now() - Duration::from_secs(300);
+            rt.stalled_at = Some(rt.last_activity);
+            (rt.last_activity, rt.stalled_at, rt.seq)
+        };
+        resume_tx.send(()).unwrap();
+        reader.join().unwrap();
+        let rt = rig.rt.lock().unwrap();
+        assert_eq!(rt.turn_open, replace, "same-launch abort closes; old-launch abort must not");
+        assert_eq!(rt.pending.contains_key("successor-approval"), replace);
+        if replace {
+            assert_eq!((rt.last_activity, rt.stalled_at, rt.seq), before);
+            assert_eq!(rt.status, TabStatus::Waiting);
+            assert!(matches!(receipt.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+            assert!(matches!(&rt.engine, Engine::Cli(p) if p.codex_interrupt_hooks_owed == 0));
+        }
+    }
+}
+
+/// Authentication before a wait does not authorize mutation after replacement.
+#[test]
+fn old_hooks_cannot_mutate_successor_after_pump() {
+    for event in ["Interrupt", "Stop", "SessionEnd", "Notification", "SessionStart", "PermissionRequest"] {
+        for replace in [false, true] {
+            let rig = Rig::of(CliKind::Codex, "");
+            rig.compose("active turn", 0);
+            rig.cli_takes("active turn");
+            let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: event.into(),
+                payload: json!({"notification_type":"permission_prompt", "tool_name":"Bash", "tool_input":{"command":"ls"}, "last_assistant_message": if event == "Stop" { Some("old reply") } else { None }}) };
+            let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let manager = rig.manager.clone();
+            let worker = std::thread::spawn(move || manager.on_hook_pumping(frame, |rt, tail| {
+                manager.pump(rt, tail);
+                paused_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            }));
+            paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let ready = Arc::new(tui::Ready::new(true));
+            {
+                let mut rt = rig.rt.lock().unwrap();
+                let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+                if replace {
+                    p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+                    p.generation += 1;
+                    p.origin.token = crate::hooks::mint_token();
+                }
+                p.ready = ready.clone();
+                p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
+            }
+            let receipt = rig.compose_confirmed("still awaiting acceptance");
+            rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+                request_id: "retained".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
+                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+            }, None);
+            // Notification must not turn a successor from Working to Waiting.
+            if event == "Notification" { rig.rt.lock().unwrap().status = TabStatus::InProgress; }
+            let before = {
+                let rt = rig.rt.lock().unwrap();
+                (rt.last_activity, rt.status, rt.seq)
+            };
+            resume_tx.send(()).unwrap();
+            let reply = worker.join().unwrap();
+            if replace {
+                let rt = rig.rt.lock().unwrap();
+                assert!(rt.turn_open, "{event}");
+                assert!(rt.pending.contains_key("retained"), "{event}");
+                assert_eq!((rt.last_activity, rt.status, rt.seq), before, "{event}");
+                assert!(matches!(receipt.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "{event}");
+                assert!(rig.observer.completed.lock().unwrap().is_empty(), "{event}");
+                assert_ne!(reply, reply_for(CliKind::Codex, "PermissionRequest", Decision::Allow));
+            } else {
+                match event {
+                    "Stop" | "Interrupt" | "SessionEnd" => assert!(!rig.turn_open(), "{event}"),
+                    "Notification" => assert_eq!(rig.status(), TabStatus::Waiting),
+                    "PermissionRequest" => assert_eq!(reply, reply_for(CliKind::Codex, "PermissionRequest", Decision::Allow)),
+                    _ => {}
+                }
+            }
+            if event == "SessionStart" {
+                std::thread::sleep(tui::READY_SETTLE + Duration::from_millis(1));
+                assert_eq!(ready.settled(), !replace);
+            }
+        }
+    }
+}
+
+#[test]
+fn delayed_provider_id_persistence_belongs_to_its_launch() {
+    for replace in [false, true] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(), "title":"test",
+            "created":index::now(), "modified":index::now(),
+            "tabs":[{"id":TAB,"harness":"codex","providerSessionId":"successor-id","created":index::now(),"modified":index::now()}]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let rt = rig.rt.clone();
+        let tail = rig.tail.clone();
+        let worker = std::thread::spawn(move || {
+            paused_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            SessionManager::persist_provider_session(&rt, &tail, "old-id".into());
+        });
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if replace {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+            p.generation += 1;
+            p.origin.token = crate::hooks::mint_token();
+        }
+        resume_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().provider_session_id.as_deref(), Some(if replace {"successor-id"} else {"old-id"}));
+    }
+}
+
+#[test]
+fn stale_stop_reply_cannot_fabricate_successor_output() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("successor", 0);
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+    }
+    let before = rig.events();
+    rig.manager.settle_reply(&rig.rt, &rig.tail, Some("old hook reply"));
+    assert_eq!(rig.events(), before);
+    assert!(rig.turn_open());
+}
+
+#[test]
+fn delayed_permission_lookup_cannot_reuse_successor_consent() {
+    for replace in [false, true] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+            payload: json!({"tool_name":"Bash","tool_input":{"command":"ls"}}) };
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let manager = rig.manager.clone();
+        let rt = rig.rt.clone();
+        let worker = std::thread::spawn(move || {
+            paused_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            manager.ask_permission(&rt, &frame, CliKind::Codex)
+        });
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            if replace {
+                p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+                p.generation += 1;
+                p.origin.token = crate::hooks::mint_token();
+            }
+            p.answered.insert(tool_key("Bash", &json!({"command":"ls"})), true);
+        }
+        resume_tx.send(()).unwrap();
+        let reply = worker.join().unwrap();
+        assert_eq!(reply == reply_for(CliKind::Codex, "PermissionRequest", Decision::Allow), !replace);
+        assert!(rig.rt.lock().unwrap().pending.is_empty());
+    }
+}
+
+/// The former worker captured only tab ids; resolving them after dispatch
+/// selected and stopped the replacement instead of the launch that requested it.
+#[test]
+fn restart_dispatch_is_bound_to_the_original_launch() {
+    for (replace, fenced) in [(false, true), (true, false), (true, true)] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let manager = rig.manager.clone();
+        let rt = rig.rt.clone();
+        let expected = rig.tail.clone();
+        let worker = std::thread::spawn(move || {
+            paused_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if !fenced {
+                // Actual old worker dispatch: resolve the tab by ids at execution.
+                // Stopping below prevents this control from launching a real CLI.
+                assert!(manager.restart_for_settings(SESSION, TAB).is_err());
+                return false;
+            }
+            let Some(work) = manager.begin_restart_launch(&rt, &expected).unwrap() else { return false };
+            let exited = work.process.as_ref().is_none_or(|process| process.wait(RESTART_WAIT));
+            let guard = manager.claim_restart_completion(&rt, &work, exited).unwrap();
+            let claimed = guard.is_some();
+            drop(guard);
+            claimed
+        });
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if replace {
+            let mut rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.tail = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+            p.generation += 1;
+            p.origin.token = crate::hooks::mint_token();
+            // This is a real replacement process in the same pane slot.
+            rig.manager.terminals.respawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
+            rt.stopping = !fenced;
+        }
+        let successor_pid = rig.manager.terminals.pid(&rig.pane).unwrap();
+        resume_tx.send(()).unwrap();
+        let claimed = worker.join().unwrap();
+        let survived = rig.manager.terminals.is_running(&rig.pane);
+        let still_cli = matches!(rig.rt.lock().unwrap().engine, Engine::Cli(_));
+        // Clean up before assertions, including the discriminating old-order case.
+        rig.manager.terminals.kill_and_wait(&rig.pane, RESTART_WAIT);
+        rig.manager.terminals.stop_owned_groups(RESTART_WAIT);
+        assert_eq!(claimed, !replace);
+        assert_eq!(survived, replace && fenced, "old tab-id dispatch stops the successor pid {successor_pid}");
+        assert_eq!(still_cli, replace && fenced);
+    }
+}
+
+#[test]
+fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
+    for replacement in ["none", "engine", "stop", "pane", "claim"] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let spec = || pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap();
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        assert!(rig.manager.has_background_work(), "a pending restart prevents idle exit");
+        let (waited_tx, waited_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let manager = rig.manager.clone();
+        let rt = rig.rt.clone();
+        let worker = std::thread::spawn(move || {
+            let exited = work.process.as_ref().is_none_or(|process| process.wait(RESTART_WAIT));
+            assert!(exited);
+            waited_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let guard = manager.claim_restart_completion(&rt, &work, exited).unwrap();
+            let claimed = guard.is_some();
+            drop(guard);
+            claimed
+        });
+        waited_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(rig.rt.try_lock().is_ok(), "process waits must release runtime");
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            match replacement {
+                "engine" => {
+                    rt.engine = Engine::OpenCode(opencode::OpenCode::new(1, "/unused", None, None, "manual"));
+                    rt.open_turn();
+                    rig.manager.apply(&mut rt, Payload::PermissionRequested {
+                        request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
+                        input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+                    }, None);
+                }
+                "stop" => { rig.manager.release_cli(&mut rt); }
+                "claim" => { rt.restart_claim = Some(Arc::new(tui::Tail::unknown(codex::rollout::decode_line))); }
+                "pane" => { rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec()).unwrap(); }
+                _ => {}
+            }
+        }
+        let before = rig.events();
+        resume_tx.send(()).unwrap();
+        let claimed = worker.join().unwrap();
+        let successor_running = rig.manager.terminals.is_running(&rig.pane);
+        rig.manager.terminals.kill_and_wait(&rig.pane, RESTART_WAIT);
+        rig.manager.terminals.stop_owned_groups(RESTART_WAIT);
+        assert_eq!(claimed, replacement == "none", "{replacement}");
+        assert_eq!(rig.events(), before, "{replacement}: finishing old work must not publish into a successor");
+        if replacement == "engine" {
+            let rt = rig.rt.lock().unwrap();
+            assert!(rt.turn_open && rt.pending.contains_key("successor"));
+            assert_eq!(rt.status, TabStatus::Waiting);
+        }
+        if replacement == "pane" { assert!(successor_running); }
+    }
+}
+
+#[test]
+fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
+    for (state, fenced) in [("idle", true), ("turn", false), ("turn", true), ("cancelled", true), ("stop", true)] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let spec = pty::PaneSpec { cwd: rig._dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 300"), env: &[] };
+        rig.manager.terminals.spawn(rig.manager.sink.clone(), &rig.pane, spec).unwrap();
+        if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine { p.restart_when_idle = true; }
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let (manager, rt, tail) = (rig.manager.clone(), rig.rt.clone(), rig.tail.clone());
+        let worker = std::thread::spawn(move || {
+            paused_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            // The old worker validated only tail identity, even if this same
+            // launch had since accepted a new turn. Keep that actual path as
+            // a discriminating control, stopping before real CLI startup.
+            let work = if fenced { manager.begin_idle_restart_launch(&rt, &tail) }
+                else { manager.begin_restart_launch(&rt, &tail).unwrap() };
+            if let Some(work) = work {
+                assert!(work.process.as_ref().is_none_or(|process| process.wait(RESTART_WAIT)));
+                true
+            } else { false }
+        });
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let receipt = if state == "turn" {
+            let receipt = rig.compose_confirmed("new work on the same launch");
+            rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+                request_id: "same-launch-approval".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
+                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+            }, None);
+            Some(receipt)
+        } else { None };
+        {
+            let mut rt = rig.rt.lock().unwrap();
+            if state == "cancelled" {
+                if let Engine::Cli(p) = &mut rt.engine { p.restart_when_idle = false; }
+            }
+            if state == "stop" { rt.stopping = true; }
+        }
+        let before = rig.events();
+        resume_tx.send(()).unwrap();
+        let reserved = worker.join().unwrap();
+        let survived = rig.manager.terminals.is_running(&rig.pane);
+        let (open, pending, due) = {
+            let rt = rig.rt.lock().unwrap();
+            (rt.turn_open, rt.pending.contains_key("same-launch-approval"),
+                matches!(&rt.engine, Engine::Cli(p) if p.restart_when_idle))
+        };
+        rig.manager.terminals.kill_and_wait(&rig.pane, RESTART_WAIT);
+        rig.manager.terminals.stop_owned_groups(RESTART_WAIT);
+        assert_eq!(reserved, state == "idle" || !fenced, "{state}/{fenced}");
+        assert_eq!(survived, !reserved, "{state}/{fenced}");
+        if !reserved { assert_eq!(rig.events(), before); }
+        if state == "turn" {
+            assert_eq!(open, fenced);
+            assert_eq!(pending, fenced);
+            assert_eq!(due, fenced, "deferred settings remain due for the next idle boundary");
+            if fenced {
+                assert!(matches!(receipt.unwrap().try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+                // When that new turn finishes, the same pending restart can
+                // reserve the slot; deferral must not silently cancel it.
+                rig.rt.lock().unwrap().turn_open = false;
+                assert!(rig.manager.begin_idle_restart_launch(&rig.rt, &rig.tail).is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_restart_wait_blocks_only_its_unchanged_claim() {
+    for replaced in [false, true] {
+        let rig = Rig::of(CliKind::Codex, "");
+        let entry: index::SessionEntry = serde_json::from_value(json!({
+            "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+            "title": "restart failure", "created": index::now(), "modified": index::now(),
+            "tabs": [{ "id": TAB, "harness": "codex", "created": index::now() }]
+        })).unwrap();
+        index::save(&[entry]).unwrap();
+        let work = rig.manager.begin_restart_launch(&rig.rt, &rig.tail).unwrap().unwrap();
+        let successor = Arc::new(tui::Tail::unknown(codex::rollout::decode_line));
+        if replaced {
+            let mut rt = rig.rt.lock().unwrap();
+            rt.restart_claim = Some(successor.clone());
+            rt.engine = Engine::OpenCode(opencode::OpenCode::new(1, "/unused", None, None, "manual"));
+            rt.open_turn();
+            rig.manager.apply(&mut rt, Payload::PermissionRequested {
+                request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
+                input: json!({"command":"ls"}), title: None, description: None, options: vec![],
+            }, None);
+        }
+        let before = rig.events();
+        // Deliberately supply a failed exit confirmation, independently of
+        // OS timing: the continuation must never turn that into a new launch.
+        let refused = match rig.manager.claim_restart_completion(&rig.rt, &work, false) {
+            Ok(None) => false,
+            Ok(Some(_)) => panic!("an unconfirmed process exit must never grant startup"),
+            Err(error) => { assert!(error.to_string().contains("exit could not be confirmed")); true }
+        };
+        assert_eq!(refused, !replaced);
+        {
+            let rt = rig.rt.lock().unwrap();
+            if replaced {
+                assert!(!rt.stopping && rt.turn_open && rt.pending.contains_key("successor"));
+                assert!(rt.recovery.is_none());
+                assert!(rt.restart_claim.as_ref().is_some_and(|claim| Arc::ptr_eq(claim, &successor)));
+            } else {
+                assert!(rt.stopping && matches!(rt.engine, Engine::None));
+                assert_eq!(rt.recovery, Some(RecoveryKind::Disconnected));
+                assert_eq!(rt.status, TabStatus::Waiting);
+                assert!(rt.restart_claim.is_none());
+            }
+        }
+        if replaced { assert_eq!(rig.events(), before); }
+        if !replaced {
+            let prompt = PromptText { mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
+            assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
+            assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));
+            // The public adapter deliberately normalizes internal failures.
+            // Check its existing contract separately, without expecting the
+            // internal guard's text to pass through that boundary unchanged.
+            let public = rig.manager.send(SESSION, TAB, "must not start".into(), vec![]).expect_err("public send also refuses new work");
+            assert_eq!(public.to_string(), RecoveryKind::Failed.message(), "unexpected public refusal: {public:#}");
+            assert!(!rig.manager.terminals.is_running(&rig.pane));
+            assert!(rig.rt.lock().unwrap().stopping);
+            assert!(!rig.events().iter().any(|event| matches!(&event.payload, Payload::UserMessage { text, .. } if text == "must not start")));
+        }
+    }
+}

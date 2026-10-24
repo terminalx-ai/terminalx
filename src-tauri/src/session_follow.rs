@@ -208,7 +208,7 @@ enum First {
 }
 
 /// The agent in front of a pane, for a window to draw the pane's tab with.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneAgent {
     pub pane_id: String,
@@ -419,6 +419,8 @@ impl SessionManager {
         let ready = Arc::new(tui::Ready::new(false));
         ready.mark();
         let mode = index::get(session_id)?.tab(tab_id).map(|tab| tab.permission_mode.clone()).unwrap_or_default();
+        rt.restart_claim = None;
+        rt.stopping_pid = None;
         rt.engine = Engine::Cli(CliTab {
             usage_account: None,
             harness: kind,
@@ -592,17 +594,21 @@ impl SessionManager {
     /// The first read of a transcript that already held something sorts what
     /// is history from what is happening now.
     pub(super) fn pump_by_hand(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>) {
+        self.pump_by_hand_from(rt_arc, tail, || tail.drain_records());
+    }
+
+    pub(super) fn pump_by_hand_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &Arc<tui::Tail>, read: impl FnOnce() -> Vec<tui::Record>) {
         let (first, agent) = match &mut rt_arc.lock().unwrap().engine {
-            Engine::Cli(CliTab { by_hand: Some(by), .. }) => (by.first.take(), by.agent.clone()),
+            Engine::Cli(CliTab { tail: current, by_hand: Some(by), .. }) if Arc::ptr_eq(current, tail) => (by.first.take(), by.agent.clone()),
             _ => return,
         };
-        let mut records = tail.drain_records();
+        let mut records = read();
         let prompts: Vec<usize> =
             records.iter().enumerate().filter(|(_, (payloads, _, _))| payloads.iter().any(|payload| matches!(payload, Payload::UserMessage { .. }))).map(|(at, _)| at).collect();
         // Still the first read until there is something to sort.
         let wait = |first: First| {
-            if let Engine::Cli(CliTab { by_hand: Some(by), .. }) = &mut rt_arc.lock().unwrap().engine {
-                by.first.get_or_insert(first);
+            if let Engine::Cli(CliTab { tail: current, by_hand: Some(by), .. }) = &mut rt_arc.lock().unwrap().engine {
+                if Arc::ptr_eq(current, tail) { by.first.get_or_insert(first); }
             }
         };
         let history = match first {
@@ -623,10 +629,10 @@ impl SessionManager {
         let live = records.split_off(history);
         if !records.is_empty() {
             let busy = live.is_empty() && self.follow.locator().glance(&agent).activity == Some(Activity::Busy);
-            self.import(rt_arc, records, live.is_empty(), busy);
+            self.import(rt_arc, tail, records, live.is_empty(), busy);
         }
         for (payloads, mark, ts) in live {
-            self.pump_read(rt_arc, vec![(payloads, mark, ts)]);
+            self.pump_read(rt_arc, tail, vec![(payloads, mark, ts)]);
         }
     }
 
@@ -638,13 +644,13 @@ impl SessionManager {
     ///
     /// The tab's lock is taken a batch at a time, so a long conversation
     /// does not keep the tab from answering anything else until it is in.
-    fn import(&self, rt_arc: &Arc<Mutex<TabRuntime>>, records: Vec<tui::Record>, whole: bool, busy: bool) {
+    fn import(&self, rt_arc: &Arc<Mutex<TabRuntime>>, tail: &tui::Tail, records: Vec<tui::Record>, whole: bool, busy: bool) {
         let ended = |status| Payload::TurnCompleted { status, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false };
         let mut open = false;
         let mut records = records.into_iter().peekable();
         while records.peek().is_some() {
             let mut rt = rt_arc.lock().unwrap();
-            if !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
+            if !Self::has_tail(&rt, tail) || !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
                 return;
             }
             for (payloads, mark, ts) in records.by_ref().take(IMPORT_BATCH) {
@@ -687,7 +693,7 @@ impl SessionManager {
             return;
         }
         let mut rt = rt_arc.lock().unwrap();
-        if !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
+        if !Self::has_tail(&rt, tail) || !matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some()) {
             return;
         }
         if !whole {
@@ -961,6 +967,7 @@ impl SessionManager {
         // two shells started at once for one pane would each end the other.
         let rt_arc = self.runtime(session_id, tab_id)?;
         let rt = rt_arc.lock().unwrap();
+        if rt.restart_claim.is_some() { return Ok(()); }
         // An agent took the tab in the meantime: its pane is that agent's.
         if matches!(rt.engine, Engine::Cli(_)) {
             self.announce_pane(&rt);

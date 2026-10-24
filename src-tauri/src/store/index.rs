@@ -11,6 +11,11 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
+#[path = "transaction.rs"]
+mod transaction;
+
+const TRANSACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The launch mode of any session or tab whose creator did not name one —
 /// the desktop, the CLI, the relay, a cloud launch, an automation — and of a
 /// stored tab that has none. Only an explicit mode overrides it.
@@ -567,11 +572,17 @@ fn save_file(file: &mut IndexFile) -> Result<()> {
     Ok(())
 }
 
+fn with_file_lock<R>(f: impl FnOnce() -> Result<R>) -> Result<R> {
+    transaction::run(&file_path()?.with_extension("lock"), TRANSACTION_TIMEOUT, f)
+}
+
 fn update_file<R>(f: impl FnOnce(&mut IndexFile) -> Result<R>) -> Result<R> {
-    let mut file = load_file()?;
-    let r = f(&mut file)?;
-    save_file(&mut file)?;
-    Ok(r)
+    with_file_lock(|| {
+        let mut file = load_file()?;
+        let r = f(&mut file)?;
+        save_file(&mut file)?;
+        Ok(r)
+    })
 }
 
 pub fn load() -> Result<Vec<SessionEntry>> {
@@ -586,10 +597,16 @@ pub fn load() -> Result<Vec<SessionEntry>> {
 #[cfg(test)]
 pub fn save(sessions: &[SessionEntry]) -> Result<()> {
     // The sessions are written whatever the file held before, as they always were.
-    let mut file = load_file().unwrap_or_default();
-    file.sessions = sessions.to_vec();
-    save_file(&mut file)
+    with_file_lock(|| {
+        let mut file = load_file().unwrap_or_default();
+        file.sessions = sessions.to_vec();
+        save_file(&mut file)
+    })
 }
+
+#[cfg(test)]
+#[path = "index_transaction_tests.rs"]
+mod transaction_tests;
 
 /// Apply `f` to the whole index under the write lock and persist it.
 pub fn update<R>(f: impl FnOnce(&mut Vec<SessionEntry>) -> Result<R>) -> Result<R> {
@@ -632,41 +649,45 @@ pub fn set_tab_layout(workspace: &str, mut layout: TabLayout) -> Result<Vec<Sess
     })
 }
 
-/// Shells do not outlive the app, so a layout that still names one is naming
-/// a tab that cannot come back. Called once when the app starts.
+/// Explicit legacy layout cleanup. Window startup must retain owner shells.
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the explicit layout maintenance API; desktop attachment must not call it."))]
 pub fn forget_shell_tabs() -> Result<()> {
-    let mut file = load_file()?;
-    let mut changed = false;
-    for layout in file.workspace_tabs.values_mut() {
-        let before = layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
-        let shell = |key: &String| key.starts_with(SHELL_TAB);
-        layout.order.retain(|key| !shell(key));
-        layout.pinned.retain(|key| !shell(key));
-        layout.muted.retain(|key| !shell(key));
-        layout.titles.retain(|key, _| !shell(key));
-        changed |= before != layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
-    }
-    if !changed {
-        return Ok(());
-    }
-    file.workspace_tabs.retain(|_, layout| !layout.is_empty());
-    save_file(&mut file)
+    with_file_lock(|| {
+        let mut file = load_file()?;
+        let mut changed = false;
+        for layout in file.workspace_tabs.values_mut() {
+            let before = layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
+            let shell = |key: &String| key.starts_with(SHELL_TAB);
+            layout.order.retain(|key| !shell(key));
+            layout.pinned.retain(|key| !shell(key));
+            layout.muted.retain(|key| !shell(key));
+            layout.titles.retain(|key, _| !shell(key));
+            changed |= before != layout.order.len() + layout.pinned.len() + layout.muted.len() + layout.titles.len();
+        }
+        if !changed {
+            return Ok(());
+        }
+        file.workspace_tabs.retain(|_, layout| !layout.is_empty());
+        save_file(&mut file)
+    })
 }
 
 /// A shell became an agent's tab (#437), under the tab's own id. What the
 /// reader arranged for the shell (its place in the row, a pin, a mute, a
 /// title) is the tab's from here on. Returns whether any layout named it.
 pub fn shell_became_tab(pane: &str, tab_id: &str) -> Result<bool> {
-    let (shell, tab) = (format!("{SHELL_TAB}{pane}"), format!("{AGENT_TAB}{tab_id}"));
-    let mut file = load_file()?;
-    let mut renamed = false;
-    for layout in file.workspace_tabs.values_mut() {
-        renamed |= layout.rename(&shell, &tab);
-    }
-    if renamed {
-        save_file(&mut file)?;
-    }
-    Ok(renamed)
+    with_file_lock(|| {
+        let (shell, tab) = (format!("{SHELL_TAB}{pane}"), format!("{AGENT_TAB}{tab_id}"));
+        let mut file = load_file()?;
+        let mut renamed = false;
+        for layout in file.workspace_tabs.values_mut() {
+            renamed |= layout.rename(&shell, &tab);
+        }
+        if renamed {
+            save_file(&mut file)?;
+        }
+        Ok(renamed)
+    })
 }
 
 /// Take an agent tab out of its session. With `keep` it stays reopenable;

@@ -20,54 +20,6 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
 }
 
-/// Stop whatever a tab is running: a headless child, or the terminal pane a
-/// PTY-first tab's own CLI lives in.
-/// How long a delete waits for a session's processes to exit before it
-/// tries to remove their directory anyway.
-const STOP_BEFORE_REMOVE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Stop everything the sessions run (agents, their shells and whatever those
-/// started, such as a dev server) and wait for it to exit, so nothing still
-/// holds the directory that is about to be removed.
-fn stop_sessions_and_wait(state: &tauri::State<'_, crate::AppState>, sessions: &[SessionEntry]) {
-    let mut panes = Vec::new();
-    for session in sessions {
-        for tab in &session.tabs {
-            state.host.kill(&format!("{}/{}", session.id, tab.id));
-        }
-        let tabs: Vec<String> = session.tabs.iter().map(|tab| tab.id.clone()).collect();
-        panes.extend(state.terminals.session_pane_ids(&session.id, &tabs));
-    }
-    state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
-}
-
-/// Stop a session's agents and wait for them to exit, leaving its shells
-/// alone. For a session that changes directory and goes on: its agents must
-/// let go of their conversations before they start again elsewhere, but a
-/// shell the reader opened (a dev server, say) is theirs, and is not ended
-/// for a change they made to where the agents run.
-fn stop_agents_and_wait(state: &tauri::State<'_, crate::AppState>, session: &SessionEntry) {
-    let panes: Vec<String> = session
-        .tabs
-        .iter()
-        .map(|tab| {
-            state.host.kill(&format!("{}/{}", session.id, tab.id));
-            tab.pane_id()
-        })
-        .collect();
-    state.terminals.kill_all_and_wait(&panes, STOP_BEFORE_REMOVE_WAIT);
-}
-
-fn kill_tab(app: &AppHandle, state: &tauri::State<'_, crate::AppState>, session_id: &str, tab_id: &str) {
-    state.host.kill(&format!("{session_id}/{tab_id}"));
-    // The tab's own pane, or the shell's it took over (#437).
-    let pane = index::get(session_id).ok().and_then(|session| session.tab(tab_id).map(TabEntry::pane_id)).unwrap_or_else(|| crate::session::SessionManager::pane_id(tab_id));
-    state.terminals.kill(&pane);
-    // A shell's pane is listed by every window, which is told it has gone.
-    if crate::pty::is_shell_id(&pane) {
-        let _ = app.emit(PTY_CLOSED_EVENT, &pane);
-    }
-}
 
 // ------------------------------------------------------------------ account
 
@@ -1781,18 +1733,18 @@ pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
 // ---------------------------------------------------------------- automations
 
 #[tauri::command]
-pub fn automations_list() -> CmdResult<Vec<crate::automations::Automation>> {
-    store::automations::list().map_err(err)
+pub fn automations_list(state: State<'_, AppState>) -> CmdResult<Vec<crate::automations::Automation>> {
+    state.sessions().map_err(err)?.automations().map_err(err)
 }
 
 #[tauri::command]
-pub fn automation_runs(automation_id: String) -> CmdResult<Vec<crate::automations::AutomationRun>> {
-    store::automations::list_runs(&automation_id).map_err(err)
+pub fn automation_runs(state: State<'_, AppState>, automation_id: String) -> CmdResult<Vec<crate::automations::AutomationRun>> {
+    state.sessions().map_err(err)?.automation_runs(&automation_id).map_err(err)
 }
 
 #[tauri::command]
-pub fn automation_issue_states() -> CmdResult<Vec<crate::automations::AutomationIssueState>> {
-    crate::automations::issue_states().map_err(err)
+pub fn automation_issue_states(state: State<'_, AppState>) -> CmdResult<Vec<crate::automations::AutomationIssueState>> {
+    state.sessions().map_err(err)?.automation_issues().map_err(err)
 }
 
 #[tauri::command]
@@ -1803,63 +1755,24 @@ pub async fn automation_issue_preview(project_path: String, repo: String, query:
 }
 
 #[tauri::command]
-pub fn automation_create(app: AppHandle, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
-    let mut input = input;
-    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
-    validate_automation_target(&input)?;
-    let automation = crate::automations::definition_from_input(input, None, chrono::Utc::now()).map_err(err)?;
-    let automation = store::automations::insert(automation).map_err(err)?;
-    crate::automations::emit_definitions(&app);
-    Ok(automation)
+pub fn automation_create(state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    state.sessions().map_err(err)?.save_automation(None, input).map_err(err)
 }
 
 #[tauri::command]
-pub fn automation_update(app: AppHandle, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
-    let existing = store::automations::get(&id).map_err(err)?;
-    let mut input = input;
-    input.project_path = projects::canonical(&input.project_path).map_err(err)?;
-    validate_automation_target(&input)?;
-    let automation = crate::automations::definition_from_input(input, Some(&existing), chrono::Utc::now()).map_err(err)?;
-    let reset_seen = match (&existing.issue_trigger, &automation.issue_trigger) {
-        (Some(before), Some(after)) => {
-            before.repo != after.repo
-                || before.query != after.query
-                || (!before.run_on_existing && after.run_on_existing)
-        }
-        (None, Some(_)) => true,
-        _ => false,
-    };
-    let automation = store::automations::replace(automation).map_err(err)?;
-    if reset_seen {
-        store::automations::clear_seen(&id).map_err(err)?;
-    }
-    crate::automations::emit_definitions(&app);
-    Ok(automation)
+pub fn automation_update(state: State<'_, AppState>, id: String, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
+    state.sessions().map_err(err)?.save_automation(Some(&id), input).map_err(err)
 }
 
 #[tauri::command]
-pub fn automation_delete(app: AppHandle, id: String) -> CmdResult<()> {
-    store::automations::remove(&id).map_err(err)?;
-    crate::automations::emit_definitions(&app);
-    Ok(())
-}
-
-fn validate_automation_target(input: &crate::automations::AutomationInput) -> CmdResult<()> {
-    if input.workspace == crate::automations::AutomationWorkspace::NewWorktree && !git::is_repo(Path::new(&input.project_path)) {
-        return Err("Folder automations must use an existing session; worktrees require a Git repository.".into());
-    }
-    if input.workspace == crate::automations::AutomationWorkspace::Session {
-        let target = index::get(input.session_id.as_deref().ok_or("Choose a session for this automation.")?).map_err(err)?;
-        if projects::canonical(&target.project_path).map_err(err)? != input.project_path {
-            return Err("The selected session belongs to another project.".into());
-        }
-    }
-    Ok(())
+pub fn automation_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.sessions().map_err(err)?.delete_automation(&id).map_err(err)
 }
 
 #[tauri::command]
-pub async fn automation_run_now(app: AppHandle, id: String) -> CmdResult<crate::automations::AutomationRun> {
-    tauri::async_runtime::spawn_blocking(move || crate::automations::dispatch(&app, &id, crate::automations::AutomationTrigger::Manual, None).map_err(err))
+pub async fn automation_run_now(state: State<'_, AppState>, id: String) -> CmdResult<crate::automations::AutomationRun> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.run_automation(&id).map_err(err))
         .await
         .map_err(err)?
 }
@@ -1876,8 +1789,9 @@ pub async fn session_summaries(session_ids: Option<Vec<String>>) -> CmdResult<Ve
 
 /// Cached display/status reads never walk transcripts or wait for the scan.
 #[tauri::command]
-pub async fn app_activity_summary() -> CmdResult<crate::store::activity::Summary> {
-    tauri::async_runtime::spawn_blocking(|| crate::store::activity::summary().map_err(err))
+pub async fn app_activity_summary(state: State<'_, AppState>) -> CmdResult<crate::store::activity::Summary> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.activity_summary().map_err(err))
         .await.map_err(err)?
 }
 
@@ -1919,7 +1833,7 @@ fn announce_session(app: &AppHandle, session_id: &str) {
 
 #[tauri::command]
 pub fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, tab: NewTab) -> CmdResult<TabEntry> {
-    let tab = state.manager().ok_or("not ready")?.add_tab(&session_id, &tab).map_err(err)?;
+    let tab = state.sessions().map_err(err)?.add_tab(&session_id, &tab).map_err(err)?;
     announce_session(&app, &session_id);
     Ok(tab)
 }
@@ -1936,11 +1850,7 @@ fn announce_tabs(app: &AppHandle) {
 #[tauri::command]
 pub fn remove_tab(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<()> {
     let state = app.state::<crate::AppState>();
-    kill_tab(&app, &state, &session_id, &tab_id);
-    crate::session_ops::close_tab_entry(&session_id, &tab_id)?;
-    announce_session(&app, &session_id);
-    announce_tabs(&app);
-    Ok(())
+    state.sessions().map_err(err)?.close_tab(&session_id, &tab_id).map_err(err)
 }
 
 /// Bring a closed tab back into its session, with its conversation.
@@ -2072,11 +1982,8 @@ pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::NewQuick
 pub async fn set_quick_chat_cwd(app: AppHandle, session_id: String, cwd: Option<String>) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| stop_agents_and_wait(&state, session);
-        crate::session_ops::set_quick_chat_cwd(&app, &session_id, cwd.as_deref(), &stop)
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("quickCwd", serde_json::json!({"sessionId":session_id,"cwd":cwd})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// Turn a quick chat into an ordinary session of a project, with its history.
@@ -2084,50 +1991,8 @@ pub async fn set_quick_chat_cwd(app: AppHandle, session_id: String, cwd: Option<
 pub async fn move_quick_chat_to_project(app: AppHandle, session_id: String, project_path: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| stop_agents_and_wait(&state, session);
-        let moved = crate::session_ops::move_quick_chat_to_project(&app, &session_id, &project_path, &stop)?;
-        // The project may have been added by this: every window lists it.
-        let _ = app.emit(PROJECTS_CHANGED_EVENT, &());
-        Ok(moved)
-    })
-    .await
-    .map_err(err)?
-}
-
-/// How often idle quick chats are looked for.
-const RETENTION_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
-/// A scratch directory with no session is left alone this long: one being
-/// made right now is a moment ahead of its index entry.
-const ORPHAN_SCRATCH_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-
-/// Apply the retention setting now, and again every few hours while the app runs.
-pub fn start_quick_chat_retention(app: AppHandle) {
-    let spawned = std::thread::Builder::new().name("quick-chat-retention".into()).spawn(move || loop {
-        sweep_quick_chats(&app);
-        std::thread::sleep(RETENTION_SWEEP_EVERY);
-    });
-    if let Err(error) = spawned {
-        log::warn!("quick chat retention is off for this run: {error}");
-    }
-}
-
-fn sweep_quick_chats(app: &AppHandle) {
-    let days = store::settings::load().floating.retention_days;
-    let state = app.state::<crate::AppState>();
-    // A shell the reader left running in it is a use of it, whatever its date.
-    let shells = state.terminals.shells();
-    let live: Vec<&str> = shells.iter().filter(|shell| !shell.exited).map(|shell| shell.session_id.as_str()).collect();
-    let busy = |session: &SessionEntry| crate::session_ops::has_shell_in_use(session, &live, |pane| state.terminals.is_running(pane));
-    let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-    match crate::session_ops::sweep_idle_quick_chats(app, days, &busy, &stop) {
-        Ok(removed) if !removed.is_empty() => log::info!("removed {} quick chat(s) idle for more than {days} day(s)", removed.len()),
-        Ok(_) => {}
-        Err(error) => log::warn!("quick chat retention: {error}"),
-    }
-    let orphans = crate::session_ops::remove_orphan_scratch(ORPHAN_SCRATCH_AGE);
-    if orphans > 0 {
-        log::info!("removed {orphans} scratch director(ies) no session uses");
-    }
+        state.sessions().map_err(err)?.workspace("quickMove", serde_json::json!({"sessionId":session_id,"projectPath":project_path})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// What a session's scratch directory holds, for the delete confirmation.
@@ -2138,7 +2003,7 @@ pub async fn quick_chat_scratch(session_id: String) -> CmdResult<crate::session_
 
 /// The sessions a workspace removal deleted or moved, and what became of
 /// its branch.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRemoveReport {
     pub sessions: Vec<SessionEntry>,
@@ -2155,8 +2020,7 @@ pub struct WorkspaceRemoveReport {
 pub async fn delete_session(app: AppHandle, session_id: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-        crate::session_ops::delete_session_blocking(&app, &session_id, &stop).map(|_| ())
+        state.sessions().map_err(err)?.delete_session(&session_id).map_err(err)
     })
     .await
     .map_err(err)?
@@ -2236,32 +2100,8 @@ pub async fn sessions_sharing_worktree(session_id: String) -> CmdResult<Vec<Stri
 pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<SessionEntry> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let s = index::get(&session_id).map_err(err)?;
-        if s.worktree_name.is_none() {
-            return Err("session has no worktree".to_string());
-        }
-        for tab in &s.tabs {
-            kill_tab(&app, &state, &s.id, &tab.id);
-        }
-        let branch = git::current_branch(Path::new(&s.project_path));
-        let out = index::update_session(&session_id, |s| {
-            s.cwd = s.project_path.clone();
-            s.worktree_name = None;
-            s.worktree_removed = false;
-            s.removed_workspace = None;
-            s.branch = branch.clone();
-            s.base_ref = None;
-            for t in &mut s.tabs {
-                t.status = TabStatus::Idle;
-            }
-            Ok(s.clone())
-        })
-        .map_err(err)?;
-        let _ = app.emit("session_updated", &out);
-        Ok(out)
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("relocate", serde_json::json!({"sessionId":session_id})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// Fork a tab into a new session: a fresh worktree at the source branch's
@@ -2450,16 +2290,15 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let tracked = m.tracked_transcript(&session_id, &tab_id);
-        crate::continuation::prepare(&session_id, &tab_id, tracked).map_err(err)
+        m.prepare_continuation(&session_id, &tab_id).map_err(err)
     }).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn load_tab_events(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<crate::events::AgentEvent>> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.load_events(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
@@ -2497,7 +2336,7 @@ pub async fn send_message(
     images: Option<Vec<ImageInput>>,
     confirm_delivery: Option<bool>,
 ) -> CmdResult<SendOutcome> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         if confirm_delivery.unwrap_or(false) {
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
@@ -2511,26 +2350,26 @@ pub async fn send_message(
 
 #[tauri::command]
 pub fn interrupt_turn(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<bool> {
-    state.manager().ok_or("not ready")?.interrupt(&session_id, &tab_id).map_err(err)
+    state.sessions().map_err(err)?.interrupt(&session_id, &tab_id).map_err(err)
 }
 
 #[tauri::command]
 pub fn tab_handoff(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::session::HandoffInfo> {
-    state.manager().ok_or("not ready")?.handoff(&session_id, &tab_id).map_err(err)
+    state.sessions().map_err(err)?.handoff(&session_id, &tab_id).map_err(err)
 }
 
 /// The terminal pane a tab's CLI is running in, or nothing if it is not.
 /// A window that opened after the CLI did never saw the pane announced.
 #[tauri::command]
 pub fn tab_pane(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Option<crate::session::TabPtyEvent>> {
-    Ok(state.manager().ok_or("not ready")?.pane_of(&session_id, &tab_id))
+    state.sessions().map_err(err)?.pane_of(&session_id, &tab_id).map_err(err)
 }
 
 /// Start a tab's own CLI. PTY-first tabs are the CLI, so opening one starts
 /// it; harnesses that still run headless do nothing here.
 #[tauri::command]
 pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.ensure_started(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
@@ -2538,29 +2377,29 @@ pub async fn ensure_tab_started(state: State<'_, AppState>, session_id: String, 
 /// really be gone before they answer, so none of them runs on the main thread.
 #[tauri::command]
 pub async fn stop_tab(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.stop(&session_id, &tab_id).map_err(err)).await.map_err(err)?
 }
 
 /// Send a message the CLI holds behind its running turn now: interrupt, then type it.
 #[tauri::command]
 pub fn send_queued_now(state: State<'_, AppState>, session_id: String, tab_id: String, seq: u64) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.send_queued_now(&session_id, &tab_id, seq).map_err(err)
+    state.sessions().map_err(err)?.send_queued_now(&session_id, &tab_id, seq).map_err(err)
 }
 
 #[tauri::command]
 pub fn cancel_queued(state: State<'_, AppState>, session_id: String, tab_id: String, message_id: String) -> CmdResult<Option<QueuedMessage>> {
-    state.manager().ok_or("not ready")?.cancel_queued(&session_id, &tab_id, &message_id).map_err(err)
+    state.sessions().map_err(err)?.cancel_queued(&session_id, &tab_id, &message_id).map_err(err)
 }
 
 #[tauri::command]
 pub fn list_queued(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<Vec<QueuedMessage>> {
-    Ok(state.manager().ok_or("not ready")?.queued(&session_id, &tab_id))
+    state.sessions().map_err(err)?.queued(&session_id, &tab_id).map_err(err)
 }
 
 #[tauri::command]
 pub fn respond_permission(state: State<'_, AppState>, session_id: String, tab_id: String, request_id: String, option_id: String) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.respond_permission(&session_id, &tab_id, &request_id, &option_id).map_err(err)
+    state.sessions().map_err(err)?.respond_permission(&session_id, &tab_id, &request_id, &option_id).map_err(err)
 }
 
 #[tauri::command]
@@ -2571,35 +2410,35 @@ pub fn answer_questions(
     request_id: String,
     answers: std::collections::HashMap<String, String>,
 ) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.answer_questions(&session_id, &tab_id, &request_id, answers).map_err(err)
+    state.sessions().map_err(err)?.answer_questions(&session_id, &tab_id, &request_id, answers).map_err(err)
 }
 
 #[tauri::command]
 pub async fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.set_model(&session_id, &tab_id, &model).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn set_tab_permission_mode(state: State<'_, AppState>, session_id: String, tab_id: String, mode: String) -> CmdResult<()> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.set_permission_mode(&session_id, &tab_id, &mode).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn set_tab_effort(state: State<'_, AppState>, session_id: String, tab_id: String, effort: Option<String>) -> CmdResult<()> {
-    let m = state.manager().ok_or("not ready")?;
+    let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || m.set_effort(&session_id, &tab_id, effort.as_deref()).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub fn mark_tab_read(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
-    state.manager().ok_or("not ready")?.mark_read(&session_id, &tab_id).map_err(err)
+    state.sessions().map_err(err)?.mark_read(&session_id, &tab_id).map_err(err)
 }
 
 #[tauri::command]
 pub fn tab_status(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<TabStatus> {
-    Ok(state.manager().ok_or("not ready")?.status_of(&session_id, &tab_id))
+    state.sessions().map_err(err)?.status_of(&session_id, &tab_id).map_err(err)
 }
 
 /// The picker's list. Claude and Codex depend on the signed-in account and
@@ -2678,61 +2517,30 @@ pub fn set_status_bar_settings(app: AppHandle, patch: StatusBarPatch) -> CmdResu
 
 #[tauri::command]
 pub fn status_usage_snapshot(state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
-    Ok(state.manager().ok_or("not ready")?.usage_snapshot())
+    state.sessions().map_err(err)?.usage_snapshot().map_err(err)
 }
 
 #[tauri::command]
-pub async fn status_usage_refresh(app: AppHandle, state: State<'_, AppState>, manual: Option<bool>) -> CmdResult<crate::status::usage::UsageSnapshot> {
-    let status = state.status.clone();
-    let manager = state.manager().ok_or("not ready")?;
-    let manual = manual.unwrap_or(false);
-    // Read per request, so a changed interval governs the very next refresh.
-    let cadence = store::settings::load().status_bar.usage_refresh_ms();
-    let publishing_app = app.clone();
-    let publishing_manager = manager.clone();
-    let failures = tauri::async_runtime::spawn_blocking(move || {
-        let mut failures = Vec::new();
-        if let Err(error) = status.usage.refresh_claude(manual, cadence) {
-            failures.push(format!("Claude usage refresh: {error:#}"));
-        }
-        // Publish Claude as soon as its source settles; starting Codex's
-        // app-server must not hold a confirmed Claude rollover off-screen.
-        let _ = publishing_app.emit(crate::status::usage::EVENT, publishing_manager.usage_snapshot());
-        if let Err(error) = status.usage.refresh_codex(manual, cadence) {
-            failures.push(format!("Codex usage refresh: {error:#}"));
-        }
-        failures
-    })
-    .await
-    .map_err(err)?;
-    for failure in failures {
-        log::warn!("{failure}");
-    }
-    let snapshot = manager.usage_snapshot();
-    let _ = app.emit(crate::status::usage::EVENT, &snapshot);
-    Ok(snapshot)
+pub async fn status_usage_refresh(state: State<'_, AppState>, manual: Option<bool>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    let manager = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || manager.refresh_usage(manual.unwrap_or(false)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub async fn status_codex_reset(app: AppHandle, state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
-    let status = state.status.clone();
-    let manager = state.manager().ok_or("not ready")?;
-    tauri::async_runtime::spawn_blocking(move || status.usage.reset_codex().map_err(err)).await.map_err(err)??;
-    let snapshot = manager.usage_snapshot();
-    let _ = app.emit(crate::status::usage::EVENT, &snapshot);
-    Ok(snapshot)
+pub async fn status_codex_reset(state: State<'_, AppState>) -> CmdResult<crate::status::usage::UsageSnapshot> {
+    let manager = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || manager.reset_codex_usage().map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub fn status_resource_overview(state: State<'_, AppState>) -> crate::status::resources::ResourceOverview {
-    state.status.resources.overview(&state.terminals)
+pub fn status_resource_overview(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    state.sessions().map_err(err)?.resource_overview().map_err(err)
 }
 
 #[tauri::command]
-pub async fn status_resource_sample(state: State<'_, AppState>) -> CmdResult<crate::status::resources::ResourceSnapshot> {
-    let status = state.status.clone();
-    let terminals = state.terminals.clone();
-    tauri::async_runtime::spawn_blocking(move || status.resources.sample(&terminals).map_err(err)).await.map_err(err)?
+pub async fn status_resource_sample(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.resource_sample().map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2740,10 +2548,9 @@ pub async fn status_resource_kill(
     state: State<'_, AppState>,
     pane_id: String,
     confirmed: Option<bool>,
-) -> CmdResult<crate::status::resources::KillResult> {
-    let status = state.status.clone();
-    let terminals = state.terminals.clone();
-    tauri::async_runtime::spawn_blocking(move || status.resources.kill(&terminals, &pane_id, confirmed.unwrap_or(false)).map_err(err))
+) -> CmdResult<serde_json::Value> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.resource_kill(&pane_id, confirmed.unwrap_or(false)).map_err(err))
         .await
         .map_err(err)?
 }
@@ -2907,122 +2714,100 @@ pub fn gh_available() -> bool {
 
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn pty_spawn(app: AppHandle, state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>, title: Option<String>) -> CmdResult<()> {
-    let spec = crate::pty::PaneSpec { cwd: &cwd, cols: cols.max(2), rows: rows.max(1), command: command.as_deref(), env: &[] };
-    state.terminals.spawn(std::sync::Arc::new(app.clone()), &id, spec).map_err(err)?;
-    if let Some(title) = title.as_deref().filter(|title| !title.trim().is_empty()) {
-        state.terminals.set_title(&id, title);
-    }
-    // A shell tab is every window's to list, not only the one that opened it.
-    if let Some(shell) = state.terminals.shell(&id) {
-        let _ = app.emit(PTY_OPENED_EVENT, &shell);
-    }
-    Ok(())
+pub async fn pty_spawn(state: State<'_, AppState>, id: String, cwd: String, cols: u16, rows: u16, command: Option<String>, title: Option<String>) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.spawn(&id, &cwd, cols, rows, command.as_deref(), title.as_deref())).await.map_err(err)?.map_err(err)
 }
 
-pub(crate) const PTY_OPENED_EVENT: &str = "pty_opened";
-pub(crate) const PTY_CLOSED_EVENT: &str = "pty_closed";
-pub(crate) const PTY_RENAMED_EVENT: &str = "pty_renamed";
 
 /// Which of these shell tabs are running a command now, for a close that would end it.
 #[tauri::command]
-pub fn pty_busy(state: State<'_, AppState>, ids: Vec<String>) -> Vec<String> {
-    ids.into_iter().filter(|id| state.terminals.is_busy(id)).collect()
+pub async fn pty_busy(state: State<'_, AppState>, ids: Vec<String>) -> CmdResult<Vec<String>> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.busy(&ids)).await.map_err(err)?.map_err(err)
 }
 
 /// The shell tabs that are open, in every session: a window loaded after
 /// they were opened (the floating one, a reload) lists them from this.
 #[tauri::command]
-pub fn pty_shells(state: State<'_, AppState>) -> Vec<crate::pty::ShellPane> {
-    // A shell an agent was started in is that agent's tab from then on
-    // (#437): the session lists it, and it is not also a shell tab.
-    let taken: std::collections::HashSet<String> = index::load().unwrap_or_default().iter().flat_map(|session| &session.tabs).filter_map(|tab| tab.follow.pane.clone()).collect();
-    state.terminals.shells().into_iter().filter(|shell| !taken.contains(&shell.id)).collect()
+pub async fn pty_shells(state: State<'_, AppState>) -> CmdResult<Vec<crate::pty::ShellPane>> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.shells()).await.map_err(err)?.map_err(err)
 }
 
 /// The agents in front of terminals right now (#437), for a window that
 /// loads after they were started.
 #[tauri::command]
-pub fn pane_agents(state: State<'_, AppState>) -> Vec<crate::session::follow::PaneAgent> {
-    state.manager().map(|manager| manager.pane_agents()).unwrap_or_default()
+pub fn pane_agents(state: State<'_, AppState>) -> CmdResult<Vec<crate::session::follow::PaneAgent>> {
+    state.sessions().map_err(err)?.pane_agents().map_err(err)
 }
 
 /// Start a tab's agent again on one of the tab's conversations (#437): the
 /// one it holds, or one it held before another agent was run in its terminal.
 #[tauri::command]
 pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
-    let manager = app.state::<AppState>().manager().ok_or("not ready")?;
+    let manager = app.state::<AppState>().sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
-pub fn pty_rename(app: AppHandle, state: State<'_, AppState>, id: String, title: String) {
-    state.terminals.rename(&id, &title);
-    if let Some(shell) = state.terminals.shell(&id) {
-        let _ = app.emit(PTY_RENAMED_EVENT, &shell);
-    }
+pub async fn pty_rename(state: State<'_, AppState>, id: String, title: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.rename(&id, &title)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
 pub async fn pty_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
-    if !state.pairing.desktop_terminal_input_allowed(&id) {
-        return Ok(());
-    }
-    // A paste can fill the PTY's input buffer while the program is busy
-    // writing output. Never wait for it on the UI thread: that also prevents
-    // the window's output acknowledgements and other panes' input arriving.
-    state.terminals.write_async(&id, data.into_bytes()).await.map_err(err)
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.write(&id, data.as_bytes())).await.map_err(err)?.map_err(err)
 }
 
 /// The window shows this pane: send it the pane's output as raw bytes, the
 /// scrollback so far first. No base64, no JSON, and no other listener hears it.
 /// `token` names this attachment in the acknowledgements and the detach that follow.
 #[tauri::command]
-pub fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) {
-    state.terminals.attach(window.label(), &id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok()));
+pub async fn pty_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    let label = window.label().to_owned();
+    tauri::async_runtime::spawn_blocking(move || runtime.attach(&label, &id, &token, Box::new(move |bytes| channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes.to_vec())).is_ok())))
+        .await.map_err(err)?.map_err(err)
 }
 
 /// The window has drawn `drawn` bytes of the pane's output since it attached (flow control).
 #[tauri::command]
-pub fn pty_ack(state: State<'_, AppState>, id: String, token: String, drawn: u64) {
-    state.terminals.ack(&id, &token, drawn);
+pub fn pty_ack(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String, drawn: u64) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    runtime.ack(window.label(), &id, &token, drawn).map_err(err)
 }
 
 /// A freshly loaded window: whatever its previous page was shown is gone.
 /// Only this window's views: another window goes on showing its terminals.
 #[tauri::command]
 pub fn pty_detach_all(window: tauri::WebviewWindow, state: State<'_, AppState>) {
-    state.terminals.detach_window(window.label());
+    if let Some(runtime) = state.runtime() { runtime.detach_window(window.label()); }
 }
 
 #[tauri::command]
-pub fn pty_detach(state: State<'_, AppState>, id: String, token: String) {
-    state.terminals.detach(&id, &token);
+pub fn pty_detach(window: tauri::WebviewWindow, state: State<'_, AppState>, id: String, token: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    runtime.detach(window.label(), &id, &token).map_err(err)
 }
 
 #[tauri::command]
-pub fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
-    if !state.pairing.desktop_terminal_input_allowed(&id) {
-        return Ok(());
-    }
-    state.terminals.resize(&id, cols.max(2), rows.max(1)).map_err(err)
+pub async fn pty_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.resize(&id, cols, rows)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
-pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> Vec<String> {
-    state.pairing.mobile_driven_tabs()
+pub fn mobile_terminal_drivers(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    state.pairing.mobile_driven_tabs().map_err(err)
 }
 
 #[tauri::command]
-pub fn pty_kill(app: AppHandle, state: State<'_, AppState>, id: String) {
-    // By its name, not by whether it is still running: a shell whose process
-    // has already gone is still a tab in the other window, to be dropped there.
-    let shell = crate::pty::is_shell_id(&id);
-    state.terminals.kill(&id);
-    // Closed for everyone: the other window drops its tab for it too.
-    if shell {
-        let _ = app.emit(PTY_CLOSED_EVENT, &id);
-    }
+pub async fn pty_kill(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let runtime = state.runtime().ok_or_else(|| state.runtime_error.lock().unwrap().clone())?;
+    tauri::async_runtime::spawn_blocking(move || runtime.terminals()?.kill(&id)).await.map_err(err)?.map_err(err)
 }
 
 /// The webview's answer to a `terminal_perf_request` event.
@@ -3483,7 +3268,7 @@ pub async fn github_identity(project_path: String, refresh: Option<bool>) -> Cmd
 
 /// A pipeline as it starts, with what the author's first prompt must carry
 /// for the pipeline to hear when the work is done.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartedIssuePipeline {
     pub pipeline: crate::issue_pipeline::Pipeline,
@@ -3500,50 +3285,32 @@ pub fn issue_pipelines_list() -> CmdResult<Vec<crate::issue_pipeline::Pipeline>>
 /// cannot serve: one on the default branch, or in a project that turned it off.
 #[tauri::command]
 pub async fn issue_pipeline_start(app: AppHandle, session_id: String, tab_id: String, auto_merge: Option<bool>) -> CmdResult<StartedIssuePipeline> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let host = crate::issue_pipeline::desktop::host(&app).map_err(err)?;
-        let pipeline = crate::issue_pipeline::engine::start(&host, &session_id, &tab_id, auto_merge, None).map_err(err)?;
-        Ok(StartedIssuePipeline { pipeline, author_brief: crate::issue_pipeline::prompts::author_brief() })
-    })
-    .await
-    .map_err(err)?
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("start", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"autoMerge":auto_merge})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_continue(app: AppHandle, session_id: String, tab_id: String, options: crate::issue_pipeline::LaunchOptions) -> CmdResult<Option<StartedIssuePipeline>> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let host = crate::issue_pipeline::desktop::host(&app).map_err(err)?;
-        let pipeline = crate::issue_pipeline::engine::continue_launch(&host, &session_id, &tab_id, &options).map_err(err)?;
-        Ok(pipeline.map(|pipeline| StartedIssuePipeline { pipeline, author_brief: crate::issue_pipeline::prompts::author_brief() }))
-    }).await.map_err(err)?
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("continue", serde_json::json!({"sessionId":session_id,"tabId":tab_id,"options":options})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_set_auto_merge(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let host = crate::issue_pipeline::desktop::host(&app).map_err(err)?;
-        crate::issue_pipeline::engine::set_auto_merge(&host, &id, value).map_err(err)
-    })
-    .await
-    .map_err(err)?
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("autoMerge", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_set_resolve_conflicts(app: AppHandle, id: String, value: bool) -> CmdResult<crate::issue_pipeline::Pipeline> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let host = crate::issue_pipeline::desktop::host(&app).map_err(err)?;
-        crate::issue_pipeline::engine::set_resolve_conflicts(&host, &id, value).map_err(err)
-    }).await.map_err(err)?
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("resolveConflicts", serde_json::json!({"id":id,"value":value})).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
 pub async fn issue_pipeline_act(app: AppHandle, id: String, action: crate::issue_pipeline::engine::Action) -> CmdResult<crate::issue_pipeline::Pipeline> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let host = crate::issue_pipeline::desktop::host(&app).map_err(err)?;
-        crate::issue_pipeline::engine::act(&host, &id, action).map_err(err)
-    })
-    .await
-    .map_err(err)?
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.pipeline("act", serde_json::json!({"id":id,"action":action})).map_err(err)).await.map_err(err)?
 }
 
 /// Move a cloud workspace's Linear issue to its team's review state with the
@@ -4188,29 +3955,16 @@ pub async fn remove_leftovers(app: AppHandle, ids: Vec<String>, run: Option<Stri
     .map_err(err)?
 }
 
-/// Run `f` with what the worktree clean-up reads about this machine: the
-/// open projects, and what is running now (asked again at every check).
-fn with_cleanup_host<R>(state: &crate::AppState, f: impl FnOnce(&crate::worktree_cleanup::Host<'_>) -> R) -> CmdResult<R> {
-    let (all, _) = projects::list().map_err(err)?;
-    let (open, archived): (Vec<Project>, Vec<Project>) = all.into_iter().partition(|project| !project.archived);
-    // An archived project is not cleaned, and its folder is not removable either.
-    let protected: Vec<std::path::PathBuf> = archived.iter().map(|project| std::path::PathBuf::from(&project.path)).collect();
-    let manager = state.manager();
-    let running = |session: &str, tab: &str| manager.as_ref().is_some_and(|manager| manager.is_running(session, tab)) || state.host.is_live(&format!("{session}/{tab}"));
-    let live = |sessions: &[SessionEntry]| crate::worktree_cleanup::Live::observe(&state.terminals, sessions, &running);
-    Ok(f(&crate::worktree_cleanup::Host { projects: &open, protected: &protected, confine: None, live: &live, fetch: crate::landed::Fetch::Fresh }))
-}
+
 
 /// Every worktree of the open projects on this machine with whether the
 /// clean-up may remove it, and why not. Reads only.
 #[tauri::command]
-pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<String>>) -> CmdResult<Vec<crate::worktree_cleanup::ProjectScan>> {
+pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::worktree_cleanup::scan(host, project_paths.as_deref()).map_err(err))?
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("scan", serde_json::json!({"projectPaths":project_paths})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// What removing one worktree would free. `None` when `job` was cancelled.
@@ -4218,16 +3972,17 @@ pub async fn worktree_cleanup_scan(app: AppHandle, project_paths: Option<Vec<Str
 pub async fn worktree_cleanup_size(app: AppHandle, job: String, project_path: String, path: String) -> CmdResult<Option<u64>> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::worktree_cleanup::estimate_size(host, crate::worktree_cleanup::Jobs::sizes(), &format!("local:{job}"), &project_path, &path).map_err(err))?
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("size", serde_json::json!({"job":job,"projectPath":project_path,"path":path})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// Stop the size estimates whose job id starts with `prefix`.
 #[tauri::command]
-pub fn worktree_cleanup_cancel_sizes(prefix: String) {
-    crate::worktree_cleanup::Jobs::sizes().cancel(&format!("local:{prefix}"));
+pub async fn worktree_cleanup_cancel_sizes(app: AppHandle, prefix: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        state.sessions().map_err(err)?.workspace("cancelSizes", serde_json::json!({"prefix":prefix})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// Remove the worktrees the person confirmed. Each is checked again on the
@@ -4235,35 +3990,31 @@ pub fn worktree_cleanup_cancel_sizes(prefix: String) {
 /// How far it is goes out as `worktree_cleanup_progress` events carrying
 /// `run`; the list returned is what happened.
 #[tauri::command]
-pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<Vec<crate::worktree_cleanup::ItemResult>> {
-    use crate::worktree_cleanup::{Jobs, OfRun, Progress, Watch, PROGRESS_EVENT};
+pub async fn worktree_cleanup_remove(app: AppHandle, items: Vec<crate::worktree_cleanup::RemoveItem>, run: Option<String>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let run = run.unwrap_or_default();
-        let report = |progress: &Progress| {
-            let _ = app.emit(PROGRESS_EVENT, OfRun { run: &run, progress });
-        };
-        let stop = Jobs::removals().start(&run);
-        let results = with_cleanup_host(&state, |host| crate::worktree_cleanup::remove(host, &app, &items, Watch { report: Some(&report), stop: Some(&stop) }));
-        Jobs::removals().finish(&stop);
-        let results = results?;
-        for done in results.iter().filter(|done| matches!(done.outcome, crate::worktree_cleanup::Outcome::Removed | crate::worktree_cleanup::Outcome::AlreadyRemoved)) {
-            state.browser.forget_workspace(&crate::browser::control::canonical(&done.path));
+        let items: Vec<_> = items.into_iter().map(|item| serde_json::json!({
+            "projectPath":item.project_path,"path":item.path,"token":item.token,"deleteSessions":item.delete_sessions,
+            "acceptIgnored":item.accept_ignored,"estimatedBytes":item.estimated_bytes
+        })).collect();
+        let results: serde_json::Value = state.sessions().map_err(err)?.workspace("remove", serde_json::json!({"items":items,"run":run})).map_err(err)?;
+        for done in results.as_array().into_iter().flatten() {
+            if matches!(done["outcome"].as_str(), Some("removed" | "alreadyRemoved")) {
+                if let Some(path) = done["path"].as_str() { state.browser.forget_workspace(&crate::browser::control::canonical(path)); }
+            }
         }
         Ok(results)
-    })
-    .await
-    .map_err(err)?
+    }).await.map_err(err)?
 }
 
 /// Stop the removal `run` once the worktree it is on is finished. The ones
 /// it has not started are left as they are and reported as not attempted.
 #[tauri::command]
-pub fn worktree_cleanup_stop(run: String) {
-    // An id is matched from its start; none at all would match every removal.
-    if !run.is_empty() {
-        crate::worktree_cleanup::Jobs::removals().cancel(&run);
-    }
+pub async fn worktree_cleanup_stop(app: AppHandle, run: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        state.sessions().map_err(err)?.workspace("cancelRemove", serde_json::json!({"prefix":run})).map_err(err)
+    }).await.map_err(err)?
 }
 
 // ---- removing a workspace once its pull request has merged ------------------
@@ -4402,57 +4153,45 @@ pub fn session_set_work_private(app: AppHandle, session_id: String, private: boo
 /// those are is read here, from the settings file, so no caller can widen it:
 /// with the setting off this removes nothing.
 #[tauri::command]
-pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<crate::merged_cleanup::Swept> {
+pub async fn merged_cleanup_sweep(app: AppHandle) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let settings = store::settings::load().merged_cleanup;
-        let swept = with_cleanup_host(&state, |host| {
-            let scope = crate::merged_cleanup::Scope {
-                projects: host.projects.iter().filter(|project| settings.enabled_for(&project.path)).map(|project| project.path.clone()).collect(),
-                delete_sessions: settings.delete_conversations,
-                grace_seconds: u64::from(settings.grace_minutes) * 60,
-            };
-            let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-            let pull_requests = |cwd: &Path, branches: &[String]| crate::github::branch_prs(cwd, branches);
-            let run = crate::merged_cleanup::Sweep { host, sink: &app, stop: &stop, pull_requests: &pull_requests, now: chrono::Utc::now() };
-            crate::merged_cleanup::sweep(&run, &scope).map_err(err)
-        })??;
-        for removed in swept.statuses.iter().filter(|status| status.phase == crate::merged_cleanup::Phase::Removed) {
-            state.browser.forget_workspace(&crate::browser::control::canonical(&removed.path));
+        let result: serde_json::Value = state.sessions().map_err(err)?.workspace("mergedSweep", serde_json::json!({})).map_err(err)?;
+        for status in result["statuses"].as_array().into_iter().flatten() {
+            if status["phase"] == "removed" {
+                if let Some(path) = status["path"].as_str() { state.browser.forget_workspace(&crate::browser::control::canonical(path)); }
+            }
         }
-        Ok(swept)
-    })
-    .await
-    .map_err(err)?
+        Ok(result)
+    }).await.map_err(err)?
 }
 
 /// Keep a workspace that is waiting to be removed, or let it go again.
 #[tauri::command]
-pub async fn merged_cleanup_hold(path: String, held: bool) -> CmdResult<()> {
-    tauri::async_runtime::spawn_blocking(move || crate::merged_cleanup::hold(&path, held, chrono::Utc::now()).map_err(err)).await.map_err(err)?
+pub async fn merged_cleanup_hold(app: AppHandle, path: String, held: bool) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<crate::AppState>();
+        state.sessions().map_err(err)?.workspace("mergedHold", serde_json::json!({"path":path,"held":held})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// What was removed by itself, newest first, with whether each can still be
 /// brought back.
 #[tauri::command]
-pub async fn merged_cleanup_records(app: AppHandle) -> CmdResult<Vec<crate::merged_cleanup::RecordView>> {
+pub async fn merged_cleanup_records(app: AppHandle) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::merged_cleanup::records(host).map_err(err))?
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("mergedRecords", serde_json::json!({})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// Undo one removal: the worktree, its branch and what else can be put back.
 #[tauri::command]
-pub async fn merged_cleanup_restore(app: AppHandle, id: String) -> CmdResult<crate::merged_cleanup::Restored> {
+pub async fn merged_cleanup_restore(app: AppHandle, id: String) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        with_cleanup_host(&state, |host| crate::merged_cleanup::restore(host, &app, &id, chrono::Utc::now()).map_err(err))?
-    })
-    .await
-    .map_err(err)?
+        state.sessions().map_err(err)?.workspace("mergedRestore", serde_json::json!({"id":id})).map_err(err)
+    }).await.map_err(err)?
 }
 
 /// An attached project's directory, for a call that asks GitHub about it.
@@ -4530,40 +4269,17 @@ pub async fn workspace_disposition(project_path: String, path: String, fetch: Op
 /// person saw when they gave the second confirmation. If the workspace has
 /// changed since, it no longer matches and nothing is removed.
 #[tauri::command]
-pub async fn remove_workspace(
-    app: AppHandle,
-    project_path: String,
-    path: String,
-    keep_sessions: bool,
-    delete_branch: bool,
-    confirmed_digest: Option<String>,
-    expected_sessions: Vec<String>,
-) -> CmdResult<WorkspaceRemoveReport> {
+pub async fn remove_workspace(app: AppHandle, project_path: String, path: String, keep_sessions: bool,
+    delete_branch: bool, confirmed_digest: Option<String>, expected_sessions: Vec<String>) -> CmdResult<WorkspaceRemoveReport> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<crate::AppState>();
-        let browser_key = crate::browser::control::canonical(&path);
-        // Deleting a directory git cannot remove is itself a risk the person
-        // has to have confirmed.
-        let direct = if confirmed_digest.is_some() { git::DirectDelete::Allowed } else { git::DirectDelete::Never };
-        let request = crate::session_ops::WorkspaceRemoval {
-            project_path: &project_path,
-            path: &path,
-            sessions: if keep_sessions { crate::session_ops::SessionsFate::Keep } else { crate::session_ops::SessionsFate::Delete },
-            delete_branch,
-            confirmation: confirmed_digest.map(crate::session_ops::Confirmation::Shown).unwrap_or(crate::session_ops::Confirmation::Single),
-            expected_sessions: Some(&expected_sessions),
-            direct,
-            fetch: crate::landed::Fetch::Fresh,
-            guard: None,
-        };
-        let stop = |session: &SessionEntry| stop_sessions_and_wait(&state, std::slice::from_ref(session));
-        let removed = crate::session_ops::remove_workspace(&app, &request, &stop)?;
-        // Only once the workspace is really gone: a removal that fails keeps it.
-        state.browser.forget_workspace(&browser_key);
-        Ok(WorkspaceRemoveReport { sessions: removed.sessions, kept_branch: removed.removal.kept_branch, rescued_branch: removed.removal.rescued_branch })
-    })
-    .await
-    .map_err(err)?
+        let removed = state.sessions().map_err(err)?.workspace("removeWorkspace", serde_json::json!({
+            "projectPath":project_path,"path":path,"keepSessions":keep_sessions,"deleteBranch":delete_branch,
+            "confirmedDigest":confirmed_digest,"expectedSessions":expected_sessions
+        })).map_err(err)?;
+        state.browser.forget_workspace(&crate::browser::control::canonical(&path));
+        Ok(removed)
+    }).await.map_err(err)?
 }
 
 // ---- The local mirror of a cloud workspace (PRO-25) -------------------------

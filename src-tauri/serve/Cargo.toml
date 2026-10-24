@@ -23,6 +23,9 @@ runtime-protocol = 3
 name = "terminalx-serve"
 path = "src/main.rs"
 
+[features]
+local-ui = ["raccoon/local-ui"]
+
 [dependencies]
 # Without the default `desktop` feature: no Tauri, WebView, GTK or audio.
 raccoon = { path = "..", default-features = false }

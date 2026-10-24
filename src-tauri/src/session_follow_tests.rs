@@ -847,7 +847,7 @@ fn what_needs_the_cli_restarted_is_refused_for_one_started_by_hand_and_says_why(
     assert!(rig.tabs().iter().all(|tab| tab.requested_permission_mode.is_none() && tab.permission_mode == follow::MODE_SET_IN_TERMINAL));
     // A guest of a shared session cannot drive a CLI the host started by hand.
     let guest = crate::local_sharing::Person { user_id: "guest".into(), display_name: "Guest".into(), email: String::new(), email_verified: false, organization_ids: Vec::new() };
-    let permit = crate::local_sharing::WritePermit { connection_id: "c".into(), revision: 0, tab_epoch: 0 };
+    let permit = crate::local_sharing::WritePermit { share_generation: String::new(), connection_id: "c".into(), revision: 0, tab_epoch: 0 };
     let refused = rig.manager.send_shared(SESSION, &tab("claude"), "hi".into(), guest.clone(), permit.clone()).unwrap_err();
     assert!(format!("{refused:#}").contains("Only the host can send to it"), "{refused:#}");
     // Nor start an agent in a tab that is a terminal.
@@ -1005,4 +1005,74 @@ fn a_conversation_is_blank_until_something_is_said_in_it() {
     line(json!({ "type": "conversation", "harness": "claude", "resumed": true }));
     line(json!({ "type": "conversation", "id": "c3", "harness": "codex" }));
     assert!(conversation_is_blank(&log, Some("c3")) && !conversation_is_blank(&log, None));
+}
+
+/// The direct by-hand reader must carry the same launch fence as managed reads.
+#[test]
+fn by_hand_drained_history_and_live_records_cannot_cross_launches() {
+    for (replace, empty) in [(false, false), (true, false), (false, true), (true, true)] {
+        let rig = Rig::new(json!([]));
+        let pane = rig.shell(1);
+        let path = rig.dir.path().join("empty.jsonl");
+        // An older, nonempty file selects History; a zero-byte file deliberately
+        // has no historical first-read state. A blank line yields no records.
+        std::fs::write(&path, "\n").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_times(
+            std::fs::FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(60))
+        ).unwrap();
+        rig.told.set(CLAUDE_PID, Some(located(CLAUDE_ID, &path)), None);
+        rig.manager.pane_foreground(&pane, Some(agent("claude", CLAUDE_PID)));
+        let tab = rig.tab();
+        let rt = rig.runtime(&tab.id);
+        let tail = {
+            let mut rt = rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            // Disable the automatic reader for this test's controlled read.
+            p.generation += 1;
+            p.tail.clone()
+        };
+        let captured = rig.dir.path().join("captured.jsonl");
+        std::fs::write(&captured, CLAUDE_FIXTURE).unwrap();
+        let read = tui::Tail::from_offset(captured, 0, claude::transcript::decode_line).marking(claude::transcript::decode_marked);
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let manager = rig.manager.clone();
+        let current = rt.clone();
+        let old_tail = tail.clone();
+        let reader = std::thread::spawn(move || manager.pump_by_hand_from(&current, &old_tail, || {
+            let records = if empty { Vec::new() } else { read.drain_records() };
+            paused_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            records
+        }));
+        paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if replace {
+            let mut rt = rt.lock().unwrap();
+            let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+            p.tail = Arc::new(tui::Tail::unknown(claude::transcript::decode_line));
+            p.generation += 1;
+            p.origin.token = crate::hooks::mint_token();
+        }
+        let before = rig.events(&tab.id);
+        resume_tx.send(()).unwrap();
+        reader.join().unwrap();
+        if replace {
+            assert_eq!(rig.events(&tab.id), before);
+            rig.manager.pump_by_hand_from(&rt, &tail, || panic!("a stale tail must be rejected before consuming first-read state or reading"));
+        } else if !empty {
+            assert!(rig.events(&tab.id).len() > before.len());
+            assert!(rig.said(&tab.id).iter().any(|line| line == "claude: pong"));
+        }
+        if empty {
+            // A same-launch empty read restores History. A replaced launch
+            // must not inherit that old first-read state: its next prompt is live.
+            let current_tail = match &rt.lock().unwrap().engine { Engine::Cli(p) => p.tail.clone(), _ => unreachable!() };
+            let fresh = rig.dir.path().join("fresh.jsonl");
+            std::fs::write(&fresh, claude_user_record("fresh live prompt")).unwrap();
+            let read = tui::Tail::from_offset(fresh, 0, claude::transcript::decode_line).marking(claude::transcript::decode_marked);
+            rig.manager.pump_by_hand_from(&rt, &current_tail, || read.drain_records());
+            let turn_open = rt.lock().unwrap().turn_open;
+            assert_eq!(turn_open, replace, "only the unchanged launch restores historical first-read state");
+        }
+    }
 }

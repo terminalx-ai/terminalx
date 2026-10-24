@@ -26,6 +26,7 @@ import { DevicesTab } from "./DevicesTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
 import { StorageTab } from "./StorageTab";
 import { ShortcutsTab } from "./ShortcutsTab";
+import { LocalRuntimeSettings } from "./LocalRuntimeSettings";
 import { QuickChatSettings } from "./FloatingWindowSettings";
 import { OrganizationsTab } from "./OrganizationsTab";
 
@@ -239,6 +240,7 @@ function GeneralTab() {
         control={<Switch checked={prefs.useWorktree} onCheckedChange={(v) => setPrefs({ useWorktree: v })} />}
       />
       <QuickChatSettings />
+      <LocalRuntimeSettings />
     </div>
   );
 }

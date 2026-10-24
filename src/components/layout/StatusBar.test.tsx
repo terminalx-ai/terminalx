@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { UsageSnapshot } from "@/lib/api";
+import { statusBar } from "@/lib/api";
+import type { ResourceSnapshot, UsageSnapshot } from "@/lib/api";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const { openStats, resetCodexUsage, statusState } = vi.hoisted(() => ({
   openStats: vi.fn(),
@@ -10,13 +12,16 @@ const { openStats, resetCodexUsage, statusState } = vi.hoisted(() => ({
     usage: { windows: [] } as UsageSnapshot,
     usageRefreshing: false,
     resources: { agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null },
-    resourceSample: null,
+    resourcesAvailable: true,
+    resourceGeneration: 0,
+    resourceSample: null as ResourceSnapshot | null,
     resourcesRefreshing: false,
     ready: true,
   },
 }));
 
 vi.mock("@/lib/status", () => ({
+  resourceGenerationIsCurrent: (generation: number) => statusState.resourcesAvailable && statusState.resourceGeneration === generation,
   refreshResourceSample: vi.fn(),
   refreshUsage: vi.fn(),
   removeResourceOptimistically: vi.fn(),
@@ -56,6 +61,10 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   statusBarWidth = 1_000;
   statusState.settings.percent = "used";
+  statusState.settings.resources = false;
+  statusState.resourcesAvailable = true;
+  statusState.resourceGeneration = 0;
+  statusState.resourceSample = null;
   statusState.settings.usageMode = "detailed";
   const now = Date.now();
   statusState.usage = {
@@ -75,6 +84,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -416,4 +426,146 @@ describe("status bar usage", () => {
     });
     expect(within(dialog).getByRole("alert").textContent).toBe("The reset could not be used.");
   });
+});
+
+it("removes stale resource counts and kill rows on disconnect, then restores a fresh snapshot", () => {
+  statusState.settings.resources = true;
+  statusState.resources.agentCount = 7;
+  statusState.resourceSample = {
+    sampledAt: 1, totalCpuPercent: 0, totalRssBytes: 1024,
+    host: { totalBytes: 8192, availableBytes: 4096, cores: 2 },
+    app: { mainPid: 1, mainCpuPercent: 0, mainRssBytes: 1, webviewCpuPercent: 0, webviewRssBytes: 1, webviewProcessCount: 1 },
+    processes: [{ paneId: "old-pane", tabId: null, tabTitle: "Old agent", sessionId: null, sessionTitle: null,
+      projectPath: null, projectName: null, cwd: "/fixture", kind: "agent", harness: "claude", orphaned: false,
+      pid: 42, cpuPercent: 0, rssBytes: 1024, childCount: 0, killRule: "idle" }],
+  };
+  const { rerender } = render(<TooltipProvider><StatusBar /></TooltipProvider>);
+  fireEvent.click(screen.getByRole("button", { name: /7 live agents/ }));
+  expect(screen.getByRole("button", { name: "Kill Old agent" })).toBeTruthy();
+  // Deliberately retain the old payload: availability alone must hide authority.
+  statusState.resourcesAvailable = false;
+  rerender(<TooltipProvider><StatusBar /></TooltipProvider>);
+  expect(screen.getByRole("button", { name: "Resources unavailable" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /live agents/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Kill Old agent" })).toBeNull();
+  expect(screen.queryByText("No live tab or terminal processes.")).toBeNull();
+  expect(screen.getByRole("button", { name: /^Claude 5h 12% used/ })).toBeTruthy();
+  statusState.resourcesAvailable = true;
+  statusState.resources.agentCount = 1;
+  statusState.resourceSample = { ...statusState.resourceSample, processes: [] };
+  rerender(<TooltipProvider><StatusBar /></TooltipProvider>);
+  expect(screen.getByRole("button", { name: /1 live agents/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Kill Old agent" })).toBeNull();
+});
+
+function resourceFixture() {
+  statusState.settings.resources = true;
+  statusState.resources.agentCount = 1;
+  statusState.resourceSample = {
+    sampledAt: 1, totalCpuPercent: 0, totalRssBytes: 1024,
+    host: { totalBytes: 8192, availableBytes: 4096, cores: 2 },
+    app: { mainPid: 1, mainCpuPercent: 0, mainRssBytes: 1, webviewCpuPercent: 0, webviewRssBytes: 1, webviewProcessCount: 1 },
+    processes: [{ paneId: "shell", tabId: null, tabTitle: "Shell", sessionId: null, sessionTitle: null,
+      projectPath: null, projectName: null, cwd: "/fixture", kind: "shell", harness: null, orphaned: false,
+      pid: 42, cpuPercent: 0, rssBytes: 1024, childCount: 0, killRule: "confirm" }],
+  };
+}
+function delayedKill() {
+  let resolve!: (value: Awaited<ReturnType<typeof statusBar.killResource>>) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<Awaited<ReturnType<typeof statusBar.killResource>>>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const resourceBar = () => <TooltipProvider><StatusBar /></TooltipProvider>;
+function openResources() { fireEvent.click(screen.getByRole("button", { name: /1 live agents/ })); }
+
+it.each(["before recovery", "after recovery"])("rejects a delayed pre-disconnect confirmation %s", async (timing) => {
+  resourceFixture();
+  const reply = delayedKill();
+  const rpc = vi.spyOn(statusBar, "killResource").mockReturnValueOnce(reply.promise);
+  const view = render(resourceBar());
+  openResources();
+  fireEvent.click(screen.getByRole("button", { name: "Kill Shell" }));
+  statusState.resourcesAvailable = false;
+  statusState.resourceGeneration++;
+  view.rerender(resourceBar());
+  const complete = () => act(async () => reply.resolve({ killed: false, confirmation: "Old permission" }));
+  if (timing === "before recovery") await complete();
+  statusState.resourcesAvailable = true;
+  statusState.resourceSample = { ...statusState.resourceSample!, processes: [] };
+  view.rerender(resourceBar());
+  if (timing === "after recovery") await complete();
+  expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
+  expect(rpc.mock.calls).toEqual([["shell", false]]);
+});
+
+it.each(["confirmation", "error"])("does not let an old %s or finally clear a new request", async (outcome) => {
+  resourceFixture();
+  const old = delayedKill(); const fresh = delayedKill();
+  const rpc = vi.spyOn(statusBar, "killResource").mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise)
+    .mockResolvedValue({ killed: true, confirmation: null });
+  const view = render(resourceBar());
+  openResources();
+  fireEvent.click(screen.getByRole("button", { name: "Kill Shell" }));
+  // Simulate batched unavailable/recovery: no rendered false state is required.
+  statusState.resourceGeneration++;
+  view.rerender(resourceBar());
+  openResources();
+  fireEvent.click(screen.getByRole("button", { name: "Kill Shell" }));
+  await act(async () => {
+    if (outcome === "error") old.reject(new Error("obsolete failure"));
+    else old.resolve({ killed: false, confirmation: "obsolete confirmation" });
+  });
+  expect((screen.getByRole("button", { name: "Kill Shell" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByText(/obsolete/)).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
+  await act(async () => fresh.resolve({ killed: false, confirmation: "Current permission" }));
+  const dialog = screen.getByRole("dialog", { name: "Kill process?" });
+  expect(within(dialog).getByText("Current permission")).toBeTruthy();
+  await act(async () => fireEvent.click(within(dialog).getByRole("button", { name: "Kill process" })));
+  expect(rpc.mock.calls).toEqual([["shell", false], ["shell", false], ["shell", true]]);
+});
+
+it("distinguishes overview-only recovery from a sampled empty process list", () => {
+  resourceFixture();
+  const sample = statusState.resourceSample!;
+  statusState.resourceSample = null;
+  const view = render(resourceBar());
+  openResources();
+  expect(screen.getByText("Process details have not been sampled yet.")).toBeTruthy();
+  expect(screen.queryByText("No live tab or terminal processes.")).toBeNull();
+  statusState.resourceSample = { ...sample, processes: [] };
+  view.rerender(resourceBar());
+  expect(screen.getByText("No live tab or terminal processes.")).toBeTruthy();
+  expect(screen.queryByText("Process details have not been sampled yet.")).toBeNull();
+});
+
+it("rejects confirmation clicks invalidated before React renders and ignores late confirmed replies", async () => {
+  resourceFixture();
+  const confirmed = delayedKill();
+  const rpc = vi.spyOn(statusBar, "killResource")
+    .mockResolvedValueOnce({ killed: false, confirmation: "Confirm current shell" })
+    .mockReturnValueOnce(confirmed.promise);
+  const view = render(resourceBar());
+  openResources();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Kill Shell" })));
+  const dialog = screen.getByRole("dialog", { name: "Kill process?" });
+  // The store invalidates synchronously before a subscriber render is flushed.
+  statusState.resourcesAvailable = false;
+  statusState.resourceGeneration++;
+  fireEvent.click(within(dialog).getByRole("button", { name: "Kill process" }));
+  expect(rpc).toHaveBeenCalledTimes(1);
+  view.rerender(resourceBar());
+  statusState.resourcesAvailable = true;
+  view.rerender(resourceBar());
+  openResources();
+  // An idle row can still receive a confirmation from backend resampling.
+  statusState.resourceSample!.processes[0].killRule = "idle";
+  view.rerender(resourceBar());
+  fireEvent.click(screen.getByRole("button", { name: "Kill Shell" }));
+  statusState.resourceGeneration++;
+  view.rerender(resourceBar());
+  await act(async () => confirmed.resolve({ killed: false, confirmation: "Late resampled confirmation" }));
+  expect(screen.queryByRole("dialog", { name: "Kill process?" })).toBeNull();
+  expect(rpc.mock.calls).toEqual([["shell", false], ["shell", false]]);
 });
