@@ -32,6 +32,7 @@
   explicit auxiliary-model download/delete controls and detector diagnostics.
   Detection preserves original recognition audio, keeps text on model errors,
   and supports cancellation; Apple retains its platform speech detection.
+  Reject symlink and nonregular detector cache entries without blocking capture.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

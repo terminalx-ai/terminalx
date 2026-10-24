@@ -85,12 +85,17 @@ impl NoiseGuard {
     #[cfg(target_os = "macos")]
     fn run(&self, path: Option<&Path>, audio: &[f32], cancel: &AtomicBool) -> NoiseStatus {
         use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
         use terminalx_dictation_detector::{verify_model, Detector, MODEL_SIZE};
         let Some(path) = path else {
             return NoiseStatus::Unavailable;
         };
         // A deleted model must not keep operating from an old cached handle.
-        let Ok(file) = std::fs::File::open(path) else {
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(path)
+        else {
             return NoiseStatus::Unavailable;
         };
         if file
@@ -205,6 +210,40 @@ mod tests {
                 .evaluate(true, Some(&path), &[0.0; 512], &cancel)
                 .status,
             NoiseStatus::InvalidModel
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn nonregular_cache_entries_cannot_block_model_loading() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let fifo = temp.path().join("model.gguf");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: NUL-terminated path in an owned disposable directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let status = NoiseGuard::default()
+                .evaluate(true, Some(&fifo), &[0.0; 512], &AtomicBool::new(false))
+                .status;
+            let _ = send.send(status);
+        });
+        assert_eq!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            NoiseStatus::InvalidModel
+        );
+        let target = temp.path().join("target.gguf");
+        std::fs::write(&target, vec![0; terminalx_dictation_detector::MODEL_SIZE]).unwrap();
+        let link = temp.path().join("link.gguf");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        assert_eq!(
+            NoiseGuard::default()
+                .evaluate(true, Some(&link), &[0.0; 512], &AtomicBool::new(false))
+                .status,
+            NoiseStatus::Unavailable
         );
     }
 }

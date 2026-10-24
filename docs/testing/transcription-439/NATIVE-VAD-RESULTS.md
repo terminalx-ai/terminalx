@@ -1,7 +1,8 @@
 # Native detector comparison — 2026-10-24
 
-The detector-only adapter is a viable **prototype**, not an integrated or accepted
-application feature. Keep the application on transcribe-cpp 0.2.3. No microphone,
+This report records the detector-only **prototype**. Subsequent production
+integration and check results are in [PRODUCTION-DETECTOR.md](PRODUCTION-DETECTOR.md);
+the issue is not acceptance-complete. Keep the application on transcribe-cpp 0.2.3. No microphone,
 Apple recognition, guest UI or user-voice acceptance is established here.
 
 ## Runtime compatibility decision
