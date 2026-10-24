@@ -12,13 +12,14 @@ the paired measurements and Apple observations below are collected.
    to [-1,1], between one sample and 60 seconds per file. A WAV header is not
    valid harness input. Retain the original WAV for Apple playback if the
    person has a loopback microphone setup.
-3. Make `options.json` in that private folder. For a context-only ON run:
+3. Coordinator preparation (not a user task): generate manifests and options
+   from donated files. For a context-only ON run, use:
 
    ```json
    {"options":{"context":true},"entries":[]}
    ```
 
-   Create a manifest using the complete example in [README.md](README.md).
+   The coordinator creates each manifest using the complete example in [README.md](README.md).
    Point `modelPath` at explicitly selected existing weights, `audioPath` at
    one donated PCM file, `terms` at that sentence's terms, `reference` at the
    intended text, and `outputPath` at a **new** private result file. Do not
@@ -55,3 +56,35 @@ after a successful send, then removed; no resurrected text after deleting an
 Apple partial; sensitive/cloud-off diagnostics containing no context. The
 checked-in protocol describes the full matrix. Record missing rows explicitly;
 do not substitute mocked recognition or Parakeet results for Whisper/Apple.
+
+## Minimum user action
+
+No manifests or audio conversion are requested from the user. Make **one new
+recording** following [RECORDING-SCRIPT.txt](RECORDING-SCRIPT.txt): seven
+spoken lines, three takes each with pauses, plus five seconds each of
+quiet room, ambient noise and typing. Keep the microphone/distance unchanged.
+Share only these newly recorded samples with the coordinator; WAV is preferred,
+but the coordinator can convert the recorder's native format to the required
+16 kHz mono f32le and generate manifests. Do not share existing recordings.
+
+For the first Apple check, use the disposable bundle described in
+[NATIVE-BUILD.md](NATIVE-BUILD.md). No account or agent login is needed:
+
+1. Launch with the provided command; open Settings → Transcription, choose
+   Apple and the microphone. Keep the same language for both conditions.
+2. Import the supplied `OFF.json`. Leave Test project at “Global dictionary
+   only”. Click Start test, speak one script line, then Stop test. Preserve the
+   raw/final result and bias terms (copy or screenshot), marked OFF and line ID.
+3. Import `ON.json` and repeat that line, marked ON. Alternate which condition
+   goes first for successive lines; collect three takes per condition. ON uses
+   dictionary hints plus retakes/number/code formatting; the **raw** text is
+   the recognition comparison and final text includes deterministic cleanup.
+4. Repeat OFF/ON with five seconds of quiet, ambient noise and typing. Report
+   any text, permission/error message, missing first word or delay after Stop.
+   Note macOS version, microphone and language. Quit only the disposable app.
+
+OFF and ON contain identical invented dictionary terms; OFF disables every
+feature. This shortest first pass tests Apple contextual strings from the
+global dictionary. It does **not** replace project-context, correction-learning,
+partial-deletion or full model-matrix rows above. The coordinator records those
+remaining rows explicitly and arranges follow-up only after this first pass.
