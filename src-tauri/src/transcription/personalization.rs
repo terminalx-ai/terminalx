@@ -512,8 +512,14 @@ pub fn correction(before: &str, after: &str) -> Option<(String, String)> {
     if before.len() > 4096 || after.len() > 4096 || is_sensitive(before) || is_sensitive(after) {
         return None;
     }
-    let a: Vec<_> = before.split_whitespace().collect();
-    let b: Vec<_> = after.split_whitespace().collect();
+    // Recognition often supplies terminal punctuation that the edited draft
+    // omits. Count lexical changes, not punctuation/case changes elsewhere.
+    let clean = |s: &str| {
+        s.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
+            .to_string()
+    };
+    let a: Vec<_> = before.split_whitespace().map(clean).collect();
+    let b: Vec<_> = after.split_whitespace().map(clean).collect();
     if a.len() != b.len() || a.len() < 3 {
         return None;
     }
@@ -521,17 +527,13 @@ pub fn correction(before: &str, after: &str) -> Option<(String, String)> {
         .iter()
         .zip(&b)
         .enumerate()
-        .filter(|(_, (x, y))| x != y)
+        .filter(|(_, (x, y))| !x.eq_ignore_ascii_case(y))
         .collect();
     if differences.len() != 1 {
         return None;
     }
     let (_, (x, y)) = differences[0];
-    let clean = |s: &str| {
-        s.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
-            .to_string()
-    };
-    let (x, y) = (clean(x), clean(y));
+    let (x, y) = (x.to_string(), y.to_string());
     if x.eq_ignore_ascii_case(&y)
         || !(2..=60).contains(&x.len())
         || !(2..=60).contains(&y.len())
@@ -775,6 +777,10 @@ mod tests {
     }
     #[test]
     fn learns_only_real_single_word_substitution() {
+        assert_eq!(
+            correction("Open the paraquet files.", "open the Parakeet files"),
+            Some(("paraquet".into(), "Parakeet".into()))
+        );
         assert_eq!(
             correction("open the parcel file", "open the Parakeet file"),
             Some(("parcel".into(), "Parakeet".into()))

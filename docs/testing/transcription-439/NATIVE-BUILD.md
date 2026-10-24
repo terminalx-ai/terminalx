@@ -1,6 +1,8 @@
 # Disposable Apple validation build
 
-Prepared on 2026-10-24. **Built and verified, never launched.**
+Prepared on 2026-10-24. Initially built and verified without launch. Subsequently
+exercised under the user’s explicit isolated-Dev authorization, then stopped
+(verified PID 25542). See [native results](NATIVE-RESULTS.md).
 
 - Artifact: `/tmp/tx439-kmesvcjt/TerminalX Dictation 439.app`
 - Source: `ec423d66bf96bd072516a7ba23e20b21aa31c40e` (clean checkout when packaging began).
@@ -80,6 +82,7 @@ with the repository's `src-tauri/Entitlements.plist` and runtime option.
 
 The bundle and its metadata/settings are under `/tmp`; preserve them for the
 manual hold before a reboot/temporary-directory cleanup. `verification.json`
-beside the app records its hash and source. Launch/microphone behavior is still
-unverified; packaging success is not native acceptance. Nothing was pushed,
+beside the app records its hash and source. Settings UI launch/interaction was exercised; microphone behavior is still
+unverified. The prepared binary predates the later correction-learning fix;
+its source/hash above are retained rather than relabelled as the new head. Nothing was pushed,
 no acceptance-complete PR was opened, and auto-merge was not enabled.

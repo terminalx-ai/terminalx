@@ -17,6 +17,9 @@ struct Manifest {
     #[serde(default)]
     project: Option<String>,
     reference: String,
+    /// Prime this exact audio through the loaded engine before timing either arm.
+    #[serde(default)]
+    warmup: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +78,7 @@ struct Outcome {
     raw: String,
     final_text: String,
     score: Score,
+    raw_score: Score,
     inference_ms: u128,
     processing_us: u128,
 }
@@ -86,6 +90,7 @@ struct Report {
     reference: String,
     bias_terms: Vec<String>,
     candidate_terms: Vec<String>,
+    context_compile_us: u128,
     /// Baseline includes first model load; paired timings are not equivalent.
     timing_note: &'static str,
     baseline: Outcome,
@@ -101,12 +106,154 @@ struct Report {
 #[ignore = "requires explicitly provided audio, model weights and evaluation manifest"]
 #[cfg(target_os = "macos")]
 fn real_model_pair() -> anyhow::Result<()> {
-    use super::{context::RunContext, engine::Engine, personalization};
-    use std::{io::Write, os::unix::fs::OpenOptionsExt, time::Instant};
     let manifest_path = std::env::var("TX_DICTATION_EVAL_MANIFEST")?;
     let manifest_bytes = std::fs::read(manifest_path)?;
     anyhow::ensure!(manifest_bytes.len() <= 65536, "Manifest exceeds 64 KB");
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
+    evaluate(manifest, &super::engine::Engine::default())
+}
+
+/// Explicit batch input, retaining the same model between paired recordings.
+/// Never downloads or discovers audio. Every row is attempted, including failures.
+#[test]
+#[ignore = "requires an explicit synthetic/public or donated audio matrix"]
+#[cfg(target_os = "macos")]
+fn real_model_matrix() -> anyhow::Result<()> {
+    let bytes = std::fs::read(std::env::var("TX_DICTATION_EVAL_MANIFEST")?)?;
+    anyhow::ensure!(bytes.len() <= 2_000_000, "Matrix exceeds 2 MB");
+    let manifests: Vec<Manifest> = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(
+        !manifests.is_empty() && manifests.len() <= 512,
+        "Invalid matrix size"
+    );
+    let engine = super::engine::Engine::default();
+    let mut failures = Vec::new();
+    for (index, manifest) in manifests.into_iter().enumerate() {
+        if let Err(error) = evaluate(manifest, &engine) {
+            failures.push(format!("row {index}: {error:#}"));
+        }
+    }
+    anyhow::ensure!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// Learn from explicitly supplied real recognizer output, never from user history.
+#[test]
+#[ignore = "requires observed recognizer output and an explicit report path"]
+fn observed_corrections() -> anyhow::Result<()> {
+    use super::personalization::{self, Options, Personalization};
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Observation {
+        before: String,
+        after: String,
+        output_path: std::path::PathBuf,
+    }
+    let bytes = std::fs::read(std::env::var("TX_DICTATION_EVAL_MANIFEST")?)?;
+    anyhow::ensure!(bytes.len() <= 65536, "Observations exceed 64 KB");
+    let observations: Vec<Observation> = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(observations.len() <= 64, "Too many observations");
+    for observation in observations {
+        let _home = crate::store::temp_home();
+        personalization::save_revision(&Personalization {
+            options: Options {
+                learn: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })?;
+        let accepted = personalization::learn(&observation.before, &observation.after, None)?;
+        let duplicate = personalization::learn(&observation.before, &observation.after, None)?;
+        anyhow::ensure!(!duplicate, "Repeated correction must not be learned twice");
+        let data = personalization::load()?;
+        anyhow::ensure!(
+            data.entries.len() == usize::from(accepted),
+            "Unexpected learned count"
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(observation.output_path)?;
+        serde_json::to_writer_pretty(&mut file, &data)?;
+    }
+    Ok(())
+}
+
+/// Measure real project walking/compiler gates using only a disposable project.
+#[test]
+#[ignore = "writes an explicit context measurement report"]
+fn context_measurement() -> anyhow::Result<()> {
+    use super::{
+        context::{self, ContextRequest, RunContext},
+        personalization::{self, Options, Personalization},
+    };
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir()?;
+    std::fs::write(project.path().join(".gitignore"), "ignored/\n")?;
+    std::fs::create_dir(project.path().join("ignored"))?;
+    std::fs::write(
+        project.path().join("ignored/SecretIdentifier.ts"),
+        "never read this content",
+    )?;
+    for i in 0..100 {
+        std::fs::write(project.path().join(format!("FixtureSymbol{i}.ts")), "")?;
+    }
+    personalization::save_revision(&Personalization {
+        options: Options {
+            context: true,
+            project: true,
+            composer: true,
+            terminal: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })?;
+    let started = std::time::Instant::now();
+    let terms = context::project_terms(project.path());
+    let walk_us = started.elapsed().as_micros();
+    anyhow::ensure!(
+        !terms.iter().any(|s| s.contains("SecretIdentifier")),
+        "Ignored path leaked"
+    );
+    let mut rows = Vec::new();
+    for (name, remote, sensitive) in [
+        ("local", false, false),
+        ("remoteOff", true, false),
+        ("sensitive", false, true),
+    ] {
+        let started = std::time::Instant::now();
+        let run = RunContext::prepare(ContextRequest {
+            project_terms: terms.clone(),
+            remote,
+            sensitive,
+            composer: "UnlabelledPrivateWord".into(),
+            ..Default::default()
+        });
+        let prepare_us = started.elapsed().as_micros();
+        anyhow::ensure!(
+            !run.bias.iter().any(|s| s.contains("PrivateWord")),
+            "Untrusted draft leaked"
+        );
+        if remote || sensitive {
+            anyhow::ensure!(run.bias.is_empty(), "Suppressed context leaked");
+        }
+        rows.push(serde_json::json!({"surface":name,"biasTerms":run.bias,"prepareUs":prepare_us}));
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(std::env::var("TX_CONTEXT_REPORT")?)?;
+    serde_json::to_writer_pretty(
+        file,
+        &serde_json::json!({"projectWalkUs":walk_us,"fileCount":100,"rows":rows}),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn evaluate(manifest: Manifest, engine: &super::engine::Engine) -> anyhow::Result<()> {
+    use super::{context::RunContext, personalization};
+    use std::{io::Write, os::unix::fs::OpenOptionsExt, time::Instant};
     anyhow::ensure!(
         super::catalog::find(&manifest.model).is_some(),
         "Unknown catalog model"
@@ -145,7 +292,9 @@ fn real_model_pair() -> anyhow::Result<()> {
     let data: personalization::Personalization =
         serde_json::from_slice(&std::fs::read(&manifest.personalization_path)?)?;
     personalization::validate(&data)?;
+    let context_started = Instant::now();
     let bias = personalization::compile(&data, manifest.project.as_deref(), &manifest.terms);
+    let context_compile_us = context_started.elapsed().as_micros();
     let actual_bias = if manifest.model.starts_with("whisper-") {
         bias.clone()
     } else {
@@ -157,7 +306,6 @@ fn real_model_pair() -> anyhow::Result<()> {
         bias: actual_bias.clone(),
         ..Default::default()
     };
-    let engine = Engine::default();
     // Create the destination before expensive inference, with no overwrite and
     // owner-only permissions. A failed evaluation leaves an empty private file.
     let mut output = std::fs::OpenOptions::new()
@@ -165,6 +313,14 @@ fn real_model_pair() -> anyhow::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&manifest.output_path)?;
+    if manifest.warmup {
+        engine.transcribe(
+            &manifest.model,
+            &manifest.model_path,
+            &samples,
+            &RunContext::default(),
+        )?;
+    }
     let run = |context: &RunContext| -> anyhow::Result<Outcome> {
         let started = Instant::now();
         let raw = engine.transcribe(&manifest.model, &manifest.model_path, &samples, context)?;
@@ -178,17 +334,34 @@ fn real_model_pair() -> anyhow::Result<()> {
         );
         let processing_us = processing.elapsed().as_micros();
         let score = score(&manifest.reference, &final_text, &manifest.terms);
+        let raw_score = self::score(&manifest.reference, &raw, &manifest.terms);
         Ok(Outcome {
             raw,
             final_text,
             score,
+            raw_score,
             inference_ms,
             processing_us,
         })
     };
     let baseline = run(&RunContext::default())?;
     let personalized = run(&personalized)?;
-    let report = Report { model: manifest.model, audio_seconds: samples.len() as f64 / 16000.0, reference: manifest.reference, bias_terms: actual_bias, candidate_terms: bias, timing_note: "Baseline includes cold model load; personalized reuses weights. Direct-engine silence is evaluated without microphone capture guards. One paired recording is not an aggregate accuracy result.", baseline, personalized };
+    let timing_note = if manifest.warmup {
+        "Both arms follow an untimed run on identical audio. Inference plus processing is a file stop-to-final proxy, not microphone latency. Direct-engine silence bypasses capture guards."
+    } else {
+        "Baseline may include cold model load; personalized reuses weights. Direct-engine silence bypasses capture guards. One pair is not an aggregate accuracy result."
+    };
+    let report = Report {
+        model: manifest.model,
+        audio_seconds: samples.len() as f64 / 16000.0,
+        reference: manifest.reference,
+        bias_terms: actual_bias,
+        candidate_terms: bias,
+        context_compile_us,
+        timing_note,
+        baseline,
+        personalized,
+    };
     output.write_all(&serde_json::to_vec_pretty(&report)?)?;
     output.sync_all()?;
     Ok(())

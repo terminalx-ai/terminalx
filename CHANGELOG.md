@@ -12,7 +12,11 @@
   replacements. Apple refuses network fallback when on-device recognition is
   unavailable. Dictation event logs retain lengths rather than spoken text.
   Add an explicit-audio evaluation harness and recording protocol; recognition
-  improvement remains unmeasured pending donated recordings. (#439)
+  improvement requires real-audio evidence. Add warmed paired/matrix scoring,
+  raw versus final scores, observed-correction evaluation and context timing.
+  Synthetic file-recognition results are kept separate from microphone acceptance.
+  Learn a single word correction even when surrounding capitalization or terminal
+  punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
 ### Welcome
 

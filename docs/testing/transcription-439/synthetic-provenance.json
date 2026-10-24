@@ -1,0 +1,268 @@
+{
+  "kind": "synthetic offline speech; not microphone or human voice accuracy",
+  "uiSourceCommit": "ec423d66bf96bd072516a7ba23e20b21aa31c40e",
+  "uiBinarySha256": "ab0461e233a01807d2e462a004b76937ad4e89aefadd9a2cf704fe6ed0020f8d",
+  "voices": [
+    "Samantha",
+    "Daniel"
+  ],
+  "speechRate": 165,
+  "nonSpeechSeed": 439,
+  "inputFormat": "mono 16000Hz f32le, 250ms zero padding before and after speech",
+  "models": [
+    {
+      "id": "parakeet-unified-en-0.6b",
+      "repo": "handy-computer/parakeet-unified-en-0.6b-gguf",
+      "revision": "7e948f21b7bdbac698d3318db9d350f1096f3b6c",
+      "filename": "parakeet-unified-en-0.6b-Q8_0.gguf",
+      "sha256": "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+      "license": "NVIDIA Open Model License",
+      "sizeBytes": 731357568,
+      "url": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf",
+      "source": "copy of existing public weights; checksum verified"
+    },
+    {
+      "id": "nemotron-3.5-asr-streaming-0.6b",
+      "repo": "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+      "revision": "6d44e540bc31b0de1dbe174a3cea87f53a7f22fb",
+      "filename": "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+      "sha256": "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+      "license": "OpenMDW-1.1",
+      "sizeBytes": 751094240,
+      "url": "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/6d44e540bc31b0de1dbe174a3cea87f53a7f22fb/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+      "source": "download from pinned repository manifest"
+    },
+    {
+      "id": "canary-180m-flash",
+      "repo": "handy-computer/canary-180m-flash-gguf",
+      "revision": "b147f9dc52b59f0998e410540a84727bd86457fd",
+      "filename": "canary-180m-flash-Q8_0.gguf",
+      "sha256": "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c",
+      "license": "CC-BY-4.0",
+      "sizeBytes": 218447552,
+      "url": "https://huggingface.co/handy-computer/canary-180m-flash-gguf/resolve/b147f9dc52b59f0998e410540a84727bd86457fd/canary-180m-flash-Q8_0.gguf",
+      "source": "download from pinned repository manifest"
+    },
+    {
+      "id": "whisper-small",
+      "repo": "handy-computer/whisper-small-gguf",
+      "revision": "c0214bd34be9296695486f838e0142f900803159",
+      "filename": "whisper-small-Q8_0.gguf",
+      "sha256": "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
+      "license": "Apache-2.0",
+      "sizeBytes": 269751136,
+      "url": "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/c0214bd34be9296695486f838e0142f900803159/whisper-small-Q8_0.gguf",
+      "source": "download from pinned repository manifest"
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "repo": "handy-computer/whisper-large-v3-turbo-gguf",
+      "revision": "5eaf945c7978e564bae5b28a5b1639dd93c2bfb1",
+      "filename": "whisper-large-v3-turbo-Q8_0.gguf",
+      "sha256": "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183",
+      "license": "MIT",
+      "sizeBytes": 886381760,
+      "url": "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/5eaf945c7978e564bae5b28a5b1639dd93c2bfb1/whisper-large-v3-turbo-Q8_0.gguf",
+      "source": "download from pinned repository manifest"
+    }
+  ],
+  "corpus": [
+    {
+      "id": "samantha-project",
+      "spoken": "Open TranscriptionTab dot tsx and dictationText dot ts",
+      "reference": "Open TranscriptionTab.tsx and dictationText.ts",
+      "terms": [
+        "TranscriptionTab.tsx",
+        "dictationText.ts"
+      ],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "20eec337b8da5d562451424f7c99926d62036f52d87061966fd852499ef99e6c"
+    },
+    {
+      "id": "samantha-identifier",
+      "spoken": "Call refresh Dictation Engine from the Zephyr workspace",
+      "reference": "Call refreshDictationEngine from the Zephyr workspace",
+      "terms": [
+        "refreshDictationEngine",
+        "Zephyr"
+      ],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "247ec028cfd0922df5f01bf178316ff110f834b3c1804edd317169e1ea868bb4"
+    },
+    {
+      "id": "samantha-branch",
+      "spoken": "Switch to fix slash offline dictation",
+      "reference": "Switch to fix/offline-dictation",
+      "terms": [
+        "fix/offline-dictation"
+      ],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "dc341a0d6b2e7e0cecf17fb5533fc3483feb548f2bc2964071dfd5f643f5b1d7"
+    },
+    {
+      "id": "samantha-retake",
+      "spoken": "Meet at three pm scratch that four pm",
+      "reference": "Meet at four pm",
+      "terms": [],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "6d9c4c7f4f15b1f5eb7ac96e724c87c64c191bb614112f6c3e3e094e2cdfe5f2"
+    },
+    {
+      "id": "samantha-literal",
+      "spoken": "Document what scratch that means",
+      "reference": "Document what scratch that means",
+      "terms": [],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "b80a8ca50c9b5c8e4d7dad4cad13919351dd6db0bd4a92f4d6146f0d74c800bb"
+    },
+    {
+      "id": "samantha-code",
+      "spoken": "snake case user profile end case",
+      "reference": "user_profile",
+      "terms": [],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "2863b8b4f56c95b882313ba71a7f56c924ac35053e2e096982728a041f383aee"
+    },
+    {
+      "id": "samantha-legitimate",
+      "spoken": "Thank you for reviewing this change",
+      "reference": "Thank you for reviewing this change",
+      "terms": [],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "fedfdcb6fcfe841bf45a54d907a8189d6584ebf469db27a622657f532df5b1e0"
+    },
+    {
+      "id": "samantha-learning",
+      "spoken": "Open the paraquet files",
+      "reference": "Open the Parakeet files",
+      "terms": [
+        "Parakeet"
+      ],
+      "voice": "Samantha",
+      "rate": 165,
+      "sha256": "44f6c7a922a393b68a7512455fc6fe7dbc53b2b69f5354a760f721e2ba5583df"
+    },
+    {
+      "id": "daniel-project",
+      "spoken": "Open TranscriptionTab dot tsx and dictationText dot ts",
+      "reference": "Open TranscriptionTab.tsx and dictationText.ts",
+      "terms": [
+        "TranscriptionTab.tsx",
+        "dictationText.ts"
+      ],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "22d429fff43bffb6270149184a5380478e95972993465ab770fda6d77dcec3ce"
+    },
+    {
+      "id": "daniel-identifier",
+      "spoken": "Call refresh Dictation Engine from the Zephyr workspace",
+      "reference": "Call refreshDictationEngine from the Zephyr workspace",
+      "terms": [
+        "refreshDictationEngine",
+        "Zephyr"
+      ],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "83c3d661c05c8dbafff7afeef49ed1c0746f1280dc5b8b84a9e6e3b837b7d558"
+    },
+    {
+      "id": "daniel-branch",
+      "spoken": "Switch to fix slash offline dictation",
+      "reference": "Switch to fix/offline-dictation",
+      "terms": [
+        "fix/offline-dictation"
+      ],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "a6f8e331293bbb8c1ef798c3ad7a4c77f33b0d0fc5b6a377e605099cd65b6b3c"
+    },
+    {
+      "id": "daniel-retake",
+      "spoken": "Meet at three pm scratch that four pm",
+      "reference": "Meet at four pm",
+      "terms": [],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "44880c234bf8d3dac9741ac6f800faba94ee0eddd17ae55484e5f608e90cc945"
+    },
+    {
+      "id": "daniel-literal",
+      "spoken": "Document what scratch that means",
+      "reference": "Document what scratch that means",
+      "terms": [],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "19bfab6f2dab75ab7264f9778587a6ee8a7c90c2cd243bc858db996a777fb0e8"
+    },
+    {
+      "id": "daniel-code",
+      "spoken": "snake case user profile end case",
+      "reference": "user_profile",
+      "terms": [],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "0e8f1391c9c96fcb6cf0db0c308fc674c4ee7fd9ca19f289952c38c0b0caae1b"
+    },
+    {
+      "id": "daniel-legitimate",
+      "spoken": "Thank you for reviewing this change",
+      "reference": "Thank you for reviewing this change",
+      "terms": [],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "11124e0a0466747b5ea29d46c96f6f8c30531938ad7e959f0a11d45fbd90c492"
+    },
+    {
+      "id": "daniel-learning",
+      "spoken": "Open the paraquet files",
+      "reference": "Open the Parakeet files",
+      "terms": [
+        "Parakeet"
+      ],
+      "voice": "Daniel",
+      "rate": 165,
+      "sha256": "fd1c6dcfb8c5d4338ebe34c049d5f85f90e0426170f5178f29938c9070b61cc8"
+    },
+    {
+      "id": "silence",
+      "spoken": null,
+      "reference": "",
+      "terms": [
+        "TranscriptionTab.tsx",
+        "refreshDictationEngine"
+      ],
+      "sha256": "ac2878215ad33205d1732578c89f25ededaad1b676911c540825bcf4baa42d9b",
+      "provenance": "generated deterministic signal; seed 439"
+    },
+    {
+      "id": "white-noise",
+      "spoken": null,
+      "reference": "",
+      "terms": [
+        "TranscriptionTab.tsx",
+        "refreshDictationEngine"
+      ],
+      "sha256": "19ad683c1afa26e33e4650b680840028e1132d622472e7d651c3b26cbf60c854",
+      "provenance": "generated deterministic signal; seed 439"
+    },
+    {
+      "id": "tone",
+      "spoken": null,
+      "reference": "",
+      "terms": [
+        "TranscriptionTab.tsx",
+        "refreshDictationEngine"
+      ],
+      "sha256": "a1091191cff88a85922400c5b609936c5bf96417ca413811c0d85aa59a78b2c7",
+      "provenance": "generated deterministic signal; seed 439"
+    }
+  ]
+}
