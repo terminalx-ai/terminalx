@@ -1,7 +1,9 @@
 # Native validation handoff
 
 A five-model synthetic evaluation and isolated native settings pass are now
-recorded in [NATIVE-RESULTS.md](NATIVE-RESULTS.md). These are not human microphone
+recorded in [NATIVE-RESULTS.md](NATIVE-RESULTS.md). The post-merge guest UI pass,
+public runtime telemetry and precise remaining gaps are in
+[GUEST-RESULTS.md](GUEST-RESULTS.md). These are not human microphone
 accuracy evidence. Do not close #439 until
 the paired measurements and Apple observations below are collected.
 
@@ -24,9 +26,9 @@ the paired measurements and Apple observations below are collected.
    The coordinator creates each manifest using the complete example in [README.md](README.md).
    Point `modelPath` at explicitly selected existing weights, `audioPath` at
    one donated PCM file, `terms` at that sentence's terms, `reference` at the
-   intended text, and `outputPath` at a **new** private result file. Do not
-   download models without a separate decision. Only Parakeet weights were
-   found during read-only inventory; both Whisper models still need weights.
+   intended text, and `outputPath` at a **new** private result file. All five
+   catalog weights are now verified in the private evaluation cache
+   documented in NATIVE-RESULTS.md; reuse those rather than downloading again.
 4. From `src-tauri`, the following command executes **OFF then ON against the
    same PCM**. OFF always uses default options and no terms; ON uses
    `options.json` and manifest terms. No separate invocation is needed:

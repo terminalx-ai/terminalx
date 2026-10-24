@@ -15,6 +15,8 @@
   improvement requires real-audio evidence. Add warmed paired/matrix scoring,
   raw versus final scores, observed-correction evaluation and context timing.
   Synthetic file-recognition results are kept separate from microphone acceptance.
+  Record isolated guest settings validation and public-runtime Whisper telemetry,
+  including quiet-speech failures that rule out a no-speech-only filter.
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 

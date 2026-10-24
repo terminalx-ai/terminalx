@@ -1,5 +1,9 @@
 # Disposable Apple validation build
 
+This page records the historical host artifact. The rebuilt post-fix guest
+artifact and current validation limits are in [GUEST-RESULTS.md](GUEST-RESULTS.md).
+Further UI validation uses the assigned guest, not this host launch command.
+
 Prepared on 2026-10-24. Initially built and verified without launch. Subsequently
 exercised under the user’s explicit isolated-Dev authorization, then stopped
 (verified PID 25542). See [native results](NATIVE-RESULTS.md).
@@ -15,7 +19,7 @@ exercised under the user’s explicit isolated-Dev authorization, then stopped
 - Source checks at that commit: TypeScript, Vitest (3,353 tests), Clippy with
   warnings denied, and Rust (2,214 unit + 8 integration tests) passed.
 
-## User launch
+## Historical host launch
 
 Run this one command in Terminal (it remains attached until the test app quits):
 
