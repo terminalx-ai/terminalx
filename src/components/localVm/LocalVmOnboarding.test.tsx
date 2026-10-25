@@ -15,7 +15,7 @@ const mount = (environments: LocalVmEnvironment[] = []) => render(<LocalVmOnboar
 function choose() {
   fireEvent.change(screen.getByLabelText("Environment name"), { target: { value: "My selected VM" } });
   fireEvent.change(screen.getByLabelText("New local VM name"), { target: { value: "selected-mac" } });
-  fireEvent.change(screen.getByLabelText("Guest AI provider"), { target: { value: "claude" } });
+  fireEvent.change(screen.getByLabelText("Guest AI provider"), { target: { value: "codex" } });
   fireEvent.click(screen.getByLabelText(/I confirm creation and setup/));
 }
 
@@ -26,13 +26,14 @@ describe("one confirmed local VM onboarding", () => {
   it("discloses pinned image, resource and tool costs before one creation that automatically queues setup", async () => {
     mount();
     expect(mocks.invoke).not.toHaveBeenCalled();
+    expect((screen.getByRole("option", { name: "Claude (guided setup not yet supported)" }) as HTMLOptionElement).disabled).toBe(true);
     const profile = screen.getByRole("region", { name: "Local VM creation profile" });
     for (const text of ["24,212,741,210 bytes", "150 GiB sparse disk", "4 CPU", "8 GiB", "Cua CLI 0.7.0", "Lume 0.6.1", "Cua Driver 0.28.0", "provider’s usage and plan costs", "additional disk space"]) expect(profile.textContent).toContain(text);
     choose(); fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
     await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
     const pending = loadPendingSetup()!;
     expect(calls("environment.create")[0][1].params).toEqual(pending.params);
-    expect(pending.params).toMatchObject({ name: "My selected VM", vmName: "selected-mac", harness: "claude", confirm: true });
+    expect(pending.params).toMatchObject({ name: "My selected VM", vmName: "selected-mac", harness: "codex", confirm: true });
     expect(mocks.invoke.mock.calls.map(([, args]) => args.method)).toEqual(["environment.create"]);
     expect(screen.queryByText("Setup ready")).toBeNull();
   });
@@ -44,7 +45,7 @@ describe("one confirmed local VM onboarding", () => {
     const saved = loadPendingSetup()!; first.unmount(); mount();
     expect(calls("environment.create")).toHaveLength(1);
     expect((screen.getByLabelText("Environment name") as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByLabelText("Guest AI provider") as HTMLSelectElement).value).toBe("claude");
+    expect((screen.getByLabelText("Guest AI provider") as HTMLSelectElement).value).toBe("codex");
     const retry = screen.getByRole("button", { name: "Retry same VM setup request" });
     expect((retry as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByLabelText(/I confirm creation and setup/)); fireEvent.click(retry);
@@ -57,7 +58,7 @@ describe("one confirmed local VM onboarding", () => {
     const view = mount(); choose(); fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
     await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
     const pending = loadPendingSetup()!;
-    const report = setupReport({ harness: "claude", readiness: null, idempotencyKey: pending.params.idempotencyKey, status: "queued" });
+    const report = setupReport({ harness: "codex", readiness: null, idempotencyKey: pending.params.idempotencyKey, status: "queued" });
     const enrolled = { ...environment, name: "My selected VM", sandbox: "local:selected-mac", setup: report };
     view.rerender(<LocalVmOnboarding enabled environments={[{ ...enrolled, setup: { ...report, idempotencyKey: "other-key" } }]} />);
     expect(loadPendingSetup()).toEqual(pending);
@@ -82,7 +83,7 @@ describe("one confirmed local VM onboarding", () => {
     const view = mount(); choose(); fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
     await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
     const pending = loadPendingSetup()!;
-    const deleted = { ...environment, name: "My selected VM", sandbox: "local:selected-mac", deletedAt: "2026-10-25T15:00:00Z", setup: setupReport({ harness: "claude", readiness: null, idempotencyKey: pending.params.idempotencyKey }) };
+    const deleted = { ...environment, name: "My selected VM", sandbox: "local:selected-mac", deletedAt: "2026-10-25T15:00:00Z", setup: setupReport({ harness: "codex", readiness: null, idempotencyKey: pending.params.idempotencyKey }) };
     view.rerender(<LocalVmOnboarding enabled environments={[deleted]} />);
     await waitFor(() => expect(localStorage.getItem(setupStorageKey())).toBeNull());
     expect(calls("environment.create")).toHaveLength(1);

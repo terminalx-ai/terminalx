@@ -501,6 +501,11 @@ fn desktop_from_probes(
             Some("driver.requestPermissions"),
         )
     };
+    if result.accessibility.state == "granted" && result.screen_recording.state == "granted" {
+        let action = (result.session.state != "blocked").then_some("desktop.verify");
+        result.capture.action_code = action;
+        result.desktop.action_code = action.or(result.session.action_code);
+    }
     result
 }
 
@@ -1055,6 +1060,8 @@ esac
         assert_eq!(result.desktop.state, "unknown");
         assert_eq!(result.capture.state, "notProbed");
         assert_eq!(result.driver.runtime_version, None);
+        assert_eq!(result.capture.action_code, Some("desktop.verify"));
+        assert_eq!(result.desktop.action_code, Some("desktop.verify"));
     }
 
     #[test]

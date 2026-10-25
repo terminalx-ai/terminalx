@@ -622,6 +622,9 @@ fn create(journal: &Journal, params: &Value) -> Result<Value> {
     if let Some(existing) = existing_creation(&journal.read()?, name, &sandbox, harness, key)? {
         return Ok(serde_json::to_value(existing)?);
     }
+    if harness != "codex" {
+        bail!("Guided creation currently prepares Codex only. No machine or download was started; existing other-provider tasks and environments are preserved");
+    }
     if let Some(existing) = journal
         .read()?
         .environments
@@ -1535,6 +1538,18 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_guided_provider_is_refused_before_reserving_or_allocating_a_vm() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let error=create(&journal,&json!({"name":"Guest","vmName":"new","harness":"claude","idempotencyKey":"unsupported","confirm":true})).unwrap_err();
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert!(error
+                .to_string()
+                .contains("No machine or download was started"));
+        }
+        assert!(journal.read().unwrap().environments.is_empty());
+    }
     #[test]
     fn create_reservation_is_atomic_keyed_and_retains_deleted_receipt() {
         let temp = tempfile::tempdir().unwrap();

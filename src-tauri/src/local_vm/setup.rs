@@ -190,7 +190,10 @@ fn record_readiness(
             ("accessibility",&readiness["accessibility"]),("screenRecording",&readiness["screenRecording"]),
             ("provider",&readiness["provider"]),("desktop",&readiness["capture"])] {
             if let Some(step)=report["steps"].as_array_mut().and_then(|steps|steps.iter_mut().find(|s|s["id"]==id)) {
-                step["state"]=json!(if matches!(check["state"].as_str(),Some("ready"|"granted"|"authenticated"|"usable"|"verified")) {"complete"} else {"waiting"});
+                let prepared_driver=id=="driver" && check["state"]=="running"
+                    && check["installedVersion"]==super::desktop::DRIVER_VERSION
+                    && check["installedExecutableSha256"]==bootstrap::DRIVER.executable_sha256;
+                step["state"]=json!(if prepared_driver || matches!(check["state"].as_str(),Some("ready"|"granted"|"authenticated"|"usable"|"verified")) {"complete"} else {"waiting"});
                 step["detail"]=check["reasonCode"].clone();step["actionCode"]=check["actionCode"].clone();
             }
         }
@@ -644,8 +647,9 @@ pub fn ready(env: &Environment, report: &Value) -> bool {
         && read["runtime"]["executableSha256"].as_str()
             == bootstrap::owner_runtime_sha256().ok().as_deref()
         && read["runtime"]["executableSha256"].is_string()
-        && read["driver"]["state"] == "ready"
+        && matches!(read["driver"]["state"].as_str(), Some("ready" | "running"))
         && read["driver"]["installedVersion"] == super::desktop::DRIVER_VERSION
+        && read["driver"]["installedExecutableSha256"] == bootstrap::DRIVER.executable_sha256
         && read["accessibility"]["state"] == "granted"
         && read["screenRecording"]["state"] == "granted"
         && read["provider"]["state"] == "authenticated"
@@ -820,13 +824,15 @@ mod tests {
             step["state"] = json!("complete");
         }
         let boot = journal::new_id();
-        let sha = "a".repeat(64);
+        let sha = bootstrap::DRIVER.executable_sha256;
         report["readiness"] = json!({"protocol":1,"environmentId":env.id,"generation":env.generation,
             "runtime":{"identity":{"protocol":journal::PROTOCOL,"environmentId":env.id,"generation":env.generation},"executableSha256":bootstrap::owner_runtime_sha256().unwrap(),"bootIdentity":boot},
             "driver":{"state":"ready","installedVersion":super::super::desktop::DRIVER_VERSION,"installedExecutableSha256":sha},
             "accessibility":{"state":"granted"},"screenRecording":{"state":"granted"},"provider":{"harness":"codex","state":"authenticated"},
             "manualControl":false,"activeTaskTargets":[],"actionAdmission":{"state":"ready"}});
         report["desktopVerification"] = json!({"bootIdentity":boot,"driverExecutableSha256":sha,"verifiedAt":journal::now(),"captureVerified":true,"desktopUsable":true});
+        assert!(ready(&env, &report));
+        report["readiness"]["driver"]["state"] = json!("running");
         assert!(ready(&env, &report));
         for (path, value) in [
             ("/runtime/executableSha256", json!("b".repeat(64))),
