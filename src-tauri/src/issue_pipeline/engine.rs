@@ -1384,7 +1384,7 @@ pub fn set_auto_merge(host: &dyn Host, id: &str, value: bool) -> Result<Pipeline
 }
 
 /// What a person can do to a pipeline from the issue page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Action {
     /// Nothing further happens until it is resumed.

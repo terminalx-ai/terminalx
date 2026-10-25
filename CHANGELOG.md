@@ -2,7 +2,38 @@
 
 ## Unreleased
 
+## 0.2.18
+
+### Background sessions
+
+- Keep local agents, queued follow-ups, pending permissions, terminals, pipelines
+  and scheduled automations running after the desktop quits. Reopening reconnects
+  to their actual state and retained history. Runtime loss, logout and reboot
+  still report interrupted work honestly. (#467)
+- Choose whether quitting keeps work running or stops it, with a saved preference
+  and explicit Stop all and quit actions. The macOS menu-bar helper owns background
+  notifications and confirms process-group exit before reporting work stopped.
+  Disconnected resource views show unavailable state and discard stale actions. (#467)
+- Preserve a single runtime across desktop replacement, with signed helper
+  installation, authenticated attachments, bounded history replay and launch
+  fencing. Sharing authorization lives with the owner; mobile connectivity,
+  computer use, dictation and the built-in browser still require the desktop. (#467)
+- Package the macOS CLI launcher as a native executable so its signature survives
+  updater extraction while preserving arguments, streams and signal behavior. (#467)
+
+### Agent sessions
+
+- Keep macOS browser-use MCP helpers out of the Dock and app switcher while
+  preserving screen detection and usable browser windows. (PRO-116)
+
 ### Chat
+
+- Deliver queued messages through the provider's native interrupt without pasting
+  them again. Keep repeated Send now clicks harmless, retain provider queue order,
+  publish successful submission atomically with Enter, and show Codex continuations
+  as working when an older interrupt hook arrives. Reconcile completion debt in
+  record order and serialize managed transcript reads through application so
+  concurrent readers cannot close a newer continuation or cancel its approval. (#627)
 
 - Keep table Copy/Download menus readable and inside the window, and expand tables
   into a scrollable viewer above the conversation with keyboard focus restored on
@@ -194,6 +225,13 @@
 - Keep Preview / Source and neighbouring toolbar buttons readable in narrow
   editor panes, stepping down to labelled icons as space runs out. Shared
   segmented switches keep equal, content-sized options and aligned thumbs. (#482)
+
+### Cloud runtime
+
+- Public API follow-up messages target the existing eligible session tab instead
+  of opening another tab, with unattended permission, sign-in and timeout checks.
+  This ships through the separate headless runtime release and requires the
+  account service's protocol-3 support. (PRO-40, #589)
 
 ### Command line
 

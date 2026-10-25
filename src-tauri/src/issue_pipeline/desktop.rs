@@ -39,21 +39,3 @@ pub fn turn_failed(app: &AppHandle, session_id: &str, tab_id: &str, interrupted:
     let detail = engine::turn_failure(interrupted);
     off_thread(app, move |host| engine::turn_failed(host, &session_id, &tab_id, detail));
 }
-
-/// Watch the pull requests that pipelines are waiting on.
-pub fn start(app: AppHandle) {
-    std::thread::Builder::new()
-        .name("issue-pipeline-poll".into())
-        .spawn(move || {
-            let host = match host(&app) {
-                Ok(host) => host,
-                Err(error) => return log::warn!("issue pipelines are not watched: {error:#}"),
-            };
-            engine::recover(&host);
-            loop {
-                std::thread::sleep(engine::POLL_EVERY);
-                engine::poll(&host);
-            }
-        })
-        .expect("start the issue pipeline poller");
-}

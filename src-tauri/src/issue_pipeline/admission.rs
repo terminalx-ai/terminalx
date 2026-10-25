@@ -6,7 +6,25 @@ use crate::store::index;
 
 static ADMISSION: Mutex<()> = Mutex::new(());
 pub fn lock() -> MutexGuard<'static, ()> {
-    ADMISSION.lock().unwrap_or_else(|error| error.into_inner())
+    #[cfg(test)]
+    BEFORE_LOCK.with(|hook| { let next = hook.borrow_mut().take(); if let Some(next) = next { next(); } });
+    let guard = ADMISSION.lock().unwrap_or_else(|error| error.into_inner());
+    #[cfg(test)]
+    AFTER_LOCK.with(|hook| { let next = hook.borrow_mut().take(); if let Some(next) = next { next(); } });
+    guard
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_LOCK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// One-shot, thread-local barriers for process-bounded lock-order regressions.
+#[cfg(test)]
+pub(crate) fn observe_next_lock(before: Option<Box<dyn FnOnce()>>, after: Option<Box<dyn FnOnce()>>) {
+    BEFORE_LOCK.with(|hook| *hook.borrow_mut() = before);
+    AFTER_LOCK.with(|hook| *hook.borrow_mut() = after);
 }
 
 fn same_checkout(a: &str, b: &str) -> bool {

@@ -362,9 +362,12 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Follows one transcript file.
 pub struct Tail {
     path: Mutex<PathBuf>,
-    /// The cursor, held across polls. Also serialises the two callers — the
-    /// poll thread and a `Stop` hook flushing before it closes the turn — so
-    /// payloads are published in file order whichever gets there first.
+    /// Managed session readers hold this from before draining through applying the
+    /// records. Acquire it without a runtime/path/stream guard; file I/O then
+    /// finishes and releases path/stream locks before runtime is acquired.
+    pub(crate) application: Mutex<()>,
+    /// The cursor, held across polls. This serializes reads, not publication;
+    /// the application gate keeps a later read from being published first.
     stream: Mutex<Streamer>,
     decode: Decoder,
     marker: Option<Marker>,
@@ -380,14 +383,14 @@ impl Tail {
     /// names records a fork will copy in later, which are history too.
     pub fn opening(path: PathBuf, decode: Decoder, carried: HashSet<String>) -> Self {
         let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::skipping(len, decode, carried)), decode, marker: None }
     }
 
     /// Follow a file whose name is not known yet. A Codex tab is like this
     /// until its first `SessionStart` hook: Codex mints the conversation id
     /// itself, so there is nothing to derive the path from beforehand.
     pub fn unknown(decode: Decoder) -> Self {
-        Self { path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(PathBuf::new()), stream: Mutex::new(Streamer::at(0, decode)), decode, marker: None }
     }
 
     /// Follow a conversation the app did not start (#437), from `offset`:
@@ -395,7 +398,7 @@ impl Tail {
     /// the turns exchanged before the app noticed, or wherever the tab had
     /// read to when it last followed this file.
     pub fn from_offset(path: PathBuf, offset: u64, decode: Decoder) -> Self {
-        Self { path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
+        Self { application: Mutex::new(()), path: Mutex::new(path), stream: Mutex::new(Streamer::at(offset, decode)), decode, marker: None }
     }
 
     /// Also report what the records say about the turn; see [`Self::drain_records`].

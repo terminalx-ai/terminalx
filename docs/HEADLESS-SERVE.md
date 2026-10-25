@@ -9,7 +9,7 @@ git/worktree code as the desktop app, with no WebView, GTK or audio libraries (P
 
 - `src-tauri` has a default `desktop` feature. It enables Tauri, its plugins,
   `tauri-build` and `cpal`, plus the modules that only serve a window: commands, account,
-  pairing, automations, browser, computer use, dictation, media and the star reminder.
+  pairing, browser, computer use, dictation, media and the star reminder.
 - `src-tauri/serve` is a workspace member that depends on the library with
   `default-features = false`. Its binary is a thin call into `raccoon_lib::serve::main`,
   and the desktop build compiles that module too, so clippy and the tests cover it.
@@ -19,8 +19,9 @@ git/worktree code as the desktop app, with no WebView, GTK or audio libraries (P
     behaves as before.
   - Headless, `BroadcastSink` runs Rust listeners inline and fans every event out on a
     broadcast channel. That channel is what the relay host will serve (PRO-13).
-  - Desktop-only reactions (the star reminder and automation runs) go through
-    `sink::SessionObserver`, which is a no-op headless.
+  - Session reactions (the star reminder and automation runs) go through
+    `sink::SessionObserver`. The local runtime observer handles automation and
+    pipeline turns; the star reminder remains in the window.
 
 ```sh
 cd src-tauri/serve && cargo build --bin terminalx-serve   # or: cargo build -p terminalx-serve
@@ -41,6 +42,7 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
 | `--data-dir <dir>` | State directory (sets `TERMINALX_HOME`). Required unless `TERMINALX_HOME` is set: the runtime never falls back to the desktop app's `~/.raccoon` |
 | `--runtime-kind <kind>` | `local` (default) or `cloud-workspace`, which requires `--project-root`. Reported as `runtimeKind` by the control `status` command |
 | `--self-test` | Start, run the login shell in a PTY, type a command, wait for its answer and exit, then stop |
+| `--idle-grace-seconds <1–3600>` | Local runtime's unattached idle grace; defaults to 60 seconds |
 
 - **Stdout:** one JSON line when the runtime is ready (version, runtime kind, project root,
   data dir, socket path) and one when it stops. Logs go to stderr.
@@ -50,15 +52,53 @@ terminalx-serve --project-root /workspace --data-dir /var/lib/terminalx --runtim
   `terminalx-serve hook <Event>` and `terminalx-serve statusline`.
 - **Control socket:** the runtime listens on `run/hooks-<pid>.sock` in the data dir, which is
   the socket path in its ready line and what its agent tabs are given. It also answers on the
-  published `run/hooks.sock`, authenticated by `run/control.token`, unless another runtime or
-  desktop app already holds that data dir; it then leaves both alone, and takes them over once
-  the holder exits. `status` reports which as `publishesHome`.
+  published `run/hooks.sock`, authenticated by `run/control.token`. Local mode now refuses
+  another local owner or an existing desktop on the same data directory before opening
+  session stores. Cloud publication retains its existing takeover behavior.
+  `status` reports ownership of the published endpoint as `publishesHome`.
   Both sockets speak the desktop's JSON-lines protocol:
   - `status`, `projects`, `sessions`, `tabs`, `send`, `read`, `wait`, `permissions`,
     `worktrees` and `issues` work as on the desktop.
   - `browser.*` and `computer.*` return `unsupported`.
 - **Socket path length:** keep `--data-dir` short. A Unix socket path must fit in about
   104 bytes.
+
+### Local ownership and attachment API (#467, desktop wiring in progress)
+
+Local mode holds `run/local-runtime.lock` for its lifetime. `status.localRuntime`
+reports `protocol: 1`, an `epoch` unique to the process, attached-client count,
+idle grace and the authenticated `eventSocket`. The existing control request
+envelope and token protect these additional methods:
+
+- `runtime.attach` takes `{protocol: 1}` and returns an epoch and lease.
+- `runtime.heartbeat` and `runtime.detach` take that epoch and lease. Renew every
+  five seconds; a lease expires after twenty seconds without renewal.
+- `runtime.stopAll` takes the observed epoch and stops work in this runtime.
+  An epoch from a previous runtime is refused. Stop rejects new work, fences
+  queued follow-ups, terminates children and flushes activity before exit.
+- `runtime.session.*` forwards typed session operations to the same manager;
+  `runtime.pty.*` forwards shell creation, input, resize and retained-output reads.
+
+The Unix event socket expects `{protocol: 1, token}` as its first JSON line and
+responds with `{type: "ready", attachment}`. It publishes backend `event` frames
+and PTY frames only for explicitly attached panes. Send `attach` with `id` and
+view `token`, `ack` with the cumulative `drawn` byte count, or `detach` with the
+same id/token. `ping` answers `pong`. Each connection has its own window identity,
+so one disconnected window cannot detach another window's tap. Connections own
+a lease automatically; EOF, lag or a failed writer removes all their taps.
+Frames are bounded to 1 MiB, with a 2 MiB output budget per connection. A client
+that lags must reconnect and reload durable chat history and bounded PTY replay.
+The native bridge must decode PTY base64 back to the existing raw frontend channel.
+
+Idle grace runs only with no attachments, accepted requests or live work.
+Currently any live PTY conservatively keeps the runtime alive; proving idle
+shells/agent processes and desktop connection/quit integration remain in progress.
+Local mode without a relay link starts the existing automation scheduler and
+pipeline observer. Enabled schedules keep the owner available between runs;
+disabled schedules do not. Open automation runs from a previous owner are
+recovered before client admission. Reattachment never repeats that recovery.
+Cloud workspaces continue using their cloud schedule mailbox separately.
+These APIs do not yet change how quitting the desktop behaves.
 
 ## Cloud idle activity
 

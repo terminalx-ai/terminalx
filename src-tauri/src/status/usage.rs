@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod claude_oauth;
@@ -30,7 +30,7 @@ const STALE_MS: i64 = 30 * 60_000;
 const MAX_BACKOFF_MS: i64 = 15 * 60_000;
 const CLAUDE_MAX_BACKOFF_MS: i64 = 4 * 60 * 60_000;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageWindow {
     pub agent: String,
@@ -44,7 +44,7 @@ pub struct UsageWindow {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexCredits {
     pub has_credits: bool,
@@ -53,7 +53,7 @@ pub struct CodexCredits {
     pub balance: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexResetCredits {
     pub available_count: u64,
@@ -61,7 +61,7 @@ pub struct CodexResetCredits {
     pub next_expires_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,7 +70,7 @@ pub struct CodexUsage {
     pub reset_credits: Option<CodexResetCredits>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSnapshot {
     pub revision: u64,
@@ -82,7 +82,7 @@ pub struct UsageSnapshot {
     pub codex: Option<CodexUsage>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeRefresh {
     pub retry_at: Option<i64>,
@@ -91,7 +91,7 @@ pub struct ClaudeRefresh {
     pub last_success_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexRefresh {
     pub retry_at: Option<i64>,

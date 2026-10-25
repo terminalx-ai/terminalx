@@ -38,7 +38,10 @@ jobs:
 
   check:
     runs-on: macos-latest
-    timeout-minutes: 75
+    # Run 40125232605 spent 29m on setup/frontend/native checks, 9m on
+    # clippy and 34m building Rust tests despite a cache hit. Leave time
+    # for the full test run and main's cache upload after a rebuild.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4

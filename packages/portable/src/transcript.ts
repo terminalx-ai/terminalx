@@ -403,6 +403,9 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
         tasks = payload.tasks;
         break;
       case "model_request_started":
+        // A provider continuation can precede its prompt echo. Keep the
+        // stopped turn historical while this new request is visibly active.
+        ensureTurn(event);
         modelRequestOpen = true;
         break;
       case "usage_update":

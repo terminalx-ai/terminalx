@@ -35,7 +35,11 @@ struct Pane {
     /// only this pane, not every other pane's resize or kill.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pid: Option<u32>,
+    /// A shell tab launched directly into a command has no interactive shell
+    /// beneath it; its original foreground group is work too.
+    explicit_command: bool,
     alive: Arc<Mutex<bool>>,
+    group: Arc<OwnedGroup>,
     /// When this pane last wrote something. A caller that has to type into a
     /// program rather than talk to it uses the gap since the last byte as its
     /// only sign that the program has finished drawing and is listening.
@@ -44,6 +48,75 @@ struct Pane {
     cwd: String,
     /// When the pane was opened: where its tab stands among the session's.
     created: String,
+}
+
+
+/// A detached process group, never a pane name that may now identify a successor.
+pub(crate) struct StoppingPane {
+    id: String,
+    group: Arc<OwnedGroup>,
+}
+
+impl StoppingPane {
+    pub(crate) fn pid(&self) -> Option<u32> { self.group.pid() }
+
+    pub(crate) fn wait(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        let mut forced = false;
+        while start.elapsed() < timeout {
+            if self.group.pid().is_none() { return true; }
+            if !forced && start.elapsed() >= TERM_GRACE {
+                self.group.signal(true);
+                forced = true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if self.group.pid().is_none() { return true; }
+        log::warn!("pane {} did not exit within {timeout:?}", self.id);
+        false
+    }
+}
+
+
+/// Keep group ownership separate from output EOF and leader exit. Once an
+/// empty group is observed, permanently retire its numeric identity.
+struct OwnedGroup(Mutex<Option<u32>>);
+impl OwnedGroup {
+    fn pid(&self) -> Option<u32> {
+        let mut owned = self.0.lock().unwrap();
+        if owned.is_some_and(|pid| !group_alive(pid)) { *owned = None; }
+        *owned
+    }
+    fn signal(&self, force: bool) {
+        let mut owned = self.0.lock().unwrap();
+        if let Some(pid) = *owned {
+            if !group_alive(pid) { *owned = None; return; }
+            // A reaped leader's PID is not authority to signal an unrelated
+            // process. Only the PTY's original process group is owned here.
+            #[cfg(unix)]
+            unsafe { libc::kill(-(pid as i32), if force { libc::SIGKILL } else { libc::SIGTERM }); }
+            #[cfg(not(unix))]
+            { if force { crate::harness::host::kill_now(pid); } else { crate::harness::host::terminate(pid); } }
+        }
+    }
+    fn terminate(self: &Arc<Self>) {
+        self.signal(false);
+        let group = self.clone();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            while group.pid().is_some() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            group.signal(true);
+        });
+    }
+}
+fn group_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    // SAFETY: signal zero observes a known PTY process group.
+    { (unsafe { libc::kill(-(pid as i32), 0) }) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
+    #[cfg(not(unix))]
+    { crate::harness::host::is_alive(pid) }
 }
 
 /// A direct line for one pane's raw output, beside the `pty_data` event: a
@@ -116,6 +189,8 @@ const EXIT_AFTER_OUTPUT: Duration = Duration::from_millis(500);
 
 pub struct Terminals {
     panes: Mutex<HashMap<String, Pane>>,
+    groups: Mutex<Vec<Arc<OwnedGroup>>>,
+    retained: Mutex<HashMap<String, crate::local_runtime::scrollback::History>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     /// Keyed by pane id and kept across the pane's own life: a view may
     /// attach before its pane is spawned, and stays attached when the process
@@ -134,7 +209,7 @@ pub struct Terminals {
 }
 
 /// A shell tab of a session: a pane the reader opened, as every window lists it.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellPane {
     pub id: String,
@@ -184,12 +259,12 @@ struct Emitted {
 
 impl Default for Terminals {
     fn default() -> Self {
-        Self { panes: Mutex::new(HashMap::new()), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default() }
+        Self { panes: Mutex::new(HashMap::new()), groups: Mutex::default(), retained: Mutex::default(), sink: Mutex::new(None), taps: Mutex::new(HashMap::new()), emitted: Arc::default(), titles: Mutex::new(HashMap::new()), renamed: Mutex::default() }
     }
 }
 
 /// What the terminals hold and have sent, for `terminalx status` (issue #232).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalStats {
     pub panes: usize,
@@ -299,7 +374,10 @@ impl Terminals {
     /// it to tell the CLI — and every hook the CLI spawns, since a hook is a
     /// grandchild of this shell — which tab it belongs to.
     pub fn spawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
-        self.spawn_after(sink, id, spec, Vec::new())
+        let printed = self.retained.lock().unwrap().get(id).map(|history| history.data.clone()).unwrap_or_default();
+        let result = self.spawn_after(sink, id, spec, printed);
+        if result.is_ok() { self.retained.lock().unwrap().remove(id); }
+        result
     }
 
     /// Open a pane in the place of one whose program has exited, keeping what
@@ -309,13 +387,11 @@ impl Terminals {
     pub fn respawn(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>) -> Result<()> {
         let printed = self.read_output(id).unwrap_or_default();
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
-            // A program that has exited is not signalled: its pid may be
-            // another process's by now.
-            if let Some(pid) = pane.pid.filter(|_| *pane.alive.lock().unwrap()) {
-                crate::harness::host::terminate(pid);
-            }
+            pane.group.terminate();
         }
-        self.spawn_after(sink, id, spec, printed)
+        let result = self.spawn_after(sink, id, spec, printed);
+        if result.is_ok() { self.retained.lock().unwrap().remove(id); }
+        result
     }
 
     fn spawn_after(&self, sink: Arc<dyn EventSink>, id: &str, spec: PaneSpec<'_>, printed: Vec<u8>) -> Result<()> {
@@ -323,6 +399,13 @@ impl Terminals {
             return Ok(());
         }
         let PaneSpec { cwd, cols, rows, command, env } = spec;
+        // A bare shell is still an interactive shell (also used by disposable
+        // PTY fixtures). Shell scripts/arguments are work until the pane exits.
+        let explicit_command = command.is_some_and(|command| {
+            let command = command.trim();
+            command.chars().any(char::is_whitespace)
+                || !matches!(std::path::Path::new(command).file_name().and_then(|name| name.to_str()), Some("sh" | "bash" | "zsh" | "fish" | "dash" | "ksh" | "tcsh" | "csh"))
+        });
         *self.sink.lock().unwrap() = Some(sink.clone());
         let pty = portable_pty::native_pty_system();
         let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| anyhow!("openpty: {e}"))?;
@@ -367,6 +450,12 @@ impl Terminals {
         let mut reader = pair.master.try_clone_reader().map_err(|e| anyhow!("pty reader: {e}"))?;
         let writer = pair.master.take_writer().map_err(|e| anyhow!("pty writer: {e}"))?;
         let alive = Arc::new(Mutex::new(true));
+        let group = Arc::new(OwnedGroup(Mutex::new(pid)));
+        {
+            let mut groups = self.groups.lock().unwrap();
+            groups.retain(|group| group.pid().is_some());
+            groups.push(group.clone());
+        }
         let last_output = Arc::new(Mutex::new(None));
         let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
         append_scrollback(&scrollback, &printed);
@@ -463,8 +552,10 @@ impl Terminals {
             let sink = sink.clone();
             let id = id.to_string();
             let tap = tap.clone();
+            let group = group.clone();
             std::thread::Builder::new().name(format!("pty-wait-{id}")).spawn(move || {
                 let code = child.wait().ok().map(|s| s.exit_code() as i32);
+                let _ = group.pid();
                 // Let the emitter go if it is holding the pane for its view, then
                 // give it a moment to send the tail, so the exit is not announced
                 // ahead of the output. Bounded: a background job the program left
@@ -478,10 +569,11 @@ impl Terminals {
                 }
                 let _ = emitted_all.recv_timeout(EXIT_AFTER_OUTPUT);
                 sink.emit("pty_exit", &PtyExit { id, code });
+                while group.pid().is_some() { std::thread::sleep(Duration::from_millis(20)); }
             })?;
         }
         let writer = Arc::new(Mutex::new(writer));
-        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, alive, last_output, scrollback, cwd: cwd.to_string(), created: crate::store::index::now() });
+        self.panes.lock().unwrap().insert(id.to_string(), Pane { master: pair.master, writer, pid, explicit_command, alive, group, last_output, scrollback, cwd: cwd.to_string(), created: crate::store::index::now() });
         self.keep_slot(id, &tap);
         self.changed();
         Ok(())
@@ -613,6 +705,23 @@ impl Terminals {
         Ok(())
     }
 
+    /// Capture the writer only if it is still the process the caller admitted.
+    /// Keeping that writer Arc cannot redirect bytes to a replacement pane.
+    pub(crate) fn write_for_process(&self, id: &str, pid: u32, data: &[u8]) -> Result<()> {
+        let writer = {
+            let panes = self.panes.lock().unwrap();
+            let pane = panes.get(id).context("no such terminal")?;
+            if pane.pid != Some(pid) || !*pane.alive.lock().unwrap() {
+                anyhow::bail!("the terminal process changed before input delivery");
+            }
+            pane.writer.clone()
+        };
+        let mut writer = writer.lock().unwrap();
+        writer.write_all(data)?;
+        writer.flush()?;
+        Ok(())
+    }
+
     /// How many bytes written into the pane its program has yet to read.
     /// `None` where that cannot be asked: no such pane, a pane whose program
     /// has gone, or a platform whose PTY keeps no such count.
@@ -657,9 +766,11 @@ impl Terminals {
     }
 
     pub fn read_output(&self, id: &str) -> Option<Vec<u8>> {
-        let scrollback = self.panes.lock().unwrap().get(id)?.scrollback.clone();
-        let bytes = scrollback.lock().unwrap().iter().copied().collect();
-        Some(bytes)
+        let scrollback = self.panes.lock().unwrap().get(id).map(|pane| pane.scrollback.clone());
+        match scrollback {
+            Some(scrollback) => Some(scrollback.lock().unwrap().iter().copied().collect()),
+            None => self.retained.lock().unwrap().get(id).map(|history| history.data.clone()),
+        }
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
@@ -676,10 +787,9 @@ impl Terminals {
     }
 
     pub fn kill(&self, id: &str) {
+        self.retained.lock().unwrap().remove(id);
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
-            if let Some(pid) = pane.pid {
-                crate::harness::host::terminate(pid);
-            }
+            pane.group.terminate();
             drop(pane);
         }
         self.drop_slot_if_unused(id);
@@ -693,28 +803,20 @@ impl Terminals {
     /// the old one has let go dies on the spot. Claude Code's TUI also ignores
     /// SIGTERM outright, so asking politely and moving on is not enough.
     pub fn kill_and_wait(&self, id: &str, timeout: Duration) {
-        let Some(pane) = self.panes.lock().unwrap().remove(id) else { return };
-        let pid = pane.pid;
-        if let Some(pid) = pid {
-            crate::harness::host::terminate(pid);
-        }
+        if let Some(pane) = self.begin_stop(id) { pane.wait(timeout); }
+    }
+
+    /// Detach and signal while the caller still owns its launch lock. Waiting
+    /// happens later, against this exact group rather than a reused pane id.
+    pub(crate) fn begin_stop(&self, id: &str) -> Option<StoppingPane> {
+        self.retained.lock().unwrap().remove(id);
+        let pane = self.panes.lock().unwrap().remove(id)?;
+        let group = pane.group.clone();
+        group.signal(false);
         drop(pane);
         self.drop_slot_if_unused(id);
         self.changed();
-        let Some(pid) = pid else { return };
-        let start = Instant::now();
-        let mut forced = false;
-        while start.elapsed() < timeout {
-            if !crate::harness::host::is_alive(pid) {
-                return;
-            }
-            if !forced && start.elapsed() >= TERM_GRACE {
-                crate::harness::host::kill_now(pid);
-                forced = true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        log::warn!("pane {id} did not exit within {timeout:?}");
+        Some(StoppingPane { id: id.to_string(), group })
     }
 
     /// Kill the shells opened for a session, whose pane ids are
@@ -724,15 +826,14 @@ impl Terminals {
     /// gone, so a directory they ran in can be removed. Signalling them all
     /// before waiting keeps the wait to one grace period rather than one each.
     pub fn kill_all_and_wait(&self, ids: &[String], timeout: Duration) {
-        let mut pids = Vec::new();
+        self.retained.lock().unwrap().retain(|id, _| !ids.contains(id));
+        let mut groups = Vec::new();
         {
             let mut panes = self.panes.lock().unwrap();
             for id in ids {
                 if let Some(pane) = panes.remove(id) {
-                    if let Some(pid) = pane.pid {
-                        crate::harness::host::terminate(pid);
-                        pids.push(pid);
-                    }
+                    pane.group.signal(false);
+                    groups.push(pane.group.clone());
                 }
             }
         }
@@ -743,31 +844,29 @@ impl Terminals {
         let start = Instant::now();
         let mut forced = false;
         while start.elapsed() < timeout {
-            pids.retain(|pid| crate::harness::host::is_alive(*pid));
-            if pids.is_empty() {
+            groups.retain(|group| group.pid().is_some());
+            if groups.is_empty() {
                 return;
             }
             if !forced && start.elapsed() >= TERM_GRACE {
-                for pid in &pids {
-                    crate::harness::host::kill_now(*pid);
-                }
+                for group in &groups { group.signal(true); }
                 forced = true;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        log::warn!("{} process(es) did not exit within {timeout:?}", pids.len());
+        log::warn!("{} process group(s) did not exit within {timeout:?}", groups.len());
     }
 
     /// Name a shell tab, for every window that lists it.
     pub fn set_title(&self, id: &str, title: &str) {
-        if self.panes.lock().unwrap().contains_key(id) {
+        if self.panes.lock().unwrap().contains_key(id) || self.retained.lock().unwrap().contains_key(id) {
             self.titles.lock().unwrap().insert(id.to_string(), title.to_string());
         }
     }
 
     /// The reader gave a shell tab a name of their own.
     pub fn rename(&self, id: &str, title: &str) {
-        if self.panes.lock().unwrap().contains_key(id) {
+        if self.panes.lock().unwrap().contains_key(id) || self.retained.lock().unwrap().contains_key(id) {
             self.titles.lock().unwrap().insert(id.to_string(), title.to_string());
             self.renamed.lock().unwrap().insert(id.to_string());
         }
@@ -818,9 +917,14 @@ impl Terminals {
         let session_id = shell_session(id)?.to_string();
         let (cwd, exited, created) = {
             let panes = self.panes.lock().unwrap();
-            let pane = panes.get(id)?;
-            let alive = *pane.alive.lock().unwrap();
-            (pane.cwd.clone(), !alive, pane.created.clone())
+            if let Some(pane) = panes.get(id) {
+                let alive = *pane.alive.lock().unwrap();
+                (pane.cwd.clone(), !alive, pane.created.clone())
+            } else {
+                let retained = self.retained.lock().unwrap();
+                let history = retained.get(id)?;
+                (history.cwd.clone(), true, history.created.clone())
+            }
         };
         let title = self.titles.lock().unwrap().get(id).cloned();
         let renamed = self.renamed.lock().unwrap().contains(id);
@@ -828,7 +932,8 @@ impl Terminals {
     }
 
     /// Whether the shell in `id` is running something: the terminal's
-    /// foreground process group is no longer the shell's own. `false` for a
+    /// foreground process group is no longer the shell's own, or the shell
+    /// tab was launched directly into a command rather than a prompt. `false` for a
     /// pane that has exited, and wherever that cannot be told.
     pub fn is_busy(&self, id: &str) -> bool {
         let panes = self.panes.lock().unwrap();
@@ -836,6 +941,7 @@ impl Terminals {
         if !*pane.alive.lock().unwrap() {
             return false;
         }
+        if is_shell_id(id) && pane.explicit_command { return true; }
         #[cfg(unix)]
         {
             matches!((pane.master.process_group_leader(), pane.pid), (Some(leader), Some(shell)) if leader > 0 && leader as u32 != shell)
@@ -850,7 +956,9 @@ impl Terminals {
     /// there when they were opened needs in order to list them.
     pub fn shells(&self) -> Vec<ShellPane> {
         let mut ids: Vec<String> = self.panes.lock().unwrap().keys().filter(|id| shell_session(id).is_some()).cloned().collect();
+        ids.extend(self.retained.lock().unwrap().keys().filter(|id| shell_session(id).is_some()).cloned());
         ids.sort();
+        ids.dedup();
         ids.iter().filter_map(|id| self.shell(id)).collect()
     }
 
@@ -858,7 +966,7 @@ impl Terminals {
     pub fn session_pane_ids(&self, session_id: &str, tab_ids: &[String]) -> Vec<String> {
         let prefix = format!("{session_id}:");
         let tabs: Vec<String> = tab_ids.iter().map(|tab| format!("tab:{tab}")).collect();
-        self.panes.lock().unwrap().keys().filter(|id| id.starts_with(&prefix) || tabs.contains(id)).cloned().collect()
+        self.panes().into_iter().map(|pane| pane.id).filter(|id| id.starts_with(&prefix) || tabs.contains(id)).collect()
     }
 
     pub fn kill_session_shells(&self, session_id: &str) {
@@ -901,18 +1009,70 @@ impl Terminals {
         self.panes.lock().unwrap().get(id).map(|p| *p.alive.lock().unwrap()).unwrap_or(false)
     }
 
+    pub(crate) fn owned_groups(&self) -> Vec<u32> {
+        let mut groups = self.groups.lock().unwrap();
+        groups.retain(|group| group.pid().is_some());
+        groups.iter().filter_map(|group|group.pid()).collect()
+    }
+
+    /// Include groups whose pane was closed/replaced before stop-all began.
+    pub(crate) fn stop_owned_groups(&self, timeout: Duration) {
+        let groups = self.groups.lock().unwrap().clone();
+        for group in &groups { group.signal(false); }
+        let start = Instant::now();
+        while groups.iter().any(|group|group.pid().is_some()) && start.elapsed() < timeout {
+            if start.elapsed() >= TERM_GRACE { for group in &groups { group.signal(true); } }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     pub fn panes(&self) -> Vec<PaneInfo> {
-        self.panes
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, pane)| PaneInfo {
-                id: id.clone(),
-                pid: pane.pid,
-                running: *pane.alive.lock().unwrap(),
-                cwd: pane.cwd.clone(),
-            })
-            .collect()
+        let mut panes: HashMap<_, _> = self.retained.lock().unwrap().iter().map(|(id, pane)|
+            (id.clone(), PaneInfo { id: id.clone(), pid: None, running: false, cwd: pane.cwd.clone() })).collect();
+        panes.extend(self.panes.lock().unwrap().iter().map(|(id, pane)| (id.clone(), PaneInfo {
+            id: id.clone(), pid: pane.pid, running: *pane.alive.lock().unwrap(), cwd: pane.cwd.clone(),
+        })));
+        panes.into_values().collect()
+    }
+
+    pub(crate) fn history(&self, budget: usize) -> Vec<crate::local_runtime::scrollback::History> {
+        use crate::local_runtime::scrollback::History;
+        let mut history = self.retained.lock().unwrap().clone();
+        let panes = self.panes.lock().unwrap();
+        let each = (budget / (history.len() + panes.len()).max(1)).min(SCROLLBACK_BYTES);
+        let titles = self.titles.lock().unwrap();
+        let renamed = self.renamed.lock().unwrap();
+        for (id, pane) in panes.iter() {
+            let printed = pane.scrollback.lock().unwrap();
+            history.insert(id.clone(), History { id: id.clone(), cwd: pane.cwd.clone(), created: pane.created.clone(),
+                title: titles.get(id).cloned(), renamed: renamed.contains(id),
+                data: printed.iter().skip(printed.len().saturating_sub(each)).copied().collect() });
+        }
+        for pane in history.values_mut() {
+            pane.title = titles.get(&pane.id).cloned();
+            pane.renamed = renamed.contains(&pane.id);
+            if pane.data.len() > each {
+                pane.data.drain(..pane.data.len() - each);
+            }
+            if pane.data.len() == each {
+                if let Some(newline) = pane.data.iter().take(4096).position(|byte| *byte == b'\n') {
+                    pane.data.drain(..=newline);
+                }
+            }
+        }
+        history.into_values().collect()
+    }
+
+    pub(crate) fn restore_history(&self, history: Vec<crate::local_runtime::scrollback::History>) {
+        let mut titles = self.titles.lock().unwrap();
+        let mut renamed = self.renamed.lock().unwrap();
+        for pane in &history {
+            if let Some(title) = &pane.title { titles.insert(pane.id.clone(), title.clone()); }
+            if pane.renamed { renamed.insert(pane.id.clone()); }
+        }
+        drop(renamed);
+        drop(titles);
+        *self.retained.lock().unwrap() = history.into_iter().map(|pane| (pane.id.clone(), pane)).collect();
     }
 
     pub fn stats(&self) -> TerminalStats {
@@ -922,12 +1082,14 @@ impl Terminals {
             (views + tapped.0.len(), bytes + tapped.0.iter().map(Tapped::unacked).sum::<usize>())
         });
         let panes = self.panes.lock().unwrap();
+        let retained = self.retained.lock().unwrap();
+        let retained = retained.iter().filter(|(id, _)| !panes.contains_key(*id)).map(|(_, pane)| pane).collect::<Vec<_>>();
         TerminalStats {
             views,
             unacked_bytes,
-            panes: panes.len(),
+            panes: panes.len() + retained.len(),
             running: panes.values().filter(|pane| *pane.alive.lock().unwrap()).count(),
-            scrollback_bytes: panes.values().map(|pane| pane.scrollback.lock().unwrap().len()).sum(),
+            scrollback_bytes: panes.values().map(|pane| pane.scrollback.lock().unwrap().len()).sum::<usize>() + retained.iter().map(|pane| pane.data.len()).sum::<usize>(),
             data_events: self.emitted.events.load(Ordering::Relaxed),
             data_bytes: self.emitted.bytes.load(Ordering::Relaxed),
         }
@@ -937,8 +1099,9 @@ impl Terminals {
         // A name outlives its pane no longer than this.
         {
             let panes = self.panes.lock().unwrap();
-            self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id));
-            self.renamed.lock().unwrap().retain(|id| panes.contains_key(id));
+            let retained = self.retained.lock().unwrap();
+            self.titles.lock().unwrap().retain(|id, _| panes.contains_key(id) || retained.contains_key(id));
+            self.renamed.lock().unwrap().retain(|id| panes.contains_key(id) || retained.contains_key(id));
         }
         if let Some(sink) = self.sink.lock().unwrap().as_ref() {
             sink.emit(crate::status::resources::CHANGED_EVENT, &());
@@ -949,6 +1112,26 @@ impl Terminals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_input_permit_cannot_target_a_replacement_terminal_process() {
+        let sink = Arc::new(crate::sink::BroadcastSink::new(64));
+        let terminals = Terminals::new();
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().to_str().unwrap();
+        let env = vec![("HOME".to_string(),path.to_string()),("ZDOTDIR".to_string(),path.to_string())];
+        let spec = || PaneSpec { cwd:path,cols:80,rows:24,command:Some("exec /bin/cat"),env:&env };
+        terminals.spawn(sink.clone(),"mobile-process",spec()).unwrap();
+        let original = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
+        assert!(terminals.write_for_process("mobile-process",original,b"first\n").is_ok());
+        terminals.kill_all();
+        terminals.spawn(sink,"mobile-process",spec()).unwrap();
+        let replacement = terminals.panes().into_iter().find(|pane|pane.id == "mobile-process").unwrap().pid.unwrap();
+        assert_ne!(original,replacement);
+        assert!(terminals.write_for_process("mobile-process",original,b"stale\n").is_err());
+        assert!(terminals.write_for_process("mobile-process",replacement,b"current\n").is_ok());
+        terminals.kill_all();
+    }
 
     #[test]
     fn output_is_sent_when_the_program_goes_quiet_not_on_its_next_write() {

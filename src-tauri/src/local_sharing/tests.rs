@@ -281,3 +281,17 @@ fn presence_keeps_one_person_and_exposes_pending_approval_without_promoting_the_
     share.approve("pending-link", "alice", true, 2000).unwrap();
     assert_eq!(share.snapshot(3000, true)["people"][0]["role"], "driver");
 }
+
+#[test]
+fn a_recreated_share_cannot_reuse_an_old_delivery_permit() {
+    let mut old = fixture();
+    old.join(guest("connection", "alice"), 1000).unwrap();
+    let permit = old.write_permit("connection", "tab").unwrap();
+    assert!(old.permit_current(&permit, "tab", 2000));
+    let mut replacement = fixture();
+    replacement.join(guest("connection", "alice"), 1000).unwrap();
+    assert!(!replacement.permit_current(&permit, "tab", 2000));
+    assert!(replacement.admit_at_writer(&permit, "tab", 2000).is_err());
+    let current = replacement.write_permit("connection", "tab").unwrap();
+    assert!(replacement.admit_at_writer(&current, "tab", 2000).is_ok());
+}

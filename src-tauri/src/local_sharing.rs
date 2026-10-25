@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+pub(crate) mod runtime;
+pub(crate) mod owner;
+
 pub const MAX_GUESTS: usize = 32;
 pub const LEASE_MS: i64 = 30_000;
 pub const IDENTITY_MS: i64 = 60_000;
@@ -166,6 +169,7 @@ pub struct Note {
 
 #[derive(Clone)]
 pub struct WritePermit {
+    pub share_generation: String,
     pub connection_id: String,
     pub revision: u64,
     pub tab_epoch: u64,
@@ -179,6 +183,8 @@ pub struct QueuedInput {
 }
 
 pub struct Share {
+    generation: String,
+    pub(crate) owner: Option<owner::Binding>,
     pub organization_id: String,
     pub session_id: String,
     pub host_id: String,
@@ -195,12 +201,15 @@ pub struct Share {
 
 #[derive(Default)]
 pub struct Sharing {
+    pub(crate) owners: HashMap<String, owner::Registration>,
     pub sessions: HashMap<String, Share>,
 }
 
 impl Share {
     pub fn new(host_id: String, organization_id: String, session_id: String) -> Self {
         Self {
+            generation: Uuid::new_v4().to_string(),
+            owner: None,
             session_id,
             host: Person {
                 user_id: host_id.clone(),
@@ -489,6 +498,7 @@ impl Share {
             .get(connection)
             .ok_or_else(|| anyhow!("Access ended."))?;
         Ok(WritePermit {
+            share_generation: self.generation.clone(),
             connection_id: connection.into(),
             revision: guest.write_revision,
             tab_epoch: self.tab_epochs.get(tab).copied().unwrap_or(0),
@@ -496,6 +506,7 @@ impl Share {
     }
 
     pub fn permit_current(&self, permit: &WritePermit, tab: &str, now: i64) -> bool {
+        if permit.share_generation != self.generation || self.owner.as_ref().is_some_and(|owner| !owner.attachment.valid()) { return false; }
         self.guests.get(&permit.connection_id).is_some_and(|g| {
             g.write_revision == permit.revision
                 && g.admitted
@@ -511,6 +522,9 @@ impl Share {
         tab_id: &str,
         now: i64,
     ) -> Result<Person> {
+        if permit.share_generation != self.generation {
+            bail!("The sharing generation changed before prompt delivery.");
+        }
         if self
             .guests
             .get(&permit.connection_id)
@@ -566,6 +580,9 @@ impl Share {
         now: i64,
         throttle: bool,
     ) -> Result<Person> {
+        if self.owner.as_ref().is_some_and(|owner| !owner.attachment.valid()) {
+            bail!("The sharing owner disconnected. Join again.");
+        }
         let guest = self
             .guests
             .get_mut(connection)

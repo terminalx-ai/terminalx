@@ -369,3 +369,24 @@ Check its glibc floor before running it on an older host
   another Mac. A Developer ID identity and notarization replace `"-"` in
   `bundle.macOS.signingIdentity` when that matters.
 - The `demo.html` page is dev-only; the production build ships `index.html`.
+
+### Native CLI launcher
+
+The macOS `Contents/MacOS/terminalx` sidecar is generated from
+`native/terminalx-launcher/main.rs` by `pnpm build:terminalx-launcher`. Tauri's
+build/dev hooks select its full target and profile; universal builds combine
+both architecture slices. Direct desktop Cargo checks build the same real
+launcher with Cargo's target. Generated executables are ignored, never committed.
+
+The launcher executes its sibling `raccoon terminalx` without a forwarding
+process. Its Mach-O signature is embedded in executable bytes, unlike the old
+shell launcher's extended-attribute signature, which the updater's tar route
+did not retain. Tauri signs the sidecar with the rest of the bundle. Verify the
+**extracted updater payload**, not only the app before archiving, with
+`codesign --verify --deep --strict`. Linux and Windows retain their existing
+platform-specific CLI installation paths.
+
+Run `pnpm test:terminalx-launcher` for forwarding, failure, signal and build-plan
+coverage. `native/terminalx-launcher/test-archive.py` accepts an existing signed
+bundle, generated launcher and the attested normal-Tauri archive replay probe;
+it signs only a fresh disposable copy and verifies the extracted result.

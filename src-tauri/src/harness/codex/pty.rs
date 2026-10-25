@@ -41,7 +41,7 @@ pub const HOOK_EVENTS: &[&str] = &[
 ];
 
 /// How long Codex waits for a hook. The two that can park on a person get the
-/// ceiling Codex itself allows; the rest only report and must never hold a
+/// default timeout; the rest only report and must never hold a
 /// turn up.
 const DECIDING_TIMEOUT_SECS: u64 = 600;
 const REPORT_TIMEOUT_SECS: u64 = 10;
@@ -61,14 +61,18 @@ fn timeout_for(event: &str) -> u64 {
 /// this same binary as `raccoon hook <Event>`, which forwards the hook's
 /// stdin over the socket.
 pub fn hooks_json(exe: &Path) -> Value {
+    hooks_json_for_owner(exe, crate::local_runtime::permissions::enabled())
+}
+
+fn hooks_json_for_owner(exe: &Path, local_owner: bool) -> Value {
     let mut hooks = serde_json::Map::new();
     for event in HOOK_EVENTS {
         hooks.insert(
             (*event).to_string(),
             json!([{ "hooks": [{
                 "type": "command",
-                "command": crate::hooks::hook_command(exe, event),
-                "timeout": timeout_for(event),
+                "command": crate::hooks::decision_hook_command(exe, event, local_owner && matches!(*event, "PermissionRequest" | "PreToolUse")),
+                "timeout": if local_owner && matches!(*event, "PermissionRequest" | "PreToolUse") { crate::local_runtime::permissions::PROVIDER_SECONDS } else { timeout_for(event) },
             }]}]),
         );
     }
@@ -149,6 +153,21 @@ pub fn pre_tool_decision(allow: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_local_owner_deciding_hooks_use_the_extended_wait() {
+        let local = hooks_json_for_owner(Path::new("/opt/runtime"), true);
+        let default = hooks_json_for_owner(Path::new("/opt/runtime"), false);
+        for event in ["PermissionRequest", "PreToolUse"] {
+            let hook = &local["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["timeout"], crate::local_runtime::permissions::PROVIDER_SECONDS);
+            assert!(hook["command"].as_str().unwrap().ends_with(" --local-owner-decision"));
+            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 600);
+            assert!(!default["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
+        }
+        assert_eq!(local["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
+        assert!(!local["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
+    }
 
     #[test]
     fn every_hook_runs_this_binary_and_none_carries_a_matcher() {
