@@ -113,6 +113,24 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         }
         "environment.inspect" => {
             let env = environment(&journal, &params)?;
+            if params["purpose"] == "deletion" {
+                return Ok(
+                    json!({"status":"deletionInspection","stages":[],"deletion":deletion_preview(&journal,&env)}),
+                );
+            }
+            if env
+                .provision
+                .as_ref()
+                .is_some_and(|p| p["status"] == "outcomeUnknown")
+                || params["purpose"] == "provisionRecovery"
+            {
+                // Recovery inspection must not start driver/model/auth probes.
+                let review = super::provisioning::preview(&journal, &env);
+                return Ok(
+                    json!({"status":"outcomeUnknown","stages":env.provision.as_ref().and_then(|p|p.get("stages")),
+                    "reconciliation":review,"deletion":{"canDelete":false,"reason":"Reconcile interrupted provisioning before independent deletion inspection","tasks":[],"guestWork":null}}),
+                );
+            }
             let vm = inspect_sandbox(&env.sandbox)?;
             let runtime = guest_rpc(&env, "describe", json!({}));
             if let Ok(response) = &runtime {
@@ -123,6 +141,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 json!({"status":vm.get("state").or(vm.get("status")),"stages":env.provision.as_ref().and_then(|p|p.get("stages")).cloned().unwrap_or(json!([])),"vm":safe_vm(&vm),"runtime":runtime.as_ref().ok(),"deletion":deletion,"detail":runtime.err().map(|e|crate::remote::protocol::redact(&format!("{e:#}")))}),
             )
         }
+        "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
         "environment.install" => {
             let env = environment(&journal, &params)?;
             install_guest(&env, Path::new(field(&params, "runtimePath")?))?;
@@ -255,8 +274,6 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 })?;
             }
             if method == "task.cancel" {
-                let absent = result.get("absent") == Some(&Value::Bool(true))
-                    && result.get("canceled") == Some(&Value::Bool(true));
                 journal.transaction(|s| {
                     let t = journal::bound(s, &target)?;
                     if t.status.terminal() {
@@ -265,14 +282,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                     // A cancellation receipt is not worker-exit evidence. The
                     // supervisor polls and retains terminal events/artifacts
                     // before releasing the lease or enabling manual takeover.
-                    t.status = if absent {
-                        journal::TaskStatus::Canceled
-                    } else if result.get("status").and_then(Value::as_str) == Some("outcomeUnknown")
-                    {
-                        journal::TaskStatus::OutcomeUnknown
-                    } else {
-                        journal::TaskStatus::Canceling
-                    };
+                    retain_cancellation(t, &result);
                     t.updated_at = journal::now();
                     Ok(())
                 })?;
@@ -282,6 +292,19 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         "task.artifact" => artifact(&journal, &params),
         "task.applyPatch" => apply_patch(&journal, &params),
         _ => bail!("Unknown local VM method"),
+    }
+}
+
+fn retain_cancellation(task: &mut Task, response: &Value) {
+    // A tombstone prevents a delayed start but cannot erase evidence of an
+    // earlier dispatch whose guest record has disappeared or rolled back.
+    if response["absent"] == true {
+        task.status = journal::TaskStatus::OutcomeUnknown;
+        task.detail = Some("The guest task record is missing. Cancellation blocks delayed starts, but earlier worker exit and external outcomes remain unknown.".into());
+    } else if response["status"] == "outcomeUnknown" {
+        task.status = journal::TaskStatus::OutcomeUnknown;
+    } else {
+        task.status = journal::TaskStatus::Canceling;
     }
 }
 
@@ -351,12 +374,19 @@ fn confirm(params: &Value) -> Result<()> {
 }
 fn environment(journal: &Journal, params: &Value) -> Result<Environment> {
     let state = journal.read()?;
-    Ok(state
+    let env = state
         .environments
         .get(field(params, "environmentId")?)
         .filter(|e| e.deleted_at.is_none())
         .context("Environment unavailable; no host fallback")?
-        .clone())
+        .clone();
+    if params
+        .get("generation")
+        .is_some_and(|v| v.as_str() != Some(&env.generation))
+    {
+        bail!("Environment generation changed; no operation was routed");
+    }
+    Ok(env)
 }
 pub fn bound_environment(journal: &Journal, target: &TaskTarget) -> Result<(Task, Environment)> {
     journal.transaction(|state| {
@@ -423,10 +453,23 @@ fn manual_control_receipt(
     }
     record_manual_control(journal, env, response)
 }
-pub fn guest_rpc(env: &Environment, method: &str, mut params: Value) -> Result<Value> {
+pub fn guest_rpc(env: &Environment, method: &str, params: Value) -> Result<Value> {
     journal::validate_sandbox(&env.sandbox)?;
     let info = inspect_sandbox(&env.sandbox)?;
-    validate_macos_vm(&info)?;
+    guest_rpc_ready(env, method, params, &info, BUDGET)
+}
+
+pub(super) fn guest_rpc_ready(
+    env: &Environment,
+    method: &str,
+    mut params: Value,
+    info: &Value,
+    budget: Duration,
+) -> Result<Value> {
+    validate_macos_vm(info)?;
+    if info["id"] != env.sandbox {
+        bail!("Cua returned a different VM identity; no guest request was sent");
+    }
     if !info
         .get("state")
         .or(info.get("status"))
@@ -452,7 +495,7 @@ pub fn guest_rpc(env: &Environment, method: &str, mut params: Value) -> Result<V
             "-",
         ],
         &request,
-        BUDGET,
+        budget,
     )?;
     let response: Value = serde_json::from_slice(&bytes).context("Invalid guest response")?;
     if response.get("ok") == Some(&Value::Bool(false)) {
@@ -843,22 +886,21 @@ fn deletion_preview(journal: &Journal, env: &Environment) -> Value {
             .filter(|t| t.target.environment_id == env.id)
             .collect();
         let active = tasks.iter().any(|t| !t.status.terminal());
-        let provisioning = env
-            .provision
-            .as_ref()
-            .and_then(|p| p.get("status"))
-            .and_then(Value::as_str)
-            .is_some_and(|s| matches!(s, "queued" | "running" | "canceling" | "outcomeUnknown"));
+        let provisioning = !provision_settled(env);
         let guest_work = guest_rpc(env, "environment.disposition", json!({}));
         let reason = if active {
             Some("Resolve/cancel all unfinished tasks before deletion".to_owned())
         } else if provisioning {
             Some("Reconcile provisioning before deletion".to_owned())
+        } else if env.manual_control {
+            Some("Return manual desktop control before deletion".to_owned())
         } else {
-            guest_work.as_ref().err().map(|_| {
-                "Start/reconnect the guest runtime to inspect uncommitted work before deletion"
-                    .to_owned()
-            })
+            guest_work
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("Guest work inspection unavailable: {e:#}"))
+                .and_then(|work| validate_deletion_work(env, &tasks, work))
+                .err()
+                .map(|e| e.to_string())
         };
         Ok(
             json!({"canDelete":reason.is_none(),"reason":reason,"tasks":tasks.iter().map(|t|json!({"target":t.target,"status":t.status,"workerSessionId":t.worker_session_id,"workerTabId":t.worker_tab_id,"providerConversationId":t.provider_conversation_id,"guestCwd":t.guest_cwd})).collect::<Vec<_>>(),"guestWork":guest_work.unwrap_or(json!({"available":false,"detail":"Guest work could not be inspected; no deletion is permitted"}))}),
@@ -868,8 +910,144 @@ fn deletion_preview(journal: &Journal, env: &Environment) -> Value {
         |e| json!({"canDelete":false,"reason":e.to_string(),"tasks":[],"guestWork":null}),
     )
 }
+
+fn provision_settled(env: &Environment) -> bool {
+    env.provision.is_none()
+        || super::provisioning::adopted(env)
+        || env.provision.as_ref().is_some_and(|p| {
+            matches!(
+                p["status"].as_str(),
+                Some("completed" | "failed" | "canceled")
+            )
+        })
+}
+
+fn validate_deletion_work(env: &Environment, tasks: &[&Task], work: &Value) -> Result<()> {
+    if env.manual_control || tasks.iter().any(|task| !task.status.terminal()) {
+        bail!("Resolve host task and manual desktop holds before deletion");
+    }
+    if work["evidenceVersion"] != 1
+        || work["complete"] != true
+        || work["environmentId"] != env.id
+        || work["generation"] != env.generation
+        || work["manualControl"] != false
+        || work["activeOwnedGroups"].as_u64() != Some(0)
+    {
+        bail!("Fresh complete bound guest quiescence/manual-control evidence is required before deletion");
+    }
+    let current_boot = field(work, "currentBootIdentity")?;
+    journal::validate_id(current_boot)?;
+    let guest_tasks = work["tasks"]
+        .as_array()
+        .context("Complete guest task history is missing")?;
+    let canceled = work["canceledTargets"]
+        .as_object()
+        .context("Canceled target history is missing")?;
+    if work["retainedData"]["complete"] != true || work["retainedData"]["unaccountedData"] != false
+    {
+        bail!("Unaccounted retained guest data or incomplete root/index inspection prevents deletion; inspect/export it explicitly");
+    }
+    if guest_tasks.is_empty() && canceled.is_empty() {
+        super::provisioning::unused_guest(env, &work["unusedRuntimeProof"])?;
+        let inventory = &work["retainedData"];
+        if inventory != &work["unusedRuntimeProof"]["retainedData"]
+            || inventory["complete"] != true
+            || inventory["sessionIndexHasData"] != false
+            || ["workspaceEntries", "artifactEntries", "sessionEntries"]
+                .iter()
+                .any(|key| !inventory[key].as_array().is_some_and(Vec::is_empty))
+        {
+            bail!("Unaccounted retained workspace, artifact or session data requires explicit inspection/export; empty task history cannot authorize deletion");
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for guest in guest_tasks {
+        let target: TaskTarget = serde_json::from_value(guest["target"].clone())?;
+        if !seen.insert(target.task_id.clone()) {
+            bail!("Duplicate guest task history");
+        }
+        let host = tasks
+            .iter()
+            .find(|t| t.target == target)
+            .context("Guest task is absent from retained host history")?;
+        if !host.status.terminal()
+            || guest["status"] != serde_json::to_value(host.status)?
+            || guest["inputDigest"] != host.input_digest
+            || guest["guestCwd"] != host.guest_cwd
+            || guest["workerSessionId"] != json!(host.worker_session_id)
+            || guest["workerTabId"] != json!(host.worker_tab_id)
+            || guest["providerConversationId"] != json!(host.provider_conversation_id)
+            || !guest["lastEventSeq"]
+                .as_u64()
+                .is_some_and(|seq| seq >= host.last_event_seq)
+        {
+            bail!("Guest task identity, terminal state or retained history differs; deletion remains blocked");
+        }
+        if !guest["gitPorcelain"].is_string() || guest.get("detail") != Some(&Value::Null) {
+            bail!("Guest workspace inspection failed; export or reconcile its retained data before deletion");
+        }
+        let events = guest["eventDigests"]
+            .as_array()
+            .context("Guest event history proof is missing")?;
+        if events.len() as u64
+            != guest["lastEventSeq"]
+                .as_u64()
+                .context("Guest history cursor missing")?
+            || events
+                .iter()
+                .enumerate()
+                .any(|(i, e)| e["seq"].as_u64() != Some(i as u64 + 1))
+        {
+            bail!("Guest history is incomplete or rolled back");
+        }
+        for event in &host.events {
+            if events
+                .get(event.seq.saturating_sub(1) as usize)
+                .and_then(|e| e["digest"].as_str())
+                != Some(journal::digest(&serde_json::to_vec(event)?).as_str())
+            {
+                bail!("Guest event history differs from retained host events; deletion remains blocked");
+            }
+        }
+        let prior_boot = guest["bootIdentity"]
+            .as_str()
+            .context("Guest worker exit proof is missing")?;
+        journal::validate_id(prior_boot)?;
+        if prior_boot == current_boot && guest["canceledBeforeStart"] != true {
+            bail!("Positive worker exit proof is unavailable for this attempt; terminal status alone does not permit deletion");
+        }
+    }
+    for (id, value) in canceled {
+        let target: TaskTarget = serde_json::from_value(value.clone())?;
+        if target.task_id != *id
+            || !seen.insert(id.clone())
+            || !tasks.iter().any(|t| {
+                t.target == target
+                    && t.status == journal::TaskStatus::Canceled
+                    && !t.dispatch_started
+                    && t.worker_session_id.is_none()
+                    && t.worker_tab_id.is_none()
+                    && t.provider_conversation_id.is_none()
+                    && t.last_event_seq == 0
+                    && t.events.is_empty()
+            })
+        {
+            bail!("A guest tombstone cannot replace a dispatched task record or erase retained worker/history evidence");
+        }
+    }
+    if tasks
+        .iter()
+        .any(|t| t.dispatch_started && !seen.contains(&t.target.task_id))
+    {
+        bail!(
+            "Dispatched host targets are missing from the guest history; deletion remains blocked"
+        );
+    }
+    Ok(())
+}
 fn delete(journal: &Journal, params: &Value) -> Result<Value> {
     confirm(params)?;
+    field(params, "generation")?;
     let env = environment(journal, params)?;
     let preview = deletion_preview(journal, &env);
     if preview.get("canDelete") != Some(&Value::Bool(true)) {
@@ -889,14 +1067,11 @@ fn delete(journal: &Journal, params: &Value) -> Result<Value> {
     {
         bail!("Resolve/cancel every affected task before deleting the VM. History is retained");
     }
-    if env
-        .provision
-        .as_ref()
-        .and_then(|p| p.get("status"))
-        .and_then(Value::as_str)
-        .is_some_and(|s| matches!(s, "running" | "queued" | "canceling"))
+    if state.environments.get(&env.id) != Some(&env)
+        || !provision_settled(&env)
+        || env.manual_control
     {
-        bail!("Finish or cancel provisioning before deleting this VM");
+        bail!("Environment disposition changed; inspect again before deletion");
     }
     // The UI lists uncommitted work and resume metadata before this call.
     // Deletion never traverses a host checkout or removes its journal/artifacts.
@@ -1031,6 +1206,129 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deletion_requires_fresh_complete_bound_guest_history_and_positive_exit_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Guest", "local:test").unwrap();
+        let mut task = journal
+            .submit(
+                "retained-task",
+                TaskInput {
+                    parent_session_id: journal::new_id(),
+                    parent_tab_id: journal::new_id(),
+                    parent_message_id: "message".into(),
+                    environment_id: env.id.clone(),
+                    prompt: "Original".into(),
+                    harness: "codex".into(),
+                    model: "".into(),
+                    effort: None,
+                    permission_mode: "manual".into(),
+                    files: vec![],
+                    desktop: true,
+                },
+            )
+            .unwrap();
+        task.status = journal::TaskStatus::Completed;
+        task.dispatch_started = true;
+        task.last_event_seq = 1;
+        task.events = vec![journal::TaskEvent {
+            seq: 1,
+            timestamp: journal::now(),
+            payload: json!({"type":"taskSettled"}),
+        }];
+        let boot = journal::new_id();
+        let work = json!({"evidenceVersion":1,"complete":true,"environmentId":env.id,"generation":env.generation,
+            "retainedData":{"complete":true,"unaccountedData":false},
+            "currentBootIdentity":boot,"manualControl":false,"activeOwnedGroups":0,"canceledTargets":{},
+            "tasks":[{"target":task.target,"status":task.status,"inputDigest":task.input_digest,"guestCwd":task.guest_cwd,
+                "workerSessionId":null,"workerTabId":null,"providerConversationId":null,"lastEventSeq":1,
+                "eventDigests":[{"seq":1,"digest":journal::digest(&serde_json::to_vec(&task.events[0]).unwrap())}],
+                "gitPorcelain":" M src/uncommitted.rs","detail":null,"bootIdentity":journal::new_id(),"canceledBeforeStart":false}]});
+        assert!(validate_deletion_work(&env, &[&task], &work).is_ok());
+        for (path, value) in [
+            ("/environmentId", json!(journal::new_id())),
+            ("/generation", json!(journal::new_id())),
+            ("/manualControl", json!(true)),
+            ("/manualControl", Value::Null),
+            ("/activeOwnedGroups", json!(1)),
+            ("/complete", Value::Null),
+            ("/tasks", json!([])),
+            ("/tasks/0/status", json!("running")),
+            ("/tasks/0/target/generation", json!(journal::new_id())),
+            ("/tasks/0/gitPorcelain", Value::Null),
+            ("/tasks/0/detail", json!("Workspace missing")),
+            ("/tasks/0/lastEventSeq", json!(0)),
+            ("/tasks/0/eventDigests/0/digest", json!("b".repeat(64))),
+            ("/tasks/0/workerSessionId", json!(journal::new_id())),
+            ("/tasks/0/bootIdentity", json!(boot)),
+        ] {
+            let mut changed = work.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(
+                validate_deletion_work(&env, &[&task], &changed).is_err(),
+                "{path}"
+            );
+        }
+        assert!(validate_deletion_work(&env, &[&task], &json!({"ok":true})).is_err());
+        assert!(validate_deletion_work(&env, &[], &work).is_err());
+        // A newly minted absent-record cancellation must not stand in for a
+        // dispatched terminal record, even if worker IDs/cursor were lost.
+        task.status = journal::TaskStatus::Canceled;
+        let mut tombstone = work.clone();
+        tombstone["tasks"] = json!([]);
+        tombstone["canceledTargets"] = json!({task.target.task_id.clone():task.target});
+        assert!(validate_deletion_work(&env, &[&task], &tombstone).is_err());
+        task.events.clear();
+        task.last_event_seq = 0;
+        assert!(validate_deletion_work(&env, &[&task], &tombstone).is_err());
+        task.worker_session_id = Some(journal::new_id());
+        task.worker_tab_id = Some(journal::new_id());
+        task.provider_conversation_id = Some(journal::new_id());
+        retain_cancellation(&mut task, &json!({"absent":true,"canceled":true}));
+        assert_eq!(task.status, journal::TaskStatus::OutcomeUnknown);
+        assert!(task.status.holds_desktop());
+        assert!(task.worker_session_id.is_some() && task.provider_conversation_id.is_some());
+    }
+
+    #[test]
+    fn deletion_of_empty_guest_requires_durable_unused_timeline_not_empty_or_missing_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Guest", "local:test").unwrap();
+        let boot = journal::new_id();
+        let mut work = json!({"evidenceVersion":1,"complete":true,"environmentId":env.id,"generation":env.generation,
+            "currentBootIdentity":boot,"manualControl":false,"activeOwnedGroups":0,"tasks":[],"canceledTargets":{}});
+        assert!(validate_deletion_work(&env, &[], &work).is_err());
+        work["unusedRuntimeProof"] = json!({"evidenceVersion":1,"environmentId":env.id,"generation":env.generation,
+            "currentBootIdentity":boot,"initializedTimeline":{"timelineId":journal::new_id(),"bootIdentity":boot,"noExecution":true},
+            "noExecutionSinceInitialization":true,"manualControl":false,"activeOwnedGroups":0,"tasks":[],"canceledTargets":{},"historyDigest":"a".repeat(64)});
+        let inventory = json!({"complete":true,"workspaceEntries":[],"artifactEntries":[],"sessionEntries":[],
+            "sessionIndexHasData":false,"unaccountedData":false,"sessionIndexDigest":"c".repeat(64)});
+        work["retainedData"] = inventory.clone();
+        work["unusedRuntimeProof"]["retainedData"] = inventory;
+        assert!(validate_deletion_work(&env, &[], &work).is_ok());
+        for (key, value) in [
+            ("workspaceEntries", json!(["unlisted-work"])),
+            ("artifactEntries", json!(["orphan-artifacts"])),
+            ("sessionEntries", json!(["orphan-session"])),
+            ("sessionIndexHasData", json!(true)),
+            ("complete", Value::Null),
+        ] {
+            let mut changed = work.clone();
+            changed["retainedData"][key] = value.clone();
+            changed["unusedRuntimeProof"]["retainedData"][key] = value;
+            assert!(
+                validate_deletion_work(&env, &[], &changed).is_err(),
+                "{key}"
+            );
+        }
+        let mut unknown = env;
+        unknown.provision = Some(progress("outcomeUnknown", "Never cleared by guest ack"));
+        assert!(!provision_settled(&unknown));
+        unknown.provision = Some(progress("adopted", "Forged status without a receipt"));
+        assert!(!provision_settled(&unknown));
+    }
     #[test]
     fn manual_control_only_releases_on_a_durable_false_receipt() {
         let temp = tempfile::tempdir().unwrap();

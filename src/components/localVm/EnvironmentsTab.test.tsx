@@ -86,7 +86,7 @@ describe("local environment lifecycle", () => {
     expect(dialog.textContent).toContain(`${action === "stop" ? 1 : 0} unfinished task`);
     expect(dialog.textContent).toMatch(/history.*retain|retain.*history/i);
     if (action === "delete") {
-      expect(calls("environment.inspect")[0][1].params).toEqual({ environmentId: "env" });
+      expect(calls("environment.inspect")[0][1].params).toEqual({ environmentId: "env", generation: environment.generation, purpose: "deletion" });
       expect(dialog.textContent).toContain("provider-resume-id");
       expect(dialog.textContent).toContain("worker-session");
       expect(dialog.textContent).toContain("src/unfinished.ts");
@@ -95,7 +95,7 @@ describe("local environment lifecycle", () => {
     expect(calls(`environment.${action}`)).toHaveLength(0);
     fireEvent.click(within(dialog).getByRole("button", { name: action === "stop" ? "Stop VM and its tasks" : "Delete VM and guest files" }));
     await waitFor(() => expect(calls(`environment.${action}`)).toHaveLength(1));
-    expect(calls(`environment.${action}`)[0][1].params).toEqual({ environmentId: "env", confirm: true });
+    expect(calls(`environment.${action}`)[0][1].params).toEqual(action === "delete" ? { environmentId: "env", generation: environment.generation, confirm: true } : { environmentId: "env", confirm: true });
   });
 
   it("keeps deletion blocked when fresh guest-work inspection is unavailable", async () => {
@@ -108,11 +108,110 @@ describe("local environment lifecycle", () => {
     expect(calls("environment.delete")).toHaveLength(0);
   });
 
+  it("closes a previously approved deletion dialog when canonical polling reports deletion", async () => {
+    mocks.state!.tasks = {};
+    mocks.invoke.mockResolvedValue({ status: "ready", stages: [], deletion: { canDelete: true, reason: null, tasks: [], guestWork: {} } });
+    const view = render(<EnvironmentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete VM…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect((within(dialog).getByRole("button", { name: "Delete VM and guest files" }) as HTMLButtonElement).disabled).toBe(false));
+    mocks.state!.environments.env = { ...environment, deletedAt: "2026-10-25T12:00:00Z" };
+    view.rerender(<EnvironmentsTab />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete VM…" })).toBeNull();
+    expect(calls("environment.delete")).toHaveLength(0);
+  });
+
   it("keeps deleted environment history visible without lifecycle actions", () => {
     mocks.state!.environments.env = { ...environment, deletedAt: "2026-10-24T12:00:00Z" };
     render(<EnvironmentsTab />);
     expect(screen.getByText(/VM deleted at/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Start VM" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete VM…" })).toBeNull();
+  });
+});
+
+describe("interrupted provisioning disposition", () => {
+  const digest = "a".repeat(64);
+  function unknown() {
+    mocks.state!.tasks = {};
+    mocks.state!.environments.env = { ...environment, provision: { status: "outcomeUnknown", detail: "Cua client interrupted; external outcome unknown", stages: [] } };
+  }
+  function inspection(binding = {}) {
+    return { status: "outcomeUnknown", stages: [], reconciliation: { available: true, reason: null,
+      proposal: { environmentId: environment.id, generation: environment.generation, sandbox: environment.sandbox, evidenceDigest: digest, observedAt: "2026-10-25T12:00:00Z", ...binding },
+      evidence: { version: 1, originalProvision: { status: "outcomeUnknown" }, guest: { noExecutionSinceInitialization: true } } } };
+  }
+  it("requires deliberate inspection and confirmation bound to the exact reviewed environment", async () => {
+    unknown(); mocks.invoke.mockResolvedValue(inspection());
+    render(<EnvironmentsTab />);
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Resolve interrupted provisioning…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(calls("environment.inspect")).toHaveLength(1));
+    expect(calls("environment.inspect")[0][1].params).toEqual({ environmentId: environment.id, generation: environment.generation, purpose: "provisionRecovery" });
+    expect(dialog.textContent).toContain("original provisioning outcome stays unknown");
+    const adopt = within(dialog).getByRole("button", { name: "Adopt verified existing VM" });
+    expect((adopt as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(within(dialog).getByRole("checkbox")); fireEvent.click(adopt);
+    await waitFor(() => expect(calls("environment.reconcileProvision")).toHaveLength(1));
+    expect(calls("environment.reconcileProvision")[0][1].params).toEqual({ environmentId: environment.id,
+      generation: environment.generation, sandbox: environment.sandbox, evidenceDigest: digest, disposition: "adoptExisting", confirm: true });
+    expect(mocks.invoke.mock.calls.map(([,args]) => args.method)).toEqual(["environment.inspect", "environment.reconcileProvision"]);
+    expect(screen.getByText(/outcomeUnknown · Cua client interrupted/)).toBeTruthy();
+  });
+  it.each([{environmentId:"other"},{generation:"other"},{sandbox:"local:other"},{evidenceDigest:"bad"}])("refuses a proposal with changed binding %j", async (binding) => {
+    unknown(); mocks.invoke.mockResolvedValue(inspection(binding)); render(<EnvironmentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Resolve interrupted provisioning…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(calls("environment.inspect")).toHaveLength(1));
+    expect((within(dialog).getByRole("button", { name: "Adopt verified existing VM" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls("environment.reconcileProvision")).toHaveLength(0);
+  });
+  it("retains unknown state on unavailable evidence and never treats a generic acknowledgment as proof", async () => {
+    unknown(); mocks.invoke.mockResolvedValue({ ok: true }); render(<EnvironmentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Resolve interrupted provisioning…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(dialog.textContent).toContain("returned no adoption evidence"));
+    expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+    expect(calls("environment.reconcileProvision")).toHaveLength(0);
+  });
+  it("invalidates reviewed evidence when the retained provision changes", async () => {
+    unknown(); mocks.invoke.mockResolvedValue(inspection()); const view = render(<EnvironmentsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Resolve interrupted provisioning…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    mocks.state!.environments.env = { ...mocks.state!.environments.env, provision: { status: "outcomeUnknown", detail: "New retained evidence", stages: [] } };
+    view.rerender(<EnvironmentsTab />);
+    expect((within(dialog).getByRole("button", { name: "Adopt verified existing VM" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls("environment.reconcileProvision")).toHaveLength(0);
+  });
+  it("requires another inspection after a lost confirmation reply without replaying creation", async () => {
+    unknown(); mocks.invoke.mockImplementation(async (_command, args) => {
+      if (args.method === "environment.inspect") return inspection();
+      throw new Error("Reply lost");
+    });
+    render(<EnvironmentsTab />); fireEvent.click(screen.getByRole("button", { name: "Resolve interrupted provisioning…" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect((within(dialog).getByRole("checkbox") as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(within(dialog).getByRole("checkbox")); fireEvent.click(within(dialog).getByRole("button", { name: "Adopt verified existing VM" }));
+    await waitFor(() => expect(dialog.textContent).toContain("lost reply may already have a retained receipt"));
+    expect((within(dialog).getByRole("button", { name: "Adopt verified existing VM" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls("environment.reconcileProvision")).toHaveLength(1);
+    expect(calls("environment.create")).toHaveLength(0);
+    expect(screen.getByText(/outcomeUnknown · Cua client interrupted/)).toBeTruthy();
+  });
+  it("shows the retained original uncertainty only from the canonical adopted record", () => {
+    unknown(); mocks.state!.environments.env.provision = { status: "adopted", stages: [], reconciliationReceipt: {
+      disposition: "adoptExisting", priorOutcomeUnknown: true, evidence: { originalProvision: { status: "outcomeUnknown", detail: "Original interrupted operation" } },
+    } };
+    render(<EnvironmentsTab />);
+    expect(screen.getByText("Retained provisioning disposition and original uncertainty")).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Environment progress" }).textContent).toContain("Original interrupted operation");
+    expect(screen.queryByRole("button", { name: "Resolve interrupted provisioning…" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel provisioning" })).toBeNull();
+    expect(mocks.invoke).not.toHaveBeenCalled();
   });
 });

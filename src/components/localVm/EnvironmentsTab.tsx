@@ -8,6 +8,7 @@ import { assertLocal } from "@/types/target";
 import type { LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmJson, LocalVmTask } from "@/types/localVm";
 import { reconcileLocalVmState, refreshLocalVmState, useLocalVmState } from "./useLocalVmState";
 import { localVmFieldClass } from "./fields";
+import { LocalVmProvisionRecovery } from "./LocalVmProvisionRecovery";
 
 export function EnvironmentsTab() {
   const { state, error, refreshing } = useLocalVmState();
@@ -87,7 +88,7 @@ export function EnvironmentsTab() {
       {busy ? <p role="status">Request in progress. Provisioning stages appear in the environment record when reported by the host.</p> : null}
       {!state && !error ? <p role="status">Loading local environment records…</p> : null}
       {state && !environments.length ? <p className="text-muted-foreground">No local VM enrolled. Enrollment is optional.</p> : null}
-      {environments.map((environment) => <EnvironmentCard key={environment.id} environment={environment} tasks={Object.values(state?.tasks ?? {}).filter((task) => task.target.environmentId === environment.id && !taskFinished(task.status))} />)}
+      {environments.map((environment) => <EnvironmentCard key={`${environment.id}:${environment.generation}:${environment.sandbox}`} environment={environment} tasks={Object.values(state?.tasks ?? {}).filter((task) => task.target.environmentId === environment.id && !taskFinished(task.status))} />)}
     </div>
   );
 }
@@ -121,6 +122,7 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
       {progress ? <EnvironmentProgress label="Environment progress" progress={progress} /> : null}
       {inspection ? <EnvironmentProgress label="Latest environment check" progress={inspection} /> : <p className="text-muted-foreground">Runtime and desktop readiness have not been checked.</p>}
       {!deleted ? <>
+      <LocalVmProvisionRecovery environment={environment} disabled={!!busy} run={run} />
       {environment.manualControl ? <section aria-label="Manual desktop control" className="space-y-2 rounded-md border border-warning/40 p-2">
         <p>Manual desktop control is held. Queued tasks wait until you return control. Closing the viewer does not release this hold; returning control does not resume the canceled task.</p>
         <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Returning desktop control to queued tasks", () => localVmRequest("environment.releaseDesktop", { environmentId: environment.id, confirm: true }))}>Return control to queued tasks</Button>
@@ -132,11 +134,11 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
         <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => setStopOpen(true)}>Stop VM…</Button>
         <Button size="sm" variant="destructive" disabled={!!busy} onClick={() => void run("Inspecting deletion risks", async () => {
           setDeletionInspection(null);
-          const report = await localVmRequest("environment.inspect", { environmentId: environment.id });
+          const report = await localVmRequest("environment.inspect", { environmentId: environment.id, generation: environment.generation, purpose: "deletion" });
           setDeletionInspection({ generation: environment.generation, report }); setDeleteOpen(true);
           return null;
         })}>Delete VM…</Button>
-        {progress && !["ready", "completed", "failed", "canceled", "deleted", "stopped"].includes(progress.status) ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Canceling provisioning", () => localVmRequest("environment.cancelProvision", { environmentId: environment.id }))}>Cancel provisioning</Button> : null}
+        {progress && !["ready", "completed", "adopted", "failed", "canceled", "deleted", "stopped"].includes(progress.status) ? <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run("Canceling provisioning", () => localVmRequest("environment.cancelProvision", { environmentId: environment.id }))}>Cancel provisioning</Button> : null}
       </div>
       <p className="text-muted-foreground">The desktop viewer is interactive and independent of task lifetime. Take over from the task card before changing apps; closing the viewer leaves tasks running.</p>
       <form className="space-y-2" onSubmit={(event) => {
@@ -156,7 +158,7 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
       {busy ? <p role="status">{busy}…</p> : null}
       {error ? <p role="alert" className="text-destructive">{error}</p> : null}
       {result !== undefined ? <pre aria-label="Environment action result" className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-well p-2">{JSON.stringify(result, null, 2)}</pre> : null}
-      <Dialog open={stopOpen} onOpenChange={setStopOpen}>
+      <Dialog open={stopOpen && !deleted} onOpenChange={setStopOpen}>
         <DialogContent>
           <DialogHeader><DialogTitle>Stop {environment.name}?</DialogTitle><DialogDescription>This stops the whole VM and affects every task using it, including tasks from other conversations. It does not delete the retained task history.</DialogDescription></DialogHeader>
           <p className="text-xs">{tasks.length} unfinished task{tasks.length === 1 ? "" : "s"} will be affected.</p>
@@ -164,7 +166,7 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
           <DialogFooter><Button variant="ghost" onClick={() => setStopOpen(false)}>Keep VM running</Button><Button variant="destructive" onClick={() => { setStopOpen(false); void run("Stopping VM", () => localVmRequest("environment.stop", { environmentId: environment.id, confirm: true })); }}>Stop VM and its tasks</Button></DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}><DialogContent>
+      <Dialog open={deleteOpen && !deleted} onOpenChange={setDeleteOpen}><DialogContent>
         <DialogHeader><DialogTitle>Delete {environment.name}?</DialogTitle><DialogDescription>This removes the whole local VM and its guest files, affecting every task and conversation using it. Export needed artifacts first. Task history is retained; it does not restore deleted guest data.</DialogDescription></DialogHeader>
         <p className="text-xs">{tasks.length} unfinished task{tasks.length === 1 ? "" : "s"} will be affected.</p>
         <div className="max-h-[45vh] space-y-3 overflow-y-auto text-xs">
@@ -174,9 +176,9 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
             <section aria-label="Guest work deletion inspection" className="space-y-1"><h4 className="font-medium">Guest work and uncommitted changes</h4><pre className="whitespace-pre-wrap break-all rounded bg-well p-2">{JSON.stringify(deletion.guestWork, null, 2)}</pre></section>
           </> : <p role="alert" className="text-warning">Deletion inspection is unavailable for this environment generation. Refresh the environment and inspect again.</p>}
         </div>
-        <DialogFooter><Button variant="ghost" onClick={() => setDeleteOpen(false)}>Keep VM</Button><Button variant="destructive" disabled={!!busy || deletion?.canDelete !== true || tasks.length > 0} onClick={() => {
-          if (deletion?.canDelete !== true || tasks.length) return;
-          setDeleteOpen(false); void run("Deleting VM", () => localVmRequest("environment.delete", { environmentId: environment.id, confirm: true }));
+        <DialogFooter><Button variant="ghost" onClick={() => setDeleteOpen(false)}>Keep VM</Button><Button variant="destructive" disabled={deleted || !!busy || deletion?.canDelete !== true || tasks.length > 0} onClick={() => {
+          if (deleted || deletion?.canDelete !== true || tasks.length) return;
+          setDeleteOpen(false); void run("Deleting VM", () => localVmRequest("environment.delete", { environmentId: environment.id, generation: environment.generation, confirm: true }));
         }}>Delete VM and guest files</Button></DialogFooter>
       </DialogContent></Dialog>
     </article>
@@ -184,5 +186,5 @@ function EnvironmentCard({ environment, tasks }: { environment: LocalVmEnvironme
 }
 
 function EnvironmentProgress({ progress, label }: { progress: LocalVmEnvironmentInspection; label: string }) {
-  return <section aria-label={label} className="space-y-1"><h5 className="font-medium">{label}</h5><p role="status">{progress.status}{progress.detail ? ` · ${progress.detail}` : ""}</p><ol className="list-inside list-decimal">{progress.stages.map((stage) => <li key={stage.id}>{stage.label}: {stage.status}{stage.detail ? ` · ${stage.detail}` : ""}</li>)}</ol></section>;
+  return <section aria-label={label} className="space-y-1"><h5 className="font-medium">{label}</h5><p role="status">{progress.status}{progress.detail ? ` · ${progress.detail}` : ""}</p><ol className="list-inside list-decimal">{progress.stages.map((stage) => <li key={stage.id}>{stage.label}: {stage.status}{stage.detail ? ` · ${stage.detail}` : ""}</li>)}</ol>{progress.reconciliationReceipt ? <details><summary>Retained provisioning disposition and original uncertainty</summary><pre className="whitespace-pre-wrap break-all">{JSON.stringify(progress.reconciliationReceipt, null, 2)}</pre></details> : null}</section>;
 }

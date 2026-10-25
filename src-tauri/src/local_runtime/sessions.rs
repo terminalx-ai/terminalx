@@ -32,6 +32,10 @@ impl Sessions {
 
     pub fn local_vm(&self, method: &str, params: Value) -> Result<Value> {
         self.0.require_local_vm()?;
+        if matches!(method,"environment.reconcileProvision"|"environment.delete")
+            || method == "environment.inspect" && matches!(params["purpose"].as_str(),Some("provisionRecovery"|"deletion")) {
+            self.0.require_vm_reconciliation()?;
+        }
         self.call("local_vm.request", json!({"method":method,"params":params}))
     }
 

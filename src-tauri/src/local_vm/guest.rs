@@ -161,6 +161,19 @@ struct State {
     canceled_targets: BTreeMap<String, TaskTarget>,
     #[serde(default)]
     manual_lease: Option<ManualLease>,
+    /// Captured before accepting work, never advanced on daemon restart. A
+    /// later kernel boot can prove that pre-initialization processes exited.
+    #[serde(default)]
+    provisioning_baseline: Option<ProvisioningBaseline>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProvisioningBaseline {
+    timeline_id: String,
+    boot_identity: String,
+    #[serde(default)]
+    no_execution: bool,
 }
 
 pub struct Guest {
@@ -229,6 +242,10 @@ impl Guest {
 
     fn open(base: PathBuf, manager: SessionManager, sink: Arc<dyn EventSink>) -> Result<Self> {
         let identity = Identity::load(&base)?;
+        let previously_initialized = base
+            .join("runtime/local-vm-guest/owner.lock")
+            .try_exists()?
+            || base.join("runtime").join(STATE).try_exists()?;
         for name in [
             "runtime",
             "runtime/local-vm-guest",
@@ -236,6 +253,9 @@ impl Guest {
             "artifacts",
         ] {
             private_directory(&base.join(name))?;
+        }
+        if !previously_initialized {
+            private_directory(&crate::store::root()?.join("sessions"))?;
         }
         let lock = OpenOptions::new()
             .create(true)
@@ -254,15 +274,46 @@ impl Guest {
             serde_json::from_slice(&read_bounded(&path, 512 * 1024 * 1024)?)
                 .context("Damaged guest task history; refusing to replace it")?
         } else {
+            if previously_initialized {
+                bail!("Initialized guest task history is missing; refusing to reset the timeline");
+            }
             State {
                 identity: identity.clone(),
                 records: BTreeMap::new(),
                 canceled_targets: BTreeMap::new(),
                 manual_lease: None,
+                provisioning_baseline: None,
             }
         };
         if state.identity != identity {
             bail!("Guest timeline changed; retained execution history cannot be rebound");
+        }
+        let boot_identity = boot_identity();
+        if state.provisioning_baseline.is_none() {
+            // A legacy/restarted owner cannot retrospectively manufacture a
+            // no-execution receipt. New installations checkpoint this marker
+            // before accepting task RPCs; all task records precede effects and
+            // are retained forever, including canceled-before-start targets.
+            let initial_data = if !previously_initialized {
+                Some(retained_data(&base, &state)?)
+            } else {
+                None
+            };
+            let no_execution = !previously_initialized
+                && state.records.is_empty()
+                && state.canceled_targets.is_empty()
+                && fs::read_dir(base.join("workspaces"))?.next().is_none()
+                && fs::read_dir(base.join("artifacts"))?.next().is_none()
+                && initial_data.as_ref().is_some_and(|data| {
+                    data["sessionIndexHasData"] == false
+                        && data["sessionEntries"].as_array().is_some_and(Vec::is_empty)
+                })
+                && manager.terminals().owned_groups().is_empty();
+            state.provisioning_baseline = boot_identity.as_ref().map(|boot| ProvisioningBaseline {
+                timeline_id: super::journal::new_id(),
+                boot_identity: boot.clone(),
+                no_execution,
+            });
         }
         for record in state.records.values_mut() {
             if record.task.status.holds_desktop() {
@@ -276,7 +327,7 @@ impl Guest {
             manager,
             sink,
             stopped: AtomicBool::new(false),
-            boot_identity: boot_identity(),
+            boot_identity,
             recovery_receipts: Mutex::new(vec![]),
             _lock: lock,
         })
@@ -307,6 +358,7 @@ impl Guest {
         match request.method.as_str() {
             "describe" => self.describe(),
             "environment.disposition" => self.disposition(),
+            "environment.provisionEvidence" => self.provision_evidence(),
             "desktop.state" => Ok(desktop_state(&self.state.lock().unwrap())),
             "desktop.takeover" => self.takeover(&request.params),
             "desktop.release" => self.release_desktop(&request.params),
@@ -1370,20 +1422,178 @@ impl Guest {
 
     fn disposition(&self) -> Result<Value> {
         let state = self.state.lock().unwrap();
-        let tasks: Vec<_> = state.records.values().map(|record| {
+        let tasks = state.records.values().map(|record| -> Result<Value> {
             let status = self.workspace(&record.task).and_then(|cwd| git(&cwd,&["status","--porcelain=v1","--untracked-files=all"],None));
-            json!({"target":record.task.target,"guestCwd":record.task.guest_cwd,"status":record.task.status,
+            let event_digests = record.task.events.iter().map(|e| -> Result<Value> {
+                Ok(json!({"seq":e.seq,"digest":digest(&serde_json::to_vec(e)?)}))
+            }).collect::<Result<Vec<_>>>()?;
+            Ok(json!({"target":record.task.target,"guestCwd":record.task.guest_cwd,"status":record.task.status,
                 "workerSessionId":record.task.worker_session_id,"workerTabId":record.task.worker_tab_id,
                 "providerConversationId":record.task.provider_conversation_id,"artifacts":record.task.artifacts,
                 "gitPorcelain":status.as_ref().ok().map(|bytes|String::from_utf8_lossy(bytes).into_owned()),
                 "detail":status.err().map(|error|format!("{error:#}")),"historyRetained":true,
-                "bootIdentity":record.boot_identity,"priorExternalOutcomeUnknown":record.prior_external_outcome_unknown})
-        }).collect();
+                "bootIdentity":record.boot_identity,"lastEventSeq":record.task.last_event_seq,
+                "inputDigest":record.task.input_digest,
+                "eventDigests":event_digests,
+                "canceledBeforeStart":record.task.status == TaskStatus::Canceled && record.operations.is_empty()
+                    && record.task.worker_session_id.is_none() && record.task.worker_tab_id.is_none()
+                    && record.task.provider_conversation_id.is_none()
+                    && record.task.events.iter().any(|e|e.payload["type"] == "canceledBeforeStart"),
+                "priorExternalOutcomeUnknown":record.prior_external_outcome_unknown}))
+        }).collect::<Result<Vec<_>>>()?;
+        let unused = self.provision_evidence_locked(&state)?;
         Ok(
-            json!({"environmentId":state.identity.environment_id,"generation":state.identity.generation,"tasks":tasks,
+            json!({"evidenceVersion":1,"complete":true,"environmentId":state.identity.environment_id,"generation":state.identity.generation,"tasks":tasks,
+            "currentBootIdentity":unused["currentBootIdentity"],"manualControl":state.manual_lease.is_some(),
+            "activeOwnedGroups":self.manager.terminals().owned_groups().len(),"unusedRuntimeProof":unused,
+            "retainedData":unused["retainedData"],
+            "canceledTargets":state.canceled_targets,
             "historyRetained":true,"deletionAvailable":false}),
         )
     }
+
+    /// Read-only: no driver, model discovery, provider, stop or VM effects.
+    /// V1 deliberately supports only an unused installed timeline. Empty
+    /// records alone are insufficient: the host must also verify a changed
+    /// kernel boot since the durable baseline, killing pre-baseline orphans.
+    fn provision_evidence(&self) -> Result<Value> {
+        let state = self.state.lock().unwrap();
+        self.provision_evidence_locked(&state)
+    }
+
+    fn provision_evidence_locked(&self, state: &State) -> Result<Value> {
+        let current_boot = boot_identity().context("Kernel boot identity is unavailable")?;
+        let retained: Value = serde_json::from_slice(&read_bounded(
+            &self.base.join("runtime").join(STATE),
+            512 * 1024 * 1024,
+        )?)?;
+        let expected = serde_json::to_value(state)?;
+        if retained != expected {
+            bail!("Guest history changed or disappeared; provisioning remains unknown");
+        }
+        let inventory = retained_data(&self.base, state)?;
+        Ok(json!({
+            "evidenceVersion":1,"environmentId":state.identity.environment_id,
+            "generation":state.identity.generation,"currentBootIdentity":current_boot,
+            "initializedTimeline":state.provisioning_baseline,"manualControl":state.manual_lease.is_some(),
+            "activeOwnedGroups":self.manager.terminals().owned_groups().len(),
+            "tasks":state.records.values().map(|r|json!({"target":r.task.target,
+                "lastEventSeq":r.task.last_event_seq,"status":r.task.status,
+                "workerSessionId":r.task.worker_session_id,"workerTabId":r.task.worker_tab_id,
+                "providerConversationId":r.task.provider_conversation_id,"bootIdentity":r.boot_identity})).collect::<Vec<_>>(),
+            "canceledTargets":state.canceled_targets,"historyDigest":digest(&serde_json::to_vec(&expected)?),
+            "retainedData":inventory,
+            "noExecutionSinceInitialization":state.provisioning_baseline.as_ref().is_some_and(|b|b.no_execution)
+                && state.records.is_empty() && state.canceled_targets.is_empty()
+        }))
+    }
+}
+
+/// Complete root inventory, including data not addressable by task records.
+/// Errors are never projected as empty/clean data. No provider/driver probes.
+fn retained_data(base: &Path, state: &State) -> Result<Value> {
+    fn entries(path: &Path) -> Result<Vec<String>> {
+        if !fs::symlink_metadata(path)?.file_type().is_dir() {
+            bail!("Retained data root is not a regular directory");
+        }
+        let mut names = fs::read_dir(path)?
+            .map(|entry| -> Result<String> {
+                let entry = entry?;
+                entry.file_type()?;
+                entry.file_name().into_string().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Retained data has a non-UTF-8 name; inspect/export it explicitly"
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        names.sort();
+        Ok(names)
+    }
+    let sessions = crate::store::root()?.join("sessions");
+    let session_entries: Vec<_> = entries(&sessions)?
+        .into_iter()
+        .filter(|name| !matches!(name.as_str(), "index.json" | "index.lock"))
+        .collect();
+    let index = match fs::read(sessions.join("index.json")) {
+        Ok(bytes) => {
+            serde_json::from_slice::<Value>(&bytes).context("Damaged retained session index")?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if state
+                .records
+                .values()
+                .any(|r| r.task.worker_session_id.is_some())
+            {
+                bail!("Retained worker session index is missing; inspection is incomplete");
+            }
+            json!({})
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let populated = index
+        .as_object()
+        .context("Invalid retained session index")?
+        .iter()
+        .any(|(key, value)| match key.as_str() {
+            "sessions" | "closedTabs" => !value.as_array().is_some_and(Vec::is_empty),
+            "workspaceTabs" => !value.as_object().is_some_and(serde_json::Map::is_empty),
+            _ => true,
+        });
+    let workspaces = entries(&base.join("workspaces"))?;
+    let artifacts = entries(&base.join("artifacts"))?;
+    let records: Vec<_> = state.records.values().collect();
+    let indexed_sessions: Vec<crate::store::index::SessionEntry> = index
+        .get("sessions")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .context("Retained session metadata could not be inspected")?
+        .unwrap_or_default();
+    let unaccounted_index =
+        index
+            .as_object()
+            .unwrap()
+            .iter()
+            .any(|(key, value)| match key.as_str() {
+                "sessions" => !indexed_sessions.iter().all(|session| {
+                    let Some(record) = records
+                        .iter()
+                        .find(|r| r.task.worker_session_id.as_deref() == Some(session.id.as_str()))
+                    else {
+                        return false;
+                    };
+                    session.unknown.is_empty()
+                        && session.cwd == record.task.guest_cwd
+                        && session.tabs.iter().all(|tab| {
+                            tab.unknown.is_empty()
+                                && tab.follow.history.is_empty()
+                                && Some(tab.id.as_str()) == record.task.worker_tab_id.as_deref()
+                                && tab.provider_session_id == record.task.provider_conversation_id
+                        })
+                }),
+                "closedTabs" => !value.as_array().is_some_and(Vec::is_empty),
+                "workspaceTabs" => !value.as_object().is_some_and(serde_json::Map::is_empty),
+                _ => true,
+            });
+    let unaccounted = unaccounted_index
+        || workspaces
+            .iter()
+            .any(|name| !records.iter().any(|r| r.task.target.workspace_id == *name))
+        || artifacts.iter().any(|name| {
+            !records.iter().any(|r| {
+                r.task.target.task_id == *name
+                    || format!("{}.index", r.task.target.task_id) == *name
+            })
+        })
+        || session_entries.iter().any(|name| {
+            !records
+                .iter()
+                .any(|r| r.task.worker_session_id.as_ref() == Some(name))
+        });
+    Ok(json!({"complete":true,"workspaceEntries":workspaces,
+        "artifactEntries":artifacts,"sessionIndexHasData":populated,"unaccountedData":unaccounted,
+        "sessionIndexDigest":digest(&serde_json::to_vec(&index)?),
+        "sessionEntries":session_entries}))
 }
 
 fn target(params: &Value) -> Result<TaskTarget> {
@@ -2180,6 +2390,150 @@ mod tests {
             artifacts_pending: false,
             boot_identity: None,
             prior_external_outcome_unknown: false,
+        }
+    }
+
+    #[test]
+    fn provisioning_evidence_uses_durable_pre_execution_marker_and_rejects_lost_history() {
+        let (_home, guest, task) = setup();
+        let proof = guest.provision_evidence().unwrap();
+        assert_eq!(proof["noExecutionSinceInitialization"], true);
+        assert_eq!(proof["initializedTimeline"]["noExecution"], true);
+        assert!(proof["currentBootIdentity"]
+            .as_str()
+            .is_some_and(|b| validate_id(b).is_ok()));
+        seed(&guest, record(task));
+        assert_eq!(
+            guest.provision_evidence().unwrap()["noExecutionSinceInitialization"],
+            false
+        );
+        let path = guest.base.join("runtime").join(STATE);
+        fs::remove_file(&path).unwrap();
+        assert!(guest.provision_evidence().is_err());
+        let base = guest.base.clone();
+        let manager = guest.manager.clone();
+        let sink = guest.sink.clone();
+        drop(guest);
+        assert!(Guest::open(base, manager, sink).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn legacy_initialization_and_restarts_never_mint_or_advance_no_execution_proof() {
+        let (_home, guest, _task) = setup();
+        let base = guest.base.clone();
+        let manager = guest.manager.clone();
+        let sink = guest.sink.clone();
+        let path = base.join("runtime").join(STATE);
+        let mut retained: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        retained
+            .as_object_mut()
+            .unwrap()
+            .remove("provisioningBaseline");
+        atomic_private_write(&path, &serde_json::to_vec(&retained).unwrap()).unwrap();
+        drop(guest);
+        let guest = Guest::open(base.clone(), manager.clone(), sink.clone()).unwrap();
+        let proof = guest.provision_evidence().unwrap();
+        assert_eq!(proof["noExecutionSinceInitialization"], false);
+        assert_eq!(
+            proof["initializedTimeline"]["bootIdentity"],
+            proof["currentBootIdentity"]
+        );
+        drop(guest);
+        let guest = Guest::open(base, manager, sink).unwrap();
+        assert_eq!(guest.provision_evidence().unwrap(), proof);
+        let mut state = guest.state.lock().unwrap();
+        state.canceled_targets.insert(new_id(), _task.target);
+        guest.save(&state).unwrap();
+        drop(state);
+        assert!(!guest.provision_evidence().unwrap()["canceledTargets"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn empty_guest_records_do_not_hide_retained_root_or_session_index_data() {
+        let (_home, guest, _task) = setup();
+        fs::create_dir(guest.base.join("workspaces/unlisted-work")).unwrap();
+        fs::write(
+            guest.base.join("artifacts/orphan-file"),
+            b"Retain this data",
+        )
+        .unwrap();
+        let sessions = crate::store::root().unwrap().join("sessions");
+        fs::create_dir(sessions.join("unlisted-session")).unwrap();
+        fs::write(
+            sessions.join("index.json"),
+            br#"{"sessions":[],"futureRetainedData":{"resume":"unlisted"}}"#,
+        )
+        .unwrap();
+        let report = guest.disposition().unwrap();
+        assert!(report["tasks"].as_array().unwrap().is_empty());
+        assert_eq!(
+            report["retainedData"]["workspaceEntries"],
+            json!(["unlisted-work"])
+        );
+        assert_eq!(
+            report["retainedData"]["artifactEntries"],
+            json!(["orphan-file"])
+        );
+        assert_eq!(
+            report["retainedData"]["sessionEntries"],
+            json!(["unlisted-session"])
+        );
+        assert_eq!(report["retainedData"]["sessionIndexHasData"], true);
+        fs::remove_file(sessions.join("index.json")).unwrap();
+        fs::remove_dir_all(&sessions).unwrap();
+        assert!(guest.provision_evidence().is_err());
+        assert!(!sessions.exists());
+    }
+
+    #[test]
+    fn retained_index_inspects_typed_follow_history_and_nested_unknown_metadata() {
+        let (_home, guest, mut task) = setup();
+        let session = new_id();
+        let tab = new_id();
+        let provider = new_id();
+        task.worker_session_id = Some(session.clone());
+        task.worker_tab_id = Some(tab.clone());
+        task.provider_conversation_id = Some(provider.clone());
+        seed(&guest, record(task.clone()));
+        let path = crate::store::root().unwrap().join("sessions/index.json");
+        let indexed = json!({"sessions":[{"id":session,"projectPath":task.guest_cwd,"cwd":task.guest_cwd,
+            "title":"Tracked worker","created":now(),"modified":now(),"tabs":[{"id":tab,"harness":"codex",
+                "created":now(),"providerSessionId":provider}]}]});
+        atomic_private_write(&path, &serde_json::to_vec(&indexed).unwrap()).unwrap();
+        let state = guest.state.lock().unwrap();
+        assert_eq!(
+            retained_data(&guest.base, &state).unwrap()["unaccountedData"],
+            false
+        );
+        for (pointer, value) in [
+            (
+                "/sessions/0/tabs/0/history",
+                json!([{"harness":"codex","providerSessionId":"older-retained-resume","ended":now()}]),
+            ),
+            ("/sessions/0/unknownRetainedData", json!({"resume":"older"})),
+            (
+                "/sessions/0/tabs/0/unknownRetainedData",
+                json!({"resume":"older"}),
+            ),
+        ] {
+            let mut changed = indexed.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            changed
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(key.into(), value);
+            atomic_private_write(&path, &serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert_eq!(
+                retained_data(&guest.base, &state).unwrap()["unaccountedData"],
+                true,
+                "{pointer}"
+            );
         }
     }
 

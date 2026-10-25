@@ -151,9 +151,44 @@ reconcile it explicitly.
 Provisioning is persisted before starting Cua. A supervisor interruption or
 uncertain cancellation retains `outcomeUnknown` and does not recreate the VM.
 Partial VM/image storage is retained for inspection and deliberate cleanup.
+Settings → Environments → **Resolve interrupted provisioning** offers one
+disposition: explicitly adopt the existing ready VM. Read-only preview and
+confirmation independently probe the exact pinned local VM and installed guest
+environment/generation, without provider, model or Driver readiness probes.
+Confirmation compares a versioned canonical evidence digest under exclusive
+owner admission, then atomically records `adopted` with the full original unknown
+record and reviewed evidence. A lost reply returns that exact durable receipt.
+Adoption establishes a current resource disposition; it does not claim that the
+interrupted operation succeeded or verify provider/GUI readiness.
+The pinned client requires the owner's separate reconciliation capability for
+recovery preview/confirmation and deletion. An older owner keeps running and the
+feature remains unavailable; the client never probes through its older generic
+inspection path, restarts it, falls back, or retries a mutation.
+
+This first flow requires **no retained host task history in any generation** and
+no guest task/canceled-target history or manual hold. A new unused installation
+checkpoints its no-execution timeline before task admission. Legacy history
+cannot acquire that proof retrospectively: its initialization boot is retained
+and a later different kernel boot is required to prove earlier orphan exit.
+Missing initialized guest state fails closed. No action in this flow reboots,
+starts, stops, recreates or deletes a VM. Missing, stopped, unbound or inadequately
+proved guests remain unknown and keep deletion/owner-stop blocked; absent-VM and
+task-bearing provisioning reconciliation require separate supported procedures.
+
 Deletion requires a fresh guest-work/task/resume inspection and refuses
 unfinished tasks or unresolved provisioning. It removes only the exact
 enrolled VM identity and never a host checkout or unrelated VM.
+An adoption receipt never authorizes deletion. Deletion independently checks
+the generation, complete guest task/canceled-target manifest, manual hold,
+owned groups, retained event digests and workspace inspection errors.
+Fresh workspace/artifact/session-root and session-index inventories also refuse
+unaccounted data; empty task records never imply those roots are empty. Deletion
+inspection uses its read-only purpose without driver/model/provider probes.
+An absent-record cancellation tombstone cannot replace dispatched task history;
+that cancellation retains an unknown outcome and its workflow hold.
+Terminal status alone is insufficient worker-exit proof: this flow accepts a durable
+canceled-before-start marker or a different kernel boot for a recorded worker;
+same-boot completed workers without an attempt-bound exit receipt remain blocked.
 
 ## Candidate dependency profile and distribution boundary
 

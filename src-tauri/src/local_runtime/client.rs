@@ -21,6 +21,7 @@ pub struct Client {
     epoch: String,
     event_socket: PathBuf,
     local_vm_protocol: Option<u64>,
+    local_vm_reconciliation: Option<u64>,
 }
 
 fn request(socket: &Path, token: &str, command: &str, params: Value) -> Result<Value> {
@@ -80,7 +81,7 @@ impl Client {
         // token and status cannot authorize commands to the replacement.
         let pinned = request(&socket, &token, "status", json!({}))?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
-        Ok(Arc::new(Self { socket, event_socket, token, epoch, local_vm_protocol:pinned["localVm"]["protocol"].as_u64() }))
+        Ok(Arc::new(Self { socket, event_socket, token, epoch, local_vm_protocol:pinned["localVm"]["protocol"].as_u64(),local_vm_reconciliation:pinned["localVm"]["reconciliationProtocol"].as_u64() }))
     }
 
     pub fn call<T: DeserializeOwned>(&self, command: &str, params: Value) -> Result<T> {
@@ -96,6 +97,13 @@ impl Client {
 
     pub fn stop_all(&self) -> Result<()> {
         let _: Value = self.call("runtime.stopAll", json!({"epoch":self.epoch}))?;
+        Ok(())
+    }
+
+    pub(crate) fn require_vm_reconciliation(&self) -> Result<()> {
+        if self.local_vm_reconciliation != Some(crate::local_vm::provisioning::PROTOCOL) {
+            bail!("This running local owner does not support verified provisioning reconciliation and deletion. Its existing work remains running; no operation was sent. Update/reconnect deliberately; no owner restart or fallback was attempted.");
+        }
         Ok(())
     }
 
@@ -152,10 +160,22 @@ mod local_vm_tests {
     #[test]
     fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
         for protocol in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:protocol});
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:protocol,local_vm_reconciliation:None});
             let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
             assert!(error.contains("no operation was sent"),"{error}");
             assert!(!error.contains("connect to the local runtime"));
+        }
+    }
+    #[test]
+    fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
+        for capability in [None,Some(0),Some(u64::MAX)] {
+            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),local_vm_protocol:Some(crate::local_vm::journal::PROTOCOL as u64),local_vm_reconciliation:capability});
+            let sessions=super::super::sessions::Sessions::new(client);
+            for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
+                let error=sessions.local_vm(method,params).unwrap_err().to_string();
+                assert!(error.contains("no operation was sent"),"{error}");
+                assert!(!error.contains("connect to the local runtime"));
+            }
         }
     }
 }

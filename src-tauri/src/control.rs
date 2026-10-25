@@ -432,8 +432,12 @@ impl ControlService {
         if command == "local_vm.request" {
             if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
             let lifetime = self.local_lifetime.as_ref().ok_or_else(|| ControlError::new("unsupported", "Local VM requests require the persistent local owner.", None::<String>))?;
-            let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
             let method = params["method"].as_str().ok_or_else(|| ControlError::invalid("method is required"))?;
+            if matches!(method, "environment.reconcileProvision" | "environment.delete") {
+                let _admission = crate::local_vm::supervisor::admit_exclusive(lifetime).map_err(ControlError::internal)?;
+                return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
+            }
+            let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
             return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
         }
         #[cfg(unix)]
@@ -536,7 +540,7 @@ impl ControlService {
                 if let Some(lifetime) = &self.local_lifetime {
                     status["localRuntime"] = lifetime.status();
                     #[cfg(unix)]
-                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL}); } }
+                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL,"reconciliationProtocol":crate::local_vm::provisioning::PROTOCOL}); } }
                 }
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;
@@ -1527,6 +1531,7 @@ mod tests {
         assert!(service.execute("status",json!({}),"test").unwrap().get("localVm").is_none());
         let service=service.with_vm_controller();
         assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["protocol"],1);
+        assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["reconciliationProtocol"],crate::local_vm::provisioning::PROTOCOL);
         assert_eq!(service.execute("local_vm.request",params,"test").unwrap()["enabled"],false);
         let journal=crate::local_vm::host::journal().unwrap();
         let env=journal.enroll("held guest","local:test").unwrap();

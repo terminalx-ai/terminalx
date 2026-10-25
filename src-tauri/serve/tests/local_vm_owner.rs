@@ -16,6 +16,7 @@ fn vm_unknown_work_survives_detach_and_refuses_stop_without_revoking_the_owner()
         .unwrap();
     journal
         .transaction(|state| {
+            state.enabled = true;
             state.environments.get_mut(&env.id).unwrap().provision =
                 Some(json!({"status":"outcomeUnknown"}));
             Ok(())
@@ -40,10 +41,41 @@ fn vm_unknown_work_survives_detach_and_refuses_stop_without_revoking_the_owner()
     assert!(client.stop_all().is_err());
     let status: Value = client.call("status", json!({})).unwrap();
     assert_eq!(status["localRuntime"]["stopping"], false);
+    assert_eq!(status["localVm"]["reconciliationProtocol"], 1);
     let next: Value = client
         .call("runtime.attach", json!({"protocol":1}))
         .unwrap();
     assert_eq!(attachment["epoch"], next["epoch"]);
+    // These requests are rejected before any Cua/guest probe. An exclusive
+    // confirm route must not attempt to upgrade its own shared admission lock.
+    let started = Instant::now();
+    let refusal = sessions
+        .local_vm(
+            "environment.reconcileProvision",
+            json!({
+                "environmentId":env.id,"generation":env.generation,"sandbox":env.sandbox,
+                "disposition":"adoptExisting","confirm":false,"evidenceDigest":"a".repeat(64)
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(!refusal.contains("does not support verified"), "{refusal}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(sessions
+        .local_vm(
+            "environment.delete",
+            json!({"environmentId":env.id,
+        "generation":"stale-generation","confirm":true})
+        )
+        .is_err());
+    assert_eq!(
+        journal.read().unwrap().environments[&env.id]
+            .provision
+            .as_ref()
+            .unwrap()["status"],
+        "outcomeUnknown"
+    );
+    assert!(client.stop_all().is_err());
     // Fixture-only reconciliation; never issues a guest or Cua operation.
     journal
         .transaction(|state| {

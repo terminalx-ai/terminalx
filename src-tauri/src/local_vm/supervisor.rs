@@ -60,11 +60,23 @@ pub fn admit(lifetime: &Lifetime) -> Result<RwLockReadGuard<'static, ()>> {
     Ok(guard)
 }
 
+/// Selected at the owner route instead of a shared guard, never upgraded from
+/// one. Keep through fresh probes and the durable disposition/deletion write.
+pub fn admit_exclusive(lifetime: &Lifetime) -> Result<RwLockWriteGuard<'static, ()>> {
+    let guard = ADMISSION.try_write().map_err(|_| {
+        anyhow::anyhow!("A Local VM operation is in flight; wait for it and inspect again")
+    })?;
+    if lifetime.is_stopping() || stopping() {
+        bail!("The local owner is stopping; no VM operation was routed");
+    }
+    Ok(guard)
+}
+
 pub(crate) fn initialized(root: &Path) -> bool {
     JOURNAL_ROOT.lock().unwrap().as_deref() == Some(root)
 }
 
-fn state_busy(state: &journal::State) -> bool {
+pub(super) fn state_busy(state: &journal::State) -> bool {
     state.tasks.values().any(|task| !task.status.terminal())
         || state
             .environments
@@ -73,6 +85,9 @@ fn state_busy(state: &journal::State) -> bool {
             .any(|env| {
                 env.manual_control
                     || env.provision.as_ref().is_some_and(|provision| {
+                        if super::provisioning::adopted(env) {
+                            return false;
+                        }
                         !provision
                             .get("status")
                             .and_then(Value::as_str)
@@ -688,13 +703,18 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(250));
         assert!(!life.is_stopping());
         let cancellation = admit(&life).unwrap();
+        assert!(admit_exclusive(&life).is_err());
         drop(cancellation);
         drop(first);
+        let reconciliation = admit_exclusive(&life).unwrap();
+        assert!(ADMISSION.try_read().is_err());
+        drop(reconciliation);
         let stop = prepare_stop().unwrap();
         life.command("runtime.stopAll", json!({"epoch":life.status()["epoch"]}))
             .unwrap();
         drop(stop);
         assert!(admit(&life).is_err());
+        assert!(admit_exclusive(&life).is_err());
         assert!(ensure_running(&AtomicBool::new(true)).is_err());
     }
 

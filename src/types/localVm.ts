@@ -92,6 +92,24 @@ export interface LocalVmEnvironmentInspection {
   stages: { id: string; label: string; status: string; detail?: string | null }[];
   detail?: string | null;
   deletion?: LocalVmDeletionInspection | null;
+  reconciliation?: LocalVmProvisionReview | null;
+  /** Durable disposition; the original unknown provisioning record is retained inside evidence. */
+  reconciliationReceipt?: LocalVmJson;
+}
+
+export interface LocalVmProvisionProposal {
+  environmentId: string;
+  generation: string;
+  sandbox: string;
+  evidenceDigest: string;
+  observedAt: string;
+}
+
+export interface LocalVmProvisionReview {
+  available: boolean;
+  reason: string | null;
+  proposal?: LocalVmProvisionProposal | null;
+  evidence?: LocalVmJson;
 }
 
 export interface LocalVmDeletionInspection {

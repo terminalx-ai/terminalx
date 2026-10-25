@@ -1,6 +1,6 @@
 import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
-import type { LocalVmArtifactContent, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmRecoveryRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifactContent, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 interface Requests {
   state: { params: Record<string, never>; result: LocalVmState };
@@ -8,9 +8,10 @@ interface Requests {
   configure: { params: { enabled: boolean }; result: LocalVmJson };
   enroll: { params: { name: string; sandbox: string }; result: LocalVmEnvironment };
   describe: { params: { environmentId: string }; result: LocalVmDescription };
-  "environment.inspect": { params: { environmentId: string }; result: LocalVmEnvironmentInspection };
+  "environment.inspect": { params: { environmentId: string; generation?: string; purpose?: "deletion" | "provisionRecovery" }; result: LocalVmEnvironmentInspection };
+  "environment.reconcileProvision": { params: Omit<LocalVmProvisionProposal, "observedAt"> & { disposition: "adoptExisting"; confirm: true }; result: LocalVmJson };
   "environment.create": { params: { name: string; vmName: string; confirm: true }; result: LocalVmEnvironment };
-  "environment.delete": { params: { environmentId: string; confirm: true }; result: LocalVmJson };
+  "environment.delete": { params: { environmentId: string; generation: string; confirm: true }; result: LocalVmJson };
   "environment.cancelProvision": { params: { environmentId: string }; result: LocalVmJson };
   "environment.start": { params: { environmentId: string }; result: LocalVmJson };
   "environment.stop": { params: { environmentId: string; confirm: true }; result: LocalVmJson };

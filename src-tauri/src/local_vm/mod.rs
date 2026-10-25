@@ -7,4 +7,5 @@ pub mod guest;
 pub mod host;
 pub mod journal;
 mod process;
+pub mod provisioning;
 pub mod supervisor;
