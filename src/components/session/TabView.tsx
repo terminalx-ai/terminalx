@@ -36,6 +36,7 @@ import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type Removabl
 import { usePickerModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
+import { LocalVmTasks } from "@/components/localVm/LocalVmTasks";
 
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
@@ -429,6 +430,9 @@ export function TabView({
       onAnswerQuestions={answerQuestions}
       onSendQueuedNow={backend.sendQueuedNow && !gate?.blocked ? sendQueuedNow : undefined}
       footer={
+        <>
+        {local ? <LocalVmTasks key={JSON.stringify([session.id, tab.id, conversation])} session={session} tab={tab} conversation={conversation} active={active} readOnly={readOnly} selectedPrompt={draft} /> : null}
+        {
         readOnly ? (
           // A conversation that is not running is read, and resumed from here: there is nobody to send to.
           <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-4 pt-2 text-xs text-muted-foreground" role="status" data-testid="conversation-read-only">
@@ -514,6 +518,8 @@ export function TabView({
         />
         </>
         )
+        }
+        </>
       }
     />
   );

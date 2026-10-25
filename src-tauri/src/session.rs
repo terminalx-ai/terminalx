@@ -2521,6 +2521,14 @@ impl SessionManager {
         // bound secrets, prompts and MCP servers. Before the grants, so an
         // agent credential always wins.
         let config = crate::cloud_config::launch_config(&tab.harness, &pane);
+        #[cfg(unix)]
+        let config = {
+            let mut config = config;
+            let guest_config = crate::local_vm::guest::launch_config(&rt.session_id, &rt.tab_id, &tab.harness)?;
+            config.env.extend(guest_config.env);
+            config.args.push_str(&guest_config.args);
+            config
+        };
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.

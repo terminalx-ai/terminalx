@@ -60,7 +60,9 @@ with 3 when the server rejects the token or credential for good.
 
 The agent CLIs' hooks call back into this binary as `terminalx-serve hook
 <Event>` and `terminalx-serve statusline`; Git and the `gh` shim of a cloud
-workspace as `terminalx-serve github-auth`.";
+workspace as `terminalx-serve github-auth`. An installed local macOS guest accepts
+bounded task RPC stdin through `terminalx-serve local-vm-rpc -`; it requires the
+private guest identity and never starts a second runtime.";
 
 /// What the runtime is serving, reported by `status` on the control socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,11 +139,20 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    // Guest helpers never start another runtime, cloud bootstrap, or daemon.
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::desktop::run_cli() { return code; }
+    #[cfg(unix)]
+    if let Some(code) = crate::local_vm::supervisor::run_cli() { return code; }
     // A hook process is short lived and answers before anything else starts.
     if crate::hooks::run_statusline_cli() || crate::hooks::run_hook_cli() {
         return 0;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("local-vm-rpc") {
+        return crate::local_vm::guest::run_rpc_cli(&args[1..]);
+    }
     // So is Git's credential helper and the `gh` shim (`cloud_github`).
     if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
         return crate::cloud_github::run_cli(&args[1..]);
@@ -191,6 +202,8 @@ struct Runtime {
     /// What moves an issue's pipeline when a turn ends (#433); idle until
     /// the agent tabs are served.
     pipelines: Arc<RuntimeObserver>,
+    #[cfg(unix)]
+    guest: Option<Arc<crate::local_vm::guest::Guest>>,
 }
 
 fn run(options: Options) -> Result<()> {
@@ -408,6 +421,10 @@ fn start(options: &Options) -> Result<Runtime> {
         control_endpoint.clone(),
     );
     manager.follow_pane_exits();
+    let interrupted = project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default();
+    crate::session::idle_orphaned_tabs();
+    #[cfg(unix)]
+    let guest = crate::local_vm::guest::Guest::installed(manager.clone(), sink.clone())?;
     let hooked = manager.clone();
     let service = crate::control::ControlService::headless(
         sink.clone(),
@@ -415,12 +432,12 @@ fn start(options: &Options) -> Result<Runtime> {
         control_endpoint.clone(),
         options.runtime_kind.as_str().into(),
     );
+    #[cfg(unix)]
+    let service = service.with_guest(guest.clone());
     let socket = crate::hooks::serve(control_endpoint, move |frame| hooked.on_hook(frame), move |request| service.handle(request))
         .context("listen on the hook and control socket")?;
     log::info!("hook socket at {}", socket.display());
-    let interrupted = project_root.as_deref().map(crate::cloud_agents::interrupted_tabs).unwrap_or_default();
-    crate::session::idle_orphaned_tabs();
-    Ok(Runtime { sink, host, terminals, manager, socket, project_root, interrupted, pipelines })
+    Ok(Runtime { sink, host, terminals, manager, socket, project_root, interrupted, pipelines, #[cfg(unix)] guest })
 }
 
 /// Serve the workspace through the relay in the background, and report
@@ -630,6 +647,8 @@ fn start_relay_host(
 }
 
 fn shutdown(runtime: &Runtime) {
+    #[cfg(unix)]
+    if let Some(guest) = &runtime.guest { guest.shutdown(); }
     runtime.host.kill_all();
     runtime.terminals.kill_all();
     if let Err(error) = crate::store::activity::shutdown() {

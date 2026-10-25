@@ -241,6 +241,10 @@ pub struct ControlService {
     /// Set by the headless runtime (`cloud-workspace`, `local`); the desktop
     /// app reports none.
     runtime_kind: Option<String>,
+    /// Present only in a pinned guest installation. Its control socket serves
+    /// a bounded task surface, never general session/fleet/host operations.
+    #[cfg(unix)]
+    guest: Option<Arc<crate::local_vm::guest::Guest>>,
     /// Asks the person before an agent's write to an issue. Only the desktop
     /// app has a window to ask in; without one such a write is refused.
     #[cfg(feature = "desktop")]
@@ -272,6 +276,8 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: None,
+            #[cfg(unix)]
+            guest: None,
             #[cfg(feature = "desktop")]
             questions: None,
             desktop: Some(DesktopControl { computer, browser, pairing: None }),
@@ -291,6 +297,8 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: Some(runtime_kind),
+            #[cfg(unix)]
+            guest: None,
             #[cfg(feature = "desktop")]
             questions: None,
             #[cfg(feature = "desktop")]
@@ -306,6 +314,12 @@ impl ControlService {
         }
     }
 
+    #[cfg(unix)]
+    pub fn with_guest(mut self, guest: Option<Arc<crate::local_vm::guest::Guest>>) -> Self {
+        self.guest = guest;
+        self
+    }
+
     #[cfg(feature = "desktop")]
     pub(crate) fn with_questions(mut self, ask: crate::issue_control::Ask) -> Self {
         self.questions = Some(ask);
@@ -319,6 +333,17 @@ impl ControlService {
     }
 
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        #[cfg(unix)]
+        if let Some(guest) = &self.guest {
+            if command != "local_vm.guest" {
+                return Err(ControlError::new("unsupported", "This guest serves only bounded local_vm.guest task requests.", None::<String>));
+            }
+            let request = serde_json::from_value(params).map_err(|error| ControlError::invalid(format!("Invalid guest request: {error}")))?;
+            return guest.dispatch(request).map_err(|error| ControlError::new("guest_request_failed", format!("{error:#}"), None::<String>));
+        }
+        if command == "local_vm.guest" {
+            return Err(ControlError::new("unsupported", "No pinned local VM guest is installed in this runtime.", None::<String>));
+        }
         #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             if let Some(action) = command.strip_prefix("share.") {

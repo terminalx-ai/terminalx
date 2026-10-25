@@ -4691,3 +4691,13 @@ pub async fn cloud_mirror_purge(organization_id: String, workspace_id: String) -
 pub async fn cloud_mirror_claim_owner(account: String, legacy_email: Option<String>) -> CmdResult<usize> {
     tauri::async_runtime::spawn_blocking(move || crate::cloud_mirror::claim_owner(&store::root().map_err(err)?, &account, legacy_email.as_deref()).map_err(err)).await.map_err(err)?
 }
+
+/// Selected-task operations run off the window thread. The adapter owns the
+/// immutable environment binding and never falls back to local tools.
+#[tauri::command]
+pub async fn local_vm_request(method: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    #[cfg(unix)]
+    { tauri::async_runtime::spawn_blocking(move || crate::local_vm::host::request(&method, params).map_err(err)).await.map_err(err)? }
+    #[cfg(not(unix))]
+    { let _ = (method, params); Err("Local macOS VMs require an Apple Silicon Mac".into()) }
+}

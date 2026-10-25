@@ -99,6 +99,8 @@ mod installation;
 mod keychain;
 mod landed;
 mod local_sharing;
+#[cfg(unix)]
+pub mod local_vm;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -373,6 +375,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
+            commands::local_vm_request,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
