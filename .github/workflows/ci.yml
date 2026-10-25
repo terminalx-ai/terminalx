@@ -101,7 +101,9 @@ jobs:
         run: pnpm exec playwright install webkit
 
       - name: WebKit layout checks
-        run: pnpm test:webkit-layout
+        run: |
+          pnpm test:webkit-layout
+          node scripts/webkit/permission-details.mjs
 
       # The computer-use helper is a Swift package with its own unit tests.
       # It is built before the Rust checks so tauri-build packages a real
@@ -158,6 +160,11 @@ jobs:
       - name: Clippy
         working-directory: src-tauri/serve
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Owner hook round trip and lost-transport denial
+        working-directory: src-tauri/serve
+        run: |
+          cargo test --locked --test owner_pretool
+          cargo test --locked --test local_lifetime owner_hook_process_fails_closed_when_its_socket_disappears
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/debug/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test

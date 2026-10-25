@@ -12,27 +12,23 @@ import { LinkedText } from "./LinkedText";
  * A held tool call. The buttons are the harness's own options; the app only
  * ever answers with an option id. The first option answers to Enter.
  */
-/** How much of a command or path a permission card quotes. */
-const DETAIL_MAX = 240;
-
 function field(input: unknown, ...names: string[]): string | null {
   if (!input || typeof input !== "object") return null;
   for (const name of names) {
     const value = (input as Record<string, unknown>)[name];
-    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "string" && value.trim()) return value;
   }
   return null;
 }
 
 /**
- * What a permission request is about, in one line: the command, the file,
- * the URL or the tool. Everyone on a shared workspace sees the same line,
- * whether or not they may answer.
+ * What the reader is approving. Preserve the full command, including its
+ * whitespace: a suffix or a second line can change what it does.
  */
 export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">): string | null {
   const tool = ask.toolName ?? "";
   const detail =
-    tool === "Bash" || tool === "shell"
+    ["Bash", "shell", "shell_command", "exec_command", "functions.exec_command", "functions.shell_command"].includes(tool)
       ? field(ask.input, "command", "cmd")
       : tool === "WebFetch"
         ? field(ask.input, "url")
@@ -41,8 +37,7 @@ export function askDetail(ask: Pick<PendingAsk, "toolName" | "input" | "title">)
           : (field(ask.input, "file_path", "path", "notebook_path") ?? (tool.startsWith("mcp__") ? tool.replace(/^mcp__/, "").replace(/__/g, " · ") : null));
   const text = detail ?? ask.title?.trim() ?? (tool || null);
   if (!text) return null;
-  const line = text.replace(/\s+/g, " ");
-  return line.length > DETAIL_MAX ? `${line.slice(0, DETAIL_MAX)}…` : line;
+  return text;
 }
 
 /** The one look both requests share: a labelled card, its body, and a bar of actions. */
@@ -75,7 +70,7 @@ export function PermissionCard({
   onAnswer,
   busy,
   blockedReason = null,
-  showDetail = false,
+  showDetail = true,
   aside,
 }: {
   ask: PendingAsk;
@@ -93,6 +88,8 @@ export function PermissionCard({
   aside?: ReactNode;
 }) {
   const detail = showDetail ? askDetail(ask) : null;
+  const directory = showDetail ? field(ask.input, "workdir", "cwd") : null;
+  const reason = showDetail ? field(ask.input, "justification", "description") ?? ask.description : null;
   const blocked = !!blockedReason;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -130,10 +127,10 @@ export function PermissionCard({
         Waiting for permission to {verbFor(ask.toolName ?? "")}
       </div>
       {detail && (
-        <div className="mt-2 break-words rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground" data-testid="permission-detail" title={detail}>
-          <LinkedText text={detail} />
-        </div>
+        <pre className="mt-2 max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
       )}
+      {directory && <p className="mt-2 break-words text-xs text-muted-foreground">Working directory: <code>{directory}</code></p>}
+      {reason && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{reason}</p>}
     </AskShell>
   );
 }
@@ -142,6 +139,10 @@ function verbFor(tool: string): string {
   switch (tool) {
     case "Bash":
     case "shell":
+    case "shell_command":
+    case "exec_command":
+    case "functions.exec_command":
+    case "functions.shell_command":
       return "run a command";
     case "apply_patch":
       return "edit files";
