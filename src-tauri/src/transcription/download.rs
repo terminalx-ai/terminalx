@@ -65,7 +65,7 @@ impl Downloads {
 
     pub fn start(self: &Arc<Self>, app: AppHandle, id: &str) -> Result<()> {
         let spec = catalog::downloadable(id).ok_or_else(|| anyhow!("unknown model {id}"))?;
-        if is_installed(spec) {
+        if spec.id != catalog::DETECTOR.id && is_installed(spec) {
             return Ok(());
         }
         let cancel = {
@@ -87,7 +87,15 @@ impl Downloads {
                     me.progress.lock().unwrap().insert(spec.id.into(), p.clone());
                     let _ = app.emit("transcription_download", p);
                 };
-                let outcome = fetch(spec, &cancel, &report);
+                // Detector verification belongs on this worker, never the command/UI thread.
+                // Invalid files are replaced only after an explicit download request
+                // and successful pinned download; cancellation leaves the old file alone.
+                let outcome = if spec.id == catalog::DETECTOR.id {
+                    detector_download_needed(super::detector_file::inspect(), &cancel)
+                        .and_then(|needed| if needed { fetch(spec, &cancel, &report) } else { Ok(()) })
+                } else {
+                    fetch(spec, &cancel, &report)
+                };
                 me.active.lock().unwrap().remove(&id_owned);
                 let (done, error) = match outcome {
                     Ok(()) => (true, None),
@@ -110,6 +118,16 @@ impl Downloads {
 
     pub fn is_active(&self, id: &str) -> bool {
         self.active.lock().unwrap().contains_key(id)
+    }
+}
+
+fn detector_download_needed(readiness: super::detector_file::Readiness, cancel: &AtomicBool) -> Result<bool> {
+    use super::detector_file::Readiness;
+    if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
+    match readiness {
+        Readiness::VerifiedFile => Ok(false),
+        Readiness::Missing | Readiness::Invalid => Ok(true),
+        Readiness::Error => bail!("Could not verify the speech detector file. Check file access and retry."),
     }
 }
 
@@ -182,6 +200,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detector_recovery_replaces_invalid_files_but_not_verified_or_unreadable_files() {
+        use super::super::detector_file::Readiness;
+        let cancel = AtomicBool::new(false);
+        assert!(detector_download_needed(Readiness::Invalid, &cancel).unwrap());
+        assert!(detector_download_needed(Readiness::Missing, &cancel).unwrap());
+        assert!(!detector_download_needed(Readiness::VerifiedFile, &cancel).unwrap());
+        assert!(detector_download_needed(Readiness::Error, &cancel).is_err());
+        cancel.store(true, Ordering::SeqCst);
+        for status in [Readiness::Missing, Readiness::Invalid, Readiness::VerifiedFile, Readiness::Error] {
+            assert!(detector_download_needed(status, &cancel).is_err());
+        }
+    }
+
+    #[test]
     fn bounded_download_verifies_before_commit_and_honors_cancellation() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("model.gguf");
@@ -200,6 +232,27 @@ mod tests {
         cancel.store(false, Ordering::SeqCst);
         receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn explicit_reinstall_commits_only_verified_bytes_and_cancel_preserves_old_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("detector.gguf");
+        let mut spec = catalog::DETECTOR.clone();
+        spec.size_bytes = 3;
+        spec.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        std::fs::write(&path, b"bad").unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(receive(&spec, b"abd".as_slice(), &cancel, &|_| {}, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"bad");
+        // Cancellation after opening the part file must preserve the old asset.
+        assert!(receive(&spec, b"abc".as_slice(), &cancel, &|_| {
+            cancel.store(true, Ordering::SeqCst);
+        }, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"bad");
+        cancel.store(false, Ordering::SeqCst);
+        receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abc");
     }
 
     /// Pulls the smallest model for real and runs a tone through it. Network

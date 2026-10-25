@@ -68,12 +68,28 @@ pub fn transcription_learn(
     personalization::learn(&before, &after, request.project.as_deref()).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectorRow {
+    #[serde(flatten)]
+    model: super::ModelRow,
+    readiness: super::detector_file::Readiness,
+}
+
 #[tauri::command]
-pub fn transcription_detector(state: tauri::State<'_, crate::AppState>) -> super::ModelRow {
-    let spec = &super::catalog::DETECTOR;
-    super::ModelRow {
-        spec: spec.clone(), installed: super::download::is_installed(spec),
-        downloading: state.transcription.downloads.is_active(spec.id),
-        progress: state.transcription.downloads.snapshot(spec.id), page: spec.page(),
-    }
+pub async fn transcription_detector(state: tauri::State<'_, crate::AppState>) -> Result<DetectorRow, String> {
+    let downloads = state.transcription.downloads.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let spec = &super::catalog::DETECTOR;
+        let readiness = super::detector_file::inspect();
+        DetectorRow {
+            model: super::ModelRow {
+                spec: spec.clone(),
+                installed: readiness == super::detector_file::Readiness::VerifiedFile,
+                downloading: downloads.is_active(spec.id),
+                progress: downloads.snapshot(spec.id), page: spec.page(),
+            },
+            readiness,
+        }
+    }).await.map_err(|e| e.to_string())
 }

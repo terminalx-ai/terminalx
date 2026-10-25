@@ -3,17 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
-import { errorMessage, type DownloadProgress, type TranscriptionModel } from "@/lib/api";
+import { errorMessage, type DownloadProgress, type TranscriptionDetector } from "@/lib/api";
 
 /** Auxiliary weights never appear in the recognition-engine chooser. */
 export function TranscriptionNoiseGuard() {
-  const [model, setModel] = useState<TranscriptionModel | null>(null);
+  const [model, setModel] = useState<TranscriptionDetector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let live = true;
     let off: (() => void) | undefined;
-    const refresh = () => invoke<TranscriptionModel>("transcription_detector")
+    const refresh = () => invoke<TranscriptionDetector>("transcription_detector")
       .then((value) => { if (live) setModel(value); })
       .catch((e) => { if (live) setError(errorMessage(e)); });
     void refresh();
@@ -30,8 +30,8 @@ export function TranscriptionNoiseGuard() {
     if (!model) return;
     setBusy(true); setError(null);
     try {
-      await invoke(command, { id: model.id });
-      setModel(await invoke<TranscriptionModel>("transcription_detector"));
+      if (command !== "transcription_detector") await invoke(command, { id: model.id });
+      setModel(await invoke<TranscriptionDetector>("transcription_detector"));
     } catch (e) { setError(errorMessage(e)); }
     finally { setBusy(false); }
   }
@@ -40,10 +40,12 @@ export function TranscriptionNoiseGuard() {
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {model && <div className="flex flex-wrap items-center gap-2">
       <span>{model.name} · <button type="button" className="underline" onClick={() => void openUrl(model.licenseUrl)}>{model.license}</button></span>
+      <span role="status">{{ missing: "Detector file missing", invalid: "Detector file invalid", verifiedFile: "Detector file verified", error: "Detector file could not be verified. Check file access and retry." }[model.readiness]}</span>
       {model.downloading ? <><span>{Math.round((model.progress?.received ?? 0) / model.sizeBytes * 100)}%</span><Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_cancel_download")}>Cancel detector download</Button></>
-        : model.installed ? <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_delete")}>Delete speech detector</Button>
-          : <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_download")}>Download speech detector</Button>}
+        : model.readiness === "verifiedFile" ? <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_delete")}>Delete speech detector</Button>
+          : model.readiness === "error" ? <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_detector")}>Retry file verification</Button>
+            : <Button size="xs" variant="outline" disabled={busy} onClick={() => void action("transcription_download")}>{model.readiness === "invalid" ? "Reinstall speech detector" : "Download speech detector"}</Button>}
     </div>}
-    <p>Missing, damaged or failed detection keeps the recognized text. The test result reports the detector status.</p>
+    <p>File verification checks size and checksum only; it does not confirm native loading or speech detection. Missing, damaged or failed detection keeps the recognized text. The test result reports the detector status.</p>
   </div>;
 }

@@ -2321,6 +2321,9 @@ export interface TranscriptionModel {
   progress?: DownloadProgress;
   page: string;
 }
+export interface TranscriptionDetector extends TranscriptionModel {
+  readiness: "missing" | "invalid" | "verifiedFile" | "error";
+}
 export interface DownloadProgress {
   id: string;
   received: number;

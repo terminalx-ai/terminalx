@@ -9,6 +9,7 @@ pub mod download;
 pub mod engine;
 pub mod noise;
 pub mod commands;
+mod detector_file;
 pub mod context;
 pub mod personalization;
 
