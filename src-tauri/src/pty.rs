@@ -234,23 +234,40 @@ impl StoppingPane {
 }
 
 
-/// Keep group ownership separate from output EOF and leader exit. Once an
-/// empty group is observed, permanently retire its numeric identity.
+/// The PTY child creates its own OS session (portable-pty calls setsid before
+/// exec). Job-control shells create additional process groups in that session.
+/// Retain that ownership after leader exit, and retire it permanently only once
+/// the entire session is observed empty. Session IDs remain reserved while any
+/// member exists; a process from another session cannot join this one.
 struct OwnedGroup(Mutex<Option<u32>>);
 impl OwnedGroup {
     fn pid(&self) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
-        if owned.is_some_and(|pid| !group_alive(pid)) { *owned = None; }
+        if let Some(pid) = *owned {
+            if !group_alive(pid) && session_jobs(pid).is_ok_and(|jobs| jobs.is_empty()) { *owned = None; }
+        }
         *owned
     }
     fn signal(&self, force: bool) {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
-            if !group_alive(pid) { *owned = None; return; }
-            // A reaped leader's PID is not authority to signal an unrelated
-            // process. Only the PTY's original process group is owned here.
             #[cfg(unix)]
-            unsafe { libc::kill(-(pid as i32), if force { libc::SIGKILL } else { libc::SIGTERM }); }
+            match session_jobs(pid) {
+                Ok(jobs) => {
+                    if jobs.is_empty() { *owned = None; return; }
+                    for (member, pgid) in jobs {
+                        // Revalidate the observed member immediately before
+                        // signalling its group. Never infer ownership from a
+                        // foreground PGID or a recycled leader PID alone.
+                        unsafe {
+                            if libc::getsid(member as i32) == pid as i32 && libc::getpgid(member as i32) == pgid as i32 {
+                                libc::kill(-(pgid as i32), if force { libc::SIGKILL } else { libc::SIGTERM });
+                            }
+                        }
+                    }
+                }
+                Err(error) => log::warn!("cannot inspect owned PTY session {pid}: {error:#}"),
+            }
             #[cfg(not(unix))]
             { if force { crate::harness::host::kill_now(pid); } else { crate::harness::host::terminate(pid); } }
         }
@@ -273,6 +290,39 @@ fn group_alive(pid: u32) -> bool {
     { (unsafe { libc::kill(-(pid as i32), 0) }) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
     #[cfg(not(unix))]
     { crate::harness::host::is_alive(pid) }
+}
+
+/// Enumerate before signalling: once the shell exits its jobs may be reparented,
+/// but they retain this session. An inspection failure is not evidence of exit.
+#[cfg(unix)]
+fn session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
+    let output = std::process::Command::new("/bin/ps").args(["-axo", "pid="]).env("LC_ALL", "C").output()?;
+    anyhow::ensure!(output.status.success(), "process enumeration failed");
+    let mut jobs = Vec::new();
+    for value in std::str::from_utf8(&output.stdout)?.split_whitespace() {
+        let member: i32 = value.parse()?;
+        if member <= 0 { continue; }
+        // SAFETY: getsid/getpgid inspect process metadata without changing it.
+        let sid = unsafe { libc::getsid(member) };
+        if sid < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) { continue; }
+            return Err(error.into());
+        }
+        if sid != session as i32 { continue; }
+        let group = unsafe { libc::getpgid(member) };
+        if group < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) { continue; }
+            return Err(error.into());
+        }
+        if group > 0 { jobs.push((member as u32, group as u32)); }
+    }
+    Ok(jobs)
+}
+#[cfg(not(unix))]
+fn session_jobs(pid: u32) -> Result<Vec<(u32, u32)>> {
+    Ok(if group_alive(pid) { vec![(pid, pid)] } else { Vec::new() })
 }
 
 /// A direct line for one pane's raw output, beside the `pty_data` event: a

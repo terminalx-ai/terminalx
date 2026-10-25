@@ -4624,7 +4624,7 @@ impl SessionManager {
         self.host.kill_all_and_wait(RESTART_WAIT);
         pids.retain(|pid| crate::harness::host::group_or_process_alive(*pid));
         *self.stop_pids.lock().unwrap() = pids.clone();
-        if !pids.is_empty() {
+        if !pids.is_empty() || !self.terminals.owned_groups().is_empty() {
             bail!("Stop all could not confirm every process exited. Retry Stop all; the runtime remains stopping.");
         }
         if !failures.is_empty() { bail!("Stop all could not settle every tab: {}", failures.join("; ")); }
