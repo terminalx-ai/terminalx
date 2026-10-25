@@ -211,6 +211,16 @@ pub struct Sweep<'a> {
     pub now: DateTime<Utc>,
 }
 
+/// Owner-backed sweeps must propagate an unconfirmed process stop into the
+/// existing per-workspace refusal report, without recording successful removal.
+pub(crate) struct FallibleSweep<'a> {
+    pub host: &'a Host<'a>,
+    pub sink: &'a dyn EventSink,
+    pub stop: &'a dyn Fn(&SessionEntry) -> Result<(), String>,
+    pub pull_requests: PullRequests<'a>,
+    pub now: DateTime<Utc>,
+}
+
 /// A workspace whose pull request was seen merged and that is still there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,7 +314,7 @@ enum Fetched {
 }
 
 struct Pass<'a> {
-    run: &'a Sweep<'a>,
+    run: &'a FallibleSweep<'a>,
     scope: &'a Scope,
     ledger: Ledger,
     /// The workspaces looked at, by path: what the ledger goes on holding.
@@ -463,7 +473,7 @@ impl Pass<'_> {
 
 /// Remove one workspace that passed every check, with its branches.
 /// `Err` is why it stayed: `(brief, detail)`.
-fn remove(run: &Sweep<'_>, scope: &Scope, repository: &Repository<'_>, entry: &Listed, candidate: &Candidate, checked: &Landed, pr: &PrRef) -> Result<Record, (String, Option<String>)> {
+fn remove(run: &FallibleSweep<'_>, scope: &Scope, repository: &Repository<'_>, entry: &Listed, candidate: &Candidate, checked: &Landed, pr: &PrRef) -> Result<Record, (String, Option<String>)> {
     let (Some(branch), Some(head)) = (candidate.branch.as_deref(), checked.head.as_deref()) else {
         return Err(("it has no branch checked out".into(), None));
     };
@@ -503,7 +513,7 @@ fn remove(run: &Sweep<'_>, scope: &Scope, repository: &Repository<'_>, entry: &L
         fetch: Fetch::JustFetched,
         guard: Some(&guard),
     };
-    let removed = match session_ops::remove_workspace(run.sink, &request, run.stop) {
+    let removed = match session_ops::remove_workspace_fallible(run.sink, &request, run.stop) {
         Ok(removed) => removed,
         Err(error) => {
             return Err(match refused.take() {
@@ -581,6 +591,11 @@ fn delete_remote_branch(project: &Path, branch: &str, merged: &str) -> BranchFat
 /// safe and say why, and remove what is safe and due. With no project in
 /// scope it removes nothing and forgets what it had seen.
 pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
+    sweep_fallible(&FallibleSweep { host: run.host, sink: run.sink,
+        stop: &|entry| { (run.stop)(entry); Ok(()) }, pull_requests: run.pull_requests, now: run.now }, scope)
+}
+
+pub(crate) fn sweep_fallible(run: &FallibleSweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let wanted: Vec<PathBuf> = scope.projects.iter().map(|path| cleanup::canonical(Path::new(path))).collect();
     let on_for = |path: &str| {
@@ -758,5 +773,7 @@ pub fn restore(host: &Host<'_>, sink: &dyn EventSink, id: &str, now: DateTime<Ut
 }
 
 #[cfg(all(test, unix))]
-#[path = "merged_cleanup_tests.rs"]
-mod tests;
+mod tests {
+    include!("merged_cleanup_tests.rs");
+    include!("local_runtime/merged_stop_regression.rs");
+}

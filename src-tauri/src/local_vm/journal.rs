@@ -156,6 +156,7 @@ pub struct State {
 /// read/modify/rename transaction, never over provider or guest I/O.
 pub struct Journal {
     dir: PathBuf,
+    require_existing: bool,
 }
 
 impl Journal {
@@ -163,6 +164,15 @@ impl Journal {
         private_directory(dir)?;
         Ok(Self {
             dir: dir.to_owned(),
+            require_existing: false,
+        })
+    }
+
+    pub fn open_existing(dir: &Path) -> Result<Self> {
+        private_directory(dir)?;
+        Ok(Self {
+            dir: dir.to_owned(),
+            require_existing: true,
         })
     }
 
@@ -181,6 +191,9 @@ impl Journal {
         let mut state = match original.as_deref() {
             Some(bytes) => serde_json::from_slice(bytes)
                 .context("read local VM journal; refusing to replace damaged history")?,
+            None if self.require_existing => bail!(
+                "Local VM history disappeared; refusing to recreate the journal or replay work"
+            ),
             None => State::default(),
         };
         let result = f(&mut state)?;

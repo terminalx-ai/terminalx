@@ -20,7 +20,12 @@ pub fn root() -> Result<PathBuf> {
     Ok(crate::store::root()?.join("local-vm"))
 }
 pub fn journal() -> Result<Journal> {
-    Journal::open(&root()?)
+    let root = root()?;
+    if super::supervisor::initialized(&root) {
+        Journal::open_existing(&root)
+    } else {
+        Journal::open(&root)
+    }
 }
 
 pub fn request(method: &str, params: Value) -> Result<Value> {
@@ -53,9 +58,6 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 s.enabled = enabled;
                 Ok(())
             })?;
-            if enabled {
-                super::supervisor::install()?;
-            }
             return Ok(json!({"enabled":enabled}));
         }
         "doctor" => return doctor(),
@@ -203,17 +205,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         }
         "environment.cancelProvision" => {
             let env = environment(&journal, &params)?;
-            journal.transaction(|s| {
-                s.environments
-                    .get_mut(&env.id)
-                    .context("Environment not found")?
-                    .provision = Some(progress(
-                    "canceling",
-                    "Cancel requested; retained partial storage is shown for explicit cleanup",
-                ));
-                Ok(())
-            })?;
-            Ok(json!({"cancelRequested":true}))
+            cancel_provision(&journal, &env)
         }
         "environment.delete" => delete(&journal, &params),
         "describe" => {
@@ -291,6 +283,41 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         "task.applyPatch" => apply_patch(&journal, &params),
         _ => bail!("Unknown local VM method"),
     }
+}
+
+pub(crate) fn cancel_provision(journal: &Journal, env: &Environment) -> Result<Value> {
+    let stage = journal.transaction(|state| {
+        let current = state
+            .environments
+            .get_mut(&env.id)
+            .filter(|current| current.generation == env.generation && current.deleted_at.is_none())
+            .context("Environment timeline changed")?;
+        let status = current
+            .provision
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .context("Provisioning state requires explicit inspection")?;
+        let status = status.to_owned();
+        match status.as_str() {
+            "queued" => {
+                current.provision = Some(progress(
+                    "canceled",
+                    "Canceled before any provisioning process started; no VM operation was sent",
+                ))
+            }
+            "running" => current.provision = Some(progress(
+                "canceling",
+                "Cancel requested; stopping the Cua client does not prove the VM operation stopped",
+            )),
+            "canceling" | "outcomeUnknown" | "completed" | "failed" | "canceled" => {}
+            _ => bail!(
+                "Unrecognized provisioning state; inspect retained history before reconciling"
+            ),
+        }
+        Ok(current.provision.clone())
+    })?;
+    Ok(json!({"cancelRequested":true,"provision":stage}))
 }
 
 fn recovery_receipt(task: &Task, response: &Value) -> Result<Task> {
@@ -590,7 +617,6 @@ fn create(journal: &Journal, params: &Value) -> Result<Value> {
         e.provision = Some(progress("queued", "Waiting for the local supervisor"));
         Ok(())
     })?;
-    super::supervisor::install()?;
     Ok(serde_json::to_value(
         journal.read()?.environments[&env.id].clone(),
     )?)
@@ -615,7 +641,6 @@ fn submit(journal: &Journal, params: Value) -> Result<Value> {
         &path.join(format!("{}.json", task.target.task_id)),
         &serde_json::to_vec(&files)?,
     )?;
-    super::supervisor::install()?;
     Ok(serde_json::to_value(task)?)
 }
 fn validate_context_path(path: &str) -> Result<()> {

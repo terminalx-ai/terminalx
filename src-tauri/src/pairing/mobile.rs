@@ -20,9 +20,7 @@ use uuid::Uuid;
 use super::model::{AccountMirror, DeviceProvenance};
 use super::{DeviceEntry, DeviceScope, PairingManager};
 use crate::events::{AgentEvent, Payload};
-use crate::pty::PtyData;
 use crate::store::index::{self, SessionEntry, TabEntry};
-use crate::session::SessionManager;
 use crate::sink::{EventSink, ListenerId};
 use crate::{store, summaries};
 
@@ -51,18 +49,14 @@ struct MobileNotification {
     tab_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct DriverLease {
-    connection_id: String,
-    pane_id: String,
-    session_id: String,
-    tab_id: String,
+struct MobileClient {
+    sender: mpsc::Sender<Value>,
+    overflowed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(super) struct MobileRuntime {
     sink: OnceLock<Arc<dyn EventSink>>,
-    clients: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
-    drivers: Mutex<HashMap<String, DriverLease>>,
+    clients: Mutex<HashMap<String, MobileClient>>,
     notifications: Mutex<VecDeque<MobileNotification>>,
     notification_epoch: String,
     notification_seq: std::sync::atomic::AtomicU64,
@@ -74,7 +68,6 @@ impl MobileRuntime {
         Self {
             sink: OnceLock::new(),
             clients: Mutex::new(HashMap::new()),
-            drivers: Mutex::new(HashMap::new()),
             notifications: Mutex::new(VecDeque::new()),
             notification_epoch: Uuid::new_v4().to_string(),
             notification_seq: std::sync::atomic::AtomicU64::new(0),
@@ -88,20 +81,24 @@ impl MobileRuntime {
             .map_err(|_| anyhow!("mobile runtime was already configured"))
     }
 
-    fn register_client(&self, id: &str, outbound: mpsc::UnboundedSender<Value>) {
-        self.clients.lock().unwrap().insert(id.into(), outbound);
+    fn register_client(&self, id: &str, outbound: mpsc::Sender<Value>, overflowed: Arc<std::sync::atomic::AtomicBool>) {
+        self.clients.lock().unwrap().insert(id.into(), MobileClient { sender:outbound, overflowed });
     }
 
     fn unregister_client(&self, id: &str) {
         self.clients.lock().unwrap().remove(id);
-        self.release_connection(id);
     }
 
     fn broadcast(&self, value: Value) {
         self.clients
             .lock()
             .unwrap()
-            .retain(|_, sender| sender.send(value.clone()).is_ok());
+            .retain(|_, client| {
+                if client.sender.try_send(value.clone()).is_ok() { true } else {
+                    client.overflowed.store(true,std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
     }
 
     pub(super) fn broadcast_sessions_changed(&self) {
@@ -152,114 +149,69 @@ impl MobileRuntime {
             .collect()
     }
 
-    fn claim_driver(&self, connection_id: &str, session_id: &str, tab_id: &str, pane_id: &str) -> Result<()> {
-        let key = tab_key(session_id, tab_id);
-        let mut drivers = self.drivers.lock().unwrap();
-        if let Some(current) = drivers.get(&key) {
-            if current.connection_id != connection_id || current.pane_id != pane_id {
-                bail!("another mobile client is driving this terminal");
-            }
-            return Ok(());
-        }
-        let lease = DriverLease {
-            connection_id: connection_id.into(),
-            pane_id: pane_id.into(),
-            session_id: session_id.into(),
-            tab_id: tab_id.into(),
-        };
-        drivers.insert(key, lease.clone());
-        drop(drivers);
-        self.emit_driver(&lease, true);
-        Ok(())
-    }
-
-    fn release_driver(&self, connection_id: &str, session_id: &str, tab_id: &str) {
-        let key = tab_key(session_id, tab_id);
-        let removed = {
-            let mut drivers = self.drivers.lock().unwrap();
-            drivers
-                .get(&key)
-                .filter(|lease| lease.connection_id == connection_id)
-                .cloned()
-                .and_then(|lease| drivers.remove(&key).map(|_| lease))
-        };
-        if let Some(lease) = removed {
-            self.emit_driver(&lease, false);
-        }
-    }
-
-    fn release_connection(&self, connection_id: &str) {
-        let removed = {
-            let mut drivers = self.drivers.lock().unwrap();
-            let keys: Vec<_> = drivers
-                .iter()
-                .filter(|(_, lease)| lease.connection_id == connection_id)
-                .map(|(key, _)| key.clone())
-                .collect();
-            keys.into_iter().filter_map(|key| drivers.remove(&key)).collect::<Vec<_>>()
-        };
-        for lease in removed {
-            self.emit_driver(&lease, false);
-        }
-    }
-
-    fn emit_driver(&self, lease: &DriverLease, active: bool) {
-        if let Some(sink) = self.sink.get() {
-            sink.emit(
-                "mobile_terminal_driver",
-                &json!({
-                    "sessionId": lease.session_id,
-                    "tabId": lease.tab_id,
-                    "active": active,
-                }),
-            );
-        }
-    }
-
-    pub(super) fn is_mobile_driven(&self, pane_id: &str) -> bool {
-        self.drivers
-            .lock()
-            .unwrap()
-            .values()
-            .any(|lease| lease.pane_id == pane_id)
-    }
-
-    pub(super) fn driven_tab_ids(&self) -> Vec<String> {
-        let mut ids = self
-            .drivers
-            .lock()
-            .unwrap()
-            .values()
-            .map(|lease| lease.tab_id.clone())
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
 }
 
 pub(super) struct MobileConnection {
     id: String,
+    owner: Arc<crate::local_runtime::desktop::Desktop>,
+    actor: crate::local_runtime::mobile::Actor,
     runtime: Arc<MobileRuntime>,
-    outbound: mpsc::UnboundedSender<Value>,
+    outbound: mpsc::Sender<Value>,
     subscriptions: Mutex<HashMap<String, ListenerId>>,
+    terminal_subscriptions: Mutex<HashMap<String,String>>,
+    polling: std::sync::atomic::AtomicBool,
+    overflowed: Arc<std::sync::atomic::AtomicBool>,
     closed: std::sync::atomic::AtomicBool,
 }
 
 impl MobileConnection {
-    pub(super) fn new(runtime: Arc<MobileRuntime>, outbound: mpsc::UnboundedSender<Value>) -> Self {
+    pub(super) fn new(manager: &PairingManager, device: &DeviceEntry, runtime: Arc<MobileRuntime>, outbound: mpsc::Sender<Value>) -> Result<Self> {
         let id = Uuid::new_v4().to_string();
-        runtime.register_client(&id, outbound.clone());
-        Self {
-            id,
+        let owner = manager.runtime.lock().unwrap().clone().context("The local runtime is unavailable.")?;
+        let attachment = owner.attachment()?;
+        let actor = crate::local_runtime::mobile::Actor {
+            epoch: attachment.epoch, lease: attachment.lease,
+            generation: manager.account.current_generation(),
+            user_id: super::registry::load_account_mirror()?.map(|mirror| mirror.user_id),
+        };
+        owner.mobile(&actor, "register", json!({"connection":id,"deviceId":device.id}))?;
+        let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        runtime.register_client(&id, outbound.clone(), overflowed.clone());
+        Ok(Self {
+            id, owner, actor, overflowed,
             runtime,
             outbound,
             subscriptions: Mutex::new(HashMap::new()),
+            terminal_subscriptions: Mutex::new(HashMap::new()),
+            polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
-        }
+        })
     }
 
-    pub(super) fn close(&self, _manager: &PairingManager) {
+    pub(super) fn check_buffer(&self) -> Result<()> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.overflowed.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("The mobile stream disconnected or fell behind. Reconnect to load retained history.");
+        }
+        Ok(())
+    }
+
+    pub(super) fn check(&self, manager: &PairingManager) -> Result<()> {
+        self.check_buffer()?;
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.account.current_generation() {
+            bail!("The paired-device connection or account changed.");
+        }
+        self.call("check", json!({}))?;
+        Ok(())
+    }
+
+    fn call(&self, method: &str, mut params: Value) -> Result<Value> {
+        params.as_object_mut().context("Mobile parameters must be an object.")?.insert("connection".into(), json!(self.id));
+        self.owner.mobile(&self.actor, method, params)
+    }
+
+    pub(super) fn close(&self, _manager: &PairingManager) { self.finish(); }
+
+    fn finish(&self) {
         if self
             .closed
             .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -272,41 +224,70 @@ impl MobileConnection {
             }
         }
         self.runtime.unregister_client(&self.id);
+        if self.call("close", json!({})).is_err() { self.owner.disconnect(); }
     }
 
     fn stream(&self, request_id: &str, result: Value) {
-        let _ = self.outbound.send(success_response(request_id, result));
+        if !self.closed.load(std::sync::atomic::Ordering::SeqCst)
+            && self.outbound.try_send(success_response(request_id, result)).is_err() { self.finish(); }
     }
 
     fn insert_subscription(&self, subscription_id: String, event_id: ListenerId) {
         self.subscriptions.lock().unwrap().insert(subscription_id, event_id);
     }
 
-    fn unsubscribe(&self, subscription_id: &str) -> bool {
+    fn unsubscribe(&self, subscription_id: &str) -> Result<bool> {
+        if self.terminal_subscriptions.lock().unwrap().contains_key(subscription_id) {
+            let result = self.call("unobserve", json!({"subscriptionId":subscription_id}))?;
+            self.terminal_subscriptions.lock().unwrap().remove(subscription_id);
+            return Ok(result["removed"].as_bool().unwrap_or(false));
+        }
         let listener = self.subscriptions.lock().unwrap().remove(subscription_id);
         if let (Some(sink), Some(listener)) = (self.runtime.sink.get(), listener) {
             sink.unlisten(listener);
-            true
-        } else {
-            false
-        }
+            Ok(true)
+        } else { Ok(false) }
     }
+
+    fn start_polling(self: &Arc<Self>) -> Result<()> {
+        if self.polling.swap(true,std::sync::atomic::Ordering::SeqCst) { return Ok(()); }
+        let weak = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new().name("mobile-output".into()).spawn(move || loop {
+            let Some(connection) = weak.upgrade() else { return };
+            if connection.closed.load(std::sync::atomic::Ordering::SeqCst) { return; }
+            if !connection.terminal_subscriptions.lock().unwrap().is_empty() {
+                match connection.call("output",json!({})) {
+                    Ok(packets) => {
+                        for packet in packets.as_array().into_iter().flatten() {
+                            let request = connection.terminal_subscriptions.lock().unwrap()
+                                .get(packet["subscriptionId"].as_str().unwrap_or_default()).cloned();
+                            if let Some(request) = request {
+                                connection.stream(&request,json!({"type":"data","chunk":packet["text"]}));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = connection.outbound.try_send(json!({"method":"terminal.closed","params":{"message":error.to_string()}}));
+                        connection.finish();
+                        return;
+                    }
+                }
+            }
+            drop(connection);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        if let Err(error) = spawned {
+            self.polling.store(false,std::sync::atomic::Ordering::SeqCst);
+            self.finish();
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
 }
 
 impl Drop for MobileConnection {
-    fn drop(&mut self) {
-        if !self
-            .closed
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            if let Some(sink) = self.runtime.sink.get() {
-                for (_, listener) in self.subscriptions.lock().unwrap().drain() {
-                    sink.unlisten(listener);
-                }
-            }
-            self.runtime.unregister_client(&self.id);
-        }
-    }
+    fn drop(&mut self) { self.finish(); }
 }
 
 pub(super) async fn dispatch(
@@ -315,41 +296,39 @@ pub(super) async fn dispatch(
     request: &Value,
     device: &DeviceEntry,
 ) -> Option<Result<Value>> {
+    if let Err(error) = connection.check(manager) { return Some(Err(error)); }
     let method = request.get("method")?.as_str()?;
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink.get().cloned();
     let result = match method {
         "sync.capabilities" => no_params(&params).map(|_| json!({ "transcript": 1, "conditionalLists": 1 })),
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries()?, params.version)),
-        "session.sync" => parse_params(params).and_then(|params| session_sync(manager, request_id(request), params)),
-        "session.tail" => parse_params(params).and_then(|params| session_tail(manager, request_id(request), params)),
+        "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
+        "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
         "session.subscribe" => sink
             .as_ref()
             .context("app is unavailable")
             .and_then(|sink| parse_params(params).and_then(|params| subscribe_session(&**sink, connection, request_id(request), params))),
         "session.unsubscribe" | "terminal.unsubscribe" | "notifications.unsubscribe" => {
-            parse_params(params).map(|params: UnsubscribeParams| json!({ "removed": connection.unsubscribe(&params.subscription_id) }))
+            parse_params(params).and_then(|params: UnsubscribeParams| Ok(json!({ "removed": connection.unsubscribe(&params.subscription_id)? })))
         }
         "session.send" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(manager, device, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| send_session(connection, params)))
         }
         "permission.respond" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(manager, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| respond_permission(connection, params)))
         }
         "chat.list" => parse_params(params).and_then(|params| list_notes(manager, params)),
         "chat.post" => parse_params(params).and_then(|params| post_note(manager, device, params)),
         "chat.promoteToAgent" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| promote_notes(manager, device, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| promote_notes(manager, connection, params)))
         }
-        "terminal.read" => parse_params(params).and_then(|params| read_terminal(manager, params)),
-        "terminal.subscribe" => sink
-            .as_ref()
-            .context("app is unavailable")
-            .and_then(|sink| parse_params(params).and_then(|params| subscribe_terminal(manager, &**sink, connection, request_id(request), params))),
+        "terminal.read" => parse_params(params).and_then(|params| read_terminal(connection, params)),
+        "terminal.subscribe" => parse_params(params).and_then(|params| subscribe_terminal(connection, request_id(request), params)),
         "steerLease.queueInput" => {
-            require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(manager, connection, params)))
+            require_driver(device).and_then(|_| parse_params(params).and_then(|params| queue_input(connection, params)))
         }
-        "steerLease.release" => parse_params(params).map(|params| release_input(connection, params)),
+        "steerLease.release" => parse_params(params).and_then(|params| release_input(connection, params)),
         "notifications.missedSince" => parse_params(params).map(|params| missed_notifications(manager, params)),
         "notifications.subscribe" => sink
             .as_ref()
@@ -481,7 +460,7 @@ fn conditional(mut value: Value, previous: Option<String>) -> Result<Value> {
     Ok(value)
 }
 
-fn session_sync(manager: &PairingManager, request_id: &str, params: SessionSyncParams) -> Result<Value> {
+fn session_sync(connection: &MobileConnection, request_id: &str, params: SessionSyncParams) -> Result<Value> {
     // Read errors are not deletions. Only an authoritative index absence clears
     // the phone's copy.
     let present = index::load()?.iter().any(|session|
@@ -490,8 +469,7 @@ fn session_sync(manager: &PairingManager, request_id: &str, params: SessionSyncP
         return Ok(json!({ "deleted": true }));
     }
     let path = store::log_path(&params.session_id, &params.tab_id)?;
-    let mut events: Vec<AgentEvent> = store::read_lines(&path)?;
-    sessions(manager)?.reconcile_lapsed_events(&params.session_id, &params.tab_id, &mut events)?;
+    connection.call("reconcile", json!({"sessionId":params.session_id,"tabId":params.tab_id}))?;
     // Reconciliation publishes to the log. Read canonical file order again:
     // another publisher may have appended between the first read and publish.
     let events: Vec<AgentEvent> = store::read_lines(&path)?;
@@ -582,26 +560,17 @@ struct SessionTailParams {
     limit: usize,
 }
 
-fn session_tail(manager: &PairingManager, request_id: &str, params: SessionTailParams) -> Result<Value> {
+fn session_tail(connection: &MobileConnection, request_id: &str, params: SessionTailParams) -> Result<Value> {
     validate_session_tab(&params.session_id, &params.tab_id)?;
     if !(1..=20).contains(&params.limit) {
         bail!("tail limit must be between 1 and 20 turns");
     }
-    let session_manager = sessions(manager)?;
     let path = store::log_path(&params.session_id, &params.tab_id)?;
     let byte_limit = tail_event_byte_limit(request_id)?;
-    let (mut events, mut has_more) = read_event_tail(&path, params.before, params.limit, byte_limit)?;
     if params.before.is_none() {
-        let count = events.len();
-        session_manager.reconcile_lapsed_events(&params.session_id, &params.tab_id, &mut events)?;
-        if events.len() != count {
-            // Reconciliation appends persisted decisions. Bound the final suffix too,
-            // so those events cannot push a full page over the byte or event limit.
-            let (bounded, trimmed) = select_event_tail(events.into_iter().rev().map(Ok), None, usize::MAX, byte_limit)?;
-            events = bounded;
-            has_more |= trimmed;
-        }
+        connection.call("reconcile", json!({"sessionId":params.session_id,"tabId":params.tab_id}))?;
     }
+    let (events, has_more) = read_event_tail(&path, params.before, params.limit, byte_limit)?;
     Ok(json!({ "events": events, "hasMore": has_more }))
 }
 
@@ -728,9 +697,9 @@ struct SessionSendParams {
     attachments: Vec<RemoteAttachmentInput>,
 }
 
-fn send_session(manager: &PairingManager, device: &DeviceEntry, params: SessionSendParams) -> Result<Value> {
+fn send_session(connection: &MobileConnection, params: SessionSendParams) -> Result<Value> {
     let (session, _) = find_tab(&params.tab_id)?;
-    let outcome = send_attributed(manager, device, &session.id, &params.tab_id, &params.text, params.attachments)?;
+    let outcome = send_attributed(connection, &session.id, &params.tab_id, &params.text, params.attachments)?;
     Ok(json!({ "status": "sent", "queued": outcome.queued }))
 }
 
@@ -743,16 +712,9 @@ struct PermissionRespondParams {
     option_id: String,
 }
 
-fn respond_permission(manager: &PairingManager, params: PermissionRespondParams) -> Result<Value> {
-    validate_session_tab(&params.session_id, &params.tab_id)?;
-    sessions(manager)?
-        .respond_permission(
-            &params.session_id,
-            &params.tab_id,
-            &params.request_id,
-            &params.option_id,
-        )?;
-    Ok(json!({ "status": "answered" }))
+fn respond_permission(connection: &MobileConnection, params: PermissionRespondParams) -> Result<Value> {
+    connection.call("permission", json!({"sessionId":params.session_id,"tabId":params.tab_id,
+        "requestId":params.request_id,"optionId":params.option_id}))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -859,7 +821,7 @@ struct ChatPromoteParams {
     attachments: Vec<RemoteAttachmentInput>,
 }
 
-fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPromoteParams) -> Result<Value> {
+fn promote_notes(manager: &PairingManager, connection: &MobileConnection, params: ChatPromoteParams) -> Result<Value> {
     validate_session_tab(&params.worktree_id, &params.tab_id)?;
     if params.message_ids.is_empty() || params.message_ids.len() > 20 {
         bail!("promotion must name between 1 and 20 notes");
@@ -878,7 +840,7 @@ fn promote_notes(manager: &PairingManager, device: &DeviceEntry, params: ChatPro
         text.push(note.body.clone());
     }
     drop(_guard);
-    let outcome = send_attributed(manager, device, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
+    let outcome = send_attributed(connection, &params.worktree_id, &params.tab_id, &text.join("\n\n"), params.attachments)?;
     let message = outcome.events.iter().find(|event| matches!(event.payload, Payload::UserMessage { .. }));
     if let Some(message) = message {
         let promotion = NotePromotion { tab_id: params.tab_id.clone(), seq: message.seq };
@@ -921,8 +883,7 @@ fn mark_promoted(notes: &mut [ChatNote], ids: &HashSet<&String>, promotion: &Not
 }
 
 fn send_attributed(
-    manager: &PairingManager,
-    device: &DeviceEntry,
+    connection: &MobileConnection,
     session_id: &str,
     tab_id: &str,
     text: &str,
@@ -936,7 +897,6 @@ fn send_attributed(
     if !text.is_empty() {
         validate_note(text)?;
     }
-    let author = effective_user(device)?;
     let (images, paths) = prepare_attachments(session_id, attachments)?;
     let mut prompt = text.to_string();
     for path in paths {
@@ -946,20 +906,8 @@ fn send_attributed(
         prompt.push('@');
         prompt.push_str(&path);
     }
-    let envelope = json!({
-        "userId": author.user_id,
-        "displayName": author.display_name,
-        "authority": "host",
-    });
-    let attributed = format!("[TerminalX Effective User v1] {envelope}\n{prompt}");
-    let session_manager = sessions(manager)?;
-    session_manager.send_with_display_text(
-        session_id,
-        tab_id,
-        attributed,
-        text.to_string(),
-        images,
-    )
+    serde_json::from_value(connection.call("send", json!({"sessionId":session_id,"tabId":tab_id,
+        "text":text,"prompt":prompt,"images":images}))?).context("Invalid owner send result")
 }
 
 fn prepare_attachments(session_id: &str, attachments: Vec<RemoteAttachmentInput>) -> Result<(Vec<crate::session::ImageInput>, Vec<String>)> {
@@ -1077,13 +1025,8 @@ struct TerminalParams {
     tab_id: String,
 }
 
-fn read_terminal(manager: &PairingManager, params: TerminalParams) -> Result<Value> {
-    let pane = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    let bytes = sessions(manager)?
-        .terminals()
-        .read_output(&pane)
-        .context("terminal output is unavailable")?;
-    Ok(json!({ "text": String::from_utf8_lossy(&bytes) }))
+fn read_terminal(connection: &MobileConnection, params: TerminalParams) -> Result<Value> {
+    connection.call("terminalRead", json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
 }
 
 #[derive(Deserialize)]
@@ -1096,50 +1039,13 @@ struct TerminalSubscribeParams {
     capabilities: Value,
 }
 
-fn subscribe_terminal(
-    manager: &PairingManager,
-    sink: &dyn EventSink,
-    connection: &Arc<MobileConnection>,
-    request_id: &str,
-    params: TerminalSubscribeParams,
-) -> Result<Value> {
-    if params.attach_mode != "observe"
-        || params.client.get("type").and_then(Value::as_str) != Some("mobile")
-        || !params.capabilities.is_object()
-    {
-        bail!("terminal subscription capabilities are invalid");
-    }
-    let pane = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    let initial = sessions(manager)?
-        .terminals()
-        .read_output(&pane)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default();
-    let subscription_id = Uuid::new_v4().to_string();
-    let stream = Arc::downgrade(connection);
-    let response_id = request_id.to_string();
-    let listener = sink.listen(
-        "pty_data",
-        Box::new(move |payload| {
-            let Ok(data) = serde_json::from_str::<PtyData>(payload) else { return };
-            if data.id != pane {
-                return;
-            }
-            let Ok(bytes) = general_purpose::STANDARD.decode(data.data) else { return };
-            if let Some(stream) = stream.upgrade() {
-                stream.stream(
-                    &response_id,
-                    json!({ "type": "data", "chunk": String::from_utf8_lossy(&bytes) }),
-                );
-            }
-        }),
-    );
-    connection.insert_subscription(subscription_id.clone(), listener);
-    Ok(json!({
-        "subscriptionId": subscription_id,
-        "type": "scrollback",
-        "serialized": initial,
-    }))
+fn subscribe_terminal(connection: &Arc<MobileConnection>, request_id: &str, params: TerminalSubscribeParams) -> Result<Value> {
+    let result = connection.call("observe",json!({"sessionId":params.worktree_id,"tabId":params.tab_id,
+        "attachMode":params.attach_mode,"client":params.client,"capabilities":params.capabilities}))?;
+    let id = result["subscriptionId"].as_str().context("Owner returned no terminal subscription.")?.to_string();
+    connection.terminal_subscriptions.lock().unwrap().insert(id,request_id.into());
+    connection.start_polling()?;
+    Ok(result)
 }
 
 #[derive(Deserialize)]
@@ -1150,34 +1056,9 @@ struct QueueInputParams {
     text: String,
 }
 
-fn queue_input(
-    manager: &PairingManager,
-    connection: &Arc<MobileConnection>,
-    params: QueueInputParams,
-) -> Result<Value> {
-    if params.text.is_empty() || params.text.len() > INPUT_BYTES_LIMIT {
-        bail!("terminal input must contain 1 to {INPUT_BYTES_LIMIT} bytes");
-    }
-    let pane = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    connection.runtime.claim_driver(
-        &connection.id,
-        &params.worktree_id,
-        &params.tab_id,
-        &pane,
-    )?;
-    // Resolve again immediately before the write so replacing a tab runtime
-    // cannot redirect a stale request into another process.
-    let current = resolve_live_pane(manager, &params.worktree_id, &params.tab_id)?;
-    if current != pane {
-        connection
-            .runtime
-            .release_driver(&connection.id, &params.worktree_id, &params.tab_id);
-        bail!("agent instance was replaced");
-    }
-    sessions(manager)?
-        .terminals()
-        .write(&current, params.text.as_bytes())?;
-    Ok(json!({ "accepted": true, "bytesWritten": params.text.len() }))
+fn queue_input(connection: &MobileConnection, params: QueueInputParams) -> Result<Value> {
+    if params.text.is_empty() || params.text.len() > INPUT_BYTES_LIMIT { bail!("terminal input must contain 1 to {INPUT_BYTES_LIMIT} bytes"); }
+    connection.call("input",json!({"sessionId":params.worktree_id,"tabId":params.tab_id,"text":params.text}))
 }
 
 #[derive(Deserialize)]
@@ -1187,11 +1068,8 @@ struct ReleaseInputParams {
     tab_id: String,
 }
 
-fn release_input(connection: &Arc<MobileConnection>, params: ReleaseInputParams) -> Value {
-    connection
-        .runtime
-        .release_driver(&connection.id, &params.worktree_id, &params.tab_id);
-    json!({ "released": true })
+fn release_input(connection: &MobileConnection, params: ReleaseInputParams) -> Result<Value> {
+    connection.call("release",json!({"sessionId":params.worktree_id,"tabId":params.tab_id}))
 }
 
 #[derive(Deserialize)]
@@ -1232,10 +1110,6 @@ fn subscribe_notifications(
     Ok(json!({ "subscriptionId": subscription_id }))
 }
 
-fn sessions(manager: &PairingManager) -> Result<&SessionManager> {
-    manager.sessions.get().context("session manager is unavailable")
-}
-
 fn validate_session_tab(session_id: &str, tab_id: &str) -> Result<(SessionEntry, TabEntry)> {
     let session = index::get(session_id)?;
     let tab = session
@@ -1254,22 +1128,6 @@ fn find_tab(tab_id: &str) -> Result<(SessionEntry, TabEntry)> {
         bail!("tab id is ambiguous");
     }
     Ok(result)
-}
-
-fn resolve_live_pane(manager: &PairingManager, session_id: &str, tab_id: &str) -> Result<String> {
-    validate_session_tab(session_id, tab_id)?;
-    let session_manager = sessions(manager)?;
-    let pane = session_manager
-        .pane_of(session_id, tab_id)
-        .context("terminal is not running")?;
-    if !session_manager.terminals().is_running(&pane.pane_id) {
-        bail!("terminal is not running");
-    }
-    Ok(pane.pane_id)
-}
-
-fn tab_key(session_id: &str, tab_id: &str) -> String {
-    format!("{session_id}/{tab_id}")
 }
 
 fn collapse_notification_text(text: &str) -> String {

@@ -1709,6 +1709,21 @@ export interface KillResult {
   confirmation: string | null;
 }
 
+export type LocalRuntimeState =
+  | { state: "inProcess" }
+  | { state: "connected"; epoch: string; runningAgents: number; terminals: number }
+  | { state: "unavailable"; message: string };
+
+export type QuitBehavior = "keepRunning" | "stopAll";
+export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
+
+export const localRuntime = {
+  status: () => invoke<LocalRuntimeState>("local_runtime_status"),
+  reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  settings: () => invoke<LocalRuntimeSettings>("local_runtime_settings"),
+  setQuitBehavior: (quitBehavior: QuitBehavior) => invoke<LocalRuntimeSettings>("set_local_runtime_quit_behavior", { quitBehavior }),
+};
+
 export const statusBar = {
   settings: () => invoke<StatusBarSettings>("status_bar_settings"),
   setSettings: (patch: Partial<StatusBarSettings>) =>

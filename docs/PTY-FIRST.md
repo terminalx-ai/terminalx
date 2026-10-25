@@ -650,17 +650,28 @@ records: they say the turn ended, and they draw nothing. The `Stop` and
 `Interrupt` hooks say the same thing with the same reply, moments apart, and
 two closers for one turn is one too many — the second lands as a turn with no
 prompt in front of it and draws the reply again as its final text, which read
-in the app as "delta / Worked for 10s / delta / Worked for 2s". The hooks are
-the authority, as they are for Claude; these records only carry the tail
-forward to them. `TurnTail` latches it: a turn is opened by the prompt that
+in the app as "delta / Worked for 10s / delta / Worked for 2s". Stop remains
+the authority for normal completion. An abort is applied in transcript order
+so a following `task_started` can open its continuation immediately (#627).
+A completion owed to an earlier Stop is consumed at its own `task_complete`
+record, even when a later start, abort and continuation arrive in that same read.
+Managed transcript polling and hook flushes hold a separate application gate from before
+advancing the tail cursor through applying the records: serializing the file
+read alone would allow a later batch to be applied ahead of an earlier abort.
+The gate is acquired without runtime or tail guards. File I/O finishes and
+releases the path/cursor locks before runtime is acquired for publication;
+other runtime users remain unblocked while a transcript read is pending.
+The gate is released before completion observers, restart callbacks and reported
+permission-mode reconciliation. By-hand history/import behavior is unchanged.
+The matching late Interrupt hook acknowledges that old abort without closing
+the new turn or cancelling its permission request. `TurnTail` latches it: a turn is opened by the prompt that
 starts it and closed by whichever closer arrives first, and a second close is
 dropped until a new prompt is published. That guard is not Codex-specific —
 Claude's transcript records an interruption as a boundary too, and it can race
 the same way.
 
-The cost is that a tab whose hooks could not be trusted has nothing to close a
-turn with, so it says so in the chat when it starts rather than leaving a turn
-spinning.
+A tab whose hooks could not be trusted still lacks a reliable normal-completion
+notification, so it says so in the chat when it starts.
 
 `session_meta`, `turn_context`, `world_state` and `thread_settings_applied` are
 configuration snapshots and draw nothing. Occupancy is
@@ -788,14 +799,41 @@ rule at click time rather than trusting the rendered row.
   typed input itself. The chat shows it as queued until the CLI takes it and the
   transcript says so; the app keeps no queue of its own for these tabs. What
   Escape does with that queue is the CLI's to decide (see "Escape interrupts;
-  only Stop ends the process"). "Send now" on a message still queued behind
-  the running turn interrupts it and types the message again as a prompt of
-  its own once the turn has ended, with the rest of the queue typed behind it
-  in order; its echo starts the new turn. Once the CLI's record of a message
-  has been read, the tab no longer holds it, and "Send now" on it neither
-  interrupts the turn nor types it again. One pressed just before that record
-  is read still stops the turn, but the record is told as the take it was,
-  and nothing is typed twice.
+  only Stop ends the process"). "Send now" flushes available acceptance records,
+  then sends one Escape for the provider to deliver its queue in its own order.
+  It never pastes a message again or reorders the echo identities. Repeated
+  clicks while that request awaits acceptance do nothing; an already accepted
+  message is also a no-op. A failed write preserves the pending messages and
+  reports an error. Acceptance removes the queued card; an interrupt alone does
+  not prove delivery. Codex abort and task-start records are applied in order,
+  including within one read, and a late Interrupt hook acknowledges the old
+  abort without closing the continuation. An unconfirmed queue still uses the
+  existing delivery-recovery notice rather than automatically resending input.
+  A synthetic macOS guest probe of Codex 0.153.4 captured multiple held prompts
+  accepted as one newline-joined `UserMessage` (`queued_escape.jsonl`). The
+  app acknowledges the exact written plain-text FIFO prefix in that record,
+  retaining each composer's identity. Multiline and repeated prompts keep their
+  order; unmatched text or an unverified combined-image representation remains
+  pending. Enter and successful-submission bookkeeping share the runtime lock,
+  so a fast acceptance cannot be consumed between the write and identity arming;
+  failed writes leave identities unarmed. The probe used the real CLI with a credential-free loopback Responses
+  server, and does not establish live OpenAI account integration.
+  A separate packaged baseline run at `5f2c9a38` reproduced the second paste:
+  both queued sequence IDs logged another `body_written` after Send now,
+  and the real rollout accepted the combined batch followed by each message
+  again. Chat also added the combined prompt beside the original messages.
+  That run did show a working continuation; the delayed-Interrupt status race
+  is covered separately by ordered native and projection regressions.
+  The candidate's real Chat controls also covered double-clicking the second
+  queued message, interrupting a running timed tool, identical multiline
+  prompts, and acceptance at tool completion. Rollout identities, Chat events,
+  and the existing development terminal-buffer diagnostic agreed: each queued
+  identity was acknowledged once, with no second paste. Chat displayed the
+  active continuation and removed its pending actions. Both guest bundles had
+  a blank terminal canvas despite populated on-screen WebGL terminal buffers;
+  visual Terminal rendering therefore remains unverified. Shared Claude
+  queue/interrupt behavior is covered by native regressions, not a live
+  authenticated Claude guest run.
 - **Permission mode changes** restart the CLI on the same conversation, because
   the TUI only cycles modes on a key with no way to read the result back and
   the CLI reads `--permission-mode` at startup alone. A change made mid-turn

@@ -48,19 +48,39 @@ the worktree and index. There is no silent overwrite or automatic merge.
 
 ## Lifetime, transport and computer control
 
-The host installs a per-user LaunchAgent with a private, stable executable
-copy. It survives window/viewer closure and app exit. It drains task queues,
-collects events and owns the optional scoped `caffeinate -i` assertion. It does
-not use `-d`, disable screen lock/FileVault, or change persistent power settings.
-Disabling new submissions does not destroy existing task history or stop a VM.
-To remove the integration, first resolve all tasks, export needed artifacts,
-and explicitly delete the enrolled guest in Settings if desired. Disable Local
-Cua. The host service can then be removed by stopping its exact
-`~/Library/LaunchAgents/com.terminalx.local-vm.<data-directory-hash>.plist`
-with `launchctl bootout gui/$(id -u) <that-plist>` and removing that same plist.
-Check its ProgramArguments data directory before choosing it; leave unrelated
-jobs and VMs alone. Retaining `$TERMINALX_HOME/local-vm` preserves the history.
-No uninstall command automatically erases conversations or credentials.
+The host VM controller runs inside the persistent local `terminalx-serve`
+owner described in [LOCAL-RUNTIME.md](LOCAL-RUNTIME.md). The desktop uses the
+same pinned authenticated client; a disconnected or older owner cannot fall
+back to a second manager or replay a pending mutation. The owner advertises a
+separate Local VM protocol capability. An older running owner is left running
+and reports this feature unavailable until the user deliberately updates and
+reconnects after resolving its work.
+
+Only VM-specific work remains in the task supervisor: durable provisioning,
+queue dispatch, guest polling, artifact retention and an optional scoped
+`caffeinate -i` assertion. There is no second host LaunchAgent or private copy
+of the desktop executable. Unfinished tasks, permission waits, unknown outcomes,
+manual holds and unresolved provisioning keep the host owner busy after window
+closure. Missing/corrupt initialized history and unrecognized provisioning
+states fail closed. Idle system sleep is prevented only for work whose
+environment explicitly opted in; display sleep and locking remain available.
+
+Normal quit detaches the desktop. Both owner socket and unattached tray stop
+use the same admission fence. Stop all and quit refuses while VM effects are
+in flight or unresolved guest work/manual control/provisioning remains, before
+revoking attachments or claiming any worker stopped. Resolve those tasks and
+return manual control first; Stop VM remains a separate explicit environment
+action. Stopping a host Cua client proves no guest cancellation. Provisioning
+cancellation before dispatch or after an uncertain restart can still require
+explicit inspection/reconciliation; a cancellation request is not a completed
+cleanup guarantee.
+
+A supervisor from a pre-cutover development build may still hold
+`$TERMINALX_HOME/local-vm/supervisor.lock`. The new owner refuses duplicate
+polling and does not unload the old job or reset its journal. Deliberate migration
+must stop that exact old `com.terminalx.local-vm.<data-directory-hash>` LaunchAgent
+after inspecting its data directory and work. No migration is performed by this
+change. Disabling Local Cua leaves history intact and does not stop a VM.
 
 A guest LaunchAgent runs the macOS arm64 `terminalx-serve` with
 `TERMINALX_HOME=/Users/lume/.terminalx-local/runtime`. Provider processes, PTYs,

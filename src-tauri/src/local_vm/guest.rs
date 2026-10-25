@@ -175,6 +175,30 @@ pub struct Guest {
 }
 
 impl Guest {
+    pub fn installation_present() -> Result<bool> {
+        Path::new(INSTALL)
+            .join("identity.json")
+            .try_exists()
+            .map_err(Into::into)
+    }
+
+    /// Determine role before enabling generic local-owner lifecycle services.
+    /// An invalid pinned installation is an error, never host/cloud fallback.
+    pub fn installed_for_root(root: &Path) -> Result<bool> {
+        let base = Path::new(INSTALL);
+        if !Self::installation_present()? {
+            return Ok(false);
+        }
+        Identity::load(base)?;
+        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            bail!("Local VM guest execution requires macOS arm64");
+        }
+        if fs::canonicalize(root)? != fs::canonicalize(base.join("runtime"))? {
+            bail!("Guest runtime must use the installed private runtime directory");
+        }
+        Ok(true)
+    }
+
     /// Absence of an installation leaves ordinary headless runtimes unchanged.
     /// An invalid installation is an error, never a fallback to local control.
     pub fn installed(
@@ -182,14 +206,8 @@ impl Guest {
         sink: Arc<dyn EventSink>,
     ) -> Result<Option<Arc<Self>>> {
         let base = PathBuf::from(INSTALL);
-        if !base.join("identity.json").try_exists()? {
+        if !Self::installed_for_root(&crate::store::root()?)? {
             return Ok(None);
-        }
-        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            bail!("Local VM guest execution requires macOS arm64");
-        }
-        if fs::canonicalize(crate::store::root()?)? != fs::canonicalize(base.join("runtime"))? {
-            bail!("Guest runtime must use the installed private runtime directory");
         }
         let guest = Arc::new(Self::open(base, manager, sink)?);
         let weak = Arc::downgrade(&guest);
@@ -276,6 +294,9 @@ impl Guest {
     }
 
     pub fn dispatch(&self, request: Request) -> Result<Value> {
+        if self.stopped.load(Ordering::Acquire) {
+            bail!("Guest runtime is stopping; no task operation was routed");
+        }
         // Re-read the installation identity so an in-place rollback/reinstall
         // invalidates even a process that is still running.
         let identity = Identity::load(&self.base)?;
@@ -1331,13 +1352,16 @@ impl Guest {
 
     fn stop_worker(&self, session: &str, tab: &str) -> Result<()> {
         let pane = SessionManager::pane_id(tab);
+        let group = self.manager.terminals().group_handle(&pane);
         let pid = self.manager.terminals().pid(&pane);
         // SessionManager::stop kills and waits for the PTY, then checks the
         // recorded process until RESTART_WAIT. Keep an independent check of
         // the pre-stop PID: clearing the in-memory engine alone is not proof
         // that desktop actions have stopped.
         self.manager.stop(session, tab)?;
-        if self.manager.is_running(session, tab) || pid.is_some_and(crate::harness::host::is_alive)
+        if self.manager.is_running(session, tab)
+            || group.as_ref().is_some_and(|g| g.pid().is_some())
+            || pid.is_some_and(crate::harness::host::group_or_process_alive)
         {
             bail!("Worker process exit is not confirmed; desktop lease remains held");
         }
@@ -2096,6 +2120,53 @@ mod tests {
         );
         let guest = Guest::open(base, manager, sink).unwrap();
         (home, guest, task)
+    }
+
+    #[test]
+    fn installed_guest_guard_precedes_all_generic_owner_window_mobile_and_sharing_routes() {
+        let (_home, guest, task) = setup();
+        let req = request(&guest, "desktop.state", json!({}));
+        let endpoint = crate::hooks::prepare_control().unwrap();
+        let service = crate::control::ControlService::headless(
+            guest.sink.clone(),
+            guest.manager.clone(),
+            endpoint,
+            "local".into(),
+        )
+        .with_local_lifetime(crate::local_runtime::Lifetime::new(Duration::from_secs(60)))
+        .with_guest(Some(Arc::new(guest)));
+        for command in [
+            "status",
+            "sessions.list",
+            "runtime.attach",
+            "runtime.stopAll",
+            "runtime.window.register",
+            "runtime.mobile.register",
+            "runtime.sharing.register",
+            "runtime.session.send",
+            "local_vm.request",
+            "computer.click",
+        ] {
+            let response = service.handle(crate::control::ControlRequest {
+                id: new_id(),
+                token: String::new(),
+                command: command.into(),
+                params: json!({}),
+            });
+            assert!(!response.ok, "{command}");
+            assert_eq!(response.error.unwrap().code, "unsupported", "{command}");
+        }
+        let response = service.handle(crate::control::ControlRequest {
+            id: new_id(),
+            token: String::new(),
+            command: "local_vm.guest".into(),
+            params: json!({"method":req.method,"params":req.params}),
+        });
+        assert!(response.ok);
+        assert_eq!(
+            response.result.unwrap()["generation"],
+            task.target.generation
+        );
     }
 
     fn record(task: Task) -> Record {

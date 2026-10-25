@@ -129,6 +129,13 @@ pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
     Ok(format!("# Written by TerminalX. Edit ~/.codex/config.toml instead.\n\n{}", toml::to_string_pretty(&out)?))
 }
 
+fn write_config(path: &Path, user: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>) -> Result<()> {
+    let config = mirrored_config(user, previous, cwd, trust)?;
+    #[cfg(target_os = "macos")]
+    let config = super::browser_use_macos::configure(&config, path.parent().context("Codex config has no home")?, std::env::var_os("PYTHONPATH").as_deref())?;
+    crate::store::write_atomic(path, config.as_bytes())
+}
+
 // ------------------------------------------------------------------ hook trust
 
 /// The `hooks.state` entries for our own hooks, out of a `hooks/list` reply.
@@ -345,7 +352,7 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
     let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     // The config has to exist before Codex is asked about the home, because
     // discovery reads it; the hook trust is filled in on the second write.
-    crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
+    write_config(&config_path, &user_toml, &previous, cwd, &state.trust)?;
 
     if state.hooks_digest != want || state.trust.is_empty() {
         state = State::default();
@@ -365,7 +372,7 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
             Err(e) => log::warn!("could not trust the Codex hooks: {e:#}"),
         }
         let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
-        crate::store::write_atomic(&config_path, mirrored_config(&user_toml, &previous, cwd, &state.trust)?.as_bytes())?;
+        write_config(&config_path, &user_toml, &previous, cwd, &state.trust)?;
         let _ = crate::store::write_json(&state_path, &state);
     }
 

@@ -1,3 +1,4 @@
+import { LocalRuntimeNotice } from "@/components/LocalRuntimeNotice";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
 import { FloatingShell } from "@/components/floating/FloatingShell";
@@ -9,5 +10,5 @@ import { isFloatingWindow } from "@/lib/appWindow";
  * backend is the source of truth for both.
  */
 export default function App() {
-  return <TooltipProvider>{isFloatingWindow() ? <FloatingShell /> : <AppShell />}</TooltipProvider>;
+  return <TooltipProvider>{isFloatingWindow() ? <FloatingShell /> : <AppShell />}<LocalRuntimeNotice /></TooltipProvider>;
 }

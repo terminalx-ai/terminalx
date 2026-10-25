@@ -309,6 +309,25 @@ describe("buildTranscript", () => {
     expect(t.turns[1].work.map((w) => (w.kind === "queued" ? `queued: ${w.text}` : w.kind))).toEqual(["queued: and then this"]);
   });
 
+  it("opens a visible continuation before a queued prompt echo arrives (#627)", () => {
+    const queued = ev({ type: "user_message", text: "Please summarize progress before continuing.", queued: true });
+    const events = [
+      ev({ type: "user_message", text: "start", queued: false }), queued,
+      ev({ type: "turn_completed", status: "aborted", authFailed: false }),
+      ev({ type: "model_request_started" }),
+    ];
+    let transcript = buildTranscript(events, true);
+    expect(transcript.turns).toHaveLength(2);
+    expect(transcript.turns[0].completed?.status).toBe("aborted");
+    expect(transcript.turns[1].live).toBe(true);
+    expect(transcript.turns[1].completed).toBeUndefined();
+    events.push(ev({ type: "turn_started", promptSeq: queued.seq }));
+    transcript = buildTranscript(events, true);
+    expect(transcript.turns).toHaveLength(2);
+    expect(transcript.turns[1].prompt?.seq).toBe(queued.seq);
+    expect(transcript.turns.flatMap((turn) => turn.work).filter((item) => item.kind === "queued")).toHaveLength(0);
+  });
+
   it("ignores a taken message it holds no queued note for", () => {
     const prompt = ev({ type: "user_message", text: "go", queued: false });
     const t = buildTranscript([prompt, ev({ type: "prompt_absorbed", promptSeq: prompt.seq }), ev({ type: "prompt_absorbed", promptSeq: 99_999 }), ev({ type: "assistant_text", text: "ok" })], true);

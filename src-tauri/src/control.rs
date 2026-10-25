@@ -241,49 +241,130 @@ pub struct ControlService {
     /// Set by the headless runtime (`cloud-workspace`, `local`); the desktop
     /// app reports none.
     runtime_kind: Option<String>,
-    /// Present only in a pinned guest installation. Its control socket serves
-    /// a bounded task surface, never general session/fleet/host operations.
+    local_lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
     #[cfg(unix)]
     guest: Option<Arc<crate::local_vm::guest::Guest>>,
+    #[cfg(unix)]
+    local_vm_available: bool,
     /// Asks the person before an agent's write to an issue. Only the desktop
     /// app has a window to ask in; without one such a write is refused.
     #[cfg(feature = "desktop")]
     questions: Option<crate::issue_control::Ask>,
     /// Computer use and the built-in browser; the headless runtime has neither.
     #[cfg(feature = "desktop")]
-    desktop: Option<DesktopControl>,
+    desktop: Option<WindowControl>,
 }
 
 #[cfg(feature = "desktop")]
 #[derive(Clone)]
-struct DesktopControl {
+pub(crate) struct WindowControl {
+    sink: Arc<dyn EventSink>,
+    questions: Option<crate::issue_control::Ask>,
     pairing: Option<Arc<crate::pairing::PairingManager>>,
     computer: Arc<crate::computer::ComputerService>,
     browser: std::sync::Arc<crate::browser::BrowserRuntime>,
 }
 
-impl ControlService {
-    #[cfg(feature = "desktop")]
-    pub fn new(
-        sink: Arc<dyn EventSink>,
-        manager: SessionManager,
-        endpoint: ControlEndpoint,
-        computer: Arc<crate::computer::ComputerService>,
-        browser: std::sync::Arc<crate::browser::BrowserRuntime>,
-    ) -> Self {
-        Self {
-            sink,
-            manager,
-            endpoint,
-            runtime_kind: None,
-            #[cfg(unix)]
-            guest: None,
-            #[cfg(feature = "desktop")]
-            questions: None,
-            desktop: Some(DesktopControl { computer, browser, pairing: None }),
-        }
+#[cfg(feature = "desktop")]
+impl WindowControl {
+    pub(crate) fn new(sink: Arc<dyn EventSink>, computer: Arc<crate::computer::ComputerService>, browser: Arc<crate::browser::BrowserRuntime>) -> Self {
+        Self { sink, computer, browser, pairing: None, questions: None }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn serve(mut self, app: tauri::AppHandle, endpoint: ControlEndpoint, pairing: Arc<crate::pairing::PairingManager>, ask: crate::issue_control::Ask) -> anyhow::Result<()> {
+        use tauri::Manager;
+        self.pairing = Some(pairing);
+        self.questions = Some(ask);
+        crate::hooks::serve_private(endpoint, |_| crate::hooks::HookReply::refused("Agent hooks belong to the background owner."), move |request| {
+            let result = (|| {
+                let runtime = app.state::<crate::AppState>().runtime().ok_or_else(|| ControlError::new("desktop_unavailable","The desktop has no runtime attachment.",None::<String>))?;
+                let attachment = runtime.attachment().map_err(ControlError::internal)?;
+                let (command,params) = crate::local_runtime::window::receive(&request,&attachment)?;
+                if matches!(command.as_str(),"window.open"|"window.quit"|"window.stopAllAndQuit") {
+                    let action_app = app.clone();
+                    let action_attachment = attachment.clone();
+                    let action = command.clone();
+                    app.run_on_main_thread(move || {
+                        // Scheduling onto AppKit is another asynchronous boundary.
+                        // Never apply an action from a replaced attachment.
+                        let current = action_app.state::<crate::AppState>().runtime()
+                            .and_then(|runtime|runtime.attachment().ok());
+                        if !current.is_some_and(|current|current.epoch == action_attachment.epoch && current.lease == action_attachment.lease) { return; }
+                        match action.as_str() {
+                            "window.open" => crate::account::focus_main_window(&action_app),
+                            "window.quit" => action_app.exit(0),
+                            "window.stopAllAndQuit" => crate::quit::stop_all_and_quit(&action_app),
+                            _ => unreachable!(),
+                        }
+                    }).map_err(ControlError::internal)?;
+                    return Ok(json!({"requested":command}));
+                }
+                self.execute(&command,params,&request.id)
+            })();
+            match result {
+                Ok(value) => ControlResponse::success(request.id,value),
+                Err(error) => ControlResponse::failure(request.id,error),
+            }
+        })?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        if let Some(action) = command.strip_prefix("share.") {
+            let pairing = self.pairing.as_ref().ok_or_else(|| ControlError::internal("Sharing is unavailable."))?;
+            let session = params["sessionId"].as_str().ok_or_else(|| ControlError::internal("Session id required."))?;
+            return match action {
+                "create" => {
+                    let settings = serde_json::from_value(params["settings"].clone()).map_err(ControlError::internal)?;
+                    tauri::async_runtime::block_on(pairing.create_share(session.into(), settings, params["directOnly"].as_bool().unwrap_or(false)))
+                }
+                "list" => pairing.share_status(session),
+                action => pairing.change_share(session, action, params.clone()),
+            }.map_err(ControlError::internal);
+        }
+        if let Some(method) = command.strip_prefix("computer.") {
+            return self.computer.call(method, params, request_id).map_err(computer_error);
+        }
+        if command.starts_with("browser.") { return crate::browser::control::handle(&self.browser, command, params); }
+        if let Some(action) = command.strip_prefix("cloud.") {
+            if action != "status" && !crate::cloud_control::enabled() { return Err(crate::cloud_control::disabled_error()); }
+            let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
+            return crate::cloud_control::call(self.sink.as_ref(), action, params);
+        }
+        match command {
+            "issues.view" | "issues.comment" | "issues.status" | "issues.assign" | "issues.label" | "issues.create" => issue_operation(self.questions.as_ref(), command, params),
+            "floating.show" | "floating.hide" | "floating.toggle" => {
+                let action = command.trim_start_matches("floating.");
+                self.sink.emit(crate::session_ops::FLOATING_REQUEST_EVENT, &json!({"action":action,"session":optional_string(&params,"session")}));
+                Ok(json!({"requested":action}))
+            }
+            "perf.terminal.start" => {
+                if !crate::terminal_perf::bench_enabled() {
+                    return Err(ControlError::new("unsupported", "The terminal benchmark is off in this app.",
+                        Some(format!("Launch a Dev build with {}=1; see docs/TERMINAL-PERFORMANCE.md.",crate::terminal_perf::BENCH_ENV))));
+                }
+                Ok(json!({"requestId":crate::terminal_perf::ask(self.sink.as_ref(),"bench",params)}))
+            }
+            "perf.terminal.poll" => {
+                let id = required_string(&params,"requestId")?;
+                match crate::terminal_perf::poll(&id) {
+                    Ok(Some(result)) => Ok(json!({"done":true,"result":result})),
+                    Ok(None) => Ok(json!({"done":false})),
+                    Err(()) => Err(ControlError::not_found(format!("No terminal benchmark request {id}."))),
+                }
+            }
+            "window.terminalCounters" => {
+                let id = crate::terminal_perf::ask(self.sink.as_ref(),"counters",json!({}));
+                Ok(crate::terminal_perf::wait(&id,crate::terminal_perf::COUNTERS_TIMEOUT).unwrap_or(Value::Null))
+            }
+            _ => Err(ControlError::invalid("This command is not a window service.")),
+        }
+    }
+}
+
+impl ControlService {
     /// The control service of `terminalx-serve`: sessions, tabs, permissions,
     /// worktrees and issues, without the desktop's computer use and browser.
     pub fn headless(
@@ -297,8 +378,11 @@ impl ControlService {
             manager,
             endpoint,
             runtime_kind: Some(runtime_kind),
+            local_lifetime: None,
             #[cfg(unix)]
             guest: None,
+            #[cfg(unix)]
+            local_vm_available: false,
             #[cfg(feature = "desktop")]
             questions: None,
             #[cfg(feature = "desktop")]
@@ -308,6 +392,10 @@ impl ControlService {
 
     pub fn handle(&self, request: ControlRequest) -> ControlResponse {
         let id = request.id.clone();
+        let _request = match self.local_lifetime.as_ref().map(|lifetime| lifetime.enter_command(request.command == "runtime.stopAll")).transpose() {
+            Ok(guard) => guard,
+            Err(error) => return ControlResponse::failure(id, error),
+        };
         match self.execute(&request.command, request.params, &id) {
             Ok(result) => ControlResponse::success(id, result),
             Err(error) => ControlResponse::failure(id, error),
@@ -320,15 +408,11 @@ impl ControlService {
         self
     }
 
-    #[cfg(feature = "desktop")]
-    pub(crate) fn with_questions(mut self, ask: crate::issue_control::Ask) -> Self {
-        self.questions = Some(ask);
-        self
-    }
+    #[cfg(unix)]
+    pub(crate) fn with_vm_controller(mut self) -> Self { self.local_vm_available=true; self }
 
-    #[cfg(feature = "desktop")]
-    pub(crate) fn with_pairing(mut self, pairing: Arc<crate::pairing::PairingManager>) -> Self {
-        if let Some(desktop) = &mut self.desktop { desktop.pairing = Some(pairing); }
+    pub(crate) fn with_local_lifetime(mut self, lifetime: Arc<crate::local_runtime::Lifetime>) -> Self {
+        self.local_lifetime = Some(lifetime);
         self
     }
 
@@ -339,10 +423,44 @@ impl ControlService {
                 return Err(ControlError::new("unsupported", "This guest serves only bounded local_vm.guest task requests.", None::<String>));
             }
             let request = serde_json::from_value(params).map_err(|error| ControlError::invalid(format!("Invalid guest request: {error}")))?;
-            return guest.dispatch(request).map_err(|error| ControlError::new("guest_request_failed", format!("{error:#}"), None::<String>));
+            return guest.dispatch(request).map_err(ControlError::internal);
         }
         if command == "local_vm.guest" {
-            return Err(ControlError::new("unsupported", "No pinned local VM guest is installed in this runtime.", None::<String>));
+            return Err(ControlError::new("unsupported", "No pinned guest is installed; no operation was routed.", None::<String>));
+        }
+        #[cfg(unix)]
+        if command == "local_vm.request" {
+            if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
+            let lifetime = self.local_lifetime.as_ref().ok_or_else(|| ControlError::new("unsupported", "Local VM requests require the persistent local owner.", None::<String>))?;
+            let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
+            let method = params["method"].as_str().ok_or_else(|| ControlError::invalid("method is required"))?;
+            return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
+        }
+        #[cfg(unix)]
+        if let Some(lifetime) = &self.local_lifetime {
+            if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
+            if crate::local_runtime::window::supported(command) { return lifetime.window.call(command, params); }
+        }
+        if command.starts_with("runtime.") {
+            if let Some(lifetime) = &self.local_lifetime {
+                if let Some(method) = command.strip_prefix("runtime.mobile.") {
+                    return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
+                }
+                if let Some(method) = command.strip_prefix("runtime.sharing.") {
+                    return crate::local_sharing::owner::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
+                }
+                if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
+                    return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
+                }
+                if command == "runtime.stopAll" {
+                    return crate::local_runtime::stop_all(&self.manager, lifetime, params);
+                }
+                return lifetime.command(command, params);
+            }
+        }
+        #[cfg(all(feature = "desktop", unix))]
+        if crate::local_runtime::window::supported(command) {
+            if let Some(desktop) = &self.desktop { return desktop.execute(command, params, request_id); }
         }
         #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
@@ -414,6 +532,11 @@ impl ControlService {
                 });
                 if let Some(kind) = &self.runtime_kind {
                     status["runtimeKind"] = json!(kind);
+                }
+                if let Some(lifetime) = &self.local_lifetime {
+                    status["localRuntime"] = lifetime.status();
+                    #[cfg(unix)]
+                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL}); } }
                 }
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;
@@ -516,8 +639,7 @@ impl ControlService {
                 format!("{command} needs the TerminalX desktop app; terminalx-serve lists issues only."),
                 None::<String>,
             )),
-            #[cfg(feature = "desktop")]
-            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" => self.pipelines(command, params),
+            "pipelines.list" | "pipelines.show" | "pipelines.autoMerge" | "pipelines.act" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.pipelines(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -535,6 +657,13 @@ impl ControlService {
     /// from the webview when there is one and it answers in time.
     fn terminal_status(&self) -> Value {
         let mut terminals = json!({ "backend": self.manager.terminals().stats() });
+        #[cfg(unix)]
+        if let Some(lifetime) = &self.local_lifetime {
+            terminals["webview"] = if lifetime.window.available() {
+                lifetime.window.call("window.terminalCounters", json!({})).unwrap_or(Value::Null)
+            } else { Value::Null };
+            return terminals;
+        }
         if self.has_webview() {
             let id = crate::terminal_perf::ask(self.sink.as_ref(), "counters", json!({}));
             terminals["webview"] = crate::terminal_perf::wait(&id, crate::terminal_perf::COUNTERS_TIMEOUT).unwrap_or(Value::Null);
@@ -720,25 +849,18 @@ impl ControlService {
             "session": entry, "outcome": outcome, "pipeline": pipeline, "pipelineNote": pipeline_note}))
     }
 
-    #[cfg(feature = "desktop")]
     fn pipeline_host(&self) -> crate::issue_pipeline::host::LocalHost {
         crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.manager.clone())
     }
 
     /// Start the issue pipeline for a new session: the pipeline and what the
     /// author's first prompt must carry for it, or why there is none.
-    #[cfg(feature = "desktop")]
     fn start_pipeline(&self, session_id: &str, tab_id: &str, auto_merge: Option<bool>) -> Result<(Value, String), String> {
+        if !cfg!(feature = "desktop") && self.local_lifetime.is_none() { return Err("Issue pipelines need a local desktop owner.".into()); }
         let pipeline = crate::issue_pipeline::engine::start(&self.pipeline_host(), session_id, tab_id, auto_merge, None).map_err(|error| format!("{error:#}"))?;
         Ok((json!(pipeline), crate::issue_pipeline::prompts::author_brief()))
     }
 
-    #[cfg(not(feature = "desktop"))]
-    fn start_pipeline(&self, _session_id: &str, _tab_id: &str, _auto_merge: Option<bool>) -> Result<(Value, String), String> {
-        Err("Issue pipelines run in the desktop app.".into())
-    }
-
-    #[cfg(feature = "desktop")]
     fn pipelines(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_pipeline::{engine, store};
         if command == "pipelines.list" {
@@ -798,6 +920,9 @@ impl ControlService {
             .min(86_400);
         let deadline = Instant::now() + Duration::from_secs(timeout);
         loop {
+            if self.local_lifetime.as_ref().is_some_and(|lifetime| lifetime.is_stopping()) {
+                return Err(ControlError::new("runtime_stopping", "The local runtime is stopping.", None::<String>));
+            }
             let status = self.manager.status_of(&target.session.id, &target.tab.id);
             let running = self.manager.is_running(&target.session.id, &target.tab.id);
             let reason = match status {
@@ -876,14 +1001,12 @@ impl ControlService {
                 "A project's main checkout cannot be deleted.",
             ));
         }
-        // Agents, then the session's shells, each waited for, so nothing
-        // still holds the directory.
+        // Keep admission through confirmed exit and removal. A failed stop
+        // cannot be discarded by a CLI caller either.
+        let _admission = crate::issue_pipeline::admission::lock();
+        self.manager.accepting_work().map_err(ControlError::internal)?;
         let stop = |session: &crate::store::index::SessionEntry| {
-            for tab in &session.tabs {
-                let _ = self.manager.stop(&session.id, &tab.id);
-            }
-            let shells = self.manager.terminals().session_pane_ids(&session.id, &[]);
-            self.manager.terminals().kill_all_and_wait(&shells, std::time::Duration::from_secs(5));
+            self.manager.stop_session_confirmed(session).map_err(|error| format!("{error:#}"))
         };
         #[cfg(feature = "desktop")]
         let browser_key = crate::browser::control::canonical(&worktree.path);
@@ -905,7 +1028,7 @@ impl ControlService {
             fetch: crate::landed::Fetch::Fresh,
             guard: None,
         };
-        let removed = crate::session_ops::remove_workspace(&*self.sink, &request, &stop).map_err(|error| {
+        let removed = crate::session_ops::remove_workspace_fallible(&*self.sink, &request, &stop).map_err(|error| {
             if error.starts_with(crate::session_ops::NEEDS_CONFIRMATION) {
                 ControlError::new("needs_force", error, Some("Nothing was removed. Repeat with --force only if losing this work is intended.".into()))
             } else {
@@ -966,6 +1089,12 @@ impl ControlService {
     /// through the contract's operations, with every write put to the
     /// person first (see `issue_control`).
     fn issue_op(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        issue_operation(self.questions.as_ref(), command, params)
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::issue_control::{authorize, in_project, run, Caller, Live, Subject, Write};
         use crate::issue_ops::{Provider, Target};
         let action = command.trim_start_matches("issues.");
@@ -1000,10 +1129,9 @@ impl ControlService {
                 routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
                 session_title: session_title.as_deref(),
             };
-            authorize(write, &subject, self.questions.as_ref())
+            authorize(write, &subject, questions)
         };
         run(action, &params, id.as_deref(), &Live(target), &gate)
-    }
 }
 
 #[cfg(feature = "desktop")]
@@ -1144,7 +1272,6 @@ fn issue_for_session(_project_path: &str, _reference: &str, _provider: Option<&s
 /// `ENG-42`), or by the session working on it. An issue worked on more than
 /// once names its newest pipeline. Two projects can each have an issue #12:
 /// then the number alone names neither, and `project` has to say which.
-#[cfg(feature = "desktop")]
 fn resolve_pipeline(selector: &str, project: Option<&Project>) -> Result<crate::issue_pipeline::Pipeline, ControlError> {
     let mut pipelines = crate::issue_pipeline::store::list().map_err(ControlError::internal)?;
     if let Some(project) = project {
@@ -1385,6 +1512,35 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_vm_requests_belong_to_the_persistent_owner_and_stop_refusal_preserves_attachment() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let params=json!({"method":"state","params":{}});
+        assert!(service.execute("local_vm.request",params.clone(),"test").is_err());
+        let life=crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let lease=life.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let service=service.with_local_lifetime(life.clone());
+        assert!(service.execute("local_vm.request",params.clone(),"test").is_err());
+        assert!(service.execute("status",json!({}),"test").unwrap().get("localVm").is_none());
+        let service=service.with_vm_controller();
+        assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["protocol"],1);
+        assert_eq!(service.execute("local_vm.request",params,"test").unwrap()["enabled"],false);
+        let journal=crate::local_vm::host::journal().unwrap();
+        let env=journal.enroll("held guest","local:test").unwrap();
+        journal.transaction(|state| {state.environments.get_mut(&env.id).unwrap().manual_control=true; Ok(())}).unwrap();
+        let stop=json!({"epoch":life.status()["epoch"]});
+        assert_eq!(service.execute("runtime.stopAll",stop.clone(),"test").unwrap_err().code,"local_vm_unresolved");
+        assert!(!life.is_stopping());
+        assert!(life.command("runtime.heartbeat",lease).is_ok());
+        assert!(life.enter().is_ok());
+        journal.transaction(|state| {state.environments.get_mut(&env.id).unwrap().manual_control=false; Ok(())}).unwrap();
+        service.execute("runtime.stopAll",stop,"test").unwrap();
+        assert!(life.is_stopping());
+        assert!(crate::local_vm::supervisor::admit(&life).is_err());
+    }
 
     fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
         let sink = Arc::new(crate::sink::BroadcastSink::new(16));

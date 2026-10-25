@@ -16,6 +16,9 @@ pub struct Settings {
     /// Extra directories to search for agent binaries.
     pub extra_bin_dirs: Vec<String>,
     pub notifications: bool,
+    /// None means the reader has not answered the first-quit choice yet.
+    /// The effective default keeps work running; stopping requires an explicit choice.
+    pub quit_behavior: Option<QuitBehavior>,
     /// Personal API key for Linear; the file is kept owner-readable only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linear_api_key: Option<String>,
@@ -40,6 +43,16 @@ pub struct Settings {
     /// What this Mac says about the issues its sessions work on (#441,
     /// `work_claims.rs`). The Rust side publishes it, so it lives here.
     pub work_status: WorkStatusSettings,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum QuitBehavior {
+    StopAll,
+    // An unknown future value must never become permission to stop work.
+    #[default]
+    #[serde(other)]
+    KeepRunning,
 }
 
 /// Who sees which issues this person's sessions are working on. Their own
@@ -191,6 +204,7 @@ impl Default for Settings {
             branch_prefix: "raccoon/".into(),
             extra_bin_dirs: Vec::new(),
             notifications: true,
+            quit_behavior: None,
             linear_api_key: None,
             linear_viewer: None,
             transcription_model: "apple".into(),
@@ -232,6 +246,23 @@ pub fn save(s: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_keeps_work_by_default_and_only_an_explicit_choice_stops_it() {
+        let legacy: Settings = serde_json::from_str(r#"{"notifications":false}"#).unwrap();
+        assert_eq!(legacy.quit_behavior, None, "first quit must still offer the choice");
+        assert_eq!(legacy.quit_behavior.unwrap_or_default(), QuitBehavior::KeepRunning);
+        assert!(!legacy.notifications);
+        for (wire, expected) in [("keepRunning", QuitBehavior::KeepRunning), ("stopAll", QuitBehavior::StopAll)] {
+            let chosen: Settings = serde_json::from_value(serde_json::json!({"quitBehavior":wire})).unwrap();
+            assert_eq!(chosen.quit_behavior, Some(expected));
+            let saved = serde_json::to_value(&chosen).unwrap();
+            assert_eq!(saved["quitBehavior"], wire);
+            assert_eq!(serde_json::from_value::<Settings>(saved).unwrap().quit_behavior, Some(expected));
+        }
+        let future: Settings = serde_json::from_str(r#"{"quitBehavior":"new-policy"}"#).unwrap();
+        assert_eq!(future.quit_behavior, Some(QuitBehavior::KeepRunning));
+    }
 
     #[test]
     fn the_floating_window_defaults_on_and_a_shortcut_turned_off_stays_off() {

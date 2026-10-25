@@ -30,9 +30,13 @@ const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.
 struct Observer {
     rt: Mutex<std::sync::Weak<Mutex<TabRuntime>>>,
     completed: Mutex<Vec<(String, String, Option<String>)>>,
+    interrupts: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionObserver for Observer {
+    fn interrupted(&self, _key: &str) {
+        self.interrupts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
         // Another thread may hold the lock for a moment, as the input thread a
@@ -197,6 +201,8 @@ impl Rig {
                 nudge_by: None,
                 held: Vec::new(),
                 resend_after_abort: None,
+                codex_interrupt_hooks_owed: 0,
+                codex_prompt_starts_turn: false,
                 decisions: HashMap::new(),
                 turn_tail: Default::default(),
                 transcript_turn: None,
@@ -219,6 +225,7 @@ impl Rig {
             stalled_at: None,
             last_settings_report: None,
             reported_mode_to_judge: None,
+            restart_claim: None,
             stopping: false,
             stop_in_flight: false,
             stopping_pid: None,
@@ -336,7 +343,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -439,14 +446,16 @@ fn the_watcher_runs_a_pending_settings_restart_after_closing_the_turn() {
         let mut rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
         p.restart_when_idle = true;
-        // Exercise the real restart through releasing the old CLI, then
-        // refuse a new process instead of launching an installed agent.
-        rt.stopping = true;
     }
     let (sent, restarted) = std::sync::mpsc::channel();
+    let shutting_down = rig.manager.shutting_down.clone();
     rig.manager.sink.listen("tab_status", Box::new(move |payload| {
         let event: serde_json::Value = serde_json::from_str(payload).unwrap();
         if event["status"] == "idle" {
+            // Exercise the actual idle restart through releasing the CLI, then
+            // refuse startup through the shutdown gate. Marking the tab as
+            // already stopping would correctly cancel the idle dispatch itself.
+            shutting_down.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = sent.send(());
         }
     }));
@@ -632,7 +641,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -1926,14 +1935,14 @@ fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer()
 }
 
 #[test]
-fn a_held_prompt_sent_now_is_typed_again_once_the_interrupted_turn_ends_and_the_rest_held_behind_it() {
+fn send_now_keeps_pending_identities_and_echo_order_after_interrupt() {
     let rig = Rig::with_live_pane();
     rig.start_turn();
     {
         let mut rt = rig.rt.lock().unwrap();
         if let Engine::Cli(p) = &mut rt.engine {
             for (seq, text) in [(41, "first held"), (42, "second held")] {
-                p.held.push((seq, HeldPrompt { text: text.into(), attachments: Vec::new() }));
+                p.held.push(seq);
                 let mut echo = ComposerEcho::new(text.into(), 0);
                 echo.queued = true;
                 echo.seq = seq;
@@ -1941,7 +1950,7 @@ fn a_held_prompt_sent_now_is_typed_again_once_the_interrupted_turn_ends_and_the_
             }
         }
     }
-    assert!(rig.manager.send_queued_now(SESSION, TAB, 7).is_err(), "a message the CLI has taken cannot be sent now");
+    assert!(rig.manager.send_queued_now(SESSION, TAB, 7).is_ok(), "a stale action is a harmless no-op");
     rig.manager.send_queued_now(SESSION, TAB, 42).unwrap();
     // The Escape went in; the CLI ends the turn as interrupted.
     {
@@ -1949,17 +1958,13 @@ fn a_held_prompt_sent_now_is_typed_again_once_the_interrupted_turn_ends_and_the_
         rig.manager.apply(&mut rt, Payload::TurnCompleted { status: TurnStatus::Aborted, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false }, None);
     }
     let rt = rig.rt.lock().unwrap();
-    assert!(rt.turn_open, "the chosen message opens a turn of its own");
-    assert_eq!(rt.status, TabStatus::InProgress);
+    assert!(!rt.turn_open, "an interrupt acknowledgement does not prove delivery");
+    assert_eq!(rt.status, TabStatus::Idle);
     let Engine::Cli(p) = &rt.engine else { panic!("a CLI tab") };
-    assert_eq!(p.awaiting_delivery, Some(42));
-    assert_eq!(p.held.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(), vec![41], "the other one is held again, behind it");
-    assert_eq!(
-        p.echoed.iter().map(|echo| (echo.seq, echo.queued, echo.resent)).collect::<Vec<_>>(),
-        vec![(42, false, true), (41, true, false)],
-        "both records stay; their echoes are awaited afresh, in the order they are typed: the chosen one as a prompt of its own, the other still queued"
-    );
-    assert!(p.resend_after_abort.is_none());
+    assert_eq!(p.awaiting_delivery, None);
+    assert_eq!(p.held, vec![41, 42]);
+    assert_eq!(p.echoed.iter().map(|echo| (echo.seq, echo.queued)).collect::<Vec<_>>(), vec![(41, true), (42, true)]);
+    assert_eq!(p.resend_after_abort, Some(42), "still pending work until provider acceptance");
 }
 
 #[test]

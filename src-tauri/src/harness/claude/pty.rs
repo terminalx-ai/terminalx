@@ -36,7 +36,7 @@ pub const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
 ];
 
 /// How long the CLI waits for a hook. A permission card is answered by a
-/// person, so that one is given the CLI's own default ceiling; the rest only
+/// person, so that one is given the CLI's default timeout; the rest only
 /// report and must never hold a turn up.
 const PERMISSION_TIMEOUT_SECS: u64 = 600;
 const REPORT_TIMEOUT_SECS: u64 = 10;
@@ -59,12 +59,16 @@ fn timeout_for(event: &str) -> u64 {
 /// `~/.claude/settings.json` means Raccoon never edits a file it does not own,
 /// and a CLI started outside Raccoon is untouched.
 pub fn settings_json(exe: &Path) -> Value {
+    settings_json_for_owner(exe, crate::local_runtime::permissions::enabled())
+}
+
+fn settings_json_for_owner(exe: &Path, local_owner: bool) -> Value {
     let mut hooks = serde_json::Map::new();
     for (event, matcher) in HOOK_EVENTS {
         let mut group = json!({ "hooks": [{
             "type": "command",
-            "command": crate::hooks::hook_command(exe, event),
-            "timeout": timeout_for(event),
+            "command": crate::hooks::decision_hook_command(exe, event, local_owner && *event == "PermissionRequest"),
+            "timeout": if local_owner && *event == "PermissionRequest" { crate::local_runtime::permissions::PROVIDER_SECONDS } else { timeout_for(event) },
         }]});
         if let Some(m) = matcher {
             group["matcher"] = json!(m);
@@ -276,6 +280,22 @@ pub fn permission_decision(allow: bool, updated_input: Option<Value>, updated_pe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_local_owner_deciding_hooks_use_the_extended_wait() {
+        let local = settings_json_for_owner(Path::new("/opt/runtime"), true);
+        let default = settings_json_for_owner(Path::new("/opt/runtime"), false);
+        {
+            let event = "PermissionRequest";
+            let hook = &local["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["timeout"], crate::local_runtime::permissions::PROVIDER_SECONDS);
+            assert!(hook["command"].as_str().unwrap().ends_with(" --local-owner-decision"));
+            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 600);
+            assert!(!default["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
+        }
+        assert_eq!(local["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
+        assert!(!local["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
+    }
 
     #[test]
     fn settings_point_every_hook_at_this_binary() {

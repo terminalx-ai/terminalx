@@ -4,9 +4,9 @@
   "version": "0.2.17",
   "identifier": "com.terminalx.next",
   "build": {
-    "beforeDevCommand": "node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos --dev && pnpm dev",
+    "beforeDevCommand": "pnpm build:terminalx-launcher --dev && node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos --dev && pnpm build:local-runtime --dev && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos && pnpm build",
+    "beforeBuildCommand": "pnpm build:terminalx-launcher && node scripts/ensure-agent-browser.mjs && pnpm build:computer-macos && pnpm build:local-runtime && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -62,7 +62,8 @@
     ],
     "createUpdaterArtifacts": true,
     "resources": {
-      "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": "TerminalX Computer Use Helper.app"
+      "../native/computer-use-macos/.build/release/TerminalX Computer Use Helper.app": "TerminalX Computer Use Helper.app",
+      "target/local-runtime/": "local-runtime/"
     }
   },
   "plugins": {

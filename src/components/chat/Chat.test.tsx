@@ -4,6 +4,7 @@ import { Chat } from "./Chat";
 import { buildTranscript } from "@/lib/transcript";
 import { syntheticLog } from "@/demo/synthetic";
 import type { StreamBlock } from "@/lib/agentEvents";
+import type { AgentEvent } from "@/types/events";
 import { READER_SCROLL_EVENT } from "@/lib/shellScroll";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -393,6 +394,36 @@ describe("a message sent while the agent worked", () => {
     // One Send now, on the message behind the running turn.
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
     expect(sendNow).toHaveBeenCalledWith(6);
+  });
+
+  it("keeps a stopped turn historical while accepted queued input continues working (#627)", () => {
+    const events: AgentEvent[] = [
+      { ...base, id: "e1", seq: 1, ts: at(1), payload: { type: "user_message", text: "go", queued: false } },
+      { ...base, id: "e2", seq: 2, ts: at(2), payload: { type: "user_message", text: "Please summarize progress before continuing.", queued: true } },
+      { ...base, id: "e3", seq: 3, ts: at(3), payload: { type: "user_message", text: "Then list the remaining steps.", queued: true } },
+      { ...base, id: "e4", seq: 4, ts: at(4), payload: { type: "turn_completed", status: "aborted", authFailed: false } },
+      { ...base, id: "e5", seq: 5, ts: at(5), payload: { type: "turn_started", promptSeq: 2 } },
+      { ...base, id: "e6", seq: 6, ts: at(6), payload: { type: "model_request_started" } },
+    ];
+    const sendNow = vi.fn();
+    const view = (log: AgentEvent[]) => (
+      <TooltipProvider>
+        <Chat sessionId="s" transcript={buildTranscript(log, true)} stream={[]} live answering={false} onAnswerPermission={() => {}} onAnswerQuestions={() => {}} footer={null} onSendQueuedNow={sendNow} />
+      </TooltipProvider>
+    );
+    const { rerender } = render(view(events));
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    expect(screen.getByText("Working")).toBeTruthy();
+    expect(screen.getAllByTestId("queued-message")).toHaveLength(1);
+    expect(screen.getByTestId("queued-message").textContent).toContain("Then list the remaining steps.");
+    fireEvent.click(screen.getByRole("button", { name: "Send now" }));
+    expect(sendNow).toHaveBeenCalledWith(3);
+
+    rerender(view([...events, { ...base, id: "e7", seq: 7, ts: at(7), payload: { type: "prompt_absorbed", promptSeq: 3 } }]));
+    expect(screen.queryByTestId("queued-message")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send now" })).toBeNull();
+    expect(screen.getAllByTestId("reader-message")).toHaveLength(3);
+    expect(screen.getByText("Working")).toBeTruthy();
   });
 
   it("offers no Send now once the turn it waited behind is over: the agent sends it itself", () => {
