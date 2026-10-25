@@ -19,6 +19,25 @@ export interface DictationContext {
   composer: string;
 }
 
+/** Conservative mirror of Rust personalization::is_sensitive, applied locally
+ * before source switches discard text. Only the boolean crosses IPC when OFF. */
+export function sensitiveSurface(text: string): boolean {
+  // Retain the frontend's spaced prompt spellings as well as Rust's markers.
+  if (/(?:password|passphrase|passcode|one.time.code|api[_ -]?key|access[_ -]?token|private key|secret)\s*[:=?]/i.test(text)) return true;
+  const lower = text.toLowerCase();
+  const compact = lower.replace(/\s/gu, "");
+  if (compact.includes("token=") || compact.includes("token:")) return true;
+  if ([".env", "private key", "password", "passphrase", "passcode", "one-time-code",
+    "one time code", "passwd", "api_key", "apikey", "api-key", "access_token", "secret",
+    "bearer ", "sk-", "ghp_", "github_pat_", "xoxb-", "xoxp-", "akia", "authorization:",
+    "token=", "token:", "eyj", "://"].some(marker => lower.includes(marker))) return true;
+  return text.split(/[^a-zA-Z0-9_\-=/]/u).some(word => {
+    const digits = word.match(/[0-9]/g)?.length ?? 0;
+    return /[0-9]{6}/.test(word) || (word.length >= 24 && digits >= 3)
+      || (word.length >= 40 && !word.includes("_") && !word.includes("/"));
+  });
+}
+
 /** Prepare names ahead of recording; never await a filesystem walk at mic start. */
 export function useDictationContext(target: string, cwd?: string, remote = false, draft = "", caret?: number) {
   const prepared = useRef<{ cwd?: string; terms: string[] }>({ terms: [] });
@@ -60,12 +79,11 @@ export function useDictationContext(target: string, cwd?: string, remote = false
     const terminal = peekInstance(tab?.pane ?? agentPaneId(target))?.term;
     if (terminal) {
       const buffer = terminal.buffer.active;
-      for (let i = buffer.viewportY; i < Math.min(buffer.length, buffer.viewportY + terminal.rows); i++) {
+      for (let i = buffer.viewportY; i < Math.min(buffer.length, buffer.viewportY + Math.min(terminal.rows, 128)); i++) {
         result.terminal.push((buffer.getLine(i)?.translateToString(true) ?? "").slice(0, 512));
       }
-      result.sensitive ||= /(?:password|passphrase|passcode|one.time.code)\s*[:?]\s*$/i.test(result.terminal.slice(-3).join("\n"));
     }
-    result.sensitive ||= /(?:password|passphrase|passcode|one.time.code|api[_ -]?key|access[_ -]?token|private key|secret)\s*[:=?]/i.test(result.composer);
+    result.sensitive ||= sensitiveSurface(result.composer) || result.terminal.some(sensitiveSurface);
     if (result.sensitive) result.learn = false;
     if (!o?.context || result.sensitive || (remote && !o.remoteContext)) {
       result.composer = "";

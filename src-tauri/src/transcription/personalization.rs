@@ -796,4 +796,14 @@ mod tests {
             assert!(correction(a, b).is_none());
         }
     }
+    #[test]
+    fn frontend_privacy_classification_contract() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/lib/__fixtures__/dictation-privacy.json"
+        )).unwrap();
+        for case in cases.as_array().unwrap() {
+            assert_eq!(is_sensitive(case["text"].as_str().unwrap()), case["sensitive"].as_bool().unwrap());
+        }
+    }
+
 }

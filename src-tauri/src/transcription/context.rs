@@ -284,4 +284,50 @@ mod tests {
         std::fs::write(dir.path().join("DictationEngine.rs"), "CONTENT_SENTINEL").unwrap();
         assert_eq!(project_terms(dir.path()), vec!["DictationEngine.rs"]);
     }
+    #[test]
+    fn formatted_stream_contract_uses_production_processing() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/lib/__fixtures__/dictation-formatting.json"
+        )).unwrap();
+        for case in cases.as_array().unwrap() {
+            let data: Personalization = serde_json::from_value(case["data"].clone()).unwrap();
+            let run = RunContext::from_data(data, ContextRequest { coding: true, ..Default::default() });
+            let noise = super::super::noise::NoiseResult::new(super::super::noise::NoiseStatus::Disabled);
+            for (raw, expected) in case["raw"].as_array().unwrap().iter().zip(case["text"].as_array().unwrap()) {
+                assert_eq!(run.finalize(raw.as_str().unwrap(), "apple", &noise), expected.as_str().unwrap(), "{}", case["name"]);
+            }
+        }
+    }
+
+    #[test]
+    fn common_finalizer_snippets_replacements_scope_boundaries_and_off() {
+        use super::super::{catalog::MODELS, noise::{NoiseResult, NoiseStatus}};
+        use personalization::{Entry, Kind};
+        let mut data = Personalization::default();
+        data.options.snippets = true;
+        data.options.replacements = true;
+        data.entries = vec![
+            Entry { id: "snippet".into(), kind: Kind::Snippet, heard: "insert status".into(),
+                written: "ready for review".into(), sounds_like: vec![], project: Some("/project".into()) },
+            Entry { id: "replacement".into(), kind: Kind::Replacement, heard: "ready".into(),
+                written: "done".into(), sounds_like: vec![], project: None },
+        ];
+        let noise = NoiseResult::new(NoiseStatus::Disabled);
+        for engine in MODELS.iter().map(|m| m.id).chain(std::iter::once("apple")) {
+            let mut run = RunContext { data: data.clone(), project: Some("/project".into()), ..Default::default() };
+            assert_eq!(run.finalize("insert status; ready", engine, &noise), "ready for review; done", "{engine}");
+            assert_eq!(run.finalize("insert statuses; already", engine, &noise), "insert statuses; already", "{engine}");
+            for project in [None, Some("/other".into())] {
+                run.project = project;
+                assert_eq!(run.finalize("insert status; ready", engine, &noise), "insert status; done", "{engine}");
+            }
+            run.project = Some("/project".into());
+            run.data.options.snippets = false;
+            assert_eq!(run.finalize("insert status; ready", engine, &noise), "insert status; done", "{engine}");
+            run.data.options.replacements = false;
+            let raw = "  insert status; ready!\n";
+            assert_eq!(run.finalize(raw, engine, &noise), raw, "{engine}");
+        }
+    }
+
 }

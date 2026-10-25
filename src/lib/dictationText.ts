@@ -28,6 +28,8 @@ export interface DictationBuffer {
   committed: string;
   /** The utterance still being revised; every partial replaces it wholesale. */
   live: string;
+  /** Raw live recognition, before personalization changes its words. */
+  raw?: string;
   /** Recogniser-owned identity for `live`, when the engine can provide one. */
   segment?: number;
 }
@@ -95,6 +97,8 @@ function survivingWordCount(prev: string[], next: string[]): number {
 
 /** What the recogniser knows about a result beyond its text. */
 export interface DictationResult {
+  /** Untransformed text used only to identify revisions. */
+  raw?: string;
   /**
    * Stable within one utterance and different for the next. Apple's is derived
    * in Rust from its timestamps: a partial has placeholder ones, and an
@@ -154,9 +158,9 @@ function isRevision(buffer: DictationBuffer, next: string, result: DictationResu
     // the last partial and can correct any word of it, so the gap between
     // results must not tighten the test. The words alone still decide, since
     // a phrase that shares nothing with the live one is not a rewrite of it.
-    return rewrites(buffer.live, next, true);
+    return rewrites(buffer.raw ?? buffer.live, result.raw ?? next, true);
   }
-  return revises(buffer.live, next, result.sincePreviousMs);
+  return revises(buffer.raw ?? buffer.live, result.raw ?? next, result.sincePreviousMs);
 }
 
 /**
@@ -168,16 +172,17 @@ function outOfOrder(buffer: DictationBuffer, result: DictationResult): boolean {
   return buffer.segment != null && result.segment != null && result.segment < buffer.segment;
 }
 
-function withLive(committed: string, live: string, segment: number | undefined): DictationBuffer {
-  return segment == null ? { committed, live } : { committed, live, segment };
+function withLive(committed: string, live: string, segment: number | undefined, raw?: string): DictationBuffer {
+  const buffer: DictationBuffer = segment == null ? { committed, live } : { committed, live, segment };
+  return raw == null ? buffer : { ...buffer, raw };
 }
 
 /** Take a partial result. Blank ones say nothing and change nothing. */
 export function applyPartial(buffer: DictationBuffer, partial: string, result: DictationResult = {}): DictationBuffer {
   const next = partial.trim();
   if (!next || outOfOrder(buffer, result)) return buffer;
-  if (isRevision(buffer, next, result)) return withLive(buffer.committed, next, result.segment);
-  return withLive(joinSpoken(buffer.committed, buffer.live), next, result.segment);
+  if (isRevision(buffer, next, result)) return withLive(buffer.committed, next, result.segment, result.raw);
+  return withLive(joinSpoken(buffer.committed, buffer.live), next, result.segment, result.raw);
 }
 
 /**

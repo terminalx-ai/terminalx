@@ -60,6 +60,7 @@ export function useDictation(): DictationState {
 interface DictationEvent {
   kind: "partial" | "final" | "error" | "stopped" | "listening" | "transcribing";
   text?: string;
+  raw?: string;
   message?: string;
   settings?: "microphone" | "speechRecognition";
   /** Stable identity derived from Apple's transcription segment timestamps. */
@@ -104,13 +105,13 @@ async function subscribe() {
           {
             const now = performance.now();
             const sincePreviousMs = previousPartialAt == null ? undefined : now - previousPartialAt;
-            buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, sincePreviousMs });
+            buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, raw: p.raw, sincePreviousMs });
             previousPartialAt = now;
           }
           set({ text: spokenText(buffer) });
           break;
         case "final":
-          buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment });
+          buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment, raw: p.raw });
           previousPartialAt = null;
           set({ text: spokenText(buffer) });
           break;

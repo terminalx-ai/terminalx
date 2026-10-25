@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * the reader spoke may go missing from the draft.
  */
 
-let deliver: (payload: { kind: string; text?: string; segment?: number }) => void = () => {};
+let deliver: (payload: { kind: string; text?: string; raw?: string; segment?: number }) => void = () => {};
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
@@ -98,7 +98,7 @@ const box = () => screen.getByRole("textbox") as HTMLTextAreaElement;
 const mic = () => screen.getAllByRole("button")[0];
 const flush = () => screen.getAllByRole("button")[1];
 
-const send = async (...events: { kind: string; text?: string; segment?: number }[]) => {
+const send = async (...events: { kind: string; text?: string; raw?: string; segment?: number }[]) => {
   await act(async () => {
     for (const e of events) deliver(e);
   });
@@ -384,3 +384,43 @@ describe("a deletion in the middle of that stream (#428)", () => {
   });
 });
 
+
+// Shared with Rust's production-finalizer contract test: these are specified
+// text transformations, not stand-ins for recognition or audio evidence.
+import formattingCases from "@/lib/__fixtures__/dictation-formatting.json";
+
+describe.each(formattingCases)("formatted Apple revisions: $name", ({ raw, text }) => {
+  it("replaces the live raw revision, then appends a distinct segment", async () => {
+    await open();
+    await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });
+    expect(box().value).toBe(text[0]);
+    await send({ kind: "partial", raw: raw[1], text: text[1], segment: 0 });
+    expect(box().value).toBe(text[1]);
+    await send({ kind: "partial", raw: raw[1], text: text[1], segment: 1 });
+    expect(box().value).toBe(`${text[1]} ${text[1]}`);
+    await send({ kind: "final", raw: raw[1], text: text[1], segment: 1 });
+    expect(box().value).toBe(`${text[1]} ${text[1]}`);
+  });
+
+  it("settles a formatted final without restoring a deleted partial (#428)", async () => {
+    await open();
+    await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });
+    fireEvent.input(box(), { target: { value: "" } });
+    await send({ kind: "final", raw: raw[1], text: text[1], segment: 0 });
+    expect(box().value).toBe("");
+  });
+
+  it("replaces the partial directly with the formatted final", async () => {
+    await open();
+    await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });
+    await send({ kind: "final", raw: raw[1], text: text[1], segment: 0 });
+    expect(box().value).toBe(text[1]);
+  });
+});
+
+it("uses raw words to preserve a legitimate new phrase even with the same segment", async () => {
+  await open();
+  await send({ kind: "partial", raw: "camel case user name end case", text: "userName", segment: 0 });
+  await send({ kind: "final", raw: "then review all changes", text: "then review all changes", segment: 0 });
+  expect(box().value).toBe("userName then review all changes");
+});

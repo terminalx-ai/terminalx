@@ -390,10 +390,11 @@ export function Composer({
   const send = useCallback(async () => {
     const text = draft.trim();
     if ((!text && !attachments.length) || sending || disabled) return;
+    const learnOnSuccess = dictation.prepareSend(text);
     setSending(true);
     try {
       await onSend(text, attach.images);
-      dictation.sent(text);
+      learnOnSuccess();
     } catch {
       // The owning tab renders the send error. Keep the draft and attachments
       // here so the reader can retry without selecting them again.
@@ -405,7 +406,7 @@ export function Composer({
     onDraftChange(recall.sent());
     attach.clear();
     ref.current?.focus({ preventScroll: true });
-  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent, dictation.sent]);
+  }, [draft, attachments, attach, sending, disabled, onSend, onDraftChange, recall.sent, dictation.prepareSend]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {

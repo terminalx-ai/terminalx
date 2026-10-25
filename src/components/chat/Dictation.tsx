@@ -37,8 +37,8 @@ export interface Dictation {
   stop: () => void;
   /** This dictation runs while a key is held, and stops when it is released. */
   held: boolean;
-  /** Observe a successful send without changing insertion or send behavior. */
-  sent: (text: string) => void;
+  /** Snapshot learning at send initiation; call the returned receipt only on success. */
+  prepareSend: (text: string) => () => void;
 }
 
 /** How many drafts on their way back to the composer are remembered, so that a draft which lags cannot grow the list for ever. */
@@ -73,7 +73,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
   const state = useDictation();
   const source = useRef(context);
   source.current = context;
-  const learning = useRef<{ before: string; after: string; spoken: string; request: DictationContext } | null>(null);
+  const learning = useRef<{ before: string; after: string; spoken: string; request: DictationContext; consumed?: boolean } | null>(null);
   const learnable = useRef(true);
   const request = useRef<DictationContext | null>(null);
   const dictating = state.target === target && state.phase !== "idle";
@@ -253,16 +253,26 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     else start();
   }, [dictating, start, stop]);
 
-  const sent = useCallback((text: string) => {
+  const prepareSend = useCallback((text: string) => {
     const candidate = learning.current;
-    learning.current = null;
-    if (!candidate || !over.current) return;
+    const surface = source.current?.();
+    if (!candidate || !over.current || candidate.consumed || surface?.sensitive || surface?.remote || !surface?.learn) return () => {};
     const corrected = correctedSegment(candidate.before.trimStart(), candidate.after.trimEnd(), text.trim());
-    if (corrected == null || corrected === candidate.spoken) return;
-    void invoke("transcription_learn", { request: candidate.request, before: candidate.spoken, after: corrected }).catch(() => {});
+    // Bind the correction and request to this send, not whichever recording is
+    // current after onSend resolves. Rejection never calls this receipt.
+    const before = candidate.spoken;
+    const snapshot = { ...candidate.request, projectTerms: [...candidate.request.projectTerms],
+      session: [...candidate.request.session], terminal: [...candidate.request.terminal] };
+    return () => {
+      if (candidate.consumed) return;
+      candidate.consumed = true;
+      if (learning.current === candidate) learning.current = null;
+      if (corrected == null || corrected === before) return;
+      void invoke("transcription_learn", { request: snapshot, before, after: corrected }).catch(() => {});
+    };
   }, []);
 
-  return { state, dictating, available, toggle, start, stop, held: held && dictating, sent };
+  return { state, dictating, available, toggle, start, stop, held: held && dictating, prepareSend };
 }
 
 /**

@@ -15,7 +15,7 @@ function Field({ remote = false, learn = true }: { remote?: boolean; learn?: boo
   const [draft, setDraft] = useState("Prefix: ");
   const ref = useRef<HTMLTextAreaElement>(null);
   const dictation = useDictationInto(request.target, draft, setDraft, ref, () => ({ ...request, remote, learn }));
-  return <><textarea ref={ref} value={draft} onChange={(e) => setDraft(e.target.value)} /><button onClick={dictation.toggle}>mic</button><button onClick={() => dictation.sent(draft)}>send</button></>;
+  return <><textarea ref={ref} value={draft} onChange={(e) => setDraft(e.target.value)} /><button onClick={dictation.toggle}>mic</button><button onClick={() => dictation.prepareSend(draft)()}>send</button></>;
 }
 async function event(payload: unknown) { await act(async () => deliver(payload)); }
 async function start(props = {}) {

@@ -1,0 +1,66 @@
+[
+  {
+    "name": "code",
+    "data": {
+      "options": {
+        "code": true
+      }
+    },
+    "raw": [
+      "camel case user name",
+      "camel case user name end case"
+    ],
+    "text": [
+      "camel case user name",
+      "userName"
+    ]
+  },
+  {
+    "name": "snippet",
+    "data": {
+      "options": {
+        "snippets": true
+      },
+      "entries": [
+        {
+          "id": "status",
+          "kind": "snippet",
+          "heard": "insert the prepared status now",
+          "written": "Ready for review"
+        }
+      ]
+    },
+    "raw": [
+      "insert the prepared status",
+      "insert the prepared status now"
+    ],
+    "text": [
+      "insert the prepared status",
+      "Ready for review"
+    ]
+  },
+  {
+    "name": "replacement",
+    "data": {
+      "options": {
+        "replacements": true
+      },
+      "entries": [
+        {
+          "id": "status",
+          "kind": "replacement",
+          "heard": "open the transcription source file",
+          "written": "TranscriptionTab.tsx"
+        }
+      ]
+    },
+    "raw": [
+      "open the transcription source",
+      "open the transcription source file"
+    ],
+    "text": [
+      "open the transcription source",
+      "TranscriptionTab.tsx"
+    ]
+  }
+]

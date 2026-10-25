@@ -25,6 +25,9 @@ pub struct DictationEvent {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Untransformed recognition for stream revision matching; never logged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// The System Settings privacy pane that can resolve this error.
@@ -61,13 +64,17 @@ fn emit_privacy_error(app: &AppHandle, message: String, settings: &'static str) 
     trace("error", None, Some(&message), None);
     let _ = app.emit(
         "dictation",
-        DictationEvent { kind: "error", text: None, message: Some(message), settings: Some(settings), segment: None },
+        DictationEvent { kind: "error", text: None, raw: None, message: Some(message), settings: Some(settings), segment: None },
     );
 }
 
 fn emit_segment(app: &AppHandle, kind: &'static str, text: Option<String>, message: Option<String>, segment: Option<u64>) {
+    emit_recognition(app, kind, text, None, message, segment);
+}
+
+fn emit_recognition(app: &AppHandle, kind: &'static str, text: Option<String>, raw: Option<String>, message: Option<String>, segment: Option<u64>) {
     trace(kind, text.as_deref(), message.as_deref(), segment);
-    let _ = app.emit("dictation", DictationEvent { kind, text, message, settings: None, segment });
+    let _ = app.emit("dictation", DictationEvent { kind, text, raw, message, settings: None, segment });
 }
 
 /// System output volume, read and written through AppleScript. Best effort:
@@ -702,9 +709,9 @@ mod mac {
                 if !result.is_null() {
                     let result = &*result;
                     let transcription = result.bestTranscription();
-                    let text = transcription.formattedString().to_string();
+                    let raw = transcription.formattedString().to_string();
                     let is_final = result.isFinal();
-                    let text = me.personalization.lock().unwrap().process(&text, &app, "apple", is_final);
+                    let text = me.personalization.lock().unwrap().process(&raw, &app, "apple", is_final);
                     let segment = segments.lock().unwrap().observe(apple_segment_bounds(&transcription), is_final);
                     if !text.trim().is_empty() {
                         produced.store(true, Ordering::SeqCst);
@@ -717,14 +724,14 @@ mod mac {
                             Route::Local { .. } => None,
                         });
                         log::debug!("dictation Apple final stopping={is_stopping} generation={generation} task_state={task_state:?}");
-                        emit_segment(&app, "final", Some(text), None, segment);
+                        emit_recognition(&app, "final", Some(text), Some(raw), None, segment);
                         if is_stopping {
                             me.finish(&app);
                         } else {
                             me.schedule_apple_restart(app.clone(), generation);
                         }
                     } else {
-                        emit_segment(&app, "partial", Some(text), None, segment);
+                        emit_recognition(&app, "partial", Some(text), Some(raw), None, segment);
                     }
                 }
                 if !error.is_null() && !handled_final {
