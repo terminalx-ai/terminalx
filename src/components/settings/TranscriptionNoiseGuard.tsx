@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
@@ -10,30 +10,52 @@ export function TranscriptionNoiseGuard() {
   const [model, setModel] = useState<TranscriptionDetector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Every inspection and transition shares one owner. A late result (including
+  // a rejected request) cannot replace state observed after a newer transition.
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  const refresh = useCallback(async () => {
+    const owner = ++generation.current;
+    try {
+      const value = await invoke<TranscriptionDetector>("transcription_detector");
+      if (mounted.current && owner === generation.current) setModel(value);
+    } catch (e) {
+      if (mounted.current && owner === generation.current) setError(errorMessage(e));
+    } finally {
+      if (mounted.current && owner === generation.current) setBusy(false);
+    }
+  }, []);
   useEffect(() => {
+    mounted.current = true;
     let live = true;
     let off: (() => void) | undefined;
-    const refresh = () => invoke<TranscriptionDetector>("transcription_detector")
-      .then((value) => { if (live) setModel(value); })
-      .catch((e) => { if (live) setError(errorMessage(e)); });
     void refresh();
     void listen<DownloadProgress>("transcription_download", ({ payload }) => {
       if (!live || payload.id !== "silero-vad-v6.2") return;
+      ++generation.current;
+      setBusy(false);
       if (payload.error) setError(payload.error);
       if (payload.done || payload.error) void refresh();
       else setModel((value) => value ? { ...value, downloading: true, progress: payload } : value);
     }).then((stop) => { if (live) off = stop; else stop(); })
       .catch((e) => { if (live) setError(errorMessage(e)); });
-    return () => { live = false; off?.(); };
-  }, []);
+    return () => { live = false; mounted.current = false; ++generation.current; off?.(); };
+  }, [refresh]);
   async function action(command: string) {
     if (!model) return;
+    const owner = ++generation.current;
     setBusy(true); setError(null);
     try {
       if (command !== "transcription_detector") await invoke(command, { id: model.id });
-      setModel(await invoke<TranscriptionDetector>("transcription_detector"));
-    } catch (e) { setError(errorMessage(e)); }
-    finally { setBusy(false); }
+      // A download event may already own a more recent inspection. Do not
+      // start another from an older command's acknowledgement.
+      if (mounted.current && owner === generation.current) await refresh();
+    } catch (e) {
+      if (mounted.current && owner === generation.current) {
+        setError(errorMessage(e));
+        setBusy(false);
+      }
+    }
   }
   return <div className="space-y-2 text-xs text-muted-foreground">
     <p>The local-model noise guard uses a separate 1.24 MB speech detector. Recording never downloads it. Apple keeps its own speech detection. Quiet speech and environmental sounds can still be misclassified; use Test dictation to check results.</p>

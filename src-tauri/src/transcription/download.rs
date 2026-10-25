@@ -144,7 +144,59 @@ pub fn fetch(spec: &ModelSpec, cancel: &AtomicBool, report: &dyn Fn(u64)) -> Res
     receive(spec, resp.into_reader(), cancel, report, &final_path)
 }
 
-fn receive(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
+fn receive(spec: &ModelSpec, reader: impl Read, cancel: &AtomicBool,
+    report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
+    if spec.id == catalog::DETECTOR.id {
+        receive_detector(spec, reader, cancel, report, final_path)
+    } else {
+        receive_recognizer(spec, reader, cancel, report, final_path)
+    }
+}
+
+/// Recovery owns an exclusively created, randomly named regular file in the
+/// destination directory. Never open the legacy predictable .part entry.
+/// NamedTempFile removes only its owned staging path on every error/cancel exit.
+fn receive_detector(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
+    report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
+    if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
+    let parent = final_path.parent().ok_or_else(|| anyhow!("missing detector directory"))?;
+    let mut staging = tempfile::Builder::new().prefix(".detector-").suffix(".part").tempfile_in(parent)?;
+    let mut hasher = Sha256::new();
+    let mut received: u64 = 0;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut last_report = Instant::now();
+    report(0);
+    loop {
+        if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
+        let n = reader.read(&mut buf)?;
+        if n == 0 { break; }
+        if received.saturating_add(n as u64) > spec.size_bytes {
+            bail!("download exceeded the pinned model size");
+        }
+        staging.write_all(&buf[..n])?;
+        hasher.update(&buf[..n]);
+        received += n as u64;
+        if last_report.elapsed() >= Duration::from_millis(200) {
+            report(received);
+            last_report = Instant::now();
+        }
+    }
+    staging.flush()?;
+    if received != spec.size_bytes {
+        bail!("download was {received} bytes, expected {}", spec.size_bytes);
+    }
+    if format!("{:x}", hasher.finalize()) != spec.sha256 {
+        bail!("checksum did not match; the file was discarded");
+    }
+    if cancel.load(Ordering::SeqCst) { bail!("download cancelled"); }
+    // persist atomically replaces the final entry only after validation. On
+    // failure PersistError still owns the temporary file and drops it here.
+    staging.persist(final_path).map_err(|e| anyhow!("commit detector file: {}", e.error))?;
+    Ok(())
+}
+
+// Preserve the existing recognizer staging behavior and policy separately.
+fn receive_recognizer(spec: &ModelSpec, mut reader: impl Read, cancel: &AtomicBool,
     report: &dyn Fn(u64), final_path: &std::path::Path) -> Result<()> {
     let part = final_path.with_extension("gguf.part");
     let mut file = std::fs::File::create(&part)?;
@@ -253,6 +305,88 @@ mod tests {
         cancel.store(false, Ordering::SeqCst);
         receive(&spec, b"abc".as_slice(), &cancel, &|_| {}, &path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detector_owned_staging_preserves_preexisting_symlink_and_hardlink_aliases() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        struct BrokenReader;
+        impl Read for BrokenReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fixture read failure"))
+            }
+        }
+        struct CancelAtEof<'a> {
+            bytes: &'a [u8],
+            cancel: &'a AtomicBool,
+        }
+        impl Read for CancelAtEof<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.bytes.read(buf)?;
+                if n == 0 { self.cancel.store(true, Ordering::SeqCst); }
+                Ok(n)
+            }
+        }
+        for hard_link in [false, true] {
+            for outcome in ["cancel", "late-cancel", "checksum", "short", "oversize", "io", "success"] {
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("detector.gguf");
+                let alias = path.with_extension("gguf.part");
+                std::fs::write(&path, b"bad").unwrap();
+                if hard_link { std::fs::hard_link(&path, &alias).unwrap(); }
+                else { symlink(&path, &alias).unwrap(); }
+                let alias_inode = std::fs::symlink_metadata(&alias).unwrap().ino();
+                let final_inode = std::fs::metadata(&path).unwrap().ino();
+                let mut spec = catalog::DETECTOR.clone();
+                spec.size_bytes = 3;
+                spec.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+                let cancel = AtomicBool::new(false);
+                let report = |_| {
+                    // Only this operation's unique staging file has been added.
+                    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 3);
+                    assert_eq!(std::fs::read(&path).unwrap(), b"bad");
+                    assert_eq!(std::fs::read(&alias).unwrap(), b"bad");
+                    if outcome == "cancel" { cancel.store(true, Ordering::SeqCst); }
+                };
+                let result = match outcome {
+                    "checksum" => receive(&spec, b"abd".as_slice(), &cancel, &report, &path),
+                    "short" => receive(&spec, b"ab".as_slice(), &cancel, &report, &path),
+                    "oversize" => receive(&spec, b"abcd".as_slice(), &cancel, &report, &path),
+                    "io" => receive(&spec, b"a".as_slice().chain(BrokenReader), &cancel, &report, &path),
+                    "late-cancel" => receive(&spec, CancelAtEof { bytes: b"abc", cancel: &cancel }, &cancel, &report, &path),
+                    _ => receive(&spec, b"abc".as_slice(), &cancel, &report, &path),
+                };
+                assert_eq!(result.is_ok(), outcome == "success");
+                assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 2, "owned staging leaked");
+                assert_eq!(std::fs::symlink_metadata(&alias).unwrap().ino(), alias_inode);
+                if !hard_link { assert_eq!(std::fs::read_link(&alias).unwrap(), path); }
+                if outcome == "success" {
+                    assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+                    // A hard link still names the old inode; a symlink follows
+                    // the intentionally replaced final entry after success.
+                    assert_eq!(std::fs::read(&alias).unwrap(), if hard_link { b"bad" } else { b"abc" });
+                } else {
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), final_inode);
+                    assert_eq!(std::fs::read(&path).unwrap(), b"bad");
+                    assert_eq!(std::fs::read(&alias).unwrap(), b"bad");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detector_owned_staging_is_removed_on_commit_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("directory.gguf");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), b"original").unwrap();
+        let mut spec = catalog::DETECTOR.clone();
+        spec.size_bytes = 3;
+        spec.sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(receive(&spec, b"abc".as_slice(), &AtomicBool::new(false), &|_| {}, &path).is_err());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(path.join("keep")).unwrap(), b"original");
     }
 
     /// Pulls the smallest model for real and runs a tone through it. Network

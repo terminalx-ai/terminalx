@@ -71,3 +71,95 @@ it("shows cancellation during recovery and retains an invalid status after cance
   await screen.findByRole("button", { name: "Reinstall speech detector" });
   expect(screen.getByRole("alert").textContent).toContain("download cancelled");
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const verified = { ...model, installed: true, readiness: "verifiedFile" };
+const invalid = { ...model, readiness: "invalid" };
+
+it.each(["invalid", "downloading", "rejection"])("keeps newer recovery verification after an older %s response", async (late) => {
+  const older = deferred<typeof model>();
+  const newer = deferred<typeof model>();
+  const statuses = [Promise.resolve(invalid), older.promise, newer.promise];
+  mocks.invoke.mockImplementation((command) => command === "transcription_detector" ? statuses.shift() : Promise.resolve());
+  render(<TranscriptionNoiseGuard />);
+  fireEvent.click(await screen.findByRole("button", { name: "Reinstall speech detector" }));
+  await waitFor(() => expect(statuses).toHaveLength(1));
+  act(() => event({ payload: { id: model.id, done: true } }));
+  await act(async () => { newer.resolve(verified); });
+  await screen.findByRole("button", { name: "Delete speech detector" });
+  await act(async () => {
+    if (late === "rejection") older.reject(new Error("obsolete verification error"));
+    else older.resolve({ ...invalid, downloading: late === "downloading" });
+  });
+  expect(screen.getByRole("status").textContent).toBe("Detector file verified");
+  expect(screen.getByRole("button", { name: "Delete speech detector" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Cancel detector download" })).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it.each(["missing", "invalid", "error"])("does not let an older verified response hide newer %s after deletion", async (readiness) => {
+  const older = deferred<typeof model>();
+  const newer = deferred<typeof model>();
+  const statuses = [Promise.resolve(verified), older.promise, newer.promise];
+  mocks.invoke.mockImplementation((command) => command === "transcription_detector" ? statuses.shift() : Promise.resolve());
+  render(<TranscriptionNoiseGuard />);
+  await screen.findByRole("button", { name: "Delete speech detector" });
+  // An event inspection is still in flight when the user deletes the file.
+  act(() => event({ payload: { id: model.id, done: true } }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete speech detector" }));
+  await waitFor(() => expect(statuses).toHaveLength(0));
+  await act(async () => { newer.resolve({ ...model, readiness }); });
+  await act(async () => { older.resolve(verified); });
+  const label = readiness === "missing" ? "Download speech detector" : readiness === "invalid" ? "Reinstall speech detector" : "Retry file verification";
+  expect(screen.getByRole("button", { name: label })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Delete speech detector" })).toBeNull();
+});
+
+it("invalidates an in-flight verification on progress before completion", async () => {
+  const older = deferred<typeof model>();
+  mocks.invoke.mockResolvedValueOnce(invalid).mockResolvedValueOnce(undefined).mockImplementationOnce(() => older.promise);
+  render(<TranscriptionNoiseGuard />);
+  fireEvent.click(await screen.findByRole("button", { name: "Reinstall speech detector" }));
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(3));
+  act(() => event({ payload: { id: model.id, received: 42, done: false } }));
+  await act(async () => { older.resolve(verified); });
+  expect(screen.getByRole("button", { name: "Cancel detector download" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Delete speech detector" })).toBeNull();
+});
+
+it.each(["resolve", "reject"])("ignores a late command %s after a completion event owns verification", async (settle) => {
+  const command = deferred<void>();
+  const newer = deferred<typeof model>();
+  const statuses = [Promise.resolve(invalid), newer.promise];
+  mocks.invoke.mockImplementation((name) => name === "transcription_detector" ? statuses.shift() : command.promise);
+  render(<TranscriptionNoiseGuard />);
+  fireEvent.click(await screen.findByRole("button", { name: "Reinstall speech detector" }));
+  act(() => event({ payload: { id: model.id, done: true } }));
+  await act(async () => { newer.resolve(verified); });
+  await act(async () => {
+    if (settle === "resolve") command.resolve(); else command.reject(new Error("obsolete command error"));
+  });
+  expect(mocks.invoke).toHaveBeenCalledTimes(3);
+  expect(screen.getByRole("button", { name: "Delete speech detector" })).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps a newer verification failure visible when an older verified response arrives", async () => {
+  const older = deferred<typeof model>();
+  const newer = deferred<typeof model>();
+  const statuses = [Promise.resolve(invalid), older.promise, newer.promise];
+  mocks.invoke.mockImplementation((name) => name === "transcription_detector" ? statuses.shift() : Promise.resolve());
+  render(<TranscriptionNoiseGuard />);
+  fireEvent.click(await screen.findByRole("button", { name: "Reinstall speech detector" }));
+  await waitFor(() => expect(statuses).toHaveLength(1));
+  act(() => event({ payload: { id: model.id, done: true } }));
+  await act(async () => { newer.reject(new Error("current verification failed")); });
+  await act(async () => { older.resolve(verified); });
+  expect(screen.getByRole("alert").textContent).toContain("current verification failed");
+  expect(screen.queryByRole("button", { name: "Delete speech detector" })).toBeNull();
+});
