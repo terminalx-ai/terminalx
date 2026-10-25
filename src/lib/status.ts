@@ -16,6 +16,8 @@ interface StatusState {
   usageRefreshing: boolean;
   usageError: string | null;
   resources: ResourceOverview;
+  resourcesAvailable: boolean;
+  resourceGeneration: number;
   resourceSample: ResourceSnapshot | null;
   resourcesRefreshing: boolean;
   ready: boolean;
@@ -28,6 +30,8 @@ let state: StatusState = {
   usageRefreshing: false,
   usageError: null,
   resources: { agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null },
+  resourcesAvailable: false,
+  resourceGeneration: 0,
   resourceSample: null,
   resourcesRefreshing: false,
   ready: false,
@@ -75,8 +79,11 @@ export function bootStatus(): Promise<void> {
       await listen<StatusBarSettings>("status_bar_settings", (event) => set({ settings: event.payload, ready: true }));
       await listen<UsageSnapshot>("status_usage", (event) => set({ usage: event.payload }));
       await listen("status_resources_changed", () => void refreshResourceOverview());
-      const [settings, usage, resources] = await Promise.all([statusBar.settings(), statusBar.usage(), statusBar.resourceOverview()]);
-      set({ settings, usage, resources, ready: true });
+      await listen("local_runtime_disconnected", invalidateResources);
+      await listen("local_runtime_view_disconnected", invalidateResources);
+      await listen("local_runtime_reattached", () => { invalidateResources(); void refreshResourceOverview(); });
+      const [settings, usage] = await Promise.all([statusBar.settings(), statusBar.usage(), refreshResourceOverview()]);
+      set({ settings, usage, ready: true });
       installFocusRefresh();
       // The backend stamps this first read when it runs, not when the module
       // loaded; time the first tick from it or that tick can land too early.
@@ -129,11 +136,26 @@ export async function resetCodexUsage(): Promise<void> {
   }
 }
 
+// A disconnected owner invalidates both reads and failures already in flight.
+// Newer reads also supersede older ones, across overview and detailed samples.
+let resourceRevision = 0;
+function invalidateResources() {
+  resourceRevision++;
+  set({ resourcesAvailable: false, resourceGeneration: state.resourceGeneration + 1, resourceSample: null, resourcesRefreshing: false });
+}
+
+/** Synchronous authority check, including invalidations React has not rendered yet. */
+export function resourceGenerationIsCurrent(generation: number): boolean {
+  return state.resourcesAvailable && state.resourceGeneration === generation;
+}
+
 export async function refreshResourceOverview() {
+  const revision = ++resourceRevision;
   try {
-    set({ resources: await statusBar.resourceOverview() });
+    const resources = await statusBar.resourceOverview();
+    if (revision === resourceRevision) set({ resources, resourcesAvailable: true });
   } catch {
-    /* the next pane event or focus will try again */
+    if (revision === resourceRevision) invalidateResources();
   }
 }
 
@@ -141,14 +163,19 @@ let resourceFlight: Promise<void> | null = null;
 export function refreshResourceSample(): Promise<void> {
   if (resourceFlight) return resourceFlight;
   return (resourceFlight = (async () => {
+    const beforeFocus = resourceRevision;
     if (!(await windowCanPoll())) return;
+    if (beforeFocus !== resourceRevision) return;
+    const revision = ++resourceRevision;
     set({ resourcesRefreshing: true });
     try {
       const sample = await statusBar.sampleResources();
+      if (revision !== resourceRevision) return;
       const total = sample.host.totalBytes;
       const available = sample.host.availableBytes;
       const pressure = total != null && available != null && total > 0 ? Math.max(0, Math.min(1, 1 - available / total)) : null;
       set({
+        resourcesAvailable: true,
         resourceSample: sample,
         resources: {
           agentCount: sample.processes.filter((process) => process.kind === "agent").length,
@@ -158,8 +185,10 @@ export function refreshResourceSample(): Promise<void> {
         },
       });
     } catch {
-      // Keep the last sample: the badge is a focus snapshot, not a heartbeat.
+      if (revision === resourceRevision) invalidateResources();
     } finally {
+      // Sampling is single-flight; this only ends this flight's spinner,
+      // never its successor's resource availability or data.
       set({ resourcesRefreshing: false });
     }
   })().finally(() => {

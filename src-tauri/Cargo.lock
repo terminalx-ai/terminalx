@@ -4086,6 +4086,7 @@ dependencies = [
  "log",
  "notify",
  "notify-debouncer-mini",
+ "notify-rust",
  "nucleo-matcher",
  "objc2",
  "objc2-app-kit",

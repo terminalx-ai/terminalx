@@ -17,11 +17,16 @@ use super::{engine, store};
 #[derive(Default)]
 pub struct RuntimeObserver {
     host: OnceLock<Arc<LocalHost>>,
+    local_automations: OnceLock<crate::automations::RuntimeHost>,
 }
 
 impl RuntimeObserver {
     pub fn attach(&self, host: Arc<LocalHost>) {
         let _ = self.host.set(host);
+    }
+
+    pub fn attach_local_automations(&self, host: crate::automations::RuntimeHost) {
+        let _ = self.local_automations.set(host);
     }
 
     fn off_thread(&self, session_id: &str, tab_id: &str, work: impl FnOnce(&LocalHost) + Send + 'static) {
@@ -36,12 +41,24 @@ impl RuntimeObserver {
 }
 
 impl SessionObserver for RuntimeObserver {
+    fn automation_running(&self, session_id: &str, tab_id: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::mark_running_from_hook(host, session_id, tab_id);
+        }
+    }
+
     fn automation_completed(&self, session_id: &str, tab_id: &str, final_message: Option<String>) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::complete_from_hook(host, session_id, tab_id, final_message.clone());
+        }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         self.off_thread(session_id, tab_id, move |host| engine::turn_completed(host, &session, &tab, final_message.as_deref()));
     }
 
     fn automation_failed(&self, session_id: &str, tab_id: &str, message: &str) {
+        if let Some(host) = self.local_automations.get() {
+            crate::automations::fail_from_hook(host, session_id, tab_id, message);
+        }
         let (session, tab) = (session_id.to_string(), tab_id.to_string());
         let detail = engine::turn_failure(message.contains("interrupted"));
         self.off_thread(session_id, tab_id, move |host| engine::turn_failed(host, &session, &tab, detail));
@@ -62,6 +79,17 @@ pub fn start(host: Arc<LocalHost>, interrupted: Vec<(String, String)>) {
     if let Err(error) = spawned {
         log::error!("start the issue pipeline poller: {error}");
     }
+}
+
+/// A new local owner means the old process really ended. Reopening a window
+/// never enters this path. Preserve interrupted work for explicit recovery.
+pub(crate) fn start_local(host: Arc<LocalHost>) {
+    engine::recover(&*host);
+    let spawned = std::thread::Builder::new().name("local-issue-pipeline-poll".into()).spawn(move || loop {
+        std::thread::sleep(engine::POLL_EVERY);
+        engine::poll(&*host);
+    });
+    if let Err(error) = spawned { log::error!("start local issue pipeline poller: {error}"); }
 }
 
 #[cfg(test)]

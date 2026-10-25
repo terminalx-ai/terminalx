@@ -248,7 +248,7 @@ export function TabView({
     [backend, local, tab.id],
   );
 
-  // A message queued behind the running turn, sent now: the turn is interrupted and the message typed again.
+  // The provider interrupts and delivers its own queue; acceptance updates the transcript.
   const sendQueuedNow = useCallback(
     (seq: number) => {
       setError(null);

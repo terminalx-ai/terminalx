@@ -385,17 +385,24 @@ fn remember_place(app: &AppHandle) {
 /// The tray icon: the way to the floating window that needs no shortcut and
 /// no main window.
 fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    // The native owner keeps the same item across window closure and updates.
+    // No second desktop item is created during its attachment lifetime.
+    if cfg!(target_os = "macos") {
+        return Ok(());
+    }
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::TrayIconBuilder;
     let quick = MenuItem::with_id(app, "tray-quick-chat", "Quick Chat", true, None::<&str>)?;
     let main = MenuItem::with_id(app, "tray-main-window", "Open TerminalX", true, None::<&str>)?;
     // An item of our own: the predefined Quit is not available on every platform.
     let quit = MenuItem::with_id(app, "tray-quit", "Quit TerminalX", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&quick, &main, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let stop_all = MenuItem::with_id(app, "tray-stop-all-and-quit", "Stop all and quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quick, &main, &PredefinedMenuItem::separator(app)?, &stop_all, &quit])?;
     let mut tray = TrayIconBuilder::with_id("terminalx").tooltip("TerminalX").menu(&menu).show_menu_on_left_click(true).on_menu_event(|app, event| match event.id().as_ref() {
         "tray-quick-chat" => later(app, "show", |app| show(app, None)),
         "tray-main-window" => crate::account::focus_main_window(app),
         "tray-quit" => app.exit(0),
+        "tray-stop-all-and-quit" => crate::quit::stop_all_and_quit(app),
         _ => {}
     });
     if let Some(icon) = app.default_window_icon() {

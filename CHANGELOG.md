@@ -2,6 +2,142 @@
 
 ## Unreleased
 
+- Package the macOS CLI launcher as a native executable so its signature survives updater archive extraction; preserve CLI arguments, process identity and signal behavior. (#467)
+
+- Recheck deferred settings restarts when their worker reserves the launch so a
+  new turn on the same CLI keeps its process, permissions and pending delivery. (#467)
+
+- Fence transcript reads, inbound hooks and delayed provider-session writes to
+  their original launch, preserving successor turns and permissions across restart. (#467)
+
+- Honor explicit Linux helper target ABIs and retain history preparation admission
+  until loading finishes, even after snapshot expiry deadlines. (#467)
+
+- Confirm surviving terminal process groups are stopped even after their leader
+  exits, retain Linux desktop runtime packaging/attachment, and load large
+  conversation histories over bounded snapshot chunks. Keep bounded permission
+  and desktop-service admission compatible with current Rust toolchains. (#467)
+
+- Discard delayed process-kill confirmations and errors after runtime invalidation;
+  distinguish missing resource details from a verified empty process list. (#467)
+
+- Show resources as unavailable when the background owner disconnects or a
+  resource read fails; discard older replies and hide stale process actions. (#467)
+
+- Keep shared force-stop and paired-device revocation responsive by releasing mobile registry locks before waiting for attachment authority.
+
+### Runtime investigation
+
+- Acquire checkout admission before mobile/sharing write permits so concurrent
+  deletion and revocation cannot deadlock. Revalidate sharing replies against
+  the owner before handing buffered session data to a guest connection. (#467)
+
+- Wake the local helper's AppKit event loop after backend shutdown, so idle
+  exit and explicit stop-all do not leave a stopped menu-bar process behind. (#467)
+
+- Publish the desktop attachment before exposing window services to the owner;
+  failed activation disconnects that view without stopping background work.
+  Reconnect explicitly revokes its previous lease before publishing the new one. (#467)
+
+- Add a macOS accessory tray and background notifications to the local runtime
+  helper, keeping a single tray through desktop detach and reattachment. Quit
+  actions preserve the saved policy and cleanup guard; packaged guest validation
+  remains pending. (#467)
+
+- Move paired-device session writes, pending permissions, terminal input and
+  observations to the local owner. Revalidate queued input against revocation,
+  account generation and tab changes, and bound mobile output buffering. Native
+  tray integration and packaged lifecycle acceptance remain in progress. (#467)
+
+- Attach desktop startup and session/terminal commands to the local runtime
+  owner. Window-only services use a private, attachment-fenced endpoint that
+  cannot take over owner discovery; unavailable owners fail explicitly. Local
+  pipeline recovery and scheduling run in the owner. Mobile/tray integration
+  and packaged acceptance remain in progress. (#467)
+
+- Route local workspace cleanup and quick-chat relocation through the runtime
+  owner. A failed process stop preserves the workspace and every affected
+  conversation, including when an earlier session already stopped. (#467)
+
+- Confirm process-group exit before acknowledging local stop-all, retain bounded
+  terminal history across orderly idle-owner shutdown, and keep open shells or
+  unknown child activity alive. Resource commands now inspect the owner, and
+  session deletion confirms its processes stopped before removing history. (#467)
+
+- Keep local-owner permission cards alive across view detachment using aligned
+  provider/bridge/owner deadlines, bounded waiters and explicit cancellation.
+  Lost hook transports and stale answers fail closed; cloud/default waits remain
+  unchanged. Provider timers remain finite (about 24.8 days). (#467)
+
+- Close tabs through their runtime owner so confirmed process exit precedes
+  closed-tab retention, and stale views cannot restart them. Route automation
+  definitions and manual runs through that same owner, retaining disabled
+  pipeline/merge choices. (#467)
+
+- Forward desktop session-link admission and writes to the runtime owner, with
+  account/attachment fencing, owner-side invitation rate limits, and access
+  revalidation before queued guest output is sent. Reconnecting does not replay
+  revoked grants. Paired-device integration remains in progress. (#467)
+
+- Add a truthful disconnected-owner notice with explicit reconnect, retain the
+  saved quit preference, and route app/tray stop-all through the cleanup guard.
+  Dismissing the first choice leaves work running; an unavailable owner cannot
+  be reported as successfully stopped. Production startup integration remains
+  in progress. (#467)
+
+- Centralize provider usage refresh in the session owner, preserving account
+  privacy, refresh backoff and early Claude updates. Add fallible usage/activity
+  adapters and independent desktop-window PTY connections without duplicate
+  app-wide events or false disconnects on window closure. Route desktop commands
+  through owner-compatible adapters, preserve independent acknowledgements, and
+  classify directly launched terminal commands as busy. Desktop startup cutover
+  remains in progress. (#467)
+
+- Build the local runtime helper through the Tauri build/dev hooks using the
+  requested target and profile, sign it with the app entitlements and verify its
+  signature before packaging. Direct Cargo checks create only an empty resource
+  directory; production builds refuse an ad-hoc signing fallback. (#467)
+
+- Add a typed native session client with fallible live-state reads and owner-side
+  continuation preparation. Verify pending permission reattachment, subsequent
+  turns and refusal to follow a replacement owner in disposable process tests.
+  Desktop command routing remains in progress. (#467)
+
+- Fence a local sharing account generation even when sign-out arrives before
+  registration, so late registration cannot restore revoked access and stale
+  sign-out cannot revoke a newer account. Cover both orderings in a disposable
+  owner-process regression. (#467)
+
+- Move shared-session admission and dispatch into a portable owner-side router.
+  Bind internal sharing grants to an attachment and account generation, revoke
+  them on disconnect, and reject delivery permits from recreated shares. Desktop
+  attachment and paired-device integration remain in progress. (#467)
+
+- Run local scheduled automations through the existing scheduler and consent
+  engine in the headless owner, with startup recovery before client admission.
+  Keep cloud scheduling separate and test detached completion and idle exit for
+  disabled schedules. Desktop ownership integration remains in progress. (#467)
+
+- Serialize session-index read/modify/write transactions across processes using
+  a stable sidecar lock, retaining closed conversations and unknown fields during
+  simultaneous window and runtime updates. Add disposable process regressions
+  for lost updates, lock timeout, failure and crash recovery. (#467)
+
+- Add single-owner local runtime locking, authenticated attachment leases and
+  stop-all, bounded event/PTY subscriptions, and process tests for detached turns,
+  pending permissions and output flow control. Fence follow-ups during shutdown
+  and wait for child termination. Desktop quit integration remains in progress.
+
+- Document local background runtime ownership, compatibility and integration
+  dependencies, and add a disposable probe of the existing headless runtime's
+  launcher lifetime, control authentication and PTY self-test. Desktop quit and
+  reattachment behavior is not implemented by this preparation. (#467)
+### Agent sessions
+
+- Keep macOS browser-use MCP helpers out of the Dock and app switcher while
+  preserving screen detection and usable browser windows. Close agent PTYs on
+  Cmd+Q and relaunch so their session-owned MCP helpers receive EOF. (PRO-116)
+
 ### Offline dictation
 
 - Add opt-in local transcription context, scoped dictionary spellings,
@@ -37,6 +173,13 @@
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
 ### Chat
+
+- Deliver queued messages through the provider's native interrupt without pasting
+  them again. Keep repeated Send now clicks harmless, retain provider queue order,
+  publish successful submission atomically with Enter, and show Codex continuations
+  as working when an older interrupt hook arrives. Reconcile completion debt in
+  record order and serialize managed transcript reads through application so
+  concurrent readers cannot close a newer continuation or cancel its approval. (#627)
 
 - Keep table Copy/Download menus readable and inside the window, and expand tables
   into a scrollable viewer above the conversation with keyboard focus restored on

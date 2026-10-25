@@ -5,7 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::events::Payload;
 use crate::harness::{claude, codex};
@@ -15,7 +15,7 @@ use crate::summaries::TailLines;
 const CAPTURE_CHARS: usize = 36_000;
 const HINT_CHARS: usize = 6_000;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Context {
     pub session_id: String,

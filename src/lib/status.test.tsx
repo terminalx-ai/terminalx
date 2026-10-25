@@ -1,11 +1,17 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { UsageSnapshot } from "./api";
+import type { ResourceOverview, ResourceSnapshot, UsageSnapshot } from "./api";
 
 const mocks = vi.hoisted(() => ({
   events: new Map<string, (event: { payload: UsageSnapshot }) => void>(),
   refresh: vi.fn<(...args: unknown[]) => Promise<UsageSnapshot>>(),
   usage: vi.fn<() => Promise<UsageSnapshot>>(),
+  overview: vi.fn<() => Promise<ResourceOverview>>(async () => ({ agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null })),
+  sample: vi.fn<() => Promise<ResourceSnapshot>>(async () => ({
+    host: { totalBytes: null, availableBytes: null, cores: 1 }, processes: [], totalRssBytes: null,
+    totalCpuPercent: null, sampledAt: 0,
+    app: { mainPid: 1, mainCpuPercent: null, mainRssBytes: null, webviewCpuPercent: null, webviewRssBytes: null, webviewProcessCount: 0 },
+  })),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, callback: (event: { payload: UsageSnapshot }) => void) => {
@@ -21,8 +27,8 @@ vi.mock("@/lib/api", () => ({
     settings: async () => ({ visible: true, usage: true, resources: false, percent: "used", usageMode: "detailed", usageRefreshMinutes: 0 }),
     usage: mocks.usage,
     refreshUsage: mocks.refresh,
-    resourceOverview: async () => ({ agentCount: 0, orphanCount: 0, rssBytes: null, pressure: null }),
-    sampleResources: async () => ({ host: {}, processes: [], totalRssBytes: null }),
+    resourceOverview: mocks.overview,
+    sampleResources: mocks.sample,
   },
 }));
 
@@ -113,4 +119,91 @@ it("revalidates on expiry and activation, and never lets a delayed command roll 
   await act(async () => { finish(retry); await background; await manual; });
   expect(mocks.refresh).toHaveBeenCalledTimes(7);
   expect(mocks.refresh).toHaveBeenLastCalledWith(true);
+});
+
+it("invalidates resource authority across disconnect and fences old boot, overview and sample replies", async () => {
+  vi.resetModules();
+  vi.useFakeTimers();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  const usage: UsageSnapshot = { revision: 20, windows: [], claudeAccount: "unchanged-account" };
+  mocks.usage.mockResolvedValue(usage);
+  mocks.refresh.mockResolvedValue(usage);
+  const overview = (agentCount: number): ResourceOverview => ({ agentCount, orphanCount: 0, rssBytes: 1024, pressure: null });
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+  const bootRead = deferred<ResourceOverview>();
+  const bootSample = deferred<ResourceSnapshot>();
+  mocks.overview.mockImplementationOnce(() => bootRead.promise);
+  mocks.sample.mockImplementationOnce(() => bootSample.promise);
+  const store = await import("./status");
+  let observed!: ReturnType<typeof store.useStatus>;
+  function Probe() { observed = store.useStatus(); return null; }
+  render(<Probe />);
+  let boot!: Promise<void>;
+  await act(async () => { boot = store.bootStatus(); });
+  await act(async () => { mocks.events.get("local_runtime_disconnected")!({ payload: usage }); });
+  await act(async () => { bootRead.resolve(overview(8)); await boot; });
+  expect(observed.resourcesAvailable).toBe(false);
+  expect(observed.resourceSample).toBeNull();
+  expect(observed.usage).toEqual(usage);
+
+  mocks.overview.mockResolvedValue(overview(2));
+  await act(async () => { await store.refreshResourceOverview(); });
+  expect(observed.resourcesAvailable).toBe(true);
+  // An older detailed failure cannot erase a newer successful overview.
+  await act(async () => { bootSample.reject(new Error("old owner")); await store.refreshResourceSample(); });
+  expect(observed.resourcesAvailable).toBe(true);
+  expect(observed.resources.agentCount).toBe(2);
+
+  const oldFailure = deferred<ResourceOverview>();
+  mocks.overview.mockImplementationOnce(() => oldFailure.promise);
+  const oldRead = store.refreshResourceOverview();
+  mocks.overview.mockResolvedValue(overview(3));
+  await act(async () => { await store.refreshResourceOverview(); oldFailure.reject(new Error("late failure")); await oldRead; });
+  expect(observed.resourcesAvailable).toBe(true);
+  expect(observed.resources.agentCount).toBe(3);
+
+  const lateOverview = deferred<ResourceOverview>();
+  mocks.overview.mockImplementationOnce(() => lateOverview.promise);
+  const reading = store.refreshResourceOverview();
+  await act(async () => { mocks.events.get("local_runtime_disconnected")!({ payload: usage }); lateOverview.resolve(overview(99)); await reading; });
+  expect(observed.resourcesAvailable).toBe(false);
+  expect(observed.resourceSample).toBeNull();
+
+  const lateSample = deferred<ResourceSnapshot>();
+  mocks.sample.mockImplementationOnce(() => lateSample.promise);
+  let sampling!: Promise<void>;
+  await act(async () => { sampling = store.refreshResourceSample(); });
+  const sample: ResourceSnapshot = {
+    host: { totalBytes: null, availableBytes: null, cores: 1 }, processes: [], totalRssBytes: 8192,
+    totalCpuPercent: null, sampledAt: 1,
+    app: { mainPid: 1, mainCpuPercent: null, mainRssBytes: null, webviewCpuPercent: null, webviewRssBytes: null, webviewProcessCount: 0 },
+  };
+  await act(async () => { mocks.events.get("local_runtime_view_disconnected")!({ payload: usage }); lateSample.resolve(sample); await sampling; });
+  expect(observed.resourcesAvailable).toBe(false);
+  expect(observed.resourceSample).toBeNull();
+  mocks.sample.mockResolvedValue(sample);
+  await act(async () => { await store.refreshResourceSample(); });
+  expect(observed.resourcesAvailable).toBe(true);
+  expect(observed.resourceSample).toEqual(sample);
+
+  mocks.overview.mockRejectedValueOnce(new Error("current read failed"));
+  await act(async () => { await store.refreshResourceOverview(); });
+  expect(observed.resourcesAvailable).toBe(false);
+  expect(observed.resourceSample).toBeNull();
+  const invalidatedGeneration = observed.resourceGeneration;
+  expect(store.resourceGenerationIsCurrent(invalidatedGeneration)).toBe(false);
+  mocks.overview.mockResolvedValue(overview(4));
+  await act(async () => { mocks.events.get("local_runtime_reattached")!({ payload: usage }); });
+  expect(observed.resourcesAvailable).toBe(true);
+  expect(observed.resources.agentCount).toBe(4);
+  expect(observed.resourceGeneration).toBeGreaterThan(invalidatedGeneration);
+  expect(store.resourceGenerationIsCurrent(invalidatedGeneration)).toBe(false);
+  expect(store.resourceGenerationIsCurrent(observed.resourceGeneration)).toBe(true);
+  expect(observed.usage).toEqual(usage);
 });

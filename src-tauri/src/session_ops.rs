@@ -413,7 +413,13 @@ fn carry_conversations(entry: &SessionEntry, to: &str) {
 /// when `cwd` is `None`. The folder is used as it is and is not registered as
 /// a project. `stop` ends what the session's tabs run: they start again, in
 /// the new directory, the next time they are opened.
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
+    set_quick_chat_cwd_fallible(sink, session_id, cwd, &|entry| { stop(entry); Ok(()) })
+}
+
+/// A stop error leaves the workspace and conversation records intact.
+pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<SessionEntry> {
     let entry = quick_chat(session_id)?;
     let target = match cwd.filter(|cwd| !cwd.trim().is_empty()) {
         Some(cwd) => quick_chat_folder(cwd)?,
@@ -423,7 +429,7 @@ pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Op
         return Ok(entry);
     }
     let scratch = store::quick::is_scratch(&entry.id, &target);
-    stop(&entry);
+    stop(&entry)?;
     carry_conversations(&entry, &target);
     let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
     let updated = index::update_session(session_id, |session| {
@@ -449,11 +455,17 @@ pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Op
 /// attached it yet. An empty scratch directory goes; one that holds files is
 /// kept until the session is deleted, since the conversation may refer to
 /// them.
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
+    move_quick_chat_to_project_fallible(sink, session_id, project_path, &|entry| { stop(entry); Ok(()) })
+}
+
+/// A stop error leaves the workspace and conversation records intact.
+pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<SessionEntry> {
     let entry = quick_chat(session_id)?;
     let project = projects::add(project_path).map_err(err)?.path;
     projects::refuse_mirror(&project).map_err(err)?;
-    stop(&entry);
+    stop(&entry)?;
     carry_conversations(&entry, &project);
     let branch = git::current_branch(Path::new(&project));
     let updated = index::update_session(session_id, |session| {
@@ -490,7 +502,13 @@ pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: i
 /// directories. A pinned or archived one is kept (the reader set it aside on
 /// purpose), and so is one `busy` says is running. `stop` ends what an idle
 /// one still has open. Returns what was deleted.
+#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
+    sweep_idle_quick_chats_fallible(sink, days, busy, &|entry| { stop(entry); Ok(()) })
+}
+
+/// A stop error leaves the workspace and conversation records intact.
+pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<Vec<SessionEntry>> {
     if days == 0 {
         return Ok(Vec::new());
     }
@@ -503,7 +521,7 @@ pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn
     };
     let doomed: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
     for session in &doomed {
-        stop(session);
+        stop(session)?;
     }
     remove_session_entries(&doomed)?;
     notify_sessions_deleted(sink, &doomed);
@@ -739,6 +757,11 @@ fn needs_confirmation(landed: &crate::landed::Landed, confirmation: &Confirmatio
 /// A folder that is not on disk (removed by hand, or on a volume that is not
 /// mounted) cannot be checked, so it needs the second confirmation too.
 pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry)) -> Result<WorkspaceRemoved> {
+    remove_workspace_fallible(sink, request, &|entry| { stop(entry); Ok(()) })
+}
+
+/// A stop error leaves the workspace and conversation records intact.
+pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
     let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
     let target = std::fs::canonicalize(request.path).unwrap_or_else(|_| PathBuf::from(request.path));
     if target == project {
@@ -759,7 +782,7 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
     }
     for session in &affected {
-        stop(session);
+        stop(session)?;
     }
     // Read again now that nothing is running in it. The default branch was
     // fetched a moment ago, so this does not go to the network again.
@@ -993,8 +1016,13 @@ pub(crate) fn rename_tab_entry(session_id: &str, tab_id: &str, title: Option<Str
 /// session, whatever they share. A workspace is removed only through
 /// [`remove_workspace`]. `stop` ends what the session's tabs are running.
 pub(crate) fn delete_session_blocking(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
+    delete_session_blocking_fallible(sink, session_id, &|entry| { stop(entry); Ok(()) })
+}
+
+/// A stop error leaves the workspace and conversation records intact.
+pub(crate) fn delete_session_blocking_fallible(sink: &dyn EventSink, session_id: &str, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<SessionEntry> {
     let entry = index::get(session_id).map_err(err)?;
-    stop(&entry);
+    stop(&entry)?;
     remove_session_entries(std::slice::from_ref(&entry))?;
     notify_sessions_deleted(sink, std::slice::from_ref(&entry));
     Ok(entry)
@@ -1748,6 +1776,47 @@ mod tests {
         assert_eq!(remove_orphan_scratch(std::time::Duration::ZERO), 1);
         assert!(!Path::new(&lost).exists());
         assert!(Path::new(&chat.cwd).is_dir(), "a directory a session uses is never an orphan");
+    }
+
+    #[test]
+    fn partial_stop_failure_keeps_every_workspace_session_and_all_history() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let first = worktree_session(dir.path());
+        let second = session_in(dir.path(), &first.cwd, "Companion");
+        let original = index::load().unwrap();
+        let history = Path::new(&first.cwd).join("untracked-fixture.txt");
+        std::fs::write(&history, "keep this work").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let stop = |_: &SessionEntry| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 { Err("fixture process still running".into()) } else { Ok(()) }
+        };
+        let error = remove_workspace_fallible(&sink(), &request(&first, SessionsFate::Delete, Confirmation::Forced, git::DirectDelete::Allowed), &stop).unwrap_err();
+        assert!(error.contains("fixture process still running"));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(serde_json::to_value(index::load().unwrap()).unwrap(), serde_json::to_value(&original).unwrap());
+        assert!(index::get(&second.id).is_ok());
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "keep this work");
+        assert!(Path::new(&first.cwd).join("a.txt").is_file());
+        assert!(git::run(dir.path(), &["worktree", "list", "--porcelain"]).unwrap().contains(&first.cwd));
+    }
+
+    #[test]
+    fn failed_quick_chat_stop_does_not_move_or_delete_its_history() {
+        let _home = crate::store::temp_home();
+        let chat = quick_chat(None);
+        let destination = repo();
+        let marker = Path::new(&chat.cwd).join("retained.txt");
+        std::fs::write(&marker, "retained").unwrap();
+        let stop = |_: &SessionEntry| Err("fixture stop refused".to_string());
+        assert!(set_quick_chat_cwd_fallible(&sink(), &chat.id, destination.path().to_str(), &stop).is_err());
+        assert!(move_quick_chat_to_project_fallible(&sink(), &chat.id, destination.path().to_str().unwrap(), &stop).is_err());
+        assert!(delete_session_blocking_fallible(&sink(), &chat.id, &stop).is_err());
+        let kept = index::get(&chat.id).unwrap();
+        assert_eq!(kept.cwd, chat.cwd);
+        assert!(kept.is_quick());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "retained");
     }
 
     #[test]
