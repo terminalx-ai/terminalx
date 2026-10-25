@@ -276,8 +276,10 @@ fn resolve_existing(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// What the app wants the hook to print. `None` prints nothing, which leaves
-/// the CLI's own behaviour untouched.
+/// What the app wants the hook to print. Reporting hooks may omit output;
+/// local-owner decision hooks fail closed on missing output. A successfully
+/// handled report at a decision gate must explicitly return `Some({})` to
+/// leave the CLI's own approval policy untouched.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct HookReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]

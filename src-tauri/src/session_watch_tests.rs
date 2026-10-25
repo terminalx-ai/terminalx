@@ -334,6 +334,36 @@ impl Rig {
     }
 }
 
+#[test]
+fn codex_pretool_reports_acknowledge_without_overriding_the_provider_policy() {
+    for mode in ["bypassPermissions", "auto", "plan"] {
+        let rig = Rig::in_mode(CliKind::Codex, mode);
+        let reply = rig.manager.on_hook(HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(),
+            event: "PreToolUse".into(),
+            payload: json!({"tool_name":"shell", "tool_input":{"command":"pwd"}}),
+        });
+        assert_eq!(reply.output, Some(json!({})), "{mode}: the local-owner bridge needs an explicit acknowledgement, not a missing reply");
+        assert!(reply.refused.is_none());
+        assert!(rig.rt.lock().unwrap().pending.is_empty());
+        assert_eq!(rig.launch_mode().as_deref(), Some(mode));
+    }
+}
+
+#[test]
+fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
+    let rig = Rig::in_mode(CliKind::Codex, "bypassPermissions");
+    let reply = rig.manager.on_hook_pumping(HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(),
+        event: "PreToolUse".into(), payload: json!({"tool_name":"shell", "tool_input":{"command":"pwd"}}),
+    }, |rt, _| {
+        let mut rt = rt.lock().unwrap();
+        let Engine::Cli(p) = &mut rt.engine else { unreachable!() };
+        p.origin.token = crate::hooks::mint_token();
+    });
+    assert!(reply.output.is_none(), "a stale launch must still fail closed at the owner bridge");
+}
+
 /// A send opens the turn before the input thread types anything. Silence
 /// before that send must not make the new turn look stalled (#237).
 #[test]

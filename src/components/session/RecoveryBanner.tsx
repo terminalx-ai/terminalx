@@ -21,7 +21,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = false, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -33,7 +33,7 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   answering?: boolean;
   /** Set when this reader may not answer requests (a shared cloud workspace's non-approver, PRO-30). */
   answerBlockedReason?: string | null;
-  /** Quote the command, file or tool each permission request is about (a shared cloud workspace: approvers and everyone waiting on them see the same). */
+  /** Quote the full command, file or tool for local and shared-workspace requests. */
   askDetail?: boolean;
   models: ModelInfo[];
   onOpenModels?: () => void;

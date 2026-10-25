@@ -4032,6 +4032,7 @@ impl SessionManager {
             });
         }
 
+        let mut reply = HookReply::default();
         match frame.event.as_str() {
             // The CLI's session is up; the composer may stop waiting. Codex
             // also mints its own conversation id, so this is where the app
@@ -4087,6 +4088,14 @@ impl SessionManager {
                 if rt.pending.is_empty() {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
+                }
+                if frame.event == "PreToolUse" {
+                    // This authenticated, still-current launch only reported a
+                    // tool. Explicitly acknowledge it: the local-owner bridge
+                    // treats missing output as a failed decision and denies.
+                    // An empty object leaves the provider's own approval and
+                    // sandbox policy in charge; it is not an explicit allow.
+                    reply.output = Some(serde_json::json!({}));
                 }
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
@@ -4157,7 +4166,7 @@ impl SessionManager {
             _ => {}
         }
         self.restart_if_due(&rt_arc, &frame.session, &frame.tab, Some(&tail));
-        HookReply::default()
+        reply
     }
 
     /// Finish a Stop hook or a watcher-closed turn. Forget its answers while

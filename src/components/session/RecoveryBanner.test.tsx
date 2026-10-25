@@ -18,6 +18,16 @@ const props = () => ({ kind: null, waiting: false, asks: [], busy: false, models
 afterEach(cleanup);
 
 describe("session recovery UI smoke", () => {
+  it("shows the full local Codex command, working directory and reason before approval", () => {
+    const command = `printf 'keep  two spaces\\n'\n${"echo next\n".repeat(40)}echo final-command`;
+    const local: PendingAsk = { ...ask, toolName: "exec_command", input: { cmd: command, workdir: "/workspace/app", justification: "Run the focused regression test" }, description: undefined };
+    render(<RecoveryBanner {...props()} waiting asks={[local]} />);
+    expect(screen.getByTestId("permission-detail").textContent).toBe(command);
+    expect(screen.getByText("/workspace/app")).toBeTruthy();
+    expect(screen.getByText("Run the focused regression test")).toBeTruthy();
+    expect(screen.getByText("Waiting for permission to run a command")).toBeTruthy();
+  });
+
   it("shows capacity recovery, model selection, then a permission request with allow, deny and stop", () => {
     const p = props();
     const { rerender, container } = render(<RecoveryBanner {...p} kind="capacity" models={[{ id: "available", label: "Available model" } as ModelInfo]} />);
@@ -33,7 +43,8 @@ describe("session recovery UI smoke", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
     expect(p.onPermission.mock.calls).toEqual([["request", "allow"], ["request", "deny"]]);
     expect(p.onStop).toHaveBeenCalledOnce();
-    expect(container.textContent).not.toMatch(/secret|TOKEN|\/Users/);
+    expect(screen.getByTestId("permission-detail").textContent).toBe("TOKEN=secret /Users/private/run");
+    expect(container.textContent).not.toContain("unsafe secret");
     expect(screen.queryByRole("button", { name: "Retry safely" })).toBeNull();
   });
 
@@ -136,9 +147,9 @@ describe("session recovery UI smoke", () => {
     rerender(<RecoveryBanner {...p} waiting asks={[shared]} askDetail />);
     expect(screen.getByTestId("permission-detail").textContent).toBe("touch /tmp/bob-asked");
     expect((screen.getByRole("button", { name: /^Allow/ }) as HTMLButtonElement).disabled).toBe(false);
-    // A local session's banner stays as it was: no detail.
+    // Local approvers need the same information before deciding.
     rerender(<RecoveryBanner {...p} waiting asks={[shared]} />);
-    expect(screen.queryByTestId("permission-detail")).toBeNull();
+    expect(screen.getByTestId("permission-detail").textContent).toBe("touch /tmp/bob-asked");
   });
 
   it("shows every option as off, with the reason, to someone who may not approve", () => {
@@ -184,12 +195,12 @@ describe("session recovery UI smoke", () => {
   });
 
   it("describes what a request is about by its tool: a command, a file, a URL, or the tool itself", () => {
-    expect(askDetail({ toolName: "Bash", input: { command: "ls  -la\n/tmp" } })).toBe("ls -la /tmp");
+    expect(askDetail({ toolName: "Bash", input: { command: "ls  -la\n/tmp" } })).toBe("ls  -la\n/tmp");
     expect(askDetail({ toolName: "Edit", input: { file_path: "/workspace/api/src/login.ts", old_string: "a" } })).toBe("/workspace/api/src/login.ts");
     expect(askDetail({ toolName: "WebFetch", input: { url: "https://example.com/docs" } })).toBe("https://example.com/docs");
     expect(askDetail({ toolName: "mcp__linear__create_issue", input: { title: "x" } })).toBe("linear · create_issue");
     expect(askDetail({ toolName: "Task", input: {} })).toBe("Task");
-    expect(askDetail({ toolName: "Bash", input: { command: "x".repeat(500) } })).toHaveLength(241);
+    expect(askDetail({ toolName: "Bash", input: { command: "x".repeat(500) } })).toHaveLength(500);
     expect(askDetail({ input: null })).toBeNull();
   });
 });
