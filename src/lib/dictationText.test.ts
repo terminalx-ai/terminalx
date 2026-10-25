@@ -437,3 +437,19 @@ describe("raw/formatted edit ownership", () => {
     expect(final.committed).toBe("userName please save changes");
   });
 });
+
+
+it("retains paired part identity through revisions, segment changes and finalization", () => {
+  const first = applyPartial(EMPTY_BUFFER, "camel case user name", { raw: "camel case user name", segment: 0 });
+  const revised = applyPartial(first, "userName", { raw: "camel case user name end case", segment: 0 });
+  const next = applyPartial(revised, "account_id", { raw: "snake case account id end case", segment: 1 });
+  const final = applyFinal(next, "account_id", { raw: "snake case account id end case", segment: 1 });
+  expect(first.parts?.[0].id).toBe(revised.parts?.[0].id);
+  expect(next.parts).toEqual([
+    { id: 0, raw: "camel case user name end case", text: "userName" },
+    { id: 1, raw: "snake case account id end case", text: "account_id" },
+  ]);
+  expect(final.parts).toEqual(next.parts);
+  // Updating a revision must not mutate the snapshot captured by an edit.
+  expect(first.parts).toEqual([{ id: 0, raw: "camel case user name", text: "camel case user name" }]);
+});

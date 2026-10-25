@@ -448,3 +448,42 @@ it("uses raw words to preserve a legitimate new phrase even with the same segmen
   await send({ kind: "final", raw: "then review all changes", text: "then review all changes", segment: 0 });
   expect(box().value).toBe("userName then review all changes");
 });
+
+
+describe("known boundaries between adjacent transformed commands (R1b)", () => {
+  const camel = formattingCases.find(row => row.name === "code")!;
+  const snake = formattingCases.find(row => row.name === "snake code")!;
+
+  it("keeps fresh formatted seg1 after deleting and completing formatted seg0", async () => {
+    await open();
+    await send({ kind: "partial", raw: camel.raw[0], text: camel.text[0], segment: 0 });
+    expect(box().value).toBe("camel case user name");
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    expect(box().value).toBe("");
+    await send({ kind: "partial", raw: camel.raw[1], text: camel.text[1], segment: 0 });
+    expect(box().value).toBe("");
+    await send({ kind: "partial", raw: snake.raw[1], text: snake.text[1], segment: 1 });
+    expect(box().value).toBe("account_id");
+    await send({ kind: "final", raw: snake.raw[1], text: snake.text[1], segment: 1 });
+    expect(box().value).toBe("account_id");
+    await send({ kind: "stopped" });
+    expect(box().value).toBe("account_id");
+  });
+
+  it.each([false, true])("preserves adjacent commands across a known boundary (first final=%s)", async finalFirst => {
+    // No unchanged prose separates the commands. The explicit 0→1 segment
+    // boundary (and optionally finalization) supplies ownership provenance.
+    // Two transformations inside ONE undivided result are not disambiguated
+    // by this contract; it makes no universal within-utterance mapping claim.
+    await open();
+    await send({ kind: "partial", raw: camel.raw[1], text: camel.text[1], segment: 0 });
+    expect(box().value).toBe("userName");
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    expect(box().value).toBe("");
+    if (finalFirst) await send({ kind: "final", raw: camel.raw[1], text: camel.text[1], segment: 0 });
+    await send({ kind: "partial", raw: snake.raw[1], text: snake.text[1], segment: 1 });
+    expect(box().value).toBe("account_id");
+    await send({ kind: "final", raw: snake.raw[1], text: snake.text[1], segment: 1 }, { kind: "stopped" });
+    expect(box().value).toBe("account_id");
+  });
+});

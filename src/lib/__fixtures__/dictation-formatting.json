@@ -68,5 +68,23 @@
       "TranscriptionTab.tsx",
       "TranscriptionTab.tsx please save changes"
     ]
+  },
+  {
+    "name": "snake code",
+    "data": {
+      "options": {
+        "code": true
+      }
+    },
+    "raw": [
+      "snake case account id",
+      "snake case account id end case",
+      "snake case account id end case please save changes"
+    ],
+    "text": [
+      "snake case account id",
+      "account_id",
+      "account_id please save changes"
+    ]
   }
 ]

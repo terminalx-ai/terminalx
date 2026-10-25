@@ -8,7 +8,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useHeldShortcut, useShortcut, useShortcutKeys } from "@/lib/hotkeys";
 import { clearDictationError, dictationAvailable, startDictation, stopDictation, useDictation, type DictationState } from "@/lib/dictation";
-import { anchorAt, insertSpoken, spokenSince, formattedSince, correctedSegment, type DictationAnchor } from "@/lib/dictationText";
+import { anchorAt, insertSpoken, spokenSince, formattedSince, joinSpoken, correctedSegment, type DictationPart, type DictationAnchor } from "@/lib/dictationText";
 import { useTranscriptionInput } from "@/lib/transcriptionInput";
 
 /**
@@ -88,6 +88,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
   const anchor = useRef<DictationAnchor>({ before: "", after: "" });
   const taken = useRef("");
   const takenRaw = useRef("");
+  const takenParts = useRef(new Map<number, string>());
   // The dictation this composer is following, and whether it has ended.
   const session = useRef<number | null>(null);
   const over = useRef(false);
@@ -108,10 +109,11 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
   heard.current = state;
 
   /** Split `text` at a caret (or around a selection) and take `said` as already part of it. */
-  const split = useCallback((text: string, start: number, end: number, said: string, raw = said) => {
+  const split = useCallback((text: string, start: number, end: number, said: string, raw = said, parts?: readonly DictationPart[]) => {
     anchor.current = anchorAt(text, start, end);
     taken.current = said;
     takenRaw.current = raw;
+    takenParts.current = new Map(parts?.map(part => [part.id, part.raw] as const));
     expected.current = [];
     last.current = null;
     caret.current = null;
@@ -139,7 +141,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       learnable.current = false;
       learning.current = null;
       const at = el.selectionEnd ?? el.value.length;
-      split(el.value, at, at, heard.current.text, heard.current.raw);
+      split(el.value, at, at, heard.current.text, heard.current.raw, heard.current.parts);
       expected.current = [el.value];
     };
     const events = ["keyup", "mouseup", "select"] as const;
@@ -153,7 +155,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
 
   /** Start the words at the reader's caret in the draft as it stands, keeping `said` as their text. */
   const reanchor = useCallback(
-    (said: string, raw = said) => {
+    (said: string, raw = said, parts?: readonly DictationPart[]) => {
       const text = current.current;
       // Where the reader last had the caret, if that is still their draft. A
       // field they never put it in reports it at the very start, which is the
@@ -161,7 +163,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       // answer: without a caret of their own the words go on the end.
       const m = mark.current;
       const at = m && m.value === text ? { start: m.start, end: m.end } : { start: text.length, end: text.length };
-      split(text, at.start, at.end, said, raw);
+      split(text, at.start, at.end, said, raw, parts);
       seen.current = text;
     },
     [split],
@@ -187,7 +189,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       if (!dictating || session.current != null) return;
       session.current = state.session;
       over.current = false;
-      reanchor(state.text, state.raw);
+      reanchor(state.text, state.raw, state.parts);
       return;
     }
     // Its dictation has ended: whatever happens to the draft now is not this hook's to answer.
@@ -198,13 +200,26 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       if (at < 0) {
         learnable.current = false;
         learning.current = null;
-        reanchor(state.text, state.raw);
+        reanchor(state.text, state.raw, state.parts);
       }
       else expected.current = expected.current.slice(at + 1);
     }
     // What is left is what the reader has not already got.
     let spoken: string;
-    if (state.raw != null) {
+    if (state.parts != null) {
+      // Never align across a boundary the reducer already knows. A fresh part
+      // has no owned raw prefix, even if both adjacent parts are transformed.
+      spoken = "";
+      taken.current = "";
+      takenRaw.current = "";
+      for (const part of state.parts) {
+        const since = formattedSince(takenParts.current.get(part.id) ?? "", part.raw, part.text);
+        takenParts.current.set(part.id, since.taken);
+        taken.current = joinSpoken(taken.current, since.formattedTaken);
+        takenRaw.current = joinSpoken(takenRaw.current, since.taken);
+        spoken = joinSpoken(spoken, since.spoken);
+      }
+    } else if (state.raw != null) {
       const since = formattedSince(takenRaw.current, state.raw, state.text);
       takenRaw.current = since.taken;
       taken.current = since.formattedTaken;
@@ -220,7 +235,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     // written: words the recogniser took back must leave the draft too.
     if (spoken || last.current != null) write(spoken);
     if (state.phase === "idle") over.current = true;
-  }, [state.text, state.raw, state.session, state.phase, draft, dictating, reanchor, write]);
+  }, [state.text, state.raw, state.parts, state.session, state.phase, draft, dictating, reanchor, write]);
 
   // Put the caret back after the words, once the draft has come round again.
   useLayoutEffect(() => {

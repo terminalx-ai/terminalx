@@ -22,6 +22,14 @@
  * Everything here is pure: the same results always make the same draft.
  */
 
+/** A reducer-owned utterance boundary, retained even after finalization.
+ * IDs are local to one recording; a revision retains its ID, a fold starts another. */
+export interface DictationPart {
+  id: number;
+  raw: string;
+  text: string;
+}
+
 /** What has been heard so far, split into what has settled and what has not. */
 export interface DictationBuffer {
   /** Utterances the recogniser has moved on from, joined with single spaces. */
@@ -32,6 +40,8 @@ export interface DictationBuffer {
   raw?: string;
   /** Raw counterparts of settled utterances, retained across edit boundaries. */
   rawCommitted?: string;
+  /** Paired forms without flattening known settled/live boundaries. */
+  parts?: readonly DictationPart[];
   /** Recogniser-owned identity for `live`, when the engine can provide one. */
   segment?: number;
 }
@@ -188,6 +198,22 @@ function hasRaw(buffer: DictationBuffer, result: DictationResult): boolean {
   return result.raw != null || buffer.raw != null || buffer.rawCommitted != null;
 }
 
+function recognitionParts(buffer: DictationBuffer): readonly DictationPart[] {
+  if (buffer.parts) return buffer.parts;
+  // Compatibility for a stream that gains raw metadata after its first result.
+  const parts: DictationPart[] = [];
+  if (buffer.committed) parts.push({ id: 0, raw: buffer.rawCommitted ?? buffer.committed, text: buffer.committed });
+  if (buffer.live) parts.push({ id: parts.length, raw: buffer.raw ?? buffer.live, text: buffer.live });
+  return parts;
+}
+
+function updateParts(buffer: DictationBuffer, raw: string, text: string, revision: boolean): readonly DictationPart[] {
+  const parts = recognitionParts(buffer);
+  const last = parts.at(-1);
+  if (revision && buffer.live && last) return [...parts.slice(0, -1), { id: last.id, raw, text }];
+  return [...parts, { id: (last?.id ?? -1) + 1, raw, text }];
+}
+
 /** Take a partial result. Blank ones say nothing and change nothing. */
 export function applyPartial(buffer: DictationBuffer, partial: string, result: DictationResult = {}): DictationBuffer {
   const next = partial.trim();
@@ -197,6 +223,7 @@ export function applyPartial(buffer: DictationBuffer, partial: string, result: D
   if (hasRaw(buffer, result)) {
     updated.rawCommitted = revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer);
     updated.raw = result.raw ?? next;
+    updated.parts = updateParts(buffer, result.raw ?? next, next, revision);
   }
   return updated;
 }
@@ -215,6 +242,7 @@ export function applyFinal(buffer: DictationBuffer, final: string, result: Dicta
     updated.rawCommitted = !text ? rawSpokenText(buffer)
       : joinSpoken(revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer), result.raw ?? text);
     updated.raw = "";
+    updated.parts = text ? updateParts(buffer, result.raw ?? text, text, revision) : recognitionParts(buffer);
   }
   return updated;
 }
