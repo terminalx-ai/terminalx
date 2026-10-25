@@ -163,3 +163,59 @@ it("keeps a newer verification failure visible when an older verified response a
   expect(screen.getByRole("alert").textContent).toContain("current verification failed");
   expect(screen.queryByRole("button", { name: "Delete speech detector" })).toBeNull();
 });
+
+it.each([false, true])("hydrates pending first metadata (downloading=%s) with current progress and permits cancel before completion", async (downloading) => {
+  const first = deferred<typeof model>();
+  mocks.invoke.mockResolvedValueOnce(first.promise).mockResolvedValue(model);
+  render(<TranscriptionNoiseGuard />);
+  await waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(1));
+  act(() => {
+    event({ payload: { id: model.id, received: 124106, done: false } });
+    event({ payload: { id: model.id, received: 620528, done: false } });
+  });
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  // The snapshot predates the latest progress, even if it already says active.
+  await act(async () => { first.resolve({ ...model, downloading }); });
+  const cancel = screen.getByRole("button", { name: "Cancel detector download" }) as HTMLButtonElement;
+  expect(cancel.disabled).toBe(false);
+  expect(screen.getByText("50%")).toBeTruthy();
+  act(() => event({ payload: { id: model.id, received: 930792, done: false } }));
+  expect(screen.getByText("75%")).toBeTruthy();
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  fireEvent.click(cancel);
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("transcription_cancel_download", { id: model.id }));
+});
+
+it.each(["resolve", "reject"])("fences initial hydration %s after terminal completion owns the status", async (settle) => {
+  const first = deferred<typeof model>();
+  const completed = deferred<typeof model>();
+  mocks.invoke.mockResolvedValueOnce(first.promise).mockResolvedValueOnce(completed.promise);
+  render(<TranscriptionNoiseGuard />);
+  await waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(1));
+  act(() => {
+    event({ payload: { id: model.id, received: 100, done: false } });
+    event({ payload: { id: model.id, done: true } });
+  });
+  await act(async () => { completed.resolve(verified); });
+  await act(async () => {
+    if (settle === "resolve") first.resolve({ ...invalid, downloading: true });
+    else first.reject(new Error("obsolete hydration failure"));
+  });
+  expect(screen.getByRole("button", { name: "Delete speech detector" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Cancel detector download" })).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("discards pending hydration and late progress after unmount", async () => {
+  const first = deferred<typeof model>();
+  mocks.invoke.mockResolvedValueOnce(first.promise);
+  const view = render(<TranscriptionNoiseGuard />);
+  await waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(1));
+  act(() => event({ payload: { id: model.id, received: 100, done: false } }));
+  view.unmount();
+  act(() => event({ payload: { id: model.id, received: 200, done: false } }));
+  await act(async () => { first.resolve({ ...model, downloading: true }); });
+  expect(mocks.off).toHaveBeenCalledTimes(1);
+  expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Cancel detector download" })).toBeNull();
+});

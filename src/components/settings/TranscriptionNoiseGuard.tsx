@@ -14,15 +14,28 @@ export function TranscriptionNoiseGuard() {
   // a rejected request) cannot replace state observed after a newer transition.
   const generation = useRef(0);
   const mounted = useRef(false);
+  const hydrated = useRef(false);
+  const hydrationOwner = useRef<number | null>(null);
+  const hydrationProgress = useRef<DownloadProgress | null>(null);
   const refresh = useCallback(async () => {
     const owner = ++generation.current;
+    const needsMetadata = !hydrated.current;
+    hydrationOwner.current = needsMetadata ? owner : null;
+    hydrationProgress.current = null;
     try {
       const value = await invoke<TranscriptionDetector>("transcription_detector");
-      if (mounted.current && owner === generation.current) setModel(value);
+      if (mounted.current && owner === generation.current) {
+        hydrated.current = true;
+        const progress = needsMetadata ? hydrationProgress.current : null;
+        setModel(progress ? { ...value, downloading: true, progress } : value);
+      }
     } catch (e) {
       if (mounted.current && owner === generation.current) setError(errorMessage(e));
     } finally {
-      if (mounted.current && owner === generation.current) setBusy(false);
+      if (mounted.current && owner === generation.current) {
+        hydrationOwner.current = null;
+        setBusy(false);
+      }
     }
   }, []);
   useEffect(() => {
@@ -32,11 +45,20 @@ export function TranscriptionNoiseGuard() {
     void refresh();
     void listen<DownloadProgress>("transcription_download", ({ payload }) => {
       if (!live || payload.id !== "silero-vad-v6.2") return;
-      ++generation.current;
       setBusy(false);
       if (payload.error) setError(payload.error);
-      if (payload.done || payload.error) void refresh();
-      else setModel((value) => value ? { ...value, downloading: true, progress: payload } : value);
+      if (payload.done || payload.error) {
+        // Terminal transitions take a new owner, fencing pending hydration too.
+        void refresh();
+      } else if (!hydrated.current) {
+        // Progress cannot supply metadata. Keep the current hydration alive and
+        // merge the newest progress into its response instead of starving it.
+        if (hydrationOwner.current !== generation.current) void refresh();
+        hydrationProgress.current = payload;
+      } else {
+        ++generation.current;
+        setModel((value) => value ? { ...value, downloading: true, progress: payload } : value);
+      }
     }).then((stop) => { if (live) off = stop; else stop(); })
       .catch((e) => { if (live) setError(errorMessage(e)); });
     return () => { live = false; mounted.current = false; ++generation.current; off?.(); };
