@@ -63,6 +63,10 @@ fn identity(target: Option<&TaskTarget>) -> Result<()> {
     }
     Ok(())
 }
+
+pub(super) fn check_identity() -> Result<()> {
+    identity(None)
+}
 pub fn ready() -> Result<()> {
     identity(None)?;
     let version = process::run(

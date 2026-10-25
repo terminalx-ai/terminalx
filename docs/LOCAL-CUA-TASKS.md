@@ -12,6 +12,46 @@ operation after the allocation, download and storage disclosure. Enrollment
 accepts only an existing `local:<name>` Lume macOS VM; it does not enroll the
 host desktop or require a cloud organization/account.
 
+The normal Create flow queues guided setup with one confirmed disclosure of
+image/tool downloads, VM resources, retained storage and provider costs. The
+persistent owner prepares pinned Cua/Lume tools in its private cache, verifies
+archive/executable hashes and Developer ID signatures, and installs its matching
+arm64 guest runtime automatically. There is no binary picker or guest shell
+procedure. Existing compatible signed Driver and Codex installations are
+retained, with their daemon, permissions, account configuration and credentials.
+Automatic provider tool preparation currently supports Codex 0.156.1; other
+retained harnesses remain subject to their reported compatibility limits.
+
+Full environment/generation/provider binding, setup intent and keyed action
+receipts live in the owner journal. Reopening Settings observes that history
+without replaying creation, installers, sign-in or permissions. Interrupted
+setup offers explicit review of the existing VM and retains prior uncertainty.
+A missing response or dead helper never proves guest work stopped; unresolved
+setup keeps the owner/deletion hold.
+
+Passive readiness uses version/status, attributed permission status, safe local
+file-store authentication evidence, and console/display metadata. It never
+launches Driver, captures pixels, refreshes credentials, discovers models or
+sends a provider turn. Missing/stopped/version-mismatched Driver, unknown
+permission attribution, unknown sign-in and unverified capture are distinct.
+Existing keyring/automatic credential selection is preserved and stays unknown
+when inspecting it might raise UI.
+
+Explicit actions own bounded guest children and checkpoint intent before
+effects. Start computer control uses the public no-permissions-gate launch mode;
+this suppresses setup prompts, not TCC. Review guest permissions uses the public
+app-owned grant flow, including its disclosed direct-capture check. Only the
+person answers macOS approvals or the guest-account password dialog. Codex
+device authorization stays in one owned app-server process; its challenge lives
+only in memory, never in journals/diagnostics. Cancellation binds that exact
+live actor and a new key. Process loss never starts another sign-in.
+
+Capture proof binds the current kernel boot and Driver executable. Capture alone
+does not prove an unlocked usable app desktop; that field remains false until
+independent input/readback evidence exists. A running VM, generic reply or PNG
+cannot make setup Ready. Fresh onboarding and desktop usability acceptance
+remain open.
+
 The conversation footer lets the user select a task prompt and specific
 project-relative context files. It inherits the parent's provider harness,
 model, effort and permission mode, and checks those against the guest's own
@@ -89,7 +129,7 @@ The existing headless runtime is reused; Linux binaries cannot substitute for
 this build. The release workflow includes a macOS arm64 runtime artifact,
 architecture check, self-test and checksum inventory.
 
-Control uses the separately installed Cua CLI's authenticated guest execution
+Control uses the pinned Cua CLI's authenticated guest execution
 transport, forwarding bounded JSON over stdin to a guest helper. The helper
 reads only its guest runtime's owner-only control socket/token. Host control
 credentials are removed from child environments. No new unauthenticated LAN
@@ -97,7 +137,7 @@ control/VNC endpoint or cloud relay is introduced by this adapter.
 
 The guest's provider MCP configuration contains the task-bound computer
 proxy. It runs **inside the guest** and forwards a restricted native tool set
-to its separately installed Cua Driver. It has no VM/fleet selector or host
+to its signed guest Cua Driver. It has no VM/fleet selector or host
 desktop endpoint. Every call checks the full-workflow desktop lease. The lease
 is held through human waits, cancellation and unknown outcomes; a timeout does
 not let another task steal it. Multiple tasks queue in one guest. Separate VMs
@@ -190,11 +230,29 @@ Terminal status alone is insufficient worker-exit proof: this flow accepts a dur
 canceled-before-start marker or a different kernel boot for a recorded worker;
 same-boot completed workers without an attempt-bound exit receipt remain blocked.
 
+## Fresh account and template constraints
+
+Pinned Lume 0.6.1 offline setup hardcodes the image's initial account and does
+not expose a supported initial personalized password in its unattended config;
+its health-check password is not an account-creation setting. The published
+initial account is not a production credential. This implementation neither
+persists it nor guesses, enters, resets or copies passwords. A supported secure
+account-personalization path and fresh guided setup remain release gates.
+
+Upstream golden-image testing includes SIP-disabled/TCC-seeded variants. Those
+are not a supported product shortcut. No permission inheritance is claimed for
+clones; a credential-free, SIP-enabled template needs fresh-clone identity,
+permission and usable-desktop evidence before reuse. The current pilot's own
+Codex authentication, Accessibility, Screen Recording and explicit Driver
+capture were verified on 2026-10-25 and must not be requested again.
+
 ## Candidate dependency profile and distribution boundary
 
-The adapter targets separately installed Cua CLI **0.7.0**, Lume **0.6.1** and
-guest Cua Driver **0.28.0**. Driver/guest interoperability still needs validation
-on this exact combination. No remote installer is executed implicitly.
+The adapter targets Cua CLI **0.7.0**, Lume **0.6.1**, guest Cua Driver
+**0.28.0** and Codex **0.156.1**. Guided setup downloads pinned release archives
+only after disclosure/confirmation. It does not run upstream shell installers,
+modify TCC/SIP, copy host credentials or enroll the host. Fresh-profile
+interoperability still needs validation on this exact combination.
 The candidate macOS image is pinned to:
 
 ```
@@ -204,7 +262,7 @@ ghcr.io/trycua/macos@sha256:7cb23670cad48a6723cf667bc63c444b83dc0c73756c23b61489
 The registry manifest inspected on 2026-10-24 declared 24,212,741,210 compressed
 download bytes, 4 vCPUs, 8 GiB RAM, a 150 GiB sparse disk and 1024×768 display.
 Actual allocated disk, image cache and project/toolchain growth are additional.
-Cua/Lume verify OCI content digests. The selected guest runtime binary is
+Cua/Lume verify OCI content digests. The automatically selected guest runtime is
 checked for arm64 and SHA-256 verified after transfer. The host checks Apple
 Silicon/macOS, virtualization, free memory/disk, dependency versions and local
 VM concurrency. These are admission checks, not performance measurements.
@@ -214,8 +272,8 @@ The source inventory at
 identifies SDK/CLI, Driver and Lume as MIT, and Spaces applications,
 `cua-spacesd` and streaming/storage components as FSL. The pinned image includes
 `cua-spacesd`; this is not an entirely MIT dependency stack. No upstream binary,
-viewer implementation, image or credential is bundled by this change. That
-external installation boundary alone does **not** settle distribution rights.
+viewer implementation, image or credential is checked into this change. Guided
+download/preparation does **not** settle distribution rights.
 The [exact FSL terms](https://github.com/trycua/cua/blob/27d8da9fd94056bd73892183531579396aafb2f9/libs/cua-spacesd/LICENSE)
 allow internal use but restrict competing commercial availability. Commercial
 integration/distribution review is still a release gate. A Lume + permitted

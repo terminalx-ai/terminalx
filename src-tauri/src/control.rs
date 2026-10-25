@@ -433,7 +433,7 @@ impl ControlService {
             if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
             let lifetime = self.local_lifetime.as_ref().ok_or_else(|| ControlError::new("unsupported", "Local VM requests require the persistent local owner.", None::<String>))?;
             let method = params["method"].as_str().ok_or_else(|| ControlError::invalid("method is required"))?;
-            if matches!(method, "environment.reconcileProvision" | "environment.delete") {
+            if matches!(method, "environment.reconcileProvision" | "environment.delete" | "environment.create" | "environment.setup" | "environment.setupAction") {
                 let _admission = crate::local_vm::supervisor::admit_exclusive(lifetime).map_err(ControlError::internal)?;
                 return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
             }
@@ -540,7 +540,7 @@ impl ControlService {
                 if let Some(lifetime) = &self.local_lifetime {
                     status["localRuntime"] = lifetime.status();
                     #[cfg(unix)]
-                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL,"reconciliationProtocol":crate::local_vm::provisioning::PROTOCOL}); } }
+                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL,"reconciliationProtocol":crate::local_vm::provisioning::PROTOCOL,"onboardingProtocol":crate::local_vm::setup::PROTOCOL}); } }
                 }
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;

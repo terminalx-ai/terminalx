@@ -6,10 +6,29 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn command(program: &str) -> Result<Command> {
-    let binary = crate::binpath::resolve(program)
-        .with_context(|| format!("Install {program} separately, then run compatibility checks"))?;
+    let binary = super::bootstrap::installed(program)?
+        .or_else(|| crate::binpath::resolve(program))
+        .with_context(|| {
+            format!("The {program} tool is unavailable; review the guided setup progress")
+        })?;
     let mut command = Command::new(binary);
-    command.env("PATH", crate::binpath::login_path());
+    let mut path = std::env::split_paths(&crate::binpath::login_path()).collect::<Vec<_>>();
+    if program == "cua" {
+        if let Some(lume) = super::bootstrap::installed("lume")? {
+            path.insert(
+                0,
+                lume.parent()
+                    .context("Prepared Lume executable has no parent")?
+                    .to_owned(),
+            );
+            // Pinned Cua 0.7.0 otherwise downloads its built-in Lume 0.6.0.
+            // Select our verified 0.6.1 executable without changing user config
+            // or stopping an existing server.
+            command.env("CUA_RUNTIME_LUME", "system");
+        }
+        command.env_remove("LUME_API");
+    }
+    command.env("PATH", std::env::join_paths(path)?);
     for key in [
         crate::hooks::CONTROL_TOKEN_ENV,
         crate::hooks::CONTROL_SOCKET_ENV,
@@ -80,7 +99,7 @@ fn run_controlled(
         std::thread::sleep(Duration::from_millis(25));
     };
     if !status.success() {
-        bail!("Environment operation failed ({status}); check the VM state, guest login, permissions, disk and networking. No host fallback occurred");
+        bail!("Local environment command failed ({status}); inspect the reported setup/task stage. No host fallback occurred");
     }
     // A successful direct child can still leave inherited pipes in descendants.
     // Bound receipt collection too; pipe closure is not guest exit evidence.

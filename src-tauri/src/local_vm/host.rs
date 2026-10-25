@@ -77,6 +77,10 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
             )?)
         }
         "environment.create" => create(&journal, &params),
+        "environment.setup" => super::setup::queue(&journal, params),
+        "environment.setupReadiness" => super::setup::inspect(&journal, params),
+        "environment.setupAction" => super::setup::action(&journal, params),
+        "environment.setupAuth" => super::setup::auth(&journal, params),
         "task.submit" => submit(&journal, params),
         "environment.start" => {
             let env = environment(&journal, &params)?;
@@ -594,7 +598,7 @@ pub fn doctor() -> Result<Value> {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let home = dirs::home_dir().context("Home directory unavailable")?;
     Ok(
-        json!({"compatible":compatibility.is_ok(),"reason":compatibility.err().map(|e|crate::remote::protocol::redact(&format!("{e:#}"))),"runtime":runtime,"resources":resources()?,"freeDiskBytes":available_disk(&home)?,"profile":{"image":IMAGE,"downloadBytes":DOWNLOAD_BYTES,"cpu":4,"memoryBytes":8_589_934_592_u64,"diskLimitBytes":161_061_273_600_u64,"storage":home.join(".lume"),"cache":home.join(".cua"),"minimumFreeDiskBytes":53_687_091_200_u64},"releaseGatesVerified":false}),
+        json!({"compatible":compatibility.is_ok(),"reason":compatibility.err().map(|e|crate::remote::protocol::redact(&format!("{e:#}"))),"runtime":runtime,"resources":resources()?,"freeDiskBytes":available_disk(&home)?,"profile":{"image":IMAGE,"downloadBytes":DOWNLOAD_BYTES,"cpu":4,"memoryBytes":8_589_934_592_u64,"diskLimitBytes":161_061_273_600_u64,"storage":home.join(".lume"),"cache":home.join(".cua"),"minimumFreeDiskBytes":53_687_091_200_u64},"bootstrapProfile":super::bootstrap::profile(),"releaseGatesVerified":false}),
     )
 }
 pub fn progress(status: &str, detail: &str) -> Value {
@@ -602,49 +606,43 @@ pub fn progress(status: &str, detail: &str) -> Value {
 }
 fn create(journal: &Journal, params: &Value) -> Result<Value> {
     confirm(params)?;
-    compatible()?;
+    if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
+        bail!("Local macOS setup requires Apple Silicon");
+    }
     let name = field(params, "name")?;
     let vm_name = field(params, "vmName")?;
     let sandbox = format!("local:{vm_name}");
+    let key = field(params, "idempotencyKey")?;
+    let harness = field(params, "harness")?;
+    super::setup::validate_request(harness, key)?;
+    if name.trim().is_empty() || name.len() > 120 {
+        bail!("Provide an environment name of 1–120 bytes");
+    }
     journal::validate_sandbox(&sandbox)?;
+    if let Some(existing) = existing_creation(&journal.read()?, name, &sandbox, harness, key)? {
+        return Ok(serde_json::to_value(existing)?);
+    }
     if let Some(existing) = journal
         .read()?
         .environments
         .values()
         .find(|e| e.sandbox == sandbox && e.deleted_at.is_none())
     {
-        if existing.owned && existing.name == name {
+        if existing.owned
+            && existing.name == name
+            && existing
+                .setup
+                .as_ref()
+                .is_some_and(|s| s["idempotencyKey"] == key && s["harness"] == harness)
+        {
             return Ok(serde_json::to_value(existing)?);
         }
         bail!("This VM identity is already enrolled");
-    }
-    let inventory: Value =
-        serde_json::from_slice(&cua(&["sb", "ls", "--local", "--json"], b"", BUDGET)?)?;
-    if inventory
-        .as_array()
-        .context("Invalid VM inventory")?
-        .iter()
-        .any(|vm| vm.get("id").and_then(Value::as_str) == Some(&sandbox))
-    {
-        bail!("This VM already exists; enroll it explicitly instead");
     }
     if available_disk(&dirs::home_dir().context("Home directory unavailable")?)?
         < 50 * 1024 * 1024 * 1024
     {
         bail!("At least 50 GiB free disk is required before project/toolchain growth");
-    }
-    if inventory
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|vm| {
-            vm.get("runtime").and_then(Value::as_str) == Some("lume")
-                && vm.get("state").and_then(Value::as_str) == Some("running")
-        })
-        .count()
-        >= 2
-    {
-        bail!("Two local macOS VMs are already running; stop one explicitly before provisioning");
     }
     let resources = resources()?;
     if resources["virtualizationAvailable"] != true
@@ -653,16 +651,73 @@ fn create(journal: &Journal, params: &Value) -> Result<Value> {
     {
         bail!("Virtualization and at least 8 GiB currently available memory (16 GiB total) are required, leaving resources for this Mac");
     }
-    let env = journal.enroll(name, &sandbox)?;
-    journal.transaction(|s| {
-        let e = s.environments.get_mut(&env.id).unwrap();
-        e.owned = true;
-        e.provision = Some(progress("queued", "Waiting for the local supervisor"));
-        Ok(())
-    })?;
-    Ok(serde_json::to_value(
-        journal.read()?.environments[&env.id].clone(),
-    )?)
+    Ok(serde_json::to_value(reserve_creation(
+        journal, name, &sandbox, harness, key,
+    )?)?)
+}
+
+fn existing_creation(
+    state: &journal::State,
+    name: &str,
+    sandbox: &str,
+    harness: &str,
+    key: &str,
+) -> Result<Option<Environment>> {
+    if let Some(prior) = state
+        .environments
+        .values()
+        .find(|e| e.setup.as_ref().is_some_and(|s| s["idempotencyKey"] == key))
+    {
+        if prior.name != name.trim()
+            || prior.sandbox != sandbox
+            || prior.setup.as_ref().unwrap()["harness"] != harness
+        {
+            bail!("Creation key already names different approved input");
+        }
+        return Ok(Some(prior.clone()));
+    }
+    Ok(None)
+}
+fn reserve_creation(
+    journal: &Journal,
+    name: &str,
+    sandbox: &str,
+    harness: &str,
+    key: &str,
+) -> Result<Environment> {
+    super::setup::validate_request(harness, key)?;
+    journal::validate_sandbox(sandbox)?;
+    journal.transaction(|state| {
+        if let Some(prior) = existing_creation(state, name, sandbox, harness, key)? {
+            return Ok(prior);
+        }
+        if state
+            .environments
+            .values()
+            .any(|e| e.sandbox == sandbox && e.deleted_at.is_none())
+        {
+            bail!("VM identity is already enrolled");
+        }
+        let mut env = Environment {
+            id: journal::new_id(),
+            name: name.trim().into(),
+            sandbox: sandbox.into(),
+            generation: journal::new_id(),
+            created_at: journal::now(),
+            deleted_at: None,
+            keep_awake: false,
+            owned: true,
+            provision: Some(progress(
+                "queued",
+                "Waiting for disclosed tool preparation before creating the VM",
+            )),
+            manual_control: false,
+            setup: None,
+        };
+        env.setup = Some(super::setup::initial(&env, harness, key)?);
+        state.environments.insert(env.id.clone(), env.clone());
+        Ok(env)
+    })
 }
 
 #[derive(Deserialize)]
@@ -674,6 +729,14 @@ struct Submission {
 }
 fn submit(journal: &Journal, params: Value) -> Result<Value> {
     let req: Submission = serde_json::from_value(params)?;
+    if journal
+        .read()?
+        .environments
+        .get(&req.input.environment_id)
+        .is_some_and(super::setup::busy)
+    {
+        bail!("Finish this environment's guided setup and desktop verification before submitting a task");
+    }
     let files = export_files(Path::new(&req.source_root), &req.input.files)?;
     let task = journal.submit(&req.idempotency_key, req.input)?;
     // A recovered submission may supply these bytes again, but can never
@@ -757,18 +820,194 @@ pub fn export_files(source: &Path, manifest: &[journal::InputFile]) -> Result<Va
     Ok(json!(files))
 }
 
+pub(crate) fn install_current_guest(env: &Environment) -> Result<()> {
+    install_guest(env, &std::env::current_exe()?)
+}
+
+pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
+    let info = inspect_sandbox(&env.sandbox)?;
+    validate_macos_vm(&info)?;
+    if info["id"] != env.sandbox
+        || info["state"] != "running"
+        || info["status"] != "ready"
+        || env.owned && info["image"] != IMAGE
+    {
+        bail!("The selected guest is not authoritatively booted with the expected profile. No machine was recreated; inspect/start this exact VM explicitly");
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
+    // Existing compatible signed app is preserved in place, retaining its
+    // designated requirement and user-granted permissions. Never replace or
+    // stop a daemon as a side effect of setup inspection/preparation.
+    let probe = "if test -d /Applications/CuaDriver.app; then /usr/bin/codesign --verify --strict /Applications/CuaDriver.app && /usr/bin/codesign --verify -R 'anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' /Applications/CuaDriver.app && /Applications/CuaDriver.app/Contents/MacOS/cua-driver --version; else printf driver-missing; fi";
+    let output = cua(
+        &[
+            "sb",
+            "exec",
+            "-i",
+            &env.sandbox,
+            "--",
+            "/bin/sh",
+            "-c",
+            probe,
+        ],
+        b"",
+        BUDGET,
+    )?;
+    let version = String::from_utf8_lossy(&output);
+    if version
+        .split_whitespace()
+        .any(|v| v.trim_start_matches('v') == super::desktop::DRIVER_VERSION)
+    {
+        return Ok(());
+    }
+    if output != b"driver-missing" {
+        bail!("Existing guest Driver does not match the supported signed profile; no daemon/app was replaced");
+    }
+    let prepared = super::bootstrap::prepare(&super::bootstrap::DRIVER)?;
+    let archive = prepared.join("terminalx-archive.tar.gz");
+    let bytes = fs::read(&archive)?;
+    if journal::digest(&bytes) != super::bootstrap::DRIVER.sha256 {
+        bail!("Cached Driver archive changed; no guest installation sent");
+    }
+    let stage = format!(
+        "{GUEST_HOME}/staging/driver-{}",
+        super::bootstrap::DRIVER.sha256
+    );
+    cua(
+        &[
+            "sb",
+            "exec",
+            "-i",
+            &env.sandbox,
+            "--",
+            "/bin/mkdir",
+            "-p",
+            &stage,
+        ],
+        b"",
+        BUDGET,
+    )?;
+    cua(
+        &[
+            "sb",
+            "cp",
+            archive.to_str().context("Tool archive path invalid")?,
+            &format!("{}:{stage}/driver.tar.gz", env.sandbox),
+        ],
+        b"",
+        Duration::from_secs(180),
+    )?;
+    let script=format!("set -eu; test ! -e /Applications/CuaDriver.app; cd '{stage}'; test \"$(/usr/bin/shasum -a 256 driver.tar.gz | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/tar -xzf driver.tar.gz; /usr/bin/codesign --verify --strict '{}'; /usr/bin/codesign --verify -R 'anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' '{}'; /bin/mv '{}' /Applications/CuaDriver.app",super::bootstrap::DRIVER.sha256,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path);
+    cua(
+        &[
+            "sb",
+            "exec",
+            "-i",
+            &env.sandbox,
+            "--",
+            "/bin/sh",
+            "-c",
+            &script,
+        ],
+        b"",
+        BUDGET,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result<()> {
+    if harness != "codex" {
+        bail!("This prepared profile supports automatic Codex setup; existing other provider installations are preserved");
+    }
+    let probe=format!("PATH='{GUEST_HOME}/bin:/Users/lume/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'; if command -v codex >/dev/null 2>&1; then codex --version; else printf provider-missing; fi");
+    let output = cua(
+        &[
+            "sb",
+            "exec",
+            "-i",
+            &env.sandbox,
+            "--",
+            "/bin/sh",
+            "-c",
+            &probe,
+        ],
+        b"",
+        BUDGET,
+    )?;
+    if String::from_utf8_lossy(&output)
+        .split_whitespace()
+        .any(|v| v.trim_start_matches('v') == super::bootstrap::CODEX.version)
+    {
+        return Ok(());
+    }
+    if output != b"provider-missing" {
+        bail!("Existing provider CLI differs from the pinned profile; its credentials/configuration were not replaced");
+    }
+    let prepared = super::bootstrap::prepare(&super::bootstrap::CODEX)?;
+    let binary = prepared.join(super::bootstrap::CODEX.executable);
+    let destination = format!("{}:{GUEST_HOME}/bin/codex.stage", env.sandbox);
+    cua(
+        &[
+            "sb",
+            "cp",
+            binary.to_str().context("Provider tool path invalid")?,
+            &destination,
+        ],
+        b"",
+        Duration::from_secs(180),
+    )?;
+    // Initial file-store policy belongs only to a genuinely new guest account
+    // setup. Existing account/config/auth files are never changed or copied.
+    let script=format!("set -eu; cd '{GUEST_HOME}/bin'; test ! -e codex; test \"$(/usr/bin/shasum -a 256 codex.stage | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/codesign --verify --strict codex.stage; /usr/bin/codesign --verify -R 'anchor apple generic and identifier codex and certificate leaf[subject.OU] = 2DC432GLL2' codex.stage; chmod 755 codex.stage; /bin/mv codex.stage codex; if test ! -e /Users/lume/.codex/config.toml && test ! -e /Users/lume/.codex/auth.json; then /bin/mkdir -p /Users/lume/.codex; chmod 700 /Users/lume/.codex; (umask 077; printf 'cli_auth_credentials_store = \"file\"\\n' > /Users/lume/.codex/config.toml); fi",super::bootstrap::CODEX.executable_sha256);
+    cua(
+        &[
+            "sb",
+            "exec",
+            "-i",
+            &env.sandbox,
+            "--",
+            "/bin/sh",
+            "-c",
+            &script,
+        ],
+        b"",
+        BUDGET,
+    )?;
+    Ok(())
+}
+
 fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
     compatible()?;
     if !runtime.is_absolute() || !runtime.is_file() {
-        bail!("Select a macOS arm64 runtime binary");
+        bail!("The bundled macOS arm64 guest runtime is unavailable");
     }
+    process::run(
+        std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--strict"])
+            .arg(runtime),
+        b"",
+        BUDGET,
+    )?;
     if journal()?
         .read()?
         .tasks
         .values()
-        .any(|t| t.target.environment_id == env.id && t.status.holds_desktop())
+        .any(|t| t.target.environment_id == env.id && !t.status.terminal())
     {
         bail!("Stop active tasks before changing the guest runtime");
+    }
+    if journal()?
+        .read()?
+        .environments
+        .get(&env.id)
+        .is_none_or(|e| {
+            e.generation != env.generation || e.manual_control || e.deleted_at.is_some()
+        })
+    {
+        bail!("Environment/manual lease changed; no runtime update sent");
     }
     let arches = process::run(
         std::process::Command::new("/usr/bin/lipo")
@@ -812,6 +1051,45 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
         {
             bail!("This guest is bound to a different environment/timeline. Reconcile it explicitly before installation");
         }
+        let current = cua(
+            &[
+                "sb",
+                "exec",
+                "-i",
+                &env.sandbox,
+                "--",
+                "/usr/bin/shasum",
+                "-a",
+                "256",
+                &format!("{GUEST_HOME}/bin/terminalx-serve"),
+            ],
+            b"",
+            BUDGET,
+        )?;
+        let expected = journal::digest(&fs::read(runtime)?);
+        if String::from_utf8_lossy(&current).split_whitespace().next() == Some(expected.as_str()) {
+            // A matching file does not identify the process that is serving
+            // requests: it may still be an older loaded executable.
+            if guest_rpc(
+                env,
+                "environment.setupReadiness",
+                json!({"harness":"codex"}),
+            )
+            .is_ok_and(|read| serving_runtime_matches(env, &expected, &read))
+            {
+                return Ok(());
+            }
+        }
+        let disposition = guest_rpc(env, "environment.disposition", json!({}))?;
+        let state = journal()?.read()?;
+        let tasks: Vec<_> = state
+            .tasks
+            .values()
+            .filter(|t| t.target.environment_id == env.id)
+            .collect();
+        validate_quiescent_history(env, &tasks, &disposition, false).context(
+            "Guest worker/setup quiescence is unproven; existing daemon and history were retained",
+        )?;
     }
     let destination = format!("{}:{GUEST_HOME}/bin/terminalx-serve.new", env.sandbox);
     cua(
@@ -875,7 +1153,36 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
         b"",
         BUDGET,
     )?;
-    Ok(())
+    let expected = journal::digest(&fs::read(runtime)?);
+    for _ in 0..6 {
+        if guest_rpc(
+            env,
+            "environment.setupReadiness",
+            json!({"harness":"codex"}),
+        )
+        .is_ok_and(|read| serving_runtime_matches(env, &expected, &read))
+        {
+            return Ok(());
+        }
+        if super::supervisor::stopping() {
+            bail!("Owner stopped while confirming installed runtime; installation outcome remains unknown");
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    bail!("The installed guest runtime has not confirmed its serving executable/identity. Inspect the retained installation; no automatic reinstall was attempted")
+}
+
+fn serving_runtime_matches(env: &Environment, expected: &str, read: &Value) -> bool {
+    read["protocol"] == 1
+        && read["environmentId"] == env.id
+        && read["generation"] == env.generation
+        && read["runtime"]["identity"]["protocol"] == journal::PROTOCOL
+        && read["runtime"]["identity"]["environmentId"] == env.id
+        && read["runtime"]["identity"]["generation"] == env.generation
+        && read["runtime"]["executableSha256"] == expected
+        && read["runtime"]["bootIdentity"]
+            .as_str()
+            .is_some_and(|s| journal::validate_id(s).is_ok())
 }
 fn deletion_preview(journal: &Journal, env: &Environment) -> Value {
     let result = (|| -> Result<Value> {
@@ -892,6 +1199,11 @@ fn deletion_preview(journal: &Journal, env: &Environment) -> Value {
             Some("Resolve/cancel all unfinished tasks before deletion".to_owned())
         } else if provisioning {
             Some("Reconcile provisioning before deletion".to_owned())
+        } else if super::setup::busy(env) {
+            Some(
+                "Resolve guided setup and owned account/permission operations before deletion"
+                    .to_owned(),
+            )
         } else if env.manual_control {
             Some("Return manual desktop control before deletion".to_owned())
         } else {
@@ -923,6 +1235,19 @@ fn provision_settled(env: &Environment) -> bool {
 }
 
 fn validate_deletion_work(env: &Environment, tasks: &[&Task], work: &Value) -> Result<()> {
+    validate_quiescent_history(env, tasks, work, true)
+}
+
+// Runtime replacement preserves all retained data. It still requires fresh,
+// complete matching history and an affirmative zero-owned-group observation.
+// Destruction additionally requires the independent attempt/boot and inventory
+// proofs below; a runtime update never creates deletion authorization.
+fn validate_quiescent_history(
+    env: &Environment,
+    tasks: &[&Task],
+    work: &Value,
+    deleting: bool,
+) -> Result<()> {
     if env.manual_control || tasks.iter().any(|task| !task.status.terminal()) {
         bail!("Resolve host task and manual desktop holds before deletion");
     }
@@ -943,19 +1268,22 @@ fn validate_deletion_work(env: &Environment, tasks: &[&Task], work: &Value) -> R
     let canceled = work["canceledTargets"]
         .as_object()
         .context("Canceled target history is missing")?;
-    if work["retainedData"]["complete"] != true || work["retainedData"]["unaccountedData"] != false
+    if deleting
+        && (work["retainedData"]["complete"] != true
+            || work["retainedData"]["unaccountedData"] != false)
     {
         bail!("Unaccounted retained guest data or incomplete root/index inspection prevents deletion; inspect/export it explicitly");
     }
     if guest_tasks.is_empty() && canceled.is_empty() {
         super::provisioning::unused_guest(env, &work["unusedRuntimeProof"])?;
         let inventory = &work["retainedData"];
-        if inventory != &work["unusedRuntimeProof"]["retainedData"]
-            || inventory["complete"] != true
-            || inventory["sessionIndexHasData"] != false
-            || ["workspaceEntries", "artifactEntries", "sessionEntries"]
-                .iter()
-                .any(|key| !inventory[key].as_array().is_some_and(Vec::is_empty))
+        if deleting
+            && (inventory != &work["unusedRuntimeProof"]["retainedData"]
+                || inventory["complete"] != true
+                || inventory["sessionIndexHasData"] != false
+                || ["workspaceEntries", "artifactEntries", "sessionEntries"]
+                    .iter()
+                    .any(|key| !inventory[key].as_array().is_some_and(Vec::is_empty)))
         {
             bail!("Unaccounted retained workspace, artifact or session data requires explicit inspection/export; empty task history cannot authorize deletion");
         }
@@ -1013,7 +1341,7 @@ fn validate_deletion_work(env: &Environment, tasks: &[&Task], work: &Value) -> R
             .as_str()
             .context("Guest worker exit proof is missing")?;
         journal::validate_id(prior_boot)?;
-        if prior_boot == current_boot && guest["canceledBeforeStart"] != true {
+        if deleting && prior_boot == current_boot && guest["canceledBeforeStart"] != true {
             bail!("Positive worker exit proof is unavailable for this attempt; terminal status alone does not permit deletion");
         }
     }
@@ -1069,6 +1397,7 @@ fn delete(journal: &Journal, params: &Value) -> Result<Value> {
     }
     if state.environments.get(&env.id) != Some(&env)
         || !provision_settled(&env)
+        || super::setup::busy(&env)
         || env.manual_control
     {
         bail!("Environment disposition changed; inspect again before deletion");
@@ -1207,6 +1536,56 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn create_reservation_is_atomic_keyed_and_retains_deleted_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = reserve_creation(&journal, "Guest", "local:new", "codex", "create-1").unwrap();
+        assert!(env.owned);
+        assert_eq!(env.provision.as_ref().unwrap()["status"], "queued");
+        assert_eq!(env.setup.as_ref().unwrap()["idempotencyKey"], "create-1");
+        assert_eq!(
+            reserve_creation(&journal, "Guest", "local:new", "codex", "create-1").unwrap(),
+            env
+        );
+        for (name, sandbox, harness) in [
+            ("Other", "local:new", "codex"),
+            ("Guest", "local:other", "codex"),
+            ("Guest", "local:new", "claude"),
+        ] {
+            assert!(reserve_creation(&journal, name, sandbox, harness, "create-1").is_err());
+        }
+        journal
+            .transaction(|state| {
+                state.environments.get_mut(&env.id).unwrap().deleted_at = Some(journal::now());
+                Ok(())
+            })
+            .unwrap();
+        let prior = reserve_creation(&journal, "Guest", "local:new", "codex", "create-1").unwrap();
+        assert_eq!(prior.id, env.id);
+        assert!(prior.deleted_at.is_some());
+        assert_eq!(journal.read().unwrap().environments.len(), 1);
+    }
+
+    #[test]
+    fn serving_runtime_ack_binds_loaded_executable_identity_and_boot() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let env = journal.enroll("Guest", "local:test").unwrap();
+        let sha = "a".repeat(64);
+        let read = json!({"protocol":1,"environmentId":env.id,"generation":env.generation,"runtime":{"identity":{"protocol":journal::PROTOCOL,"environmentId":env.id,"generation":env.generation},"executableSha256":sha,"bootIdentity":journal::new_id()}});
+        assert!(serving_runtime_matches(&env, &sha, &read));
+        for (path, value) in [
+            ("/runtime/executableSha256", json!("b".repeat(64))),
+            ("/runtime/bootIdentity", Value::Null),
+            ("/runtime/identity/generation", json!(journal::new_id())),
+            ("/environmentId", json!(journal::new_id())),
+        ] {
+            let mut changed = read.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(!serving_runtime_matches(&env, &sha, &changed), "{path}");
+        }
+    }
+    #[test]
     fn deletion_requires_fresh_complete_bound_guest_history_and_positive_exit_proof() {
         let temp = tempfile::tempdir().unwrap();
         let journal = Journal::open(temp.path()).unwrap();
@@ -1246,6 +1625,14 @@ mod tests {
                 "eventDigests":[{"seq":1,"digest":journal::digest(&serde_json::to_vec(&task.events[0]).unwrap())}],
                 "gitPorcelain":" M src/uncommitted.rs","detail":null,"bootIdentity":journal::new_id(),"canceledBeforeStart":false}]});
         assert!(validate_deletion_work(&env, &[&task], &work).is_ok());
+        // A complete current manager observation permits preserving/updating
+        // the runtime, while deletion still needs the stronger attempt proof.
+        let mut same_boot = work.clone();
+        same_boot["tasks"][0]["bootIdentity"] = json!(boot);
+        assert!(validate_quiescent_history(&env, &[&task], &same_boot, false).is_ok());
+        assert!(validate_deletion_work(&env, &[&task], &same_boot).is_err());
+        same_boot["tasks"] = json!([]);
+        assert!(validate_quiescent_history(&env, &[&task], &same_boot, false).is_err());
         for (path, value) in [
             ("/environmentId", json!(journal::new_id())),
             ("/generation", json!(journal::new_id())),

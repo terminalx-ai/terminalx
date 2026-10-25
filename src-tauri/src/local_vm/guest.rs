@@ -40,6 +40,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[path = "guest_readiness.rs"]
+pub(super) mod readiness;
+#[path = "guest_setup.rs"]
+mod setup;
+
 use super::journal::{
     atomic_private_write, digest, now, private_directory, validate_id, validate_relative, Artifact,
     Task, TaskEvent, TaskStatus, TaskTarget, PROTOCOL,
@@ -165,6 +170,8 @@ struct State {
     /// later kernel boot can prove that pre-initialization processes exited.
     #[serde(default)]
     provisioning_baseline: Option<ProvisioningBaseline>,
+    #[serde(default)]
+    setup_operations: BTreeMap<String, setup::Operation>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -183,7 +190,9 @@ pub struct Guest {
     sink: Arc<dyn EventSink>,
     stopped: AtomicBool,
     boot_identity: Option<String>,
+    runtime_sha256: String,
     recovery_receipts: Mutex<Vec<RecoveryReceipt>>,
+    setup_actor: setup::Actor,
     _lock: File,
 }
 
@@ -283,6 +292,7 @@ impl Guest {
                 canceled_targets: BTreeMap::new(),
                 manual_lease: None,
                 provisioning_baseline: None,
+                setup_operations: BTreeMap::new(),
             }
         };
         if state.identity != identity {
@@ -320,6 +330,10 @@ impl Guest {
                 unknown(record, "Guest runtime restarted during execution; no prompt or permission was replayed");
             }
         }
+        for (key, operation) in state.setup_operations.iter_mut() {
+            operation.validate(key, &identity)?;
+            operation.interrupted();
+        }
         atomic_private_write(&path, &serde_json::to_vec(&state)?)?;
         Ok(Self {
             base,
@@ -328,7 +342,9 @@ impl Guest {
             sink,
             stopped: AtomicBool::new(false),
             boot_identity,
+            runtime_sha256: super::bootstrap::owner_runtime_sha256()?,
             recovery_receipts: Mutex::new(vec![]),
+            setup_actor: setup::Actor::default(),
             _lock: lock,
         })
     }
@@ -342,6 +358,17 @@ impl Guest {
 
     pub fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
+        self.setup_actor.shutdown();
+        // Task collection may hold this mutex across bounded external I/O.
+        // Shutdown must fence helpers without waiting on that workflow. Its
+        // earlier durable intent already prevents replay after a lost receipt.
+        if let Ok(mut state) = self.state.try_lock() {
+            if self.checkpoint_setup(&mut state).is_err() {
+                log::warn!(
+                    "Guest setup shutdown receipt was not checkpointed; outcome remains unknown"
+                );
+            }
+        }
     }
 
     pub fn dispatch(&self, request: Request) -> Result<Value> {
@@ -355,8 +382,13 @@ impl Guest {
         if identity != self.state.lock().unwrap().identity {
             bail!("Guest identity changed; restart/reconcile required");
         }
+        self.checkpoint_setup(&mut self.state.lock().unwrap())?;
         match request.method.as_str() {
             "describe" => self.describe(),
+            "environment.setupReadiness" => self.setup_readiness(&request.params),
+            "environment.setupAction" => self.setup_action(&request.params),
+            "environment.setupAuth" => self.setup_auth(&request.params),
+            "environment.setupActionStatus" => self.setup_action_status(&request.params),
             "environment.disposition" => self.disposition(),
             "environment.provisionEvidence" => self.provision_evidence(),
             "desktop.state" => Ok(desktop_state(&self.state.lock().unwrap())),
@@ -378,6 +410,167 @@ impl Guest {
             "task.artifact" => self.artifact(&request.params),
             _ => bail!("Unsupported bounded guest method"),
         }
+    }
+
+    fn checkpoint_setup(&self, state: &mut State) -> Result<()> {
+        let mut next = state.clone();
+        let mut changed = false;
+        for update in self.setup_actor.receipts() {
+            let Some(op) = next
+                .setup_operations
+                .get_mut(&update.receipt.idempotency_key)
+            else {
+                continue;
+            };
+            if op.receipt.action != update.receipt.action {
+                bail!("Guest setup receipt action mismatch");
+            }
+            if op.receipt != update.receipt
+                || op.helper_exit_confirmed != update.helper_exit_confirmed
+            {
+                // A terminal receipt is immutable, including outcomeUnknown.
+                if !matches!(
+                    op.receipt.status,
+                    setup::Status::Working | setup::Status::NeedsAttention
+                ) {
+                    // External uncertainty is immutable, but later positive
+                    // owned-group exit evidence may release helper admission.
+                    if update.helper_exit_confirmed && !op.helper_exit_confirmed {
+                        op.helper_exit_confirmed = true;
+                        changed = true;
+                    }
+                    continue;
+                }
+                op.receipt = update.receipt;
+                op.helper_exit_confirmed = update.helper_exit_confirmed;
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(&next)?;
+            *state = next;
+        }
+        Ok(())
+    }
+
+    fn setup_action(&self, params: &Value) -> Result<Value> {
+        self.setup_action_using(params, |actor, params, base, login_allowed| {
+            actor.launch(params, base, login_allowed)
+        })
+    }
+
+    fn setup_action_using(
+        &self,
+        params: &Value,
+        launch: impl FnOnce(&setup::Actor, setup::Params, &Path, bool) -> Result<()>,
+    ) -> Result<Value> {
+        let params: setup::Params = serde_json::from_value(params.clone())?;
+        let mut state = self.state.lock().unwrap();
+        params.validate(&state.identity)?;
+        if let Some(op) = state.setup_operations.get(&params.idempotency_key) {
+            if op.digest != params.digest()? {
+                bail!("Guest setup key already names different immutable input");
+            }
+            return serde_json::to_value(&op.receipt).map_err(Into::into);
+        }
+        if self.stopped.load(Ordering::Acquire) || Identity::load(&self.base)? != state.identity {
+            bail!("Guest setup owner stopped or identity changed");
+        }
+        let retained: State = serde_json::from_slice(&read_bounded(
+            &self.base.join("runtime").join(STATE),
+            512 * 1024 * 1024,
+        )?)?;
+        if serde_json::to_value(&retained)? != serde_json::to_value(&*state)? {
+            bail!("Retained guest state changed; no setup effect started");
+        }
+        if state.manual_lease.is_some()
+            || state.records.values().any(|r| !r.task.status.terminal())
+            || !self.manager.terminals().owned_groups().is_empty()
+        {
+            bail!("Guest work or manual control must be resolved before setup");
+        }
+        let cancel = params.action == setup::Action::LoginCancel;
+        let boot = boot_identity();
+        if !cancel && (self.setup_actor.busy() || setup::holds_admission(&state, boot.as_deref())) {
+            bail!("A setup helper still owns guest admission; inspect or explicitly cancel it");
+        }
+        if cancel
+            && state.setup_operations.values().any(|op| {
+                op.receipt.action == setup::Action::LoginCancel && op.holds(boot.as_deref())
+            })
+        {
+            bail!("An explicit login cancellation is already unresolved");
+        }
+        let login_allowed = !state.setup_operations.values().any(|op| {
+            op.receipt.action == setup::Action::LoginStart
+                && op.receipt.status == setup::Status::OutcomeUnknown
+        });
+        let operation = setup::Operation::working(&params, boot)?;
+        let mut next = state.clone();
+        next.setup_operations
+            .insert(params.idempotency_key.clone(), operation);
+        if let Some(baseline) = next.provisioning_baseline.as_mut() {
+            baseline.no_execution = false;
+        }
+        self.save(&next)?; // Intent before CLI spawn, LaunchServices, login or capture.
+        *state = next;
+        if launch(&self.setup_actor, params.clone(), &self.base, login_allowed).is_err() {
+            let mut next = state.clone();
+            let op = next
+                .setup_operations
+                .get_mut(&params.idempotency_key)
+                .unwrap();
+            op.receipt.status = setup::Status::Failed;
+            op.receipt.detail = Some("setup_actor_not_started".into());
+            op.helper_exit_confirmed = true;
+            self.save(&next)?;
+            *state = next;
+        }
+        self.checkpoint_setup(&mut state)?;
+        serde_json::to_value(&state.setup_operations[&params.idempotency_key].receipt)
+            .map_err(Into::into)
+    }
+
+    fn setup_auth(&self, params: &Value) -> Result<Value> {
+        let params: setup::AuthParams = serde_json::from_value(params.clone())?;
+        setup::key(&params.idempotency_key)?;
+        let state = self.state.lock().unwrap();
+        params.check(&state.identity)?;
+        Ok(self.setup_actor.auth(&state, &params.idempotency_key))
+    }
+
+    fn setup_action_status(&self, params: &Value) -> Result<Value> {
+        let params: setup::AuthParams = serde_json::from_value(params.clone())?;
+        setup::key(&params.idempotency_key)?;
+        let state = self.state.lock().unwrap();
+        params.check(&state.identity)?;
+        let operation = state
+            .setup_operations
+            .get(&params.idempotency_key)
+            .context("No durable guest setup operation exists for this exact key")?;
+        serde_json::to_value(&operation.receipt).map_err(Into::into)
+    }
+
+    fn setup_readiness(&self, params: &Value) -> Result<Value> {
+        let params: readiness::ReadinessParams = serde_json::from_value(params.clone())?;
+        params.validate()?;
+        // Observation cannot release a manual reservation, claim a workflow,
+        // refresh provider credentials, or start a desktop/provider process.
+        let observed = readiness::observe(&self.base, params.harness)?;
+        let identity = Identity::load(&self.base)?;
+        let state = self.state.lock().unwrap();
+        if self.stopped.load(Ordering::Acquire) || identity != state.identity {
+            bail!("Guest identity changed or runtime stopped during readiness inspection");
+        }
+        let mut value = serde_json::to_value(readiness::Readiness::new(
+            &identity,
+            &state,
+            observed,
+            !self.manager.terminals().owned_groups().is_empty() || self.setup_actor.busy(),
+        ))?;
+        value["runtime"]["executableSha256"] = json!(self.runtime_sha256);
+        value["runtime"]["bootIdentity"] = json!(boot_identity());
+        Ok(value)
     }
 
     fn describe(&self) -> Result<Value> {
@@ -414,6 +607,9 @@ impl Guest {
             "task.permission",
             "task.recover",
             "environment.disposition",
+            "environment.setupReadiness",
+            "environment.setupAction",
+            "environment.setupAuth",
             "desktop.state",
             "desktop.takeover",
             "desktop.release",
@@ -462,6 +658,7 @@ impl Guest {
         }
         // Retrying an existing task above is always allowed, even when a
         // provider or desktop is presently unavailable.
+        require_queue_control(&state)?;
         if !desktop_ready() {
             bail!("Guest desktop MCP binding is unavailable; task submission is disabled");
         }
@@ -503,6 +700,7 @@ impl Guest {
             bail!("Installed guest identity changed");
         }
         self.checkpoint_recovery_receipts(&mut state)?;
+        self.checkpoint_setup(&mut state)?;
         let previous = serde_json::to_vec(&*state)?;
         let ids: Vec<_> = state.records.keys().cloned().collect();
         for id in ids {
@@ -531,7 +729,9 @@ impl Guest {
         if serde_json::to_vec(&*state)? != previous {
             self.save(&state)?;
         }
-        if state.manual_lease.is_some()
+        if setup::holds_admission(&state, self.boot_identity.as_deref())
+            || self.setup_actor.busy()
+            || state.manual_lease.is_some()
             || state
                 .records
                 .values()
@@ -865,6 +1065,10 @@ impl Guest {
             .unwrap_or(0);
         let mut state = self.state.lock().unwrap();
         page(&bound(&state, &target)?.task, after)?;
+        if setup::holds_admission(&state, self.boot_identity.as_deref()) || self.setup_actor.busy()
+        {
+            bail!("Guest setup helper owns admission; manual takeover is refused");
+        }
         if let Some(lease) = &state.manual_lease {
             if lease.target != target {
                 bail!("Manual desktop lease belongs to a different task target");
@@ -922,6 +1126,10 @@ impl Guest {
             bail!("Explicit confirm:true is required to release the manual desktop lease");
         }
         let mut state = self.state.lock().unwrap();
+        if setup::holds_admission(&state, self.boot_identity.as_deref()) || self.setup_actor.busy()
+        {
+            bail!("Guest setup helper still owns admission; manual release is refused");
+        }
         let mut next = state.clone();
         if let Some(lease) = next.manual_lease.take() {
             if !lease.ready {
@@ -1445,7 +1653,9 @@ impl Guest {
         Ok(
             json!({"evidenceVersion":1,"complete":true,"environmentId":state.identity.environment_id,"generation":state.identity.generation,"tasks":tasks,
             "currentBootIdentity":unused["currentBootIdentity"],"manualControl":state.manual_lease.is_some(),
-            "activeOwnedGroups":self.manager.terminals().owned_groups().len(),"unusedRuntimeProof":unused,
+            "activeOwnedGroups":self.manager.terminals().owned_groups().len()
+                + usize::from(self.setup_actor.busy() || setup::holds_admission(&state,self.boot_identity.as_deref())),"unusedRuntimeProof":unused,
+            "setupOperations":state.setup_operations,
             "retainedData":unused["retainedData"],
             "canceledTargets":state.canceled_targets,
             "historyRetained":true,"deletionAvailable":false}),
@@ -1476,7 +1686,9 @@ impl Guest {
             "evidenceVersion":1,"environmentId":state.identity.environment_id,
             "generation":state.identity.generation,"currentBootIdentity":current_boot,
             "initializedTimeline":state.provisioning_baseline,"manualControl":state.manual_lease.is_some(),
-            "activeOwnedGroups":self.manager.terminals().owned_groups().len(),
+            "activeOwnedGroups":self.manager.terminals().owned_groups().len()
+                + usize::from(self.setup_actor.busy() || setup::holds_admission(state,Some(&current_boot))),
+            "setupOperations":state.setup_operations,
             "tasks":state.records.values().map(|r|json!({"target":r.task.target,
                 "lastEventSeq":r.task.last_event_seq,"status":r.task.status,
                 "workerSessionId":r.task.worker_session_id,"workerTabId":r.task.worker_tab_id,
@@ -1484,7 +1696,7 @@ impl Guest {
             "canceledTargets":state.canceled_targets,"historyDigest":digest(&serde_json::to_vec(&expected)?),
             "retainedData":inventory,
             "noExecutionSinceInitialization":state.provisioning_baseline.as_ref().is_some_and(|b|b.no_execution)
-                && state.records.is_empty() && state.canceled_targets.is_empty()
+                && state.records.is_empty() && state.canceled_targets.is_empty() && state.setup_operations.is_empty()
         }))
     }
 }
@@ -1618,6 +1830,9 @@ fn takeover_response(state: &State, target: &TaskTarget, after: u64) -> Result<V
 }
 
 fn require_queue_control(state: &State) -> Result<()> {
+    if setup::holds_admission(state, boot_identity().as_deref()) {
+        bail!("Guest setup helper exit is unconfirmed; task input remains reserved");
+    }
     if state.manual_lease.is_some() {
         bail!("Manual desktop lease is held; explicitly release it before returning control to queued tasks");
     }
@@ -2330,6 +2545,265 @@ mod tests {
         );
         let guest = Guest::open(base, manager, sink).unwrap();
         (home, guest, task)
+    }
+
+    #[test]
+    fn setup_action_intent_precedes_effect_and_exact_receipt_is_atomic_idempotent() {
+        let (_home, guest, _task) = setup();
+        let params = request(
+            &guest,
+            "environment.setupAction",
+            json!({
+            "action":"driver.start","idempotencyKey":"setup-exact-key","confirm":true}),
+        )
+        .params;
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        let path = guest.base.join("runtime").join(STATE);
+        let result = guest
+            .setup_action_using(&params, |actor, params, _, _| {
+                let retained: State = serde_json::from_slice(&fs::read(&path)?)?;
+                assert_eq!(
+                    retained.setup_operations[&params.idempotency_key]
+                        .receipt
+                        .status,
+                    setup::Status::Working
+                );
+                count.fetch_add(1, Ordering::Relaxed);
+                actor.test_receipt(
+                    setup::Receipt {
+                        action: params.action,
+                        idempotency_key: params.idempotency_key,
+                        status: setup::Status::Complete,
+                        detail: Some("verified_disposable_effect".into()),
+                        verification: None,
+                    },
+                    true,
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(result["status"], "complete");
+        let retained: State = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            retained.setup_operations["setup-exact-key"].receipt.status,
+            setup::Status::Complete
+        );
+        assert_eq!(
+            guest
+                .setup_action_using(&params, |_, _, _, _| panic!("same key replayed effect"))
+                .unwrap(),
+            result
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let status = request(
+            &guest,
+            "environment.setupActionStatus",
+            json!({"idempotencyKey":"setup-exact-key"}),
+        );
+        assert_eq!(guest.dispatch(status).unwrap(), result);
+        assert!(guest
+            .dispatch(request(
+                &guest,
+                "environment.setupActionStatus",
+                json!({"idempotencyKey":"unknown"})
+            ))
+            .is_err());
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let mut changed = params.clone();
+        changed["action"] = json!("desktop.verify");
+        assert!(guest
+            .setup_action_using(&changed, |_, _, _, _| panic!("changed key effect"))
+            .is_err());
+        changed = params.clone();
+        changed["generation"] = json!(new_id());
+        assert!(guest
+            .setup_action_using(&changed, |_, _, _, _| panic!("wrong identity effect"))
+            .is_err());
+    }
+
+    #[test]
+    fn setup_action_disk_failure_never_exposes_success_or_replays_effect() {
+        let (_home, guest, _task) = setup();
+        let params = request(
+            &guest,
+            "environment.setupAction",
+            json!({
+            "action":"desktop.verify","idempotencyKey":"setup-disk-key","confirm":true}),
+        )
+        .params;
+        let path = guest.base.join("runtime").join(STATE);
+        let saved = path.with_extension("retained");
+        let error = guest.setup_action_using(&params, |actor, params, _, _| {
+            // The durable working intent survives a completion disk failure.
+            fs::rename(&path, &saved)?;
+            fs::create_dir(&path)?;
+            actor.test_receipt(
+                setup::Receipt {
+                    action: params.action,
+                    idempotency_key: params.idempotency_key,
+                    status: setup::Status::Complete,
+                    detail: Some("verified_disposable_capture".into()),
+                    verification: None,
+                },
+                true,
+            );
+            Ok(())
+        });
+        assert!(error.is_err());
+        assert_eq!(
+            guest.state.lock().unwrap().setup_operations["setup-disk-key"]
+                .receipt
+                .status,
+            setup::Status::Working
+        );
+        let disk: State = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(
+            disk.setup_operations["setup-disk-key"].receipt.status,
+            setup::Status::Working
+        );
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&saved, &path).unwrap();
+        let result = guest
+            .dispatch(request(&guest, "environment.setupAction", params.clone()))
+            .unwrap();
+        assert_eq!(result["status"], "complete");
+        assert_eq!(
+            guest
+                .setup_action_using(&params, |_, _, _, _| panic!("disk retry replayed effect"))
+                .unwrap(),
+            result
+        );
+        let disk: State = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            disk.setup_operations["setup-disk-key"].receipt.status,
+            setup::Status::Complete
+        );
+    }
+
+    #[test]
+    fn setup_action_restart_retains_unknown_and_same_key_cannot_start_again() {
+        let (_home, guest, _task) = setup();
+        let params=request(&guest,"environment.setupAction",json!({
+            "action":"provider.codexDeviceLogin.start","idempotencyKey":"lost-login","confirm":true})).params;
+        let result = guest
+            .setup_action_using(&params, |_, _, _, _| Ok(()))
+            .unwrap();
+        assert_eq!(result["status"], "working");
+        let base = guest.base.clone();
+        let manager = guest.manager.clone();
+        let sink = guest.sink.clone();
+        drop(guest);
+        let guest = Guest::open(base, manager, sink).unwrap();
+        let result = guest
+            .setup_action_using(&params, |_, _, _, _| panic!("lost login replayed"))
+            .unwrap();
+        assert_eq!(result["status"], "outcomeUnknown");
+        assert!(require_queue_control(&guest.state.lock().unwrap()).is_err());
+        let auth = guest
+            .dispatch(request(
+                &guest,
+                "environment.setupAuth",
+                json!({"idempotencyKey":"lost-login"}),
+            ))
+            .unwrap();
+        assert_eq!(auth["status"], "outcomeUnknown");
+        assert!(auth.get("challenge").is_none());
+        let durable = serde_json::to_string(&durable(&guest)).unwrap();
+        assert!(!durable.contains("userCode"));
+        assert!(!durable.contains("verificationUrl"));
+        assert!(!durable.contains("loginId"));
+    }
+
+    #[test]
+    fn setup_shutdown_fences_helpers_without_waiting_for_task_state_lock() {
+        let (_home, guest, _task) = setup();
+        let held = guest.state.lock().unwrap();
+        let started = std::time::Instant::now();
+        guest.shutdown();
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(guest.stopped.load(Ordering::Acquire));
+        drop(held);
+        assert!(guest
+            .dispatch(request(
+                &guest,
+                "environment.setupAuth",
+                json!({"idempotencyKey":"absent"})
+            ))
+            .is_err());
+    }
+
+    #[test]
+    fn setup_effects_refuse_manual_or_unfinished_work_and_missing_journal() {
+        let (_home, guest, task) = setup();
+        let params = request(
+            &guest,
+            "environment.setupAction",
+            json!({
+            "action":"driver.start","idempotencyKey":"blocked-setup","confirm":true}),
+        )
+        .params;
+        {
+            let mut state = guest.state.lock().unwrap();
+            state.manual_lease = Some(ManualLease {
+                target: task.target.clone(),
+                acquired_at: now(),
+                ready: true,
+            });
+            guest.save(&state).unwrap();
+        }
+        assert!(guest
+            .setup_action_using(&params, |_, _, _, _| panic!("manual lease bypassed"))
+            .is_err());
+        {
+            let mut state = guest.state.lock().unwrap();
+            state.manual_lease = None;
+            let record = recoverable_record(task, "previous-boot");
+            state
+                .records
+                .insert(record.task.target.task_id.clone(), record);
+            guest.save(&state).unwrap();
+        }
+        assert!(guest
+            .setup_action_using(&params, |_, _, _, _| panic!("unfinished task bypassed"))
+            .is_err());
+        {
+            let mut state = guest.state.lock().unwrap();
+            state.records.clear();
+            guest.save(&state).unwrap();
+        }
+        fs::remove_file(guest.base.join("runtime").join(STATE)).unwrap();
+        assert!(guest
+            .setup_action_using(&params, |_, _, _, _| panic!("missing journal recreated"))
+            .is_err());
+        assert!(!guest.base.join("runtime").join(STATE).exists());
+    }
+
+    #[test]
+    fn setup_readiness_requires_exact_identity_and_refuses_prompt_or_action_parameters() {
+        let (_home, guest, _task) = setup();
+        let path = guest.base.join("runtime").join(STATE);
+        let before = fs::read(&path).unwrap();
+        let mut wrong = request(
+            &guest,
+            "environment.setupReadiness",
+            json!({"harness":"codex"}),
+        );
+        wrong.params["generation"] = json!(new_id());
+        assert!(guest
+            .dispatch(wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("mismatch"));
+        for params in [
+            json!({"harness":"codex","prompt":true}),
+            json!({"harness":"codex","action":"driver.start"}),
+            json!({"harness":"shell"}),
+        ] {
+            assert!(guest
+                .dispatch(request(&guest, "environment.setupReadiness", params))
+                .is_err());
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]

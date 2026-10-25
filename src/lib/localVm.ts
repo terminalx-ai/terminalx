@@ -1,6 +1,6 @@
 import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
-import type { LocalVmArtifactContent, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
+import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 interface Requests {
   state: { params: Record<string, never>; result: LocalVmState };
@@ -10,7 +10,11 @@ interface Requests {
   describe: { params: { environmentId: string }; result: LocalVmDescription };
   "environment.inspect": { params: { environmentId: string; generation?: string; purpose?: "deletion" | "provisionRecovery" }; result: LocalVmEnvironmentInspection };
   "environment.reconcileProvision": { params: Omit<LocalVmProvisionProposal, "observedAt"> & { disposition: "adoptExisting"; confirm: true }; result: LocalVmJson };
-  "environment.create": { params: { name: string; vmName: string; confirm: true }; result: LocalVmEnvironment };
+  "environment.create": { params: LocalVmCreateRequest; result: LocalVmEnvironment };
+  "environment.setup": { params: LocalVmSetupRequest; result: LocalVmJson };
+  "environment.setupReadiness": { params: { environmentId: string; generation: string; harness: LocalVmSetupHarness }; result: LocalVmSetupReadiness };
+  "environment.setupAction": { params: LocalVmSetupActionRequest; result: LocalVmJson };
+  "environment.setupAuth": { params: { environmentId: string; generation: string; idempotencyKey: string }; result: LocalVmSetupAuth };
   "environment.delete": { params: { environmentId: string; generation: string; confirm: true }; result: LocalVmJson };
   "environment.cancelProvision": { params: { environmentId: string }; result: LocalVmJson };
   "environment.start": { params: { environmentId: string }; result: LocalVmJson };

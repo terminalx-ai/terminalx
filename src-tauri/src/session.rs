@@ -3919,6 +3919,9 @@ impl SessionManager {
             log::warn!("hook {} for {}/{} refused by pid {} at {}: {reason}", frame.event, frame.session, frame.tab, std::process::id(), self.control.socket.display());
             HookReply::refused(reason)
         };
+        if matches!(frame.event.as_str(), "PreToolUse" | "PermissionRequest") && self.accepting_work().is_err() {
+            return refuse("The runtime is stopping; no tool decision was admitted".into());
+        }
         let rt_arc = match self.runtime(&frame.session, &frame.tab) {
             Ok(rt_arc) => rt_arc,
             Err(error) => return refuse(format!("this TerminalX has no such tab ({error:#})")),
@@ -4068,6 +4071,9 @@ impl SessionManager {
                 // A settings restart/teardown may have replaced this launch
                 // while its transcript was being drained above.
                 if !mine(&rt) { return HookReply::default(); }
+                if frame.event == "PreToolUse" && rt.stopping {
+                    return refuse("The worker is stopping; no tool decision was admitted".into());
+                }
                 if frame.event == "UserPromptSubmit" && source == claude::transcript::PromptSource::Reader {
                     if let Engine::Cli(p) = &mut rt.engine {
                         for echo in p.echoed.iter_mut().filter(|echo| echo.submitted && !echo.queued && !echo.command) {
@@ -4099,6 +4105,14 @@ impl SessionManager {
                 drop(rt);
                 if frame.event == "UserPromptSubmit" {
                     self.observer.automation_running(&frame.session, &frame.tab);
+                }
+                if kind == CliKind::Codex && frame.event == "PreToolUse" {
+                    // This authenticated launch's mode does not ask our UI
+                    // about every tool. Explicitly acknowledge no added hook
+                    // decision: None is a lost decision to the local-owner
+                    // bridge and must continue to fail closed. `{}` preserves
+                    // the CLI's own sandbox/rules; it is not an Allow decision.
+                    return HookReply { output: Some(serde_json::json!({})), refused: None };
                 }
             }
             // The CLI is asking in its own TUI, which means our permission

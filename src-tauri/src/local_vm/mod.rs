@@ -3,9 +3,11 @@
 //! owns this journal; deleting a VM must not delete it.
 
 pub mod desktop;
+pub mod bootstrap;
 pub mod guest;
 pub mod host;
 pub mod journal;
 mod process;
 pub mod provisioning;
 pub mod supervisor;
+pub mod setup;

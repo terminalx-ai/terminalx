@@ -9,6 +9,7 @@ vi.mock("./useLocalVmState", () => ({ useLocalVmState: () => ({ state: mocks.sta
 import { EnvironmentsTab } from "./EnvironmentsTab";
 const calls = (method: string) => mocks.invoke.mock.calls.filter(([, args]) => args.method === method);
 beforeEach(() => {
+  localStorage.clear();
   mocks.invoke.mockReset(); mocks.invoke.mockResolvedValue(null);
   mocks.state = { enabled: true, environments: { env: environment }, tasks: { task: task() } };
 });
@@ -18,18 +19,17 @@ describe("local environment lifecycle", () => {
   it("never provisions on mount and displays the entire pinned profile before deliberate creation", async () => {
     render(<EnvironmentsTab />);
     expect(mocks.invoke).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByLabelText("Create a new VM instead of enrolling an existing VM"));
     const profile = screen.getByRole("region", { name: "Local VM creation profile" });
     expect(profile.textContent).toContain("ghcr.io/trycua/macos@sha256:7cb23670cad48a6723cf667bc63c444b83dc0c73756c23b614897127d5ba22ba");
     for (const value of ["24,212,741,210 bytes", "150 GiB sparse disk", "4 CPU", "8 GiB", "~/.lume", "Cua cache"]) expect(profile.textContent).toContain(value);
     fireEvent.change(screen.getByLabelText("Environment name"), { target: { value: "New VM" } });
     fireEvent.change(screen.getByLabelText("New local VM name"), { target: { value: "new-guest" } });
-    expect((screen.getByRole("button", { name: "Create local VM" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Create and set up VM" }) as HTMLButtonElement).disabled).toBe(true);
     expect(calls("environment.create")).toHaveLength(0);
-    fireEvent.click(screen.getByLabelText(/I confirm creation with the image/));
-    fireEvent.click(screen.getByRole("button", { name: "Create local VM" }));
+    fireEvent.click(screen.getByLabelText(/I confirm creation and setup with the pinned image/));
+    fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
     await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
-    expect(calls("environment.create")[0][1].params).toEqual({ name: "New VM", vmName: "new-guest", confirm: true });
+    expect(calls("environment.create")[0][1].params).toEqual({ name: "New VM", vmName: "new-guest", harness: "codex", idempotencyKey: expect.any(String), confirm: true });
   });
 
   it("persists opt-in through configure and keeps setup disabled until the host reports enabled", async () => {

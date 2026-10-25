@@ -84,6 +84,7 @@ pub(super) fn state_busy(state: &journal::State) -> bool {
             .filter(|env| env.deleted_at.is_none())
             .any(|env| {
                 env.manual_control
+                    || super::setup::busy(env)
                     || env.provision.as_ref().is_some_and(|provision| {
                         if super::provisioning::adopted(env) {
                             return false;
@@ -131,6 +132,9 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn start(lifetime: Arc<Lifetime>) -> Result<Self> {
+        // Capture the serving owner's bytes before advertising setup support.
+        // A later replacement at the same path cannot change this identity.
+        super::bootstrap::owner_runtime_sha256()?;
         let root = host::root()?;
         journal::private_directory(&root)?;
         let lock = OpenOptions::new()
@@ -154,6 +158,17 @@ impl Supervisor {
         };
         journal.transaction(|s|{
         for env in s.environments.values_mut(){
+            if let Some(setup)=env.setup.as_mut() {
+                if setup["status"]=="working" {
+                    setup["status"]=json!("outcomeUnknown");
+                    setup["detail"]=json!("The owner restarted during setup. Inspect the existing guest; installers and account/permission requests were not replayed.");
+                    if let Some(steps)=setup["steps"].as_array_mut() { for step in steps {if step["state"]=="working" {step["state"]=json!("unknown");}} }
+                    if setup["action"]["status"]=="working" {setup["action"]["status"]=json!("outcomeUnknown");}
+                    if let Some(ops)=setup["operations"].as_object_mut() {for op in ops.values_mut() {
+                        if op["receipt"]["status"]=="working" {op["receipt"]["status"]=json!("outcomeUnknown");}
+                    }}
+                }
+            }
             if env.provision.as_ref().and_then(|p|p.get("status")).and_then(Value::as_str).is_some_and(|p|matches!(p,"running"|"canceling")) {
                 env.provision=Some(host::progress("outcomeUnknown","The supervisor restarted during provisioning. Inspect the existing VM and cache; creation was not replayed."));
             }
@@ -257,12 +272,26 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
         if stopped.load(Ordering::Acquire) {
             break;
         }
+        if env.setup.is_some() {
+            if let Err(error) = super::setup::advance(journal, env) {
+                super::setup::interrupted(journal, env, &error)?;
+                continue;
+            }
+        }
         let provision = env
             .provision
             .as_ref()
             .and_then(|p| p.get("status"))
             .and_then(Value::as_str);
         if provision == Some("queued") {
+            if env.setup.is_some()
+                && journal.read()?.environments[&env.id]
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s["status"] == "outcomeUnknown")
+            {
+                continue;
+            }
             ensure_running(stopped)?;
             provision_vm(journal, env, stopped)?;
         }
@@ -405,6 +434,25 @@ fn provision_vm(journal: &Journal, env: &Environment, stopped: &AtomicBool) -> R
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        let inventory: Value = serde_json::from_slice(&host::cua(
+            &["sb", "ls", "--local", "--json"],
+            b"",
+            Duration::from_secs(45),
+        )?)?;
+        let entries = inventory
+            .as_array()
+            .context("Invalid VM inventory; creation was not sent")?;
+        if entries.iter().any(|vm| vm["id"] == env.sandbox) {
+            bail!("This VM already exists. Creation was not sent; enroll/inspect it explicitly instead");
+        }
+        if entries
+            .iter()
+            .filter(|vm| vm["runtime"] == "lume" && vm["state"] == "running")
+            .count()
+            >= 2
+        {
+            bail!("Two local macOS VMs are already running; no creation was sent");
+        }
         ensure_running(stopped)?;
         let child = command.spawn()?;
         watch_provision(ProvisionChild(child), journal, env, stopped)
@@ -731,6 +779,7 @@ mod tests {
             owned: false,
             provision: None,
             manual_control: false,
+            setup: None,
         };
         let text = guest_plist(&env);
         assert!(text.contains("KeepAlive"));

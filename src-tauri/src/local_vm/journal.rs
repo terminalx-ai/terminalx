@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// Separately installed dependencies; TerminalX never enrolls the host as a
-/// Space and never bundles the separately licensed Spaces application/image.
+/// Pinned disclosed bootstrap dependencies. TerminalX never enrolls the host
+/// as a Space or copies host credentials into the guest.
 pub const CUA_VERSION: &str = "0.7.0";
 pub const LUME_VERSION: &str = "0.6.1";
 pub const PROTOCOL: u32 = 1;
@@ -141,6 +141,8 @@ pub struct Environment {
     pub provision: Option<Value>,
     #[serde(default)]
     pub manual_control: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -228,6 +230,7 @@ impl Journal {
                 owned: false,
                 provision: None,
                 manual_control: false,
+                setup: None,
             };
             state.environments.insert(env.id.clone(), env.clone());
             Ok(env)
