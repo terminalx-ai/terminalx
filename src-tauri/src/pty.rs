@@ -208,13 +208,31 @@ struct Pane {
 
 
 /// A detached process group, never a pane name that may now identify a successor.
+#[derive(Clone)]
 pub(crate) struct StoppingPane {
     id: String,
     group: Arc<OwnedGroup>,
 }
 
 impl StoppingPane {
+    pub(crate) fn same_launch(&self, other: &Self) -> bool { Arc::ptr_eq(&self.group, &other.group) }
+
     pub(crate) fn pid(&self) -> Option<u32> { self.group.pid() }
+
+    pub(crate) fn wait_all(panes: &[Self], timeout: Duration) -> bool {
+        for pane in panes { pane.group.signal(false); }
+        let start = Instant::now();
+        let mut forced = false;
+        loop {
+            if panes.iter().all(|pane| pane.pid().is_none()) { return true; }
+            if start.elapsed() >= timeout { return false; }
+            if !forced && start.elapsed() >= TERM_GRACE {
+                for pane in panes { pane.group.signal(true); }
+                forced = true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     pub(crate) fn wait(&self, timeout: Duration) -> bool {
         let start = Instant::now();
@@ -239,9 +257,15 @@ impl StoppingPane {
 /// Retain that ownership after leader exit, and retire it permanently only once
 /// the entire session is observed empty. Session IDs remain reserved while any
 /// member exists; a process from another session cannot join this one.
-struct OwnedGroup(Mutex<Option<u32>>);
+struct OwnedGroup(Mutex<Option<u32>>, #[cfg(test)] Arc<AtomicBool>);
 impl OwnedGroup {
-    fn pid(&self) -> Option<u32> { self.pid_with(session_jobs) }
+    fn new(pid: Option<u32>) -> Self { Self(Mutex::new(pid), #[cfg(test)] Arc::new(AtomicBool::new(false))) }
+
+    fn pid(&self) -> Option<u32> {
+        #[cfg(test)]
+        if self.1.load(Ordering::SeqCst) { return *self.0.lock().unwrap(); }
+        self.pid_with(session_jobs)
+    }
 
     fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
@@ -251,6 +275,8 @@ impl OwnedGroup {
         *owned
     }
     fn signal(&self, force: bool) {
+        #[cfg(test)]
+        if self.1.load(Ordering::SeqCst) { return; }
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
             #[cfg(unix)]
@@ -492,7 +518,7 @@ const EXIT_AFTER_OUTPUT: Duration = Duration::from_millis(500);
 pub struct Terminals {
     startup: Mutex<Option<Arc<crate::startup::Monitor>>>,
     panes: Mutex<HashMap<String, Pane>>,
-    groups: Mutex<Vec<Arc<OwnedGroup>>>,
+    groups: Mutex<Vec<(String, Arc<OwnedGroup>)>>,
     retained: Mutex<HashMap<String, crate::local_runtime::scrollback::History>>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     /// Keyed by pane id and kept across the pane's own life: a view may
@@ -902,11 +928,11 @@ impl Terminals {
         };
         *self.sink.lock().unwrap() = Some(sink.clone());
         let alive = Arc::new(Mutex::new(true));
-        let group = Arc::new(OwnedGroup(Mutex::new(group)));
+        let group = Arc::new(OwnedGroup::new(group));
         {
             let mut groups = self.groups.lock().unwrap();
-            groups.retain(|group| group.pid().is_some());
-            groups.push(group.clone());
+            groups.retain(|(_, group)| group.pid().is_some());
+            groups.push((id.to_string(), group.clone()));
         }
         let last_output = Arc::new(Mutex::new(last_output));
         let scrollback = Arc::new(Mutex::new(scrollback));
@@ -1395,6 +1421,11 @@ impl Terminals {
         Ok((size.cols, size.rows))
     }
 
+    #[cfg(test)]
+    pub(crate) fn inspection_failure_for_test(&self, id: &str) -> Arc<AtomicBool> {
+        self.panes.lock().unwrap()[id].group.1.clone()
+    }
+
     pub fn kill(&self, id: &str) {
         self.retained.lock().unwrap().remove(id);
         if let Some(pane) = self.panes.lock().unwrap().remove(id) {
@@ -1426,7 +1457,36 @@ impl Terminals {
     /// the old one has let go dies on the spot. Claude Code's TUI also ignores
     /// SIGTERM outright, so asking politely and moving on is not enough.
     pub fn kill_and_wait(&self, id: &str, timeout: Duration) {
-        if let Some(pane) = self.begin_stop(id) { pane.wait(timeout); }
+        if let Err(error) = self.kill_and_wait_confirmed(id, timeout) { log::warn!("{error:#}"); }
+    }
+
+    pub(crate) fn kill_and_wait_confirmed(&self, id: &str, timeout: Duration) -> Result<()> {
+        self.kill_all_and_wait_confirmed(&[id.to_string()], timeout)
+    }
+
+    /// Snapshot unresolved ownership without detaching a pane or waiting for OS exit.
+    /// Callers retain these handles, never a reusable pane name, across retries.
+    pub(crate) fn pending_stops(&self, id: &str) -> Vec<StoppingPane> {
+        self.groups.lock().unwrap().iter()
+            .filter(|(pane, group)| pane == id && group.pid().is_some())
+            .map(|(pane, group)| StoppingPane { id: pane.clone(), group: group.clone() }).collect()
+    }
+
+    /// Capture every retained launch of these pane IDs before waiting. A new
+    /// pane with a reused ID is not part of this operation's snapshot.
+    pub(crate) fn begin_stop_all(&self, ids: &[String]) -> Vec<StoppingPane> {
+        self.retained.lock().unwrap().retain(|id, _| !ids.contains(id));
+        let groups = {
+            let mut panes = self.panes.lock().unwrap();
+            let groups = self.groups.lock().unwrap().iter()
+                .filter(|(id, _)| ids.contains(id))
+                .map(|(id, group)| StoppingPane { id: id.clone(), group: group.clone() }).collect();
+            for id in ids { panes.remove(id); }
+            groups
+        };
+        for id in ids { self.drop_slot_if_unused(id); }
+        self.changed();
+        groups
     }
 
     /// Detach and signal while the caller still owns its launch lock. Waiting
@@ -1449,35 +1509,15 @@ impl Terminals {
     /// gone, so a directory they ran in can be removed. Signalling them all
     /// before waiting keeps the wait to one grace period rather than one each.
     pub fn kill_all_and_wait(&self, ids: &[String], timeout: Duration) {
-        self.retained.lock().unwrap().retain(|id, _| !ids.contains(id));
-        let mut groups = Vec::new();
-        {
-            let mut panes = self.panes.lock().unwrap();
-            for id in ids {
-                if let Some(pane) = panes.remove(id) {
-                    pane.group.signal(false);
-                    groups.push(pane.group.clone());
-                }
-            }
+        if let Err(error) = self.kill_all_and_wait_confirmed(ids, timeout) { log::warn!("{error:#}"); }
+    }
+
+    pub(crate) fn kill_all_and_wait_confirmed(&self, ids: &[String], timeout: Duration) -> Result<()> {
+        let panes = self.begin_stop_all(ids);
+        if !StoppingPane::wait_all(&panes, timeout) {
+            anyhow::bail!("PTY process exit could not be confirmed. Retained ownership must be stopped before retrying the operation.");
         }
-        for id in ids {
-            self.drop_slot_if_unused(id);
-        }
-        self.changed();
-        let start = Instant::now();
-        let mut forced = false;
-        while start.elapsed() < timeout {
-            groups.retain(|group| group.pid().is_some());
-            if groups.is_empty() {
-                return;
-            }
-            if !forced && start.elapsed() >= TERM_GRACE {
-                for group in &groups { group.signal(true); }
-                forced = true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        log::warn!("{} process group(s) did not exit within {timeout:?}", groups.len());
+        Ok(())
     }
 
     /// Name a shell tab, for every window that lists it.
@@ -1597,7 +1637,12 @@ impl Terminals {
     pub fn session_pane_ids(&self, session_id: &str, tab_ids: &[String]) -> Vec<String> {
         let prefix = format!("{session_id}:");
         let tabs: Vec<String> = tab_ids.iter().map(|tab| format!("tab:{tab}")).collect();
-        self.panes().into_iter().map(|pane| pane.id).filter(|id| id.starts_with(&prefix) || tabs.contains(id)).collect()
+        let mut ids: Vec<_> = self.panes().into_iter().map(|pane| pane.id).collect();
+        ids.extend(self.groups.lock().unwrap().iter().map(|(id, _)| id.clone()));
+        ids.retain(|id| id.starts_with(&prefix) || tabs.contains(id));
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub fn kill_session_shells(&self, session_id: &str) {
@@ -1642,13 +1687,13 @@ impl Terminals {
 
     pub(crate) fn owned_groups(&self) -> Vec<u32> {
         let mut groups = self.groups.lock().unwrap();
-        groups.retain(|group| group.pid().is_some());
-        groups.iter().filter_map(|group|group.pid()).collect()
+        groups.retain(|(_, group)| group.pid().is_some());
+        groups.iter().filter_map(|(_, group)|group.pid()).collect()
     }
 
     /// Include groups whose pane was closed/replaced before stop-all began.
     pub(crate) fn stop_owned_groups(&self, timeout: Duration) {
-        let groups = self.groups.lock().unwrap().clone();
+        let groups: Vec<_> = self.groups.lock().unwrap().iter().map(|(_, group)| group.clone()).collect();
         for group in &groups { group.signal(false); }
         let start = Instant::now();
         while groups.iter().any(|group|group.pid().is_some()) && start.elapsed() < timeout {
@@ -1745,6 +1790,26 @@ impl Terminals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scoped_stop_retains_removed_shell_ownership_without_vetoing_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(32));
+        let spec = || PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some("sleep 60"), env: &[] };
+        terminals.spawn(sink.clone(), "failed:shell", spec()).unwrap();
+        terminals.spawn(sink, "other:shell", spec()).unwrap();
+        let failure = terminals.inspection_failure_for_test("failed:shell");
+        failure.store(true, Ordering::SeqCst);
+        assert!(terminals.kill_and_wait_confirmed("failed:shell", Duration::ZERO).is_err());
+        assert!(!terminals.is_live("failed:shell"));
+        assert_eq!(terminals.session_pane_ids("failed", &[]), ["failed:shell"]);
+        assert!(terminals.kill_all_and_wait_confirmed(&terminals.session_pane_ids("failed", &[]), Duration::ZERO).is_err());
+        terminals.kill_and_wait_confirmed("other:shell", Duration::from_secs(5)).unwrap();
+        assert!(!terminals.owned_groups().is_empty(), "unrelated stop must not drop failed ownership");
+        failure.store(false, Ordering::SeqCst);
+        terminals.kill_all_and_wait_confirmed(&terminals.session_pane_ids("failed", &[]), Duration::from_secs(5)).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn disappearing_census_member_cannot_retire_a_session_with_a_forked_successor() {
@@ -1777,7 +1842,7 @@ time.sleep(60)
         impl Drop for Cleanup { fn drop(&mut self) { unsafe { libc::kill(-(self.0 as i32),libc::SIGKILL); } } }
         let _cleanup = Cleanup(member);
         assert!(!group_alive(sid), "original group must already be gone");
-        let owned = Arc::new(OwnedGroup(Mutex::new(Some(sid))));
+        let owned = Arc::new(OwnedGroup::new(Some(sid)));
         // Stable/current sample remains owned before triggering the barrier.
         assert_eq!(owned.pid_with(|sid|session_jobs_from_pids(sid,vec![member as i32])),Some(sid));
         let observed = owned.pid_with(|sid| {

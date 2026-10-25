@@ -987,3 +987,40 @@ menu, Cmd+R and non-concurrent replacement must use PRO-131's
 land. Setup port injection and “run after setup” await PRO-240 (#836).
 The action editors from PRO-155 (#809) are already on main; this change
 does not introduce a competing action schema or script runner.
+
+## Stop confirmation and destructive callers
+
+A PTY pane name can be reused after its view/process handle is detached. Stop
+confirmation therefore retains the exact launch ownership handles, and the
+terminal registry associates every retained launch with its pane ID. A failed
+agent Stop keeps those handles for retry; it does not resolve the reused name
+and stop a replacement. Session deletion also discovers unresolved shell launches
+whose Pane objects have already been removed. Confirmation errors keep the
+session indexed and its workspace/history intact; unrelated sessions are not a
+reason to veto or broaden a scoped stop.
+
+| Caller | Required result before mutation |
+| --- | --- |
+| Agent Stop and retry | Exact captured PTY launches must confirm exit; failure keeps stopping/recovery and launch admission closed. |
+| Agent relocation | Every affected agent Stop must succeed; failure preserves original workspace metadata. Reader-opened shells are not stopped. |
+| Session deletion and tab removal | Scoped agents and shells must confirm exit before history/index removal. |
+| Remote session/workspace removal and merged cleanup | Fallible stop reaches the existing retention/refusal APIs; waiting cleanup retains terminal metadata and subscriptions on failure. |
+| Resource kill | Sampling, kill rules and confirmation still apply; an unconfirmed wait cannot return `killed: true`. |
+| Explicit Stop all | Per-tab failures and retained owned groups prevent acknowledgement; this remains broader than a session-scoped operation. |
+| Nonwaiting terminal teardown | Requests termination without promising confirmed exit; retained launch ownership remains available to later confirmation. |
+
+These results are bounded OS observations of owned work, not a universal
+process-containment certificate. The two reviewed native enumeration omissions
+(macOS internal truncation and Linux cursor/PID-wrap omission) remain unresolved
+at this checkpoint. Propagating a failed wait repairs known-live/indeterminate
+caller handling; it does not detect those unobserved false-empty cases or waive
+them. Platform mechanism work and final acceptance remain separate gates.
+
+The compatibility `kill_and_wait`/`kill_all_and_wait` wrappers log failure for
+non-confirming teardown callers. Destructive session/workspace/resource callers
+use the fallible variants. Final headless process teardown still uses the unit
+wrapper; it is not a successful removal acknowledgement. Restart reservations
+publish their exact detached handles before releasing runtime, and completion
+retires only those handles under the still-current claim. No runtime lock is
+held across a process-exit wait; startup refuses unresolved prior ownership and
+leaves its handles for explicit Stop instead.
