@@ -241,10 +241,12 @@ impl StoppingPane {
 /// member exists; a process from another session cannot join this one.
 struct OwnedGroup(Mutex<Option<u32>>);
 impl OwnedGroup {
-    fn pid(&self) -> Option<u32> {
+    fn pid(&self) -> Option<u32> { self.pid_with(session_jobs) }
+
+    fn pid_with(&self, census: impl FnOnce(u32) -> Result<Vec<(u32, u32)>>) -> Option<u32> {
         let mut owned = self.0.lock().unwrap();
         if let Some(pid) = *owned {
-            if !group_alive(pid) && session_jobs(pid).is_ok_and(|jobs| jobs.is_empty()) { *owned = None; }
+            if !group_alive(pid) && census(pid).is_ok_and(|jobs| jobs.is_empty()) { *owned = None; }
         }
         *owned
     }
@@ -296,29 +298,57 @@ fn group_alive(pid: u32) -> bool {
 /// but they retain this session. An inspection failure is not evidence of exit.
 #[cfg(unix)]
 fn session_jobs(session: u32) -> Result<Vec<(u32, u32)>> {
-    let output = std::process::Command::new("/bin/ps").args(["-axo", "pid="]).env("LC_ALL", "C").output()?;
-    anyhow::ensure!(output.status.success(), "process enumeration failed");
+    session_jobs_from_pids(session, process_ids()?)
+}
+
+#[cfg(unix)]
+fn session_jobs_from_pids(session: u32, pids: Vec<i32>) -> Result<Vec<(u32, u32)>> {
     let mut jobs = Vec::new();
-    for value in std::str::from_utf8(&output.stdout)?.split_whitespace() {
-        let member: i32 = value.parse()?;
+    let started = Instant::now();
+    for member in pids {
+        anyhow::ensure!(started.elapsed() < Duration::from_millis(100), "process census metadata deadline exceeded");
         if member <= 0 { continue; }
-        // SAFETY: getsid/getpgid inspect process metadata without changing it.
+        // A vanished sample is indeterminate: it could have forked an owned
+        // successor after enumeration. Never turn ESRCH into proof of emptiness.
         let sid = unsafe { libc::getsid(member) };
-        if sid < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) { continue; }
-            return Err(error.into());
-        }
+        if sid < 0 { return Err(std::io::Error::last_os_error().into()); }
         if sid != session as i32 { continue; }
         let group = unsafe { libc::getpgid(member) };
-        if group < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) { continue; }
-            return Err(error.into());
-        }
+        if group < 0 { return Err(std::io::Error::last_os_error().into()); }
         if group > 0 { jobs.push((member as u32, group as u32)); }
     }
     Ok(jobs)
+}
+
+// Do not use ps here: it can silently omit a sampled PID that vanishes while
+// formatting the table, hiding precisely the churn that must refuse retirement.
+#[cfg(target_os = "macos")]
+fn process_ids() -> Result<Vec<i32>> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    anyhow::ensure!(count > 0, "cannot size process census");
+    let capacity = (count as usize).checked_add(256).context("process census overflow")?;
+    anyhow::ensure!(capacity <= 1_048_576, "process census exceeds bound");
+    let mut pids = vec![0i32; capacity];
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), (capacity * std::mem::size_of::<i32>()) as i32) };
+    anyhow::ensure!(count > 0 && (count as usize) < capacity, "process census failed or was truncated");
+    pids.truncate(count as usize);
+    Ok(pids)
+}
+#[cfg(target_os = "linux")]
+fn process_ids() -> Result<Vec<i32>> {
+    let mut pids = Vec::new();
+    let started = Instant::now();
+    for entry in std::fs::read_dir("/proc")? {
+        anyhow::ensure!(pids.len() < 1_048_576 && started.elapsed() < Duration::from_millis(100), "process census bound exceeded");
+        let entry = entry?;
+        if let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<i32>().ok()) { pids.push(pid); }
+    }
+    anyhow::ensure!(!pids.is_empty(), "empty process census");
+    Ok(pids)
+}
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn process_ids() -> Result<Vec<i32>> {
+    anyhow::bail!("PTY session census is unavailable on this platform")
 }
 #[cfg(not(unix))]
 fn session_jobs(pid: u32) -> Result<Vec<(u32, u32)>> {
@@ -1715,6 +1745,70 @@ impl Terminals {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn disappearing_census_member_cannot_retire_a_session_with_a_forked_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("churn.py");
+        std::fs::write(&script, r#"import os,signal,time,json
+os.setsid()
+sid=os.getsid(0)
+if os.fork(): os._exit(0)
+os.setpgid(0,0)
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+open('sample.json','w').write(json.dumps([sid,os.getpid()]))
+while not os.path.exists('fork-now'): time.sleep(.005)
+if os.fork(): os._exit(0)
+open('successor','w').write(str(os.getpid()))
+time.sleep(60)
+"#).unwrap();
+        let mut leader = std::process::Command::new("python3").arg(&script).current_dir(dir.path())
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        let sample: Vec<u32> = loop {
+            if let Some(value) = std::fs::read(dir.path().join("sample.json")).ok().and_then(|bytes|serde_json::from_slice(&bytes).ok()) { break value; }
+            assert!(Instant::now() < until,"fixture did not publish sample");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(leader.wait().unwrap().success());
+        let (sid, member) = (sample[0], sample[1]);
+        struct Cleanup(u32);
+        impl Drop for Cleanup { fn drop(&mut self) { unsafe { libc::kill(-(self.0 as i32),libc::SIGKILL); } } }
+        let _cleanup = Cleanup(member);
+        assert!(!group_alive(sid), "original group must already be gone");
+        let owned = Arc::new(OwnedGroup(Mutex::new(Some(sid))));
+        // Stable/current sample remains owned before triggering the barrier.
+        assert_eq!(owned.pid_with(|sid|session_jobs_from_pids(sid,vec![member as i32])),Some(sid));
+        let observed = owned.pid_with(|sid| {
+            // Census has captured A. Allow A to fork B, exit and be reaped
+            // before the metadata phase. No timing guess chooses the race.
+            std::fs::write(dir.path().join("fork-now"),b"go").unwrap();
+            loop {
+                if std::fs::read_to_string(dir.path().join("successor")).ok().and_then(|s|s.parse::<i32>().ok()).is_some() && unsafe { libc::getsid(member as i32) } < 0 { break; }
+                assert!(Instant::now() < until,"sampled member did not exit after forking");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            session_jobs_from_pids(sid,vec![member as i32])
+        });
+        assert_eq!(observed,Some(sid),"a churning sample retired ownership of the live successor");
+        let successor: i32 = std::fs::read_to_string(dir.path().join("successor")).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::getsid(successor) },sid as i32);
+        assert_eq!(owned.pid_with(|_|anyhow::bail!("injected census failure")),Some(sid));
+        let stopping = StoppingPane { id: "churning-census".into(), group: owned.clone() };
+        assert!(!stopping.wait(Duration::ZERO), "bounded stop confirmed a live successor");
+        owned.signal(true);
+        let until = Instant::now() + Duration::from_secs(10);
+        while owned.pid().is_some() {
+            owned.signal(true);
+            assert!(Instant::now() < until,"owned successor did not terminate");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(stopping.wait(Duration::ZERO));
+        // Stable-empty retires permanently; later samples cannot reacquire it.
+        assert_eq!(owned.pid_with(|_|panic!("retired identity was inspected again")),None);
+    }
+
     use super::*;
 
     #[test]
