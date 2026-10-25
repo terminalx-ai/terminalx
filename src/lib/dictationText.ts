@@ -223,6 +223,8 @@ export function applyPartial(buffer: DictationBuffer, partial: string, result: D
   if (hasRaw(buffer, result)) {
     updated.rawCommitted = revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer);
     updated.raw = result.raw ?? next;
+  }
+  if (hasRaw(buffer, result) || buffer.parts != null) {
     updated.parts = updateParts(buffer, result.raw ?? next, next, revision);
   }
   return updated;
@@ -242,6 +244,8 @@ export function applyFinal(buffer: DictationBuffer, final: string, result: Dicta
     updated.rawCommitted = !text ? rawSpokenText(buffer)
       : joinSpoken(revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer), result.raw ?? text);
     updated.raw = "";
+  }
+  if (hasRaw(buffer, result) || buffer.parts != null) {
     updated.parts = text ? updateParts(buffer, result.raw ?? text, text, revision) : recognitionParts(buffer);
   }
   return updated;

@@ -453,3 +453,20 @@ it("retains paired part identity through revisions, segment changes and finaliza
   // Updating a revision must not mutate the snapshot captured by an edit.
   expect(first.parts).toEqual([{ id: 0, raw: "camel case user name", text: "camel case user name" }]);
 });
+
+
+it("retains identities initialized at recording start before raw metadata exists", () => {
+  const first = applyPartial({ ...EMPTY_BUFFER, parts: [] }, "please save", { segment: 0 });
+  expect(first.raw).toBeUndefined();
+  expect(first.rawCommitted).toBeUndefined();
+  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
+  const revised = applyPartial(first, "please save changes", { raw: "please save changes", segment: 0 });
+  expect(revised.parts).toEqual([{ id: 0, raw: "please save changes", text: "please save changes" }]);
+  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
+  const settled = applyFinal(first, "please save", { segment: 0 });
+  const fresh = applyPartial(settled, "account_id", { raw: "snake case account id end case", segment: 1 });
+  expect(fresh.parts).toEqual([
+    { id: 0, raw: "please save", text: "please save" },
+    { id: 1, raw: "snake case account id end case", text: "account_id" },
+  ]);
+});

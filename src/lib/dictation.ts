@@ -171,7 +171,8 @@ export async function refreshDictationEngine() {
  */
 export function startDictation(target: string, personalization?: DictationContext): number | null {
   if (state.phase !== "idle" || isTranscriptionInputSaving()) return null;
-  buffer = EMPTY_BUFFER;
+  // Track identities from the first result, even before optional raw metadata.
+  buffer = { ...EMPTY_BUFFER, parts: [] };
   previousPartialAt = null;
   stopping = false;
   const session = state.session + 1;

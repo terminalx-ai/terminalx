@@ -206,7 +206,7 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
     }
     // What is left is what the reader has not already got.
     let spoken: string;
-    if (state.parts != null) {
+    if (state.parts != null && state.raw != null) {
       // Never align across a boundary the reducer already knows. A fresh part
       // has no owned raw prefix, even if both adjacent parts are transformed.
       spoken = "";
@@ -229,6 +229,12 @@ export function useDictationInto(target: string, draft: string, onDraftChange: (
       taken.current = since.taken;
       takenRaw.current = since.taken;
       spoken = since.spoken;
+      // Preserve display-only insertion semantics, but keep each known part's
+      // owned prefix current for a later result that supplies raw metadata.
+      for (const part of state.parts ?? []) {
+        const owned = takenParts.current.get(part.id);
+        if (owned != null) takenParts.current.set(part.id, spokenSince(owned, part.raw).taken);
+      }
     }
     // Nothing is written until there is something to say, so a selection the
     // mic opened on is not removed by silence. After that even nothing is

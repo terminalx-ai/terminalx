@@ -487,3 +487,59 @@ describe("known boundaries between adjacent transformed commands (R1b)", () => {
     expect(box().value).toBe("account_id");
   });
 });
+
+
+describe("legacy-to-raw ownership transition (R1c)", () => {
+  it("keeps a deleted prefix owned when raw first appears in the same segment", async () => {
+    await open();
+    await send({ kind: "partial", text: "please save", segment: 0 });
+    expect(box().value).toBe("please save");
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    expect(box().value).toBe("");
+    await send({ kind: "partial", text: "please save changes", raw: "please save changes", segment: 0 });
+    expect(box().value).toBe("changes");
+    await send({ kind: "final", text: "please save changes", raw: "please save changes", segment: 0 });
+    expect(box().value).toBe("changes");
+    await send({ kind: "stopped" });
+    expect(box().value).toBe("changes");
+  });
+
+  it("keeps settled deleted legacy text owned and inserts only a fresh raw-bearing segment", async () => {
+    await open();
+    await send({ kind: "partial", text: "please save", segment: 0 });
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    await send({ kind: "final", text: "please save", segment: 0 });
+    expect(box().value).toBe("");
+    await send({ kind: "partial", text: "account_id", raw: "snake case account id end case", segment: 1 });
+    expect(box().value).toBe("account_id");
+    await send({ kind: "final", text: "account_id", raw: "snake case account id end case", segment: 1 }, { kind: "stopped" });
+    expect(box().value).toBe("account_id");
+  });
+
+  it("retains an external draft reanchor before raw metadata arrives", async () => {
+    const tabId = "r1c-reanchor";
+    setDraft(tabId, "");
+    await open(<TabField tabId={tabId} />);
+    await send({ kind: "partial", text: "please save", segment: 0 });
+    expect(box().value).toBe("please save");
+    // A parent draft update, not a field input event: exercise reanchor.
+    await act(async () => setDraft(tabId, "Notes:"));
+    expect(box().value).toBe("Notes:");
+    await send({ kind: "partial", text: "please save changes", raw: "please save changes", segment: 0 });
+    expect(box().value).toBe("Notes: changes");
+    await send({ kind: "final", text: "please save changes", raw: "please save changes", segment: 0 }, { kind: "stopped" });
+    expect(box().value).toBe("Notes: changes");
+  });
+
+  it("tracks owned legacy revisions before switching to raw projection", async () => {
+    await open();
+    await send({ kind: "partial", text: "please safe", segment: 0 });
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    await send({ kind: "partial", text: "please save changes", segment: 0 });
+    expect(box().value).toBe("changes");
+    await send({ kind: "partial", text: "please save changes now", raw: "please save changes now", segment: 0 });
+    expect(box().value).toBe("changes now");
+    await send({ kind: "final", text: "please save changes now", raw: "please save changes now", segment: 0 }, { kind: "stopped" });
+    expect(box().value).toBe("changes now");
+  });
+});
