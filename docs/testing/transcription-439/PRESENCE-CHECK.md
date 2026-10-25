@@ -38,7 +38,10 @@ private store (269,751,136 bytes, provenance beside launcher). This separates
 microphone input from Apple availability; it is not Apple success. No account,
 agent prompt or model download is required. Do not bypass native consent.
 
-This short presence check is still pending and is not statistical acceptance.
+The 2026-10-25 manual round now has bounded Apple and Whisper Small recognition
+and diagnostic observations, including failed trials; see
+[HUMAN-OBSERVATIONS.md](HUMAN-OBSERVATIONS.md). It is paused and is not full
+acceptance. Silence/noise-guard acceptance is explicitly deferred to #631, not passed.
 The full recording matrix remains in HANDOFF.md; the subsequently completed
 synthetic production detector matrix is recorded in PRODUCTION-DETECTOR.md and
 does not establish this microphone presence check. All four checks passed before

@@ -1,5 +1,12 @@
 # Native validation handoff
 
+2026-10-25 update: the manual round is paused. Bounded Apple and Whisper Small
+observations, including failures, are reconciled in
+[HUMAN-OBSERVATIONS.md](HUMAN-OBSERVATIONS.md). Silence/noise-guard acceptance was
+explicitly deferred to [#631](https://github.com/terminalx-ai/terminalx/issues/631),
+not passed. The current ledger below governs remaining scope; the original
+recording protocol is retained for reference, not a request for more user tests.
+
 Current criterion-by-criterion gaps are tracked in
 [ACCEPTANCE-STATUS.md](ACCEPTANCE-STATUS.md). The replacement-worker production
 matrix completed 255 pairs, retaining its strict mismatch and quiet recognition
