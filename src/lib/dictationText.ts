@@ -30,6 +30,8 @@ export interface DictationBuffer {
   live: string;
   /** Raw live recognition, before personalization changes its words. */
   raw?: string;
+  /** Raw counterparts of settled utterances, retained across edit boundaries. */
+  rawCommitted?: string;
   /** Recogniser-owned identity for `live`, when the engine can provide one. */
   segment?: number;
 }
@@ -177,25 +179,44 @@ function withLive(committed: string, live: string, segment: number | undefined, 
   return raw == null ? buffer : { ...buffer, raw };
 }
 
+/** Everything recognised before formatting, with the same utterance folding. */
+export function rawSpokenText(buffer: DictationBuffer): string {
+  return joinSpoken(buffer.rawCommitted ?? buffer.committed, buffer.raw ?? buffer.live);
+}
+
+function hasRaw(buffer: DictationBuffer, result: DictationResult): boolean {
+  return result.raw != null || buffer.raw != null || buffer.rawCommitted != null;
+}
+
 /** Take a partial result. Blank ones say nothing and change nothing. */
 export function applyPartial(buffer: DictationBuffer, partial: string, result: DictationResult = {}): DictationBuffer {
   const next = partial.trim();
   if (!next || outOfOrder(buffer, result)) return buffer;
-  if (isRevision(buffer, next, result)) return withLive(buffer.committed, next, result.segment, result.raw);
-  return withLive(joinSpoken(buffer.committed, buffer.live), next, result.segment, result.raw);
+  const revision = isRevision(buffer, next, result);
+  const updated = withLive(revision ? buffer.committed : spokenText(buffer), next, result.segment, result.raw);
+  if (hasRaw(buffer, result)) {
+    updated.rawCommitted = revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer);
+    updated.raw = result.raw ?? next;
+  }
+  return updated;
 }
 
 /**
- * Take a final result: the utterance is over either way. A final that is the
- * last partial said again (or tidied up) replaces it; one that stands on its
- * own is kept as well, so a phrase is never lost to a dedupe.
+ * Take a final result: fold raw and formatted forms at the same boundary so
+ * an edit can keep ownership even after the live utterance has settled.
  */
 export function applyFinal(buffer: DictationBuffer, final: string, result: DictationResult = {}): DictationBuffer {
   if (outOfOrder(buffer, result)) return buffer;
   const text = final.trim();
-  if (!text) return { committed: spokenText(buffer), live: "" };
-  if (isRevision(buffer, text, result)) return { committed: joinSpoken(buffer.committed, text), live: "" };
-  return { committed: joinSpoken(spokenText(buffer), text), live: "" };
+  const revision = isRevision(buffer, text, result);
+  const updated: DictationBuffer = { committed: !text ? spokenText(buffer)
+    : joinSpoken(revision ? buffer.committed : spokenText(buffer), text), live: "" };
+  if (hasRaw(buffer, result)) {
+    updated.rawCommitted = !text ? rawSpokenText(buffer)
+      : joinSpoken(revision ? buffer.rawCommitted ?? buffer.committed : rawSpokenText(buffer), result.raw ?? text);
+    updated.raw = "";
+  }
+  return updated;
 }
 
 /** One word of a transcript as it was heard, where it starts, and the form it is compared in. */
@@ -253,6 +274,62 @@ export function spokenSince(taken: string, heard: string): { taken: string; spok
   if (kept >= now.length) return { taken: heard, spoken: "" };
   const at = now[kept].at;
   return { taken: heard.slice(0, at).trimEnd(), spoken: heard.slice(at) };
+}
+
+/**
+ * Project an edit's raw ownership into the current formatted stream. Compare
+ * recognition with recognition first; never count formatted words as though
+ * they were raw words. Unchanged words anchor the projection. Each changed
+ * span is atomic: if it overlaps owned raw input, its entire expansion stays
+ * owned (including a closing formatting marker which arrived after the edit).
+ * Unchanged suffix words beyond that span remain newly spoken.
+ */
+export function formattedSince(taken: string, raw: string, formatted: string): { taken: string; formattedTaken: string; spoken: string } {
+  const recognition = spokenSince(taken, raw);
+  let owned = spokenWords(recognition.taken).length;
+  if (owned === 0) return { taken: "", formattedTaken: "", spoken: formatted.trimStart() };
+  const a = spokenWords(raw);
+  const b = spokenWords(formatted);
+  const anchors: [number, number][] = [];
+  let head = 0;
+  while (head < a.length && head < b.length && a[head].word === b[head].word) {
+    anchors.push([head, head]);
+    head++;
+  }
+  let endA = a.length, endB = b.length;
+  while (endA > head && endB > head && a[endA - 1].word === b[endB - 1].word) { endA--; endB--; }
+  // Most dictation is an unchanged prefix/suffix. Bound alignment of the
+  // changed middle; an ambiguous larger rewrite remains one atomic span.
+  const n = endA - head, m = endB - head;
+  if (n <= 256 && m <= 256) {
+    const rows = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+      rows[i][j] = a[head + i].word === b[head + j].word ? 1 + rows[i + 1][j + 1] : Math.max(rows[i + 1][j], rows[i][j + 1]);
+    }
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[head + i].word === b[head + j].word) { anchors.push([head + i++, head + j++]); }
+      else if (rows[i + 1][j] >= rows[i][j + 1]) i++;
+      else j++;
+    }
+  }
+  for (let i = endA, j = endB; i < a.length; i++, j++) anchors.push([i, j]);
+  anchors.push([a.length, b.length]);
+  let rawAt = 0, displayAt = 0, displayOwned = 0;
+  for (const [rawEnd, displayEnd] of anchors) {
+    // A pure insertion at the owned boundary belongs to the preceding span.
+    const changed = rawEnd > rawAt || displayEnd > displayAt;
+    if (changed && (rawAt < owned || (rawAt === rawEnd && rawAt === owned))) {
+      owned = Math.max(owned, rawEnd);
+      displayOwned = displayEnd;
+    }
+    if (rawEnd < owned) displayOwned = displayEnd + 1;
+    rawAt = rawEnd + 1;
+    displayAt = displayEnd + 1;
+  }
+  const rawCut = owned >= a.length ? raw.length : a[owned].at;
+  const displayCut = displayOwned >= b.length ? formatted.length : b[displayOwned].at;
+  return { taken: raw.slice(0, rawCut).trimEnd(), formattedTaken: formatted.slice(0, displayCut).trimEnd(), spoken: formatted.slice(displayCut) };
 }
 
 /**

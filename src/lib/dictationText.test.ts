@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, formattedSince, rawSpokenText, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
 type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
@@ -407,5 +407,33 @@ describe("the stream observed from Apple", () => {
       expect(end("Draft:", [...events, { final: "", segment: 1 }]).text).toBe(heard);
       expect(heard.startsWith("Draft: I need a settings page")).toBe(true);
     }
+  });
+});
+
+
+describe("raw/formatted edit ownership", () => {
+  it("owns the transformed command while leaving its new suffix", () => {
+    const raw = "camel case user name end case please save changes";
+    const formatted = "userName please save changes";
+    expect(formattedSince("camel case user name", raw, formatted)).toEqual({
+      taken: "camel case user name end case", formattedTaken: "userName", spoken: "please save changes",
+    });
+  });
+
+  it("keeps multiword expansions atomic at an owned raw boundary", () => {
+    expect(formattedSince("insert the prepared status", "insert the prepared status now please save changes",
+      "Ready for review please save changes").spoken).toBe("please save changes");
+  });
+
+  it("does not consume a newly spoken formatting command after the owned prefix", () => {
+    expect(formattedSince("please review", "please review camel case user name end case", "please review userName").spoken).toBe("userName");
+  });
+
+  it("retains raw settled utterances when the next segment stands alone", () => {
+    const partial = applyPartial(EMPTY_BUFFER, "userName", { raw: "camel case user name end case", segment: 0 });
+    const next = applyPartial(partial, "please save changes", { raw: "please save changes", segment: 1 });
+    const final = applyFinal(next, "please save changes", { raw: "please save changes", segment: 1 });
+    expect(rawSpokenText(final)).toBe("camel case user name end case please save changes");
+    expect(final.committed).toBe("userName please save changes");
   });
 });

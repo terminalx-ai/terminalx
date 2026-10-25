@@ -8,11 +8,13 @@
     },
     "raw": [
       "camel case user name",
-      "camel case user name end case"
+      "camel case user name end case",
+      "camel case user name end case please save changes"
     ],
     "text": [
       "camel case user name",
-      "userName"
+      "userName",
+      "userName please save changes"
     ]
   },
   {
@@ -32,11 +34,13 @@
     },
     "raw": [
       "insert the prepared status",
-      "insert the prepared status now"
+      "insert the prepared status now",
+      "insert the prepared status now please save changes"
     ],
     "text": [
       "insert the prepared status",
-      "Ready for review"
+      "Ready for review",
+      "Ready for review please save changes"
     ]
   },
   {
@@ -56,11 +60,13 @@
     },
     "raw": [
       "open the transcription source",
-      "open the transcription source file"
+      "open the transcription source file",
+      "open the transcription source file please save changes"
     ],
     "text": [
       "open the transcription source",
-      "TranscriptionTab.tsx"
+      "TranscriptionTab.tsx",
+      "TranscriptionTab.tsx please save changes"
     ]
   }
 ]

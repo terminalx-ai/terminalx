@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { DictationContext } from "./dictationContext";
 import { isTranscriptionInputSaving } from "./transcriptionInput";
-import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, type DictationBuffer } from "./dictationText";
+import { applyFinal, applyPartial, EMPTY_BUFFER, spokenText, rawSpokenText, type DictationBuffer } from "./dictationText";
 
 /**
  * Dictation into the composer. The Rust side owns the microphone and Apple's
@@ -25,6 +25,8 @@ export interface DictationState {
    * final result that lands in the same tick as the stop is never missed.
    */
   text: string;
+  /** Raw stream paired with text, for ownership after a user edit. */
+  raw?: string;
   /** Which dictation this is. A composer follows only the one it started. */
   session: number;
   /** Which composer (tab id) the text belongs to. */
@@ -108,12 +110,12 @@ async function subscribe() {
             buffer = applyPartial(buffer, p.text ?? "", { segment: p.segment, raw: p.raw, sincePreviousMs });
             previousPartialAt = now;
           }
-          set({ text: spokenText(buffer) });
+          set({ text: spokenText(buffer), raw: buffer.rawCommitted == null ? undefined : rawSpokenText(buffer) });
           break;
         case "final":
           buffer = applyFinal(buffer, p.text ?? "", { segment: p.segment, raw: p.raw });
           previousPartialAt = null;
-          set({ text: spokenText(buffer) });
+          set({ text: spokenText(buffer), raw: buffer.rawCommitted == null ? undefined : rawSpokenText(buffer) });
           break;
         case "error":
           previousPartialAt = null;
@@ -171,7 +173,7 @@ export function startDictation(target: string, personalization?: DictationContex
   previousPartialAt = null;
   stopping = false;
   const session = state.session + 1;
-  set({ phase: "starting", text: "", session, target, error: null, settings: null });
+  set({ phase: "starting", text: "", raw: undefined, session, target, error: null, settings: null });
   opening = (async () => {
     // The listener is in place before the microphone is, so no result can
     // arrive before there is somewhere for it to go.

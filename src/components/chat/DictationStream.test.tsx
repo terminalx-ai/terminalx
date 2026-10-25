@@ -410,6 +410,30 @@ describe.each(formattingCases)("formatted Apple revisions: $name", ({ raw, text 
     expect(box().value).toBe("");
   });
 
+  it("keeps the new suffix after deleting the unfinished command (R1)", async () => {
+    await open();
+    await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });
+    expect(box().value).toBe(text[0]);
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    expect(box().value).toBe("");
+    await send({ kind: "final", raw: raw[2], text: text[2], segment: 0 }, { kind: "stopped" });
+    expect(box().value).toBe("please save changes");
+  });
+
+  it("retains raw ownership as the suffix revises and then a new segment arrives", async () => {
+    await open();
+    await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });
+    await act(async () => fireEvent.input(box(), { target: { value: "" } }));
+    await send({ kind: "partial", raw: raw[2], text: text[2], segment: 0 });
+    expect(box().value).toBe("please save changes");
+    await send({ kind: "partial", raw: raw[2] + " now", text: text[2] + " now", segment: 0 });
+    expect(box().value).toBe("please save changes now");
+    await send({ kind: "partial", raw: "then review it", text: "then review it", segment: 1 });
+    expect(box().value).toBe("please save changes now then review it");
+    await send({ kind: "final", raw: "then review it", text: "then review it", segment: 1 }, { kind: "stopped" });
+    expect(box().value).toBe("please save changes now then review it");
+  });
+
   it("replaces the partial directly with the formatted final", async () => {
     await open();
     await send({ kind: "partial", raw: raw[0], text: text[0], segment: 0 });

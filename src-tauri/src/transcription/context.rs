@@ -293,6 +293,9 @@ mod tests {
             let data: Personalization = serde_json::from_value(case["data"].clone()).unwrap();
             let run = RunContext::from_data(data, ContextRequest { coding: true, ..Default::default() });
             let noise = super::super::noise::NoiseResult::new(super::super::noise::NoiseStatus::Disabled);
+            // Includes the R1 closing-marker + new-suffix contract consumed by
+            // the real frontend edit/deletion regression, not just a bare identifier.
+            assert_eq!(case["raw"].as_array().unwrap().len(), case["text"].as_array().unwrap().len());
             for (raw, expected) in case["raw"].as_array().unwrap().iter().zip(case["text"].as_array().unwrap()) {
                 assert_eq!(run.finalize(raw.as_str().unwrap(), "apple", &noise), expected.as_str().unwrap(), "{}", case["name"]);
             }
