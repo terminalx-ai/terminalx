@@ -1,0 +1,28 @@
+{
+  "captured_at_utc": "2026-10-25T21:33:04.346086+00:00",
+  "zeron": {
+    "release": "v0.2.125",
+    "source_commit": "255c540d651910ccab451b77ec59c05ba4266d41",
+    "artifact": "zeron-0.2.125-macos-arm64-app.tar.gz",
+    "sha256": "7d308368d8aaa4cc500c6c84bc7d2caa8dc4a18fe573fb384da40266758fcf21",
+    "download_url": "https://github.com/zeronsh/zeron/releases/download/v0.2.125/zeron-0.2.125-macos-arm64-app.tar.gz"
+  },
+  "terminalx": {
+    "version": "0.2.19",
+    "source_commit": "e86b2de2db8968739d75e85ae0e859b38e95a862",
+    "build": "Tauri debug app, official Dev identity/config plus development packaging hook; updater artifacts disabled",
+    "artifact": "terminalx-dev-0.2.19.zip",
+    "artifact_sha256": "c7aa6d944fb3b48c409b1f8a0f96b089fb442ba3e1b15ba24bd305f49f603d99"
+  },
+  "vms": {
+    "base": "cua-base-57b1d14676cd",
+    "zeron": "zeron-terminalx-comparison",
+    "terminalx": "terminalx-fresh-comparison",
+    "cpu": 4,
+    "memory_gib": 8,
+    "configured_display": "1440x900",
+    "os": "macOS 26.5.2 (25F84)",
+    "lume": "0.6.1"
+  },
+  "authentication": "No host provider credentials copied; no authenticated/cloud end-to-end runs."
+}

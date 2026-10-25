@@ -1,0 +1,86 @@
+[
+  {
+    "start": 0.0,
+    "end": 25.08,
+    "title": "Zeron × TerminalX",
+    "evidence": "INTERIM COMPARISON · 26 OCT 2026"
+  },
+  {
+    "start": 25.08,
+    "end": 48.2,
+    "title": "01 · A guided first run",
+    "evidence": "ZERON · OBSERVED"
+  },
+  {
+    "start": 48.2,
+    "end": 70.4,
+    "title": "02 · Install is part of the product",
+    "evidence": "ZERON · OBSERVED FOOTAGE"
+  },
+  {
+    "start": 70.4,
+    "end": 94.80000000000001,
+    "title": "03 · Keep the launch context nearby",
+    "evidence": "ZERON · OBSERVED"
+  },
+  {
+    "start": 94.80000000000001,
+    "end": 118.24000000000001,
+    "title": "04 · Worktree, shell and a real failure",
+    "evidence": "ZERON · OBSERVED FOOTAGE"
+  },
+  {
+    "start": 118.24000000000001,
+    "end": 142.32,
+    "title": "05 · Inspect changes beside the conversation",
+    "evidence": "ZERON · OBSERVED FOOTAGE"
+  },
+  {
+    "start": 142.32,
+    "end": 166.16,
+    "title": "06 · Browser and presentation controls",
+    "evidence": "ZERON · OBSERVED"
+  },
+  {
+    "start": 166.16,
+    "end": 190.68,
+    "title": "07 · Context capture deserves its own flow",
+    "evidence": "ZERON · SETUP OBSERVED, CAPTURE UNTESTED"
+  },
+  {
+    "start": 190.68,
+    "end": 217.56,
+    "title": "08 · Breadth versus a focused agent model",
+    "evidence": "SOURCE-CONFIRMED · SEE REPORT LINKS"
+  },
+  {
+    "start": 217.56,
+    "end": 245.44,
+    "title": "09 · TerminalX: verified installation boundary",
+    "evidence": "TERMINALX · CLI VERIFIED, UI PENDING"
+  },
+  {
+    "start": 245.44,
+    "end": 270.52,
+    "title": "10 · Preserve TerminalX’s distinctive strengths",
+    "evidence": "TERMINALX · SOURCE-CONFIRMED"
+  },
+  {
+    "start": 270.52,
+    "end": 295.59999999999997,
+    "title": "11 · The first improvements to ship",
+    "evidence": "RECOMMENDATIONS · VALIDATE WITH USERS"
+  },
+  {
+    "start": 295.59999999999997,
+    "end": 322.2,
+    "title": "12 · Next: improve the tools already present",
+    "evidence": "RECOMMENDATIONS · 14 ITEMS IN THE REPORT"
+  },
+  {
+    "start": 322.2,
+    "end": 349.96,
+    "title": "What remains before the comparison is complete",
+    "evidence": "BLOCKED ON ACCESSIBILITY · CHECKS PASSED"
+  }
+]
