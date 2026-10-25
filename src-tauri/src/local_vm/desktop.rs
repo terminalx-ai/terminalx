@@ -11,6 +11,7 @@ use std::time::Duration;
 pub const DRIVER_VERSION: &str = "0.28.0";
 const ALLOWED: &[&str] = &[
     "list_apps",
+    "list_windows",
     "get_app_state",
     "get_app_windows",
     "get_window_state",
@@ -250,6 +251,36 @@ fn serve(target: &TaskTarget) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_native_window_catalog_preserves_discovery_without_routing_overrides() {
+        let catalog: Value =
+            serde_json::from_str(include_str!("fixtures/cua-driver-0.28.0-list-windows.json"))
+                .unwrap();
+        assert_eq!(catalog["driverVersion"], DRIVER_VERSION);
+        let descriptor = &catalog["tool"];
+        let response = filter_response(
+            json!({"jsonrpc":"2.0","id":9,"result":{"tools":[descriptor,{"name":"shell"},{"name":"create_vm"},{"name":"permissions_grant"}]}}),
+        );
+        assert_eq!(response["result"]["tools"], json!([descriptor]));
+        let request = json!({"method":"tools/call","params":{"name":descriptor["name"],"arguments":{"pid":15115,"on_screen_only":false}}});
+        check_capability_request(&request).unwrap();
+        for field in [
+            "host",
+            "environment",
+            "sandbox",
+            "machine",
+            "endpoint",
+            "permissionMode",
+        ] {
+            let mut overridden = request.clone();
+            overridden["params"]["arguments"][field] = json!("forbidden");
+            assert!(check_capability_request(&overridden).is_err(), "{field}");
+        }
+        assert_eq!(descriptor["inputSchema"]["additionalProperties"], false);
+        assert!(descriptor["inputSchema"]["properties"]["pid"].is_object());
+        assert!(descriptor["inputSchema"]["properties"]["on_screen_only"].is_object());
+    }
 
     fn browser_catalog() -> Value {
         serde_json::from_str(include_str!(
