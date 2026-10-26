@@ -171,3 +171,46 @@ fn capacity_failure_preserves_history_and_does_not_return_acceptance() {
     assert!(journal.is_degraded());
     assert_eq!(fs::read(&path).unwrap(), before);
 }
+
+#[test]
+fn successful_serialization_with_missing_required_replay_field_is_rejected_before_write() {
+    #[derive(Serialize, Deserialize)]
+    struct Change {
+        #[serde(skip_serializing)]
+        required: String,
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Change>::create(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let change = Change { required: "must survive replay".into() };
+    assert!(!change.required.is_empty());
+    assert_eq!(serde_json::to_vec(&change).unwrap(), b"{}");
+    let result = journal.commit(vec![change]);
+    assert!(result.is_err()); // Old code returns a receipt and corrupts replay.
+    assert!(journal.is_degraded());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(journal.snapshot().is_err());
+    let mut restarted = Journal::<Change>::begin(&path).unwrap();
+    let snapshot = restarted.snapshot().unwrap();
+    assert_eq!(snapshot.batches.len(), 2); // Only the two backend barriers.
+    assert!(snapshot.batches.iter().all(|batch| batch.changes.is_empty()));
+}
+
+#[test]
+fn ordinary_typed_payload_returns_a_receipt_and_replays_after_restart() {
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct Change { required: String }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Change>::create(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let receipt = journal.commit(vec![Change { required: "retained".into() }]).unwrap();
+    assert!(!journal.is_degraded());
+    assert_eq!(journal.snapshot().unwrap().batches[1], receipt);
+    assert!(fs::read(&path).unwrap().starts_with(&before));
+    let mut restarted = Journal::<Change>::begin(&path).unwrap();
+    let snapshot = restarted.snapshot().unwrap();
+    assert_eq!(snapshot.batches[1], receipt);
+    assert_eq!(snapshot.batches[1].changes[0].required, "retained");
+}

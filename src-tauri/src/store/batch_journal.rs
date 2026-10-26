@@ -149,10 +149,23 @@ fn read<T: DeserializeOwned>(path: &Path, allow_missing: bool) -> Result<(Vec<u8
     Ok((bytes, snapshot))
 }
 
-fn replace<T: Serialize>(path: &Path, mut bytes: Vec<u8>, batch: &Batch<T>) -> Result<()> {
+fn replace<T: Serialize + DeserializeOwned>(path: &Path, mut bytes: Vec<u8>, batch: &Batch<T>) -> Result<()> {
     let encoded = serde_json::to_vec(batch)?;
     if encoded.len() >= MAX_BYTES || bytes.len() > MAX_BYTES - encoded.len() - 1 {
         bail!("batch journal capacity exhausted; preserved without truncation");
+    }
+    // Serialize + Deserialize does not imply round-trip decodability (for
+    // example, skip_serializing on a required field). Validate the exact new
+    // record before replacement, including single-line framing and the header
+    // already selected under the transaction lock. Do not require T equality.
+    if encoded.contains(&b'\n') || encoded.contains(&b'\r') {
+        bail!("encoded journal batch is not a single line");
+    }
+    let decoded: Batch<T> = serde_json::from_slice(&encoded).context("replay proposed journal batch")?;
+    if decoded.version != VERSION || decoded.sequence != batch.sequence
+        || decoded.backend_generation != batch.backend_generation
+        || decoded.changes.is_empty() != batch.changes.is_empty() {
+        bail!("encoded journal batch changed its header or barrier kind");
     }
     bytes.extend_from_slice(&encoded);
     bytes.push(b'\n');
