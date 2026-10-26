@@ -66,7 +66,7 @@ live actor and a new key. Process loss never starts another sign-in.
 
 Capture proof binds the current kernel boot and Driver executable. Capture alone
 does not prove an unlocked usable app desktop. The explicit desktop check opens
-a new private `.txt` document in guest TextEdit, selects its unique exact window
+a new private `.txt` document in guest TextEdit in the foreground, selects its unique exact window
 and native editor, and types a nonce through Driver. It requires fresh native
 readback, identical bytes saved by the application, and confirmation that the
 same document closed before removing the file. Native Save/Close menu actions

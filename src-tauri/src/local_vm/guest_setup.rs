@@ -446,7 +446,7 @@ esac
             std::fs::write(home.path().join("save"), if save { "yes" } else { "no" }).unwrap();
             script(
                 &selected.open,
-                "#!/bin/sh\nprintf '%s' \"$4\" > \"$HOME/checkfile\"\n",
+                "#!/bin/sh\nprintf '%s' \"$3\" > \"$HOME/checkfile\"\n",
             );
             script(
                 &selected.driver,

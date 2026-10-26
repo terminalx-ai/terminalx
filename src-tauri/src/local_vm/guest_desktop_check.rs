@@ -14,6 +14,17 @@ pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
     // Only our fixed stage labels may leave the guest; Driver output, screen
     // content, document paths and arbitrary OS errors are never persisted.
     match error.to_string().as_str() {
+        "Guest check document could not be opened" => {
+            "guest_native_desktop_document_open_unverified"
+        }
+        "Guest check document window unverified"
+        | "Guest check document was not available; inspect it before trying another check" => {
+            "guest_native_desktop_document_window_unverified"
+        }
+        "Guest initial document snapshot unverified" => {
+            "guest_native_desktop_initial_snapshot_unverified"
+        }
+        "Guest check file cleanup failed" => "guest_native_desktop_cleanup_unverified",
         "Guest native input failed" => "guest_native_desktop_input_unverified",
         "Guest native readback failed" => "guest_native_desktop_readback_unverified",
         "Guest application save request failed" => {
@@ -176,7 +187,6 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     let opened = finite(
         &paths.open,
         &[
-            "-g",
             "-a",
             "/System/Applications/TextEdit.app",
             file.to_str().context("Check document path")?,
@@ -184,7 +194,8 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         paths,
         closed,
         Duration::from_secs(10),
-    )?;
+    )
+    .context("Guest check document could not be opened")?;
     if opened.code != 0 {
         bail!("Guest check document could not be opened");
     }
@@ -193,16 +204,22 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         if closed.load(Ordering::Acquire) || Instant::now() >= deadline {
             bail!("Guest check document was not available; inspect it before trying another check");
         }
-        if let Some(target) =
-            document_window(&call("list_windows", json!({}), paths, closed)?, &name)?
+        if let Some(target) = document_window(
+            &call("list_windows", json!({}), paths, closed)
+                .context("Guest check document window unverified")?,
+            &name,
+        )
+        .context("Guest check document window unverified")?
         {
             break target;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     let target = json!({"pid":pid,"window_id":window,"session":session});
-    let snapshot = call("get_window_state", target.clone(), paths, closed)?;
-    let token = editor(&snapshot, pid, window, "")?;
+    let snapshot = call("get_window_state", target.clone(), paths, closed)
+        .context("Guest initial document snapshot unverified")?;
+    let token =
+        editor(&snapshot, pid, window, "").context("Guest initial document snapshot unverified")?;
     let marker = format!("TerminalX desktop check {nonce}");
     call(
         "type_text",
@@ -256,7 +273,7 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
             .context("Guest check document close failed")?;
         let still_present = windows["windows"]
             .as_array()
-            .context("Driver window inventory missing")?
+            .context("Guest check document close failed")?
             .iter()
             .any(|w| w["window_id"] == window);
         if !still_present {
@@ -267,7 +284,7 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    fs::remove_file(file)?;
+    fs::remove_file(file).context("Guest check file cleanup failed")?;
     Ok(())
 }
 
