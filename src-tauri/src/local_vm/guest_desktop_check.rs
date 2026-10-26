@@ -31,8 +31,10 @@ pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
                 "guest_native_desktop_save_request_unverified"
             }
         }
-        "Guest application saved file could not be read"
-        | "Guest application save was not verified; no shortcut was replayed" => {
+        "Guest application saved file could not be read" => {
+            "guest_native_desktop_saved_file_unreadable"
+        }
+        "Guest application save was not verified; no shortcut was replayed" => {
             "guest_native_desktop_save_unverified"
         }
         "Guest check document close failed"
@@ -57,7 +59,11 @@ fn call(tool: &str, arguments: Value, paths: &Paths, closed: &AtomicBool) -> Res
     }
     let value: Value =
         serde_json::from_slice(&result.bytes).context("Guest desktop response was invalid")?;
-    if value["isError"] == true || value["ok"] == false || value["effect"] == "refused" {
+    if value["isError"] == true
+        || value["ok"] == false
+        || value["effect"] == "refused"
+        || value["status"] == "refused"
+    {
         bail!("Guest desktop verification was refused; inspect the guest");
     }
     Ok(value)
@@ -178,16 +184,17 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     // native readback, then a separate application save/file round trip.
     let snapshot = call("get_window_state", target.clone(), paths, closed)
         .context("Guest native readback failed")?;
-    let token = editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
-    // Bind shortcuts to the editor we just read. Driver's window-only menu
-    // activation can acknowledge a chord without dispatching it in TextEdit;
-    // an AX-addressed foreground chord confirms focus on this exact editor.
+    editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
+    // The pinned English TextEdit profile exposes this native menu path.
+    // Driver resolves it live only after confirming this exact window is key.
+    // A missing/disabled menu is a refusal, never a reason to replay a shortcut.
     call(
-        "hotkey",
-        json!({"pid":pid,"window_id":window,"session":session,"element_token":token,"keys":["cmd","s"],"delivery_mode":"foreground"}),
+        "invoke_menu",
+        json!({"pid":pid,"window_id":window,"session":session,"path":["File","Save…"]}),
         paths,
         closed,
-    ).context("Guest application save request failed")?;
+    )
+    .context("Guest application save request failed")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let bytes = super::super::read_bounded(&file, 4096)
@@ -204,14 +211,14 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     // A failed close is still an unresolved setup effect, never Ready.
     let snapshot = call("get_window_state", target, paths, closed)
         .context("Guest check document close failed")?;
-    let token =
-        editor(&snapshot, pid, window, &marker).context("Guest check document close failed")?;
+    editor(&snapshot, pid, window, &marker).context("Guest check document close failed")?;
     call(
-        "hotkey",
-        json!({"pid":pid,"window_id":window,"session":session,"element_token":token,"keys":["cmd","w"],"delivery_mode":"foreground"}),
+        "invoke_menu",
+        json!({"pid":pid,"window_id":window,"session":session,"path":["File","Close"]}),
         paths,
         closed,
-    ).context("Guest check document close failed")?;
+    )
+    .context("Guest check document close failed")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let windows = call("list_windows", json!({"pid":pid}), paths, closed)

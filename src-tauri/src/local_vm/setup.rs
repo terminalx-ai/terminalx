@@ -351,6 +351,7 @@ fn safe_receipt(receipt: &Value) -> Value {
         Some("guest_native_desktop_input_unverified")=>"Guest TextEdit did not accept the check's native input. Inspect the retained check document; typing was not replayed.",
         Some("guest_native_desktop_readback_unverified")=>"Guest TextEdit did not return the exact typed check text through native readback. Inspect the retained check document; typing was not replayed.",
         Some("guest_native_desktop_save_unverified")=>"Native text readback passed, but the application save was not independently verified. Inspect the retained check document; Save was not replayed.",
+        Some("guest_native_desktop_saved_file_unreadable")=>"Native text readback passed, but the saved check file could not be read independently. Inspect the retained check document; Save was not replayed.",
         Some("guest_native_desktop_save_request_interrupted")=>"Native text readback passed, but the Save helper timed out or was interrupted before its result was confirmed. Inspect the retained check document; Save was not replayed.",
         Some("guest_native_desktop_save_response_invalid")=>"Native text readback passed, but the Save response could not be verified. Inspect the retained check document; Save was not replayed.",
         Some("guest_native_desktop_save_request_unverified")=>"Native text readback passed, but the Save request did not return a successful receipt. Inspect the retained check document; Save was not replayed.",

@@ -1881,6 +1881,9 @@ mod tests {
             b"host edits\n"
         );
         fs::write(temp.path().join("selected"), b"before\n").unwrap();
+        // Restoring bytes can leave Git's stat cache racily dirty. Establish
+        // the intended clean-index fixture without staging different content.
+        git(&["update-index", "--refresh"]);
         let receipts = tempfile::tempdir().unwrap();
         assert_eq!(
             apply_patch_once(receipts.path(), temp.path(), &patch, "test-import").unwrap()

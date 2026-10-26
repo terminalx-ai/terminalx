@@ -69,9 +69,9 @@ does not prove an unlocked usable app desktop. The explicit desktop check opens
 a new private `.txt` document in guest TextEdit, selects its unique exact window
 and native editor, and types a nonce through Driver. It requires fresh native
 readback, identical bytes saved by the application, and confirmation that the
-same document closed before removing the file. Native save/close shortcuts use
-fresh snapshot-bound editor tokens with the supported foreground delivery mode
-inside the guest. Other windows and host
+same document closed before removing the file. Native Save/Close menu actions
+use Driver's exact-window foreground verification inside the pinned English
+guest profile. Other windows and host
 applications are never selected. A refusal, ambiguous target or missing readback
 pauses setup without repeating input; an uncertain check document stays under
 `~/.terminalx-local/setup-checks` for inspection. A running VM, generic reply or

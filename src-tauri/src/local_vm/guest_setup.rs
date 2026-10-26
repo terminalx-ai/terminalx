@@ -469,9 +469,9 @@ elif tool == 'get_window_state':
  print(json.dumps({'pid':10,'window_id':20,'elements':[{'role':'AXTextArea','value':(h/'typed').read_text() if (h/'typed').exists() else '', 'element_token':'s1:1'}]}))
 elif tool == 'type_text':
  (h/'typed').write_text(args['text']); print('{}')
-elif tool == 'hotkey':
- if args['keys']==['cmd','s'] and (h/'save').read_text()=='yes': doc.write_text((h/'typed').read_text())
- if args['keys']==['cmd','w']: (h/'closed').touch()
+elif tool == 'invoke_menu':
+ if args['path']==['File','Save…'] and (h/'save').read_text()=='yes': doc.write_text((h/'typed').read_text())
+ if args['path']==['File','Close']: (h/'closed').touch()
  print('{}')
 else: sys.exit(99)
 "##,
