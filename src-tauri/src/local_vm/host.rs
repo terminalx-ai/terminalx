@@ -844,7 +844,7 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
     // Existing compatible signed app is preserved in place, retaining its
     // designated requirement and user-granted permissions. Never replace or
     // stop a daemon as a side effect of setup inspection/preparation.
-    let probe = "if test -d /Applications/CuaDriver.app; then /usr/bin/codesign --verify --strict /Applications/CuaDriver.app && /usr/bin/codesign --verify -R 'anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' /Applications/CuaDriver.app && /Applications/CuaDriver.app/Contents/MacOS/cua-driver --version; else printf driver-missing; fi";
+    let probe = "if test -d /Applications/CuaDriver.app; then /usr/bin/codesign --verify --strict /Applications/CuaDriver.app && /usr/bin/codesign --verify -R '=anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' /Applications/CuaDriver.app && /Applications/CuaDriver.app/Contents/MacOS/cua-driver --version; else printf driver-missing; fi";
     let output = cua(
         &[
             "sb",
@@ -903,7 +903,7 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
         b"",
         Duration::from_secs(180),
     )?;
-    let script=format!("set -eu; test ! -e /Applications/CuaDriver.app; cd '{stage}'; test \"$(/usr/bin/shasum -a 256 driver.tar.gz | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/tar -xzf driver.tar.gz; /usr/bin/codesign --verify --strict '{}'; /usr/bin/codesign --verify -R 'anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' '{}'; /bin/mv '{}' /Applications/CuaDriver.app",super::bootstrap::DRIVER.sha256,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path);
+    let script=format!("set -eu; test ! -e /Applications/CuaDriver.app; cd '{stage}'; test \"$(/usr/bin/shasum -a 256 driver.tar.gz | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/tar -xzf driver.tar.gz; /usr/bin/codesign --verify --strict '{}'; /usr/bin/codesign --verify -R '=anchor apple generic and identifier com.trycua.driver and certificate leaf[subject.OU] = YCK386LBJ7' '{}'; /bin/mv '{}' /Applications/CuaDriver.app",super::bootstrap::DRIVER.sha256,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path,super::bootstrap::DRIVER.signed_path);
     cua(
         &[
             "sb",
@@ -964,7 +964,7 @@ pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result
     )?;
     // Initial file-store policy belongs only to a genuinely new guest account
     // setup. Existing account/config/auth files are never changed or copied.
-    let script=format!("set -eu; cd '{GUEST_HOME}/bin'; test ! -e codex; test \"$(/usr/bin/shasum -a 256 codex.stage | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/codesign --verify --strict codex.stage; /usr/bin/codesign --verify -R 'anchor apple generic and identifier codex and certificate leaf[subject.OU] = 2DC432GLL2' codex.stage; chmod 755 codex.stage; /bin/mv codex.stage codex; if test ! -e /Users/lume/.codex/config.toml && test ! -e /Users/lume/.codex/auth.json; then /bin/mkdir -p /Users/lume/.codex; chmod 700 /Users/lume/.codex; (umask 077; printf 'cli_auth_credentials_store = \"file\"\\n' > /Users/lume/.codex/config.toml); fi",super::bootstrap::CODEX.executable_sha256);
+    let script=format!("set -eu; cd '{GUEST_HOME}/bin'; test ! -e codex; test \"$(/usr/bin/shasum -a 256 codex.stage | /usr/bin/cut -d ' ' -f1)\" = '{}'; /usr/bin/codesign --verify --strict codex.stage; /usr/bin/codesign --verify -R '=anchor apple generic and identifier codex and certificate leaf[subject.OU] = 2DC432GLL2' codex.stage; chmod 755 codex.stage; /bin/mv codex.stage codex; if test ! -e /Users/lume/.codex/config.toml && test ! -e /Users/lume/.codex/auth.json; then /bin/mkdir -p /Users/lume/.codex; chmod 700 /Users/lume/.codex; (umask 077; printf 'cli_auth_credentials_store = \"file\"\\n' > /Users/lume/.codex/config.toml); fi",super::bootstrap::CODEX.executable_sha256);
     cua(
         &[
             "sb",

@@ -104,12 +104,41 @@ fn verify_signature(tool: &Tool, path: &Path) -> Result<()> {
             .arg(path),
         b"",
         Duration::from_secs(15),
-    )?;
+    )
+    .with_context(|| {
+        format!(
+            "Pinned {} {} package signature verification failed",
+            tool.name, tool.version
+        )
+    })?;
     // Pin the publisher in addition to the exact archive digest. Developer ID
     // identity is retained when tools are placed outside global install paths.
-    process::run(std::process::Command::new("/usr/bin/codesign").args(["--verify","-R"])
-        .arg(format!("anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{}\"",tool.identifier,tool.publisher_team))
-        .arg(path), b"", Duration::from_secs(15))?;
+    verify_requirement(
+        path,
+        &format!(
+            "anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{}\"",
+            tool.identifier, tool.publisher_team
+        ),
+    )
+    .with_context(|| {
+        format!(
+            "Pinned {} {} publisher verification failed",
+            tool.name, tool.version
+        )
+    })?;
+    Ok(())
+}
+
+fn verify_requirement(path: &Path, expression: &str) -> Result<()> {
+    process::run(
+        std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "-R"])
+            // Without '=' codesign treats this argument as a requirement file.
+            .arg(format!("={expression}"))
+            .arg(path),
+        b"",
+        Duration::from_secs(15),
+    )?;
     Ok(())
 }
 
@@ -218,6 +247,18 @@ fn verify_download(tool: &Tool, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inline_signature_requirement_accepts_the_exact_signed_app_and_rejects_another_identity() {
+        let app = Path::new("/System/Applications/TextEdit.app");
+        assert!(
+            verify_requirement(app, "anchor apple and identifier \"com.apple.TextEdit\"").is_ok()
+        );
+        assert!(
+            verify_requirement(app, "anchor apple and identifier \"com.apple.Calculator\"")
+                .is_err()
+        );
+    }
     #[test]
     fn modified_or_incomplete_bootstrap_bytes_are_never_installable() {
         for tool in [&CUA, &LUME, &DRIVER, &CODEX] {

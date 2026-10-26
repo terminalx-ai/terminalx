@@ -1365,7 +1365,7 @@ fn driver_action(
                 "--deep",
                 "--strict",
                 "-R",
-                "identifier \"com.trycua.driver\" and anchor apple generic",
+                "=identifier \"com.trycua.driver\" and anchor apple generic",
                 paths.app.to_str().context("Driver bundle path")?,
             ],
             paths,
