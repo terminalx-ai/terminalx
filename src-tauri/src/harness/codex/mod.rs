@@ -13,6 +13,9 @@ pub mod by_hand;
 mod browser_use_macos;
 pub mod home;
 pub mod models;
+// Dormant Host sink boundary; no engine, launch path or reader opts in yet.
+#[allow(dead_code)]
+pub(crate) mod owned_transport;
 pub mod pty;
 pub mod rollout;
 
