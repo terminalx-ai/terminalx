@@ -143,9 +143,8 @@ impl Shared {
         }
         if !available && matches!(action,Action::Stop) {
             let _request = context.lifetime.enter_command(true).map_err(|error|anyhow::anyhow!(error.message))?;
-            context.lifetime.command("runtime.stopAll",json!({"epoch":context.lifetime.status()["epoch"]}))
+            super::stop_all(&context.manager, &context.lifetime, json!({"epoch":context.lifetime.status()["epoch"]}))
                 .map_err(|error|anyhow::anyhow!(error.message))?;
-            if let Err(error) = context.manager.stop_all_confirmed() { context.lifetime.stop_failed(); return Err(error); }
             return Ok(());
         }
         let command = match action { Action::Open=>"window.open",Action::Quick=>"floating.show",Action::Quit=>"window.quit",Action::Stop=>"window.stopAllAndQuit" };

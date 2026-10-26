@@ -761,6 +761,13 @@ impl Terminals {
         }).await?
     }
 
+    /// Observe this launch's entire owned group after its pane/leader retires.
+    #[cfg(unix)]
+    pub(crate) fn group_handle(&self, id: &str) -> Option<StoppingPane> {
+        let group = self.panes.lock().unwrap().get(id)?.group.clone();
+        Some(StoppingPane { id: id.into(), group })
+    }
+
     pub fn pid(&self, id: &str) -> Option<u32> {
         self.panes.lock().unwrap().get(id)?.pid
     }
@@ -1187,6 +1194,21 @@ mod tests {
             output.extend(chunk);
         }
         String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_proof_handle_survives_pane_retirement_until_owned_processes_exit() {
+        let terminals=Terminals::new();
+        let sink:Arc<dyn EventSink>=Arc::new(crate::sink::BroadcastSink::new(16));
+        let dir=tempfile::tempdir().unwrap();
+        pane(&terminals,&sink,&dir,"proof-group","exec /bin/sleep 30");
+        let proof=terminals.group_handle("proof-group").unwrap();
+        assert!(proof.pid().is_some());
+        let stopping=terminals.begin_stop("proof-group").unwrap();
+        assert!(terminals.pid("proof-group").is_none());
+        assert!(stopping.wait(Duration::from_secs(3)));
+        assert!(proof.pid().is_none());
     }
 
     fn pane(terminals: &Terminals, sink: &Arc<dyn EventSink>, dir: &tempfile::TempDir, id: &str, command: &str) {

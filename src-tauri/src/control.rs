@@ -242,6 +242,10 @@ pub struct ControlService {
     /// app reports none.
     runtime_kind: Option<String>,
     local_lifetime: Option<Arc<crate::local_runtime::Lifetime>>,
+    #[cfg(unix)]
+    guest: Option<Arc<crate::local_vm::guest::Guest>>,
+    #[cfg(unix)]
+    local_vm_available: bool,
     /// Asks the person before an agent's write to an issue. Only the desktop
     /// app has a window to ask in; without one such a write is refused.
     #[cfg(feature = "desktop")]
@@ -375,6 +379,10 @@ impl ControlService {
             endpoint,
             runtime_kind: Some(runtime_kind),
             local_lifetime: None,
+            #[cfg(unix)]
+            guest: None,
+            #[cfg(unix)]
+            local_vm_available: false,
             #[cfg(feature = "desktop")]
             questions: None,
             #[cfg(feature = "desktop")]
@@ -394,12 +402,44 @@ impl ControlService {
         }
     }
 
+    #[cfg(unix)]
+    pub fn with_guest(mut self, guest: Option<Arc<crate::local_vm::guest::Guest>>) -> Self {
+        self.guest = guest;
+        self
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_vm_controller(mut self) -> Self { self.local_vm_available=true; self }
+
     pub(crate) fn with_local_lifetime(mut self, lifetime: Arc<crate::local_runtime::Lifetime>) -> Self {
         self.local_lifetime = Some(lifetime);
         self
     }
 
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
+        #[cfg(unix)]
+        if let Some(guest) = &self.guest {
+            if command != "local_vm.guest" {
+                return Err(ControlError::new("unsupported", "This guest serves only bounded local_vm.guest task requests.", None::<String>));
+            }
+            let request = serde_json::from_value(params).map_err(|error| ControlError::invalid(format!("Invalid guest request: {error}")))?;
+            return guest.dispatch(request).map_err(ControlError::internal);
+        }
+        if command == "local_vm.guest" {
+            return Err(ControlError::new("unsupported", "No pinned guest is installed; no operation was routed.", None::<String>));
+        }
+        #[cfg(unix)]
+        if command == "local_vm.request" {
+            if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
+            let lifetime = self.local_lifetime.as_ref().ok_or_else(|| ControlError::new("unsupported", "Local VM requests require the persistent local owner.", None::<String>))?;
+            let method = params["method"].as_str().ok_or_else(|| ControlError::invalid("method is required"))?;
+            if matches!(method, "environment.reconcileProvision" | "environment.delete" | "environment.create" | "environment.setup" | "environment.setupAction") {
+                let _admission = crate::local_vm::supervisor::admit_exclusive(lifetime).map_err(ControlError::internal)?;
+                return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
+            }
+            let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
+            return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
+        }
         #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
@@ -416,14 +456,10 @@ impl ControlService {
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
                 }
-                let result = lifetime.command(command, params)?;
                 if command == "runtime.stopAll" {
-                    if let Err(error) = self.manager.stop_all_confirmed() {
-                        lifetime.stop_failed();
-                        return Err(ControlError::internal(error));
-                    }
+                    return crate::local_runtime::stop_all(&self.manager, lifetime, params);
                 }
-                return Ok(result);
+                return lifetime.command(command, params);
             }
         }
         #[cfg(all(feature = "desktop", unix))]
@@ -503,6 +539,8 @@ impl ControlService {
                 }
                 if let Some(lifetime) = &self.local_lifetime {
                     status["localRuntime"] = lifetime.status();
+                    #[cfg(unix)]
+                    { if self.local_vm_available { status["localVm"] = json!({"protocol":crate::local_vm::journal::PROTOCOL,"reconciliationProtocol":crate::local_vm::provisioning::PROTOCOL,"onboardingProtocol":crate::local_vm::setup::PROTOCOL}); } }
                 }
                 if let Some(grants) = crate::cloud_grants::status_json() {
                     status["agentGrants"] = grants;
@@ -1478,6 +1516,36 @@ fn resolve_worktree(params: &Value) -> Result<(projects::Project, crate::workspa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_vm_requests_belong_to_the_persistent_owner_and_stop_refusal_preserves_attachment() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let params=json!({"method":"state","params":{}});
+        assert!(service.execute("local_vm.request",params.clone(),"test").is_err());
+        let life=crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let lease=life.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let service=service.with_local_lifetime(life.clone());
+        assert!(service.execute("local_vm.request",params.clone(),"test").is_err());
+        assert!(service.execute("status",json!({}),"test").unwrap().get("localVm").is_none());
+        let service=service.with_vm_controller();
+        assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["protocol"],1);
+        assert_eq!(service.execute("status",json!({}),"test").unwrap()["localVm"]["reconciliationProtocol"],crate::local_vm::provisioning::PROTOCOL);
+        assert_eq!(service.execute("local_vm.request",params,"test").unwrap()["enabled"],false);
+        let journal=crate::local_vm::host::journal().unwrap();
+        let env=journal.enroll("held guest","local:test").unwrap();
+        journal.transaction(|state| {state.environments.get_mut(&env.id).unwrap().manual_control=true; Ok(())}).unwrap();
+        let stop=json!({"epoch":life.status()["epoch"]});
+        assert_eq!(service.execute("runtime.stopAll",stop.clone(),"test").unwrap_err().code,"local_vm_unresolved");
+        assert!(!life.is_stopping());
+        assert!(life.command("runtime.heartbeat",lease).is_ok());
+        assert!(life.enter().is_ok());
+        journal.transaction(|state| {state.environments.get_mut(&env.id).unwrap().manual_control=false; Ok(())}).unwrap();
+        service.execute("runtime.stopAll",stop,"test").unwrap();
+        assert!(life.is_stopping());
+        assert!(crate::local_vm::supervisor::admit(&life).is_err());
+    }
 
     fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
         let sink = Arc::new(crate::sink::BroadcastSink::new(16));

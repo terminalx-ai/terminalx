@@ -98,6 +98,8 @@ mod keychain;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
+#[cfg(unix)]
+pub mod local_vm;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -344,6 +346,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_settings,
             local_runtime::ui::set_local_runtime_quit_behavior,
             commands::list_projects,
+            commands::local_vm_request,
             commands::account_status,
             commands::account_refresh_roles,
             commands::account_sign_in,
