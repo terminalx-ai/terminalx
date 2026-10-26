@@ -50,6 +50,10 @@ success; configuration changes, expiry or a changed boot require a new explicit
 check. This local receipt does not prove network access or provider entitlement.
 Configuration is parsed as a TOML document, including its tables; parsing a
 single TOML value incorrectly rejects an otherwise valid retained account.
+Owned setup helpers clear the inherited environment and search only the guest's
+local tool directories and standard system/Homebrew paths. This lets retained
+`env node` provider launchers find their guest interpreter without inheriting
+host credentials or the host owner's search path.
 
 Explicit actions own bounded guest children and checkpoint intent before
 effects. Start computer control uses the public no-permissions-gate launch mode;
@@ -66,7 +70,8 @@ a new private `.txt` document in guest TextEdit, selects its unique exact window
 and native editor, and types a nonce through Driver. It requires fresh native
 readback, identical bytes saved by the application, and confirmation that the
 same document closed before removing the file. Native save/close shortcuts use
-the supported foreground delivery mode inside the guest. Other windows and host
+fresh snapshot-bound editor tokens with the supported foreground delivery mode
+inside the guest. Other windows and host
 applications are never selected. A refusal, ambiguous target or missing readback
 pauses setup without repeating input; an uncertain check document stays under
 `~/.terminalx-local/setup-checks` for inspection. A running VM, generic reply or

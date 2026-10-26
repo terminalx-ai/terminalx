@@ -178,10 +178,13 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     // native readback, then a separate application save/file round trip.
     let snapshot = call("get_window_state", target.clone(), paths, closed)
         .context("Guest native readback failed")?;
-    editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
+    let token = editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
+    // Bind shortcuts to the editor we just read. Driver's window-only menu
+    // activation can acknowledge a chord without dispatching it in TextEdit;
+    // an AX-addressed foreground chord confirms focus on this exact editor.
     call(
         "hotkey",
-        json!({"pid":pid,"window_id":window,"session":session,"keys":["cmd","s"],"delivery_mode":"foreground"}),
+        json!({"pid":pid,"window_id":window,"session":session,"element_token":token,"keys":["cmd","s"],"delivery_mode":"foreground"}),
         paths,
         closed,
     ).context("Guest application save request failed")?;
@@ -199,9 +202,13 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     }
     // Closing only the checked, saved document leaves other app windows alone.
     // A failed close is still an unresolved setup effect, never Ready.
+    let snapshot = call("get_window_state", target, paths, closed)
+        .context("Guest check document close failed")?;
+    let token =
+        editor(&snapshot, pid, window, &marker).context("Guest check document close failed")?;
     call(
         "hotkey",
-        json!({"pid":pid,"window_id":window,"session":session,"keys":["cmd","w"],"delivery_mode":"foreground"}),
+        json!({"pid":pid,"window_id":window,"session":session,"element_token":token,"keys":["cmd","w"],"delivery_mode":"foreground"}),
         paths,
         closed,
     ).context("Guest check document close failed")?;
