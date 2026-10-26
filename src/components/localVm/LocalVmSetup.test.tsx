@@ -27,6 +27,24 @@ beforeEach(() => { localStorage.clear(); mocks.invoke.mockReset(); mocks.invoke.
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("guided local VM setup", () => {
+  it("checks retained account credentials explicitly without opening a new sign-in", async () => {
+    mount(setupReport({
+      steps: [{ id: "provider", label: "Guest sign-in", state: "waiting", actionCode: "provider.codexAccount.verify" }],
+      readiness: setupReadiness({ provider: { harness: "codex", state: "unknown", reasonCode: "provider_credential_store_requires_interaction", actionCode: "provider.codexAccount.verify", evidence: "notProbed" } }),
+    }));
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Sign in to Codex" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Check existing Codex sign-in" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("does not start sign-in");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByLabelText("I confirm this action in the displayed guest."));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm setup action" }));
+    await waitFor(() => expect(calls("environment.setupAction")).toHaveLength(1));
+    expect(calls("environment.setupAction")[0][1].params.action).toBe("provider.codexAccount.verify");
+    expect(calls("environment.setupAuth")).toHaveLength(0);
+  });
+
   it("renders cached progress without guest probes or a manual runtime picker and rechecks only on request", async () => {
     mount();
     expect(mocks.invoke).not.toHaveBeenCalled();

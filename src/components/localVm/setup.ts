@@ -1,6 +1,6 @@
 import type { LocalVmCreateRequest, LocalVmEnvironment, LocalVmSetupAction, LocalVmSetupActionRequest, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupReport, LocalVmSetupRequest } from "@/types/localVm";
 
-export const SETUP_ACTIONS: readonly LocalVmSetupAction[] = ["driver.start", "driver.requestPermissions", "provider.codexDeviceLogin.start", "provider.codexDeviceLogin.cancel", "desktop.verify"];
+export const SETUP_ACTIONS: readonly LocalVmSetupAction[] = ["driver.start", "driver.requestPermissions", "provider.codexDeviceLogin.start", "provider.codexDeviceLogin.cancel", "provider.codexAccount.verify", "desktop.verify"];
 export type PendingSetup = { kind: "create"; params: LocalVmCreateRequest } | { kind: "setup"; params: LocalVmSetupRequest } | { kind: "action"; harness: LocalVmSetupHarness; loginRequestKey?: string; params: Omit<LocalVmSetupActionRequest, "loginId"> };
 
 export function setupStorageKey(environment?: LocalVmEnvironment): string {

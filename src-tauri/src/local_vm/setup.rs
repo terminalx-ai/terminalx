@@ -15,6 +15,7 @@ const ACTIONS: &[&str] = &[
     "driver.requestPermissions",
     "provider.codexDeviceLogin.start",
     "provider.codexDeviceLogin.cancel",
+    "provider.codexAccount.verify",
     "desktop.verify",
 ];
 
@@ -344,6 +345,10 @@ fn safe_receipt(receipt: &Value) -> Value {
     result["detail"]=json!(match receipt["detail"].as_str() {
         Some("device_login_awaiting_user")=>"Open the displayed Codex device sign-in link and enter its one-time code. TerminalX never opens or approves it automatically.",
         Some("guest_provider_already_authenticated_no_login_started")=>"The guest is already signed in. No new sign-in was started.",
+        Some("guest_provider_account_missing_no_login_started")=>"The guest account check found no local sign-in. No new sign-in was started; choose Sign in to Codex when ready.",
+        Some("guest_account_binding_changed_check_again_no_login_started")=>"The guest account configuration or executable changed during inspection. No sign-in was started. Review the current guest settings, then check the existing account again.",
+        Some("guest_native_desktop_check_incomplete_inspect_document")=>"The guest document check did not confirm input, saved readback and closure. Inspect the TerminalX check document in guest TextEdit before recovering setup. No input or shortcut was replayed.",
+        Some("explicit_guest_desktop_input_readback_verified")=>"Guest capture, exact-window native input and saved application readback were verified. The disposable check document was closed and removed.",
         Some("existing_provider_auth_selection_requires_review_no_login_started")=>"The existing guest provider home/account configuration needs review. No sign-in or credential-store change was started.",
         Some("prior_login_outcome_unknown_explicit_reconciliation_required")=>"The earlier sign-in process is unavailable. Its outcome remains unknown; inspect the guest account before authorizing another sign-in.",
         Some("guest_codex_missing_no_login_started")=>"The verified Codex guest tool is missing. Finish tool preparation before signing in.",
@@ -653,6 +658,11 @@ pub fn ready(env: &Environment, report: &Value) -> bool {
         && read["accessibility"]["state"] == "granted"
         && read["screenRecording"]["state"] == "granted"
         && read["provider"]["state"] == "authenticated"
+        && (read["provider"]["evidence"] != "recentExplicitLocalAccountReceipt"
+            || read["provider"]["validUntil"]
+                .as_str()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| at > chrono::Utc::now()))
         && read["manualControl"] == false
         && read["activeTaskTargets"]
             .as_array()
@@ -834,6 +844,15 @@ mod tests {
         assert!(ready(&env, &report));
         report["readiness"]["driver"]["state"] = json!("running");
         assert!(ready(&env, &report));
+        let mut explicit = report.clone();
+        explicit["readiness"]["provider"]["evidence"] = json!("recentExplicitLocalAccountReceipt");
+        assert!(!ready(&env, &explicit));
+        explicit["readiness"]["provider"]["validUntil"] =
+            json!((chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339());
+        assert!(ready(&env, &explicit));
+        explicit["readiness"]["provider"]["validUntil"] =
+            json!((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        assert!(!ready(&env, &explicit));
         for (path, value) in [
             ("/runtime/executableSha256", json!("b".repeat(64))),
             ("/runtime/bootIdentity", json!(journal::new_id())),

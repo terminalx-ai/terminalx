@@ -83,7 +83,7 @@ export interface LocalVmEnvironment {
 export type LocalVmSetupHarness = "codex" | "claude";
 export type LocalVmSetupStatus = "queued" | "working" | "needsAttention" | "ready" | "outcomeUnknown" | "failed";
 export type LocalVmSetupStepState = "pending" | "working" | "waiting" | "complete" | "failed" | "unknown";
-export type LocalVmSetupAction = "driver.start" | "driver.requestPermissions" | "provider.codexDeviceLogin.start" | "provider.codexDeviceLogin.cancel" | "desktop.verify";
+export type LocalVmSetupAction = "driver.start" | "driver.requestPermissions" | "provider.codexDeviceLogin.start" | "provider.codexDeviceLogin.cancel" | "provider.codexAccount.verify" | "desktop.verify";
 
 export interface LocalVmCreateRequest {
   name: string;
@@ -129,7 +129,7 @@ export interface LocalVmSetupReadiness {
   session: LocalVmReadinessCheck;
   desktop: LocalVmReadinessCheck;
   capture: LocalVmReadinessCheck;
-  provider: LocalVmReadinessCheck & { harness: LocalVmSetupHarness; evidence: LocalVmJson };
+  provider: LocalVmReadinessCheck & { harness: LocalVmSetupHarness; evidence: LocalVmJson; validUntil?: string };
   manualControl: boolean;
   activeTaskTargets: LocalVmTaskTarget[];
   actionAdmission: LocalVmReadinessCheck;

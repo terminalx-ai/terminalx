@@ -131,6 +131,107 @@ pub(super) struct Provider {
     /// Authentication here is the CLI's local file-backed login state; it
     /// does not prove token validity, entitlement, network or a provider turn.
     evidence: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_until: Option<String>,
+    #[serde(skip)]
+    binding: Option<AccountBinding>,
+}
+
+/// Only local selection and file metadata, never credentials or keychain data.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AccountBinding {
+    executable_sha256: String,
+    selection_sha256: String,
+}
+
+pub(super) fn codex_program(home: &Path) -> Option<PathBuf> {
+    [
+        ".terminalx-local/bin",
+        ".local/bin",
+        ".cargo/bin",
+        ".npm-global/bin",
+        ".bun/bin",
+    ]
+    .into_iter()
+    .map(|dir| home.join(dir).join("codex"))
+    .chain(
+        [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/usr/bin/codex",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    )
+    .find(|path| path.is_file())
+}
+
+pub(super) fn account_selection_valid(home: &Path) -> bool {
+    std::env::var_os("CODEX_HOME").is_none_or(|p| Path::new(&p) == home.join(".codex"))
+        && ![
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_FEDERATION_RULE_ID",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+            "CODEX_PROFILE",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+}
+
+pub(super) fn account_binding(home: &Path) -> Result<AccountBinding> {
+    let mut selection = Vec::new();
+    for name in [".codex", ".codex/config.toml", ".codex/auth.json"] {
+        match std::fs::symlink_metadata(home.join(name)) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || meta.uid() != unsafe { libc::geteuid() } {
+                    bail!("Guest account storage has an unsupported owner or link");
+                }
+                if name == ".codex" {
+                    selection.extend_from_slice(
+                        format!("{name}:{}:{}:{};", meta.dev(), meta.ino(), meta.mode()).as_bytes(),
+                    );
+                } else {
+                    selection.extend_from_slice(
+                        format!(
+                            "{name}:{}:{}:{}:{}:{}:{}:{}:{};",
+                            meta.dev(),
+                            meta.ino(),
+                            meta.mode(),
+                            meta.len(),
+                            meta.mtime(),
+                            meta.mtime_nsec(),
+                            meta.ctime(),
+                            meta.ctime_nsec()
+                        )
+                        .as_bytes(),
+                    );
+                }
+                if name.ends_with("config.toml") {
+                    let mut bytes = super::read_bounded(&home.join(name), PROBE_LIMIT as usize)?;
+                    let config = std::str::from_utf8(&bytes)?.parse::<toml::Value>()?;
+                    if config.get("profile").is_some() {
+                        use zeroize::Zeroize as _;
+                        bytes.zeroize();
+                        bail!("Guest account profile requires explicit review");
+                    }
+                    selection.extend_from_slice(super::digest(&bytes).as_bytes());
+                    use zeroize::Zeroize as _;
+                    bytes.zeroize();
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                selection.extend_from_slice(format!("{name}:absent;").as_bytes())
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(AccountBinding {
+        executable_sha256: executable_sha256(&codex_program(home).context("Guest Codex missing")?)?,
+        selection_sha256: super::digest(&selection),
+    })
 }
 
 pub(super) struct Observed {
@@ -172,9 +273,50 @@ impl<'a> Readiness<'a> {
     pub(super) fn new(
         identity: &'a Identity,
         state: &'a State,
-        observed: Observed,
+        mut observed: Observed,
         owner_busy: bool,
     ) -> Self {
+        if matches!(observed.provider.harness, Harness::Codex)
+            && observed.provider.check.reason_code
+                == "provider_credential_store_requires_interaction"
+        {
+            let boot = super::boot_identity();
+            let latest = state
+                .setup_operations
+                .values()
+                .filter(|op| {
+                    op.environment_id == identity.environment_id
+                        && op.generation == identity.generation
+                        && op.receipt.action == super::setup::Action::AccountVerify
+                })
+                .max_by_key(|op| &op.started_at)
+                .filter(|op| {
+                    op.helper_exit_confirmed && op.receipt.status == super::setup::Status::Complete
+                })
+                .and_then(|op| op.receipt.account_verification.as_ref());
+            if let Some(proof) = latest
+                .filter(|proof| proof.current(boot.as_deref(), observed.provider.binding.as_ref()))
+            {
+                observed.provider.check = if proof.authenticated {
+                    Check::new(
+                        "authenticated",
+                        "provider_explicit_local_account_confirmed",
+                        None,
+                    )
+                } else {
+                    Check::new(
+                        "unauthenticated",
+                        "provider_explicit_local_account_missing",
+                        Some("provider.codexDeviceLogin.start"),
+                    )
+                };
+                observed.provider.evidence = "recentExplicitLocalAccountReceipt";
+                observed.provider.valid_until =
+                    chrono::DateTime::parse_from_rfc3339(&proof.verified_at)
+                        .ok()
+                        .map(|at| (at + chrono::Duration::minutes(10)).to_rfc3339());
+            }
+        }
         let active_task_targets: Vec<_> = state
             .records
             .values()
@@ -530,6 +672,12 @@ fn inspect_provider(home: &Path, harness: Harness) -> Provider {
             Some("provider.inspect"),
         ),
         evidence: "notProbed",
+        valid_until: None,
+        binding: if matches!(harness, Harness::Codex) {
+            account_binding(home).ok()
+        } else {
+            None
+        },
     };
     let name = match harness {
         Harness::Codex => "codex",
@@ -599,7 +747,7 @@ fn inspect_provider(home: &Path, harness: Harness) -> Provider {
         result.check = Check::new(
             "unknown",
             "provider_credential_store_requires_interaction",
-            Some("provider.inspect"),
+            Some("provider.codexAccount.verify"),
         );
         return result;
     }
@@ -808,6 +956,103 @@ mod tests {
     }
 
     #[test]
+    fn only_the_latest_bound_explicit_account_check_can_complete_unknown_auth() {
+        use super::super::setup::{AccountVerification, Action, Operation, Params, Status};
+        let Some(boot) = super::super::boot_identity() else {
+            return;
+        };
+        let identity = Identity {
+            environment_id: super::super::super::journal::new_id(),
+            generation: super::super::super::journal::new_id(),
+            protocol: 1,
+        };
+        let binding = AccountBinding {
+            executable_sha256: "a".repeat(64),
+            selection_sha256: "b".repeat(64),
+        };
+        let params = Params {
+            environment_id: identity.environment_id.clone(),
+            generation: identity.generation.clone(),
+            action: Action::AccountVerify,
+            idempotency_key: "first".into(),
+            confirm: true,
+            login_id: None,
+        };
+        let mut op = Operation::working(&params, Some(boot.clone())).unwrap();
+        op.receipt.status = Status::Complete;
+        op.helper_exit_confirmed = true;
+        op.receipt.account_verification = Some(AccountVerification {
+            boot_identity: boot,
+            verified_at: super::super::now(),
+            binding: binding.clone(),
+            authenticated: true,
+        });
+        let mut state = State {
+            identity: identity.clone(),
+            records: Default::default(),
+            canceled_targets: Default::default(),
+            manual_lease: None,
+            provisioning_baseline: None,
+            setup_operations: std::collections::BTreeMap::from([("first".into(), op.clone())]),
+        };
+        let inspect = |state: &State, reason: &'static str| {
+            let observed = Observed {
+                desktop: Desktop::unavailable("missing", "driver_not_installed", None),
+                provider: Provider {
+                    harness: Harness::Codex,
+                    check: Check::new("unknown", reason, Some("provider.codexAccount.verify")),
+                    evidence: "notProbed",
+                    valid_until: None,
+                    binding: Some(binding.clone()),
+                },
+            };
+            serde_json::to_value(Readiness::new(&identity, state, observed, false)).unwrap()
+        };
+        let confirmed = inspect(&state, "provider_credential_store_requires_interaction");
+        assert_eq!(confirmed["provider"]["state"], "authenticated");
+        assert!(confirmed["provider"]["validUntil"].is_string());
+        assert_eq!(
+            inspect(
+                &state,
+                "provider_auth_selection_requires_explicit_inspection"
+            )["provider"]["state"],
+            "unknown"
+        );
+        let mut newer = op.clone();
+        newer.started_at =
+            Some((chrono::Utc::now() + chrono::Duration::milliseconds(1)).to_rfc3339());
+        newer.receipt.idempotency_key = "second".into();
+        newer
+            .receipt
+            .account_verification
+            .as_mut()
+            .unwrap()
+            .authenticated = false;
+        state.setup_operations.insert("second".into(), newer);
+        assert_eq!(
+            inspect(&state, "provider_credential_store_requires_interaction")["provider"]["state"],
+            "unauthenticated"
+        );
+        state
+            .setup_operations
+            .get_mut("second")
+            .unwrap()
+            .receipt
+            .status = Status::Failed;
+        assert_eq!(
+            inspect(&state, "provider_credential_store_requires_interaction")["provider"]["state"],
+            "unknown"
+        );
+        state.setup_operations.clear();
+        op.generation = super::super::super::journal::new_id();
+        state.setup_operations.insert("first".into(), op);
+        assert_eq!(
+            inspect(&state, "provider_credential_store_requires_interaction")["provider"]["state"],
+            "unknown"
+        );
+    }
+
+    #[test]
     fn readiness_binds_full_runtime_identity_and_observation_cannot_release_manual_control() {
         let identity = Identity {
             environment_id: "env-1".into(),
@@ -846,6 +1091,8 @@ mod tests {
                     Some("provider.inspect"),
                 ),
                 evidence: "notProbed",
+                valid_until: None,
+                binding: None,
             },
         };
         let value =

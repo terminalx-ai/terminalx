@@ -2576,6 +2576,7 @@ mod tests {
                         status: setup::Status::Complete,
                         detail: Some("verified_disposable_effect".into()),
                         verification: None,
+                        account_verification: None,
                     },
                     true,
                 );
@@ -2644,6 +2645,7 @@ mod tests {
                     status: setup::Status::Complete,
                     detail: Some("verified_disposable_capture".into()),
                     verification: None,
+                    account_verification: None,
                 },
                 true,
             );

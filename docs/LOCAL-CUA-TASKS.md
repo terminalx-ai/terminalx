@@ -37,6 +37,18 @@ permission attribution, unknown sign-in and unverified capture are distinct.
 Existing keyring/automatic credential selection is preserved and stays unknown
 when inspecting it might raise UI.
 
+**Check existing Codex sign-in** explicitly asks the guest's owned app-server
+for `account/read` with `refreshToken:false`, following the
+[official account API](https://learn.chatgpt.com/docs/app-server#1-check-auth-state).
+It never sends `account/login/start` or a provider turn. Credential-store consent
+remains the person's. Only the local authenticated/missing result is retained;
+account names, tokens and raw provider output are excluded. This evidence lasts
+at most ten minutes and binds the environment/generation, kernel boot, selected
+Codex executable, account configuration and credential-file metadata. Passive
+refresh never reads the keychain. A newer failed/unknown check supersedes older
+success; configuration changes, expiry or a changed boot require a new explicit
+check. This local receipt does not prove network access or provider entitlement.
+
 Explicit actions own bounded guest children and checkpoint intent before
 effects. Start computer control uses the public no-permissions-gate launch mode;
 this suppresses setup prompts, not TCC. Review guest permissions uses the public
@@ -47,10 +59,17 @@ only in memory, never in journals/diagnostics. Cancellation binds that exact
 live actor and a new key. Process loss never starts another sign-in.
 
 Capture proof binds the current kernel boot and Driver executable. Capture alone
-does not prove an unlocked usable app desktop; that field remains false until
-independent input/readback evidence exists. A running VM, generic reply or PNG
-cannot make setup Ready. Fresh onboarding and desktop usability acceptance
-remain open.
+does not prove an unlocked usable app desktop. The explicit desktop check opens
+a new private `.txt` document in guest TextEdit, selects its unique exact window
+and native editor, and types a nonce through Driver. It requires fresh native
+readback, identical bytes saved by the application, and confirmation that the
+same document closed before removing the file. Native save/close shortcuts use
+the supported foreground delivery mode inside the guest. Other windows and host
+applications are never selected. A refusal, ambiguous target or missing readback
+pauses setup without repeating input; an uncertain check document stays under
+`~/.terminalx-local/setup-checks` for inspection. A running VM, generic reply or
+PNG cannot make setup Ready. Live validation of this new check and fresh
+onboarding remain open.
 
 The conversation footer lets the user select a task prompt and specific
 project-relative context files. It inherits the parent's provider harness,
@@ -306,10 +325,10 @@ explicit direction.
 
 | Gate | Current evidence |
 | --- | --- |
-| Recovered work starts from fresh remote main | `5f2c9a38ac76daf9ed39ad50658aaae594896e96` verified. |
+| Recovered work starts from fresh remote main | Exact checkpoint `fa0f4fa8` integrated with remote main `76a7d7b2` on 2026-10-26. |
 | Automated TypeScript/UI/invariant checks | Recorded by author in external `pro114-status.json`; rerun after final edits. |
-| Real macOS guest provider worker + transcript/PTY reconnect | Pending guest restart and human provider login. |
-| Native guest app + browser input/readback; untouched host sentinel | Pending product validation. |
+| Real macOS guest provider worker + transcript/PTY reconnect | Historical scoped guest tasks and fresh RPC-client reconnect passed; desktop reopen and interrupted-provider resume remain pending. |
+| Native guest app + browser input/readback; untouched host sentinel | Historical Calculator and trusted Safari input/readback passed at checkpoint `fa0f4fa8`; new setup document check and complete host-isolation acceptance remain pending. |
 | Host locked ≥15 minutes + terminal work + GUI action | Pending human participation; never inferred from unlocked pilot. |
 | Display off + viewer closed | Pending separately. |
 | Guest lock + supported recovery | Pending. |

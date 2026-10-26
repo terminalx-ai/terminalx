@@ -17,6 +17,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize as _;
 
+#[path = "guest_desktop_check.rs"]
+mod desktop_check;
+
 const DRIVER: &str = "/Applications/CuaDriver.app/Contents/MacOS/cua-driver";
 const APP: &str = "/Applications/CuaDriver.app";
 const RPC_WAIT: Duration = Duration::from_secs(20);
@@ -48,6 +51,8 @@ pub(super) enum Action {
     LoginStart,
     #[serde(rename = "provider.codexDeviceLogin.cancel")]
     LoginCancel,
+    #[serde(rename = "provider.codexAccount.verify")]
+    AccountVerify,
     #[serde(rename = "desktop.verify")]
     DesktopVerify,
 }
@@ -142,6 +147,66 @@ esac
 done
 "##,
         );
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::hard_link(home.join("codex"), home.join(".local/bin/codex")).unwrap();
+    }
+
+    #[test]
+    fn explicit_account_check_retains_bounded_evidence_and_never_starts_sign_in() {
+        for mode in ["existing", "pending"] {
+            let home = tempfile::tempdir().unwrap();
+            provider(home.path(), mode);
+            let actor = Actor::default();
+            actor
+                .launch_with(
+                    params(Action::AccountVerify, "account-only"),
+                    paths(home.path()),
+                )
+                .unwrap();
+            wait(&actor, |view| !view.busy);
+            let receipt = actor.receipts().pop().unwrap().receipt;
+            assert_eq!(receipt.status, Status::Complete);
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("calls")).unwrap(),
+                "initialize\naccount/read:false\n"
+            );
+            if let Some(boot) = super::super::boot_identity() {
+                let mut proof = receipt.account_verification.unwrap();
+                let binding = super::super::readiness::account_binding(home.path()).unwrap();
+                assert_eq!(proof.authenticated, mode == "existing");
+                assert!(proof.current(Some(&boot), Some(&binding)));
+                assert!(!proof.current(None, Some(&binding)));
+                assert!(!proof.current(
+                    Some(&super::super::super::journal::new_id()),
+                    Some(&binding)
+                ));
+                proof.verified_at =
+                    (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339();
+                assert!(!proof.current(Some(&boot), Some(&binding)));
+                proof.verified_at =
+                    (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339();
+                assert!(!proof.current(Some(&boot), Some(&binding)));
+                proof.verified_at = super::super::now();
+                std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+                std::fs::write(
+                    home.path().join(".codex/config.toml"),
+                    "cli_auth_credentials_store = 'keyring'\n",
+                )
+                .unwrap();
+                assert!(!proof.current(
+                    Some(&boot),
+                    super::super::readiness::account_binding(home.path())
+                        .ok()
+                        .as_ref()
+                ));
+            }
+            let disk = serde_json::to_string(&actor.receipts().pop().unwrap().receipt).unwrap();
+            assert!(
+                !disk.contains("email")
+                    && !disk.contains("userCode")
+                    && !disk.contains("access_token")
+            );
+        }
     }
 
     #[test]
@@ -347,7 +412,70 @@ esac
     }
 
     #[test]
-    fn explicit_capture_is_bound_to_boot_and_binary_without_claiming_desktop_input() {
+    fn desktop_proof_requires_native_readback_save_and_exact_document_close() {
+        for save in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let selected = paths(home.path());
+            std::fs::write(home.path().join("save"), if save { "yes" } else { "no" }).unwrap();
+            script(
+                &selected.open,
+                "#!/bin/sh\nprintf '%s' \"$4\" > \"$HOME/checkfile\"\n",
+            );
+            script(
+                &selected.driver,
+                r##"#!/usr/bin/python3
+import json,os,pathlib,sys
+h=pathlib.Path(os.environ['HOME'])
+if sys.argv[1:] == ['--version']:
+ print('cua-driver 0.28.0'); sys.exit()
+if sys.argv[1:] == ['permissions','status','--json']:
+ print(json.dumps({'accessibility':True,'screen_recording':True,'source':{'attribution':'driver-daemon','bundle_id':'com.trycua.driver'}})); sys.exit()
+tool=sys.argv[2]
+if tool == 'get_desktop_state':
+ print(json.dumps({'screenshot_png_b64':'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aUKsAAAAASUVORK5CYII='})); sys.exit()
+doc=pathlib.Path((h/'checkfile').read_text())
+args=json.loads(sys.argv[3])
+with (h/'desktop-calls').open('a') as log: log.write(tool+'\n')
+if tool == 'list_windows':
+ print(json.dumps({'windows':[] if (h/'closed').exists() else [{'app_name':'TextEdit','title':doc.name,'is_on_screen':True,'pid':10,'window_id':20}]}))
+elif tool == 'get_window_state':
+ print(json.dumps({'pid':10,'window_id':20,'elements':[{'role':'AXTextArea','value':(h/'typed').read_text() if (h/'typed').exists() else '', 'element_token':'s1:1'}]}))
+elif tool == 'type_text':
+ (h/'typed').write_text(args['text']); print('{}')
+elif tool == 'hotkey':
+ if args['keys']==['cmd','s'] and (h/'save').read_text()=='yes': doc.write_text((h/'typed').read_text())
+ if args['keys']==['cmd','w']: (h/'closed').touch()
+ print('{}')
+else: sys.exit(99)
+"##,
+            );
+            let actor = Actor::default();
+            actor
+                .launch_with(params(Action::DesktopVerify, "native-check"), selected)
+                .unwrap();
+            wait(&actor, |view| !view.busy);
+            let receipt = actor.receipts().pop().unwrap().receipt;
+            let document =
+                PathBuf::from(std::fs::read_to_string(home.path().join("checkfile")).unwrap());
+            if save {
+                assert_eq!(receipt.status, Status::Complete);
+                if super::super::boot_identity().is_some() {
+                    assert!(receipt.verification.unwrap().desktop_usable);
+                }
+                assert!(!document.exists());
+            } else {
+                assert_eq!(receipt.status, Status::OutcomeUnknown);
+                assert!(receipt.verification.is_none());
+                assert!(document.exists());
+                assert!(!home.path().join("closed").exists());
+            }
+            let calls = std::fs::read_to_string(home.path().join("desktop-calls")).unwrap();
+            assert_eq!(calls.lines().filter(|call| *call == "type_text").count(), 1);
+        }
+    }
+
+    #[test]
+    fn capture_without_native_input_readback_cannot_produce_desktop_verification() {
         let home = tempfile::tempdir().unwrap();
         let selected = paths(home.path());
         std::fs::write(&selected.driver,r#"#!/bin/sh
@@ -360,21 +488,14 @@ esac
 "#).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&selected.driver, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let sha = super::super::readiness::executable_sha256(&selected.driver).unwrap();
         let actor = Actor::default();
         actor
             .launch_with(params(Action::DesktopVerify, "capture"), selected)
             .unwrap();
         wait(&actor, |view| !view.busy);
         let receipt = actor.receipts().pop().unwrap().receipt;
-        assert_eq!(receipt.status, Status::Complete);
-        if let Some(boot) = super::super::boot_identity() {
-            let proof = receipt.verification.unwrap();
-            assert_eq!(proof.boot_identity, boot);
-            assert_eq!(proof.driver_executable_sha256, sha);
-            assert!(proof.capture_verified);
-            assert!(!proof.desktop_usable);
-        }
+        assert_eq!(receipt.status, Status::OutcomeUnknown);
+        assert!(receipt.verification.is_none());
         actor.shutdown();
     }
 }
@@ -458,6 +579,34 @@ pub(super) struct Receipt {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_verification: Option<AccountVerification>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AccountVerification {
+    pub boot_identity: String,
+    pub verified_at: String,
+    pub binding: super::readiness::AccountBinding,
+    pub authenticated: bool,
+}
+
+impl AccountVerification {
+    pub fn current(
+        &self,
+        boot: Option<&str>,
+        binding: Option<&super::readiness::AccountBinding>,
+    ) -> bool {
+        let age = chrono::DateTime::parse_from_rfc3339(&self.verified_at)
+            .ok()
+            .map(|at| chrono::Utc::now().signed_duration_since(at));
+        boot == Some(self.boot_identity.as_str())
+            && binding == Some(&self.binding)
+            && age.is_some_and(|age| {
+                age >= chrono::Duration::zero() && age < chrono::Duration::minutes(10)
+            })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -478,6 +627,8 @@ pub(super) struct Operation {
     pub environment_id: String,
     pub generation: String,
     pub boot_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     #[serde(default)]
     pub helper_exit_confirmed: bool,
 }
@@ -496,6 +647,9 @@ impl Operation {
         if let Some(boot) = &self.boot_identity {
             super::validate_id(boot)?;
         }
+        if let Some(at) = &self.started_at {
+            chrono::DateTime::parse_from_rfc3339(at).context("Damaged guest setup start time")?;
+        }
         Ok(())
     }
     pub fn working(params: &Params, boot: Option<String>) -> Result<Self> {
@@ -506,11 +660,13 @@ impl Operation {
                 status: Status::Working,
                 detail: None,
                 verification: None,
+                account_verification: None,
             },
             digest: params.digest()?,
             environment_id: params.environment_id.clone(),
             generation: params.generation.clone(),
             boot_identity: boot,
+            started_at: Some(super::now()),
             helper_exit_confirmed: false,
         })
     }
@@ -760,6 +916,7 @@ fn publish(
                 status,
                 detail: Some(detail.into()),
                 verification: None,
+                account_verification: None,
             },
             helper_exit_confirmed: exited,
         },
@@ -788,27 +945,9 @@ impl Paths {
         if home != Path::new("/Users/lume") {
             bail!("Pinned guest home required");
         }
-        let codex = [
-            home.join(".terminalx-local/bin/codex"),
-            home.join(".local/bin/codex"),
-            home.join(".cargo/bin/codex"),
-            PathBuf::from("/opt/homebrew/bin/codex"),
-            PathBuf::from("/usr/local/bin/codex"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file());
-        let provider_selection_valid = std::env::var_os("CODEX_HOME")
-            .is_none_or(|p| Path::new(&p) == home.join(".codex"))
-            && ![
-                "OPENAI_API_KEY",
-                "CODEX_API_KEY",
-                "CODEX_ACCESS_TOKEN",
-                "OPENAI_FEDERATION_RULE_ID",
-                "OPENAI_IDENTITY_TOKEN_FILE",
-                "CODEX_PROFILE",
-            ]
-            .iter()
-            .any(|k| std::env::var_os(k).is_some());
+        let codex = super::readiness::codex_program(&home);
+        let provider_selection_valid = super::readiness::account_selection_valid(&home)
+            && (codex.is_none() || super::readiness::account_binding(&home).is_ok());
         Ok(Self {
             home,
             driver: DRIVER.into(),
@@ -1101,6 +1240,14 @@ fn run(
     view: &Mutex<View>,
     control: mpsc::Receiver<Control>,
 ) {
+    let account_binding = (params.action == Action::AccountVerify)
+        .then(|| {
+            Some((
+                super::boot_identity()?,
+                super::readiness::account_binding(&paths.home).ok()?,
+            ))
+        })
+        .flatten();
     let capture_binding = (params.action == Action::DesktopVerify)
         .then(|| {
             Some((
@@ -1110,13 +1257,13 @@ fn run(
         })
         .flatten();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if params.action == Action::LoginStart {
+        if matches!(params.action, Action::LoginStart | Action::AccountVerify) {
             login(&params, &paths, closed, view, control)
         } else {
             driver_action(params.action, &paths, closed)
         }
     }));
-    let (mut status, detail) = match result {
+    let (mut status, mut detail) = match result {
         Ok(Ok(result)) => result,
         _ => (
             Status::OutcomeUnknown,
@@ -1126,6 +1273,31 @@ fn run(
     let exited = paths.exits.load(Ordering::Acquire);
     if !exited {
         status = Status::OutcomeUnknown;
+    }
+    let account_verification = if params.action == Action::AccountVerify
+        && status == Status::Complete
+        && exited
+    {
+        account_binding
+            .filter(|(boot, binding)| {
+                super::boot_identity().as_ref() == Some(boot)
+                    && super::readiness::account_binding(&paths.home).as_ref().ok() == Some(binding)
+            })
+            .map(|(boot_identity, binding)| AccountVerification {
+                boot_identity,
+                binding,
+                verified_at: super::now(),
+                authenticated: detail == "guest_provider_already_authenticated_no_login_started",
+            })
+    } else {
+        None
+    };
+    if params.action == Action::AccountVerify
+        && status == Status::Complete
+        && account_verification.is_none()
+    {
+        status = Status::Failed;
+        detail = "guest_account_binding_changed_check_again_no_login_started";
     }
     let verification =
         if params.action == Action::DesktopVerify && status == Status::Complete && exited {
@@ -1142,7 +1314,7 @@ fn run(
                     verified_at: super::now(),
                     driver_executable_sha256: sha,
                     capture_verified: true,
-                    desktop_usable: false,
+                    desktop_usable: detail == "explicit_guest_desktop_input_readback_verified",
                 })
         } else {
             None
@@ -1158,6 +1330,7 @@ fn run(
                 status,
                 detail: Some(detail.into()),
                 verification,
+                account_verification,
             },
             helper_exit_confirmed: exited,
         },
@@ -1291,7 +1464,17 @@ fn driver_action(
                 Duration::from_secs(20),
             )?;
             if result.code == 0 && captured_desktop(&result.bytes) {
-                Ok((Status::Complete, "explicit_guest_desktop_capture_verified"))
+                if desktop_check::verify(paths, closed).is_ok() {
+                    Ok((
+                        Status::Complete,
+                        "explicit_guest_desktop_input_readback_verified",
+                    ))
+                } else {
+                    Ok((
+                        Status::OutcomeUnknown,
+                        "guest_native_desktop_check_incomplete_inspect_document",
+                    ))
+                }
             } else {
                 Ok((
                     Status::OutcomeUnknown,
@@ -1393,6 +1576,22 @@ fn login(
             "guest_provider_already_authenticated_no_login_started",
         ));
     }
+    if params.action == Action::AccountVerify {
+        return Ok(
+            if account.get("account") == Some(&Value::Null) && account["requiresOpenaiAuth"] == true
+            {
+                (
+                    Status::Complete,
+                    "guest_provider_account_missing_no_login_started",
+                )
+            } else {
+                (
+                    Status::Failed,
+                    "guest_provider_auth_not_required_or_unrecognized_no_login_started",
+                )
+            },
+        );
+    }
     if account.get("account") != Some(&Value::Null) || account["requiresOpenaiAuth"] != true {
         return Ok((
             Status::Failed,
@@ -1435,6 +1634,7 @@ fn login(
                     status: Status::NeedsAttention,
                     detail: Some("device_login_awaiting_user".into()),
                     verification: None,
+                    account_verification: None,
                 },
                 helper_exit_confirmed: false,
             },
