@@ -16,9 +16,9 @@ try {
     const extra = `(() => {
       const load = window.__PW_STUB__.answers.load_tab_events;
       window.__PW_STUB__.answers.load_tab_events = args => load(args).map(event => event.payload.type !== "permission_requested" ? event : {
-        ...event, payload: { ...event.payload, toolName: "exec_command", input: {
-          cmd: ${JSON.stringify(command)}, workdir: "/workspace/terminalx", justification: "Verify the permission-card regression"
-        } }
+        ...event, payload: { ...event.payload, toolName: "Bash", input: { command: ${JSON.stringify(command)} },
+          cwd: "/workspace/terminalx", description: "Approval is required because this session is set to Ask every time."
+        }
       });
     })();`;
     const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true, floating }, { width: 1100, height: 800 }, { extra });
@@ -30,7 +30,8 @@ try {
     await detail.waitFor();
     assert.equal(await detail.textContent(), command);
     await page.getByText("/workspace/terminalx", { exact: true }).filter({ visible: true }).waitFor();
-    await page.getByText("Verify the permission-card regression", { exact: true }).filter({ visible: true }).waitFor();
+    await page.getByText(/Session directory:/).filter({ visible: true }).waitFor();
+    await page.getByText("Approval is required because this session is set to Ask every time.", { exact: true }).filter({ visible: true }).waitFor();
     for (const width of floating ? [640, 360] : [1100, 760]) {
       await page.setViewportSize({ width, height: 800 });
       const geometry = await detail.evaluate(el => {

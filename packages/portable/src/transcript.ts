@@ -62,6 +62,7 @@ export interface PendingAsk {
   toolName?: string;
   title?: string;
   description?: string;
+  cwd?: string;
   input?: unknown;
   options?: PermissionOption[];
   questions?: Question[];
@@ -373,6 +374,7 @@ export function buildTranscript(events: AgentEvent[], live: boolean): Transcript
           toolName: payload.toolName,
           title: payload.title,
           description: payload.description,
+          cwd: payload.cwd,
           input: payload.input,
           options: payload.options,
         });
