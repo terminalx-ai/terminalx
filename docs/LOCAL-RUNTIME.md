@@ -473,7 +473,11 @@ with production startup still using the in-process backend.
 
 The connection notice separates unavailable live state from session history. It
 subscribes before reading status, ignores older status results after a disconnect,
-and reconnects only when explicitly requested. A reconnect closes old view leases
+and automatically makes up to five serial reconnection attempts before showing
+recovery controls. The first attempt is immediate; further attempts wait 250 ms,
+500 ms, 1 s and 2 s. Repeated disconnect events share this retry budget; closing
+the window cancels pending retries. After exhaustion the reader can retry manually.
+A reconnect closes old view leases
 before opening a replacement event attachment to the same owner generation; it
 never replays input or silently follows a replacement runtime. Successful
 reattachment reloads the view once to rebuild snapshots and PTY taps. Pairing must
