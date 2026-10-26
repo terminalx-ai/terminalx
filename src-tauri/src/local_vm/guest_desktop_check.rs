@@ -16,7 +16,22 @@ pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
     match error.to_string().as_str() {
         "Guest native input failed" => "guest_native_desktop_input_unverified",
         "Guest native readback failed" => "guest_native_desktop_readback_unverified",
-        "Guest application save failed"
+        "Guest application save request failed" => {
+            if error
+                .chain()
+                .any(|cause| cause.to_string() == "Setup helper ended without confirmed outcome")
+            {
+                "guest_native_desktop_save_request_interrupted"
+            } else if error
+                .chain()
+                .any(|cause| cause.to_string() == "Guest desktop response was invalid")
+            {
+                "guest_native_desktop_save_response_invalid"
+            } else {
+                "guest_native_desktop_save_request_unverified"
+            }
+        }
+        "Guest application saved file could not be read"
         | "Guest application save was not verified; no shortcut was replayed" => {
             "guest_native_desktop_save_unverified"
         }
@@ -40,7 +55,8 @@ fn call(tool: &str, arguments: Value, paths: &Paths, closed: &AtomicBool) -> Res
     if result.code != 0 {
         bail!("Guest desktop verification was refused; no input was replayed");
     }
-    let value: Value = serde_json::from_slice(&result.bytes)?;
+    let value: Value =
+        serde_json::from_slice(&result.bytes).context("Guest desktop response was invalid")?;
     if value["isError"] == true || value["ok"] == false || value["effect"] == "refused" {
         bail!("Guest desktop verification was refused; inspect the guest");
     }
@@ -168,11 +184,11 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         json!({"pid":pid,"window_id":window,"session":session,"keys":["cmd","s"],"delivery_mode":"foreground"}),
         paths,
         closed,
-    ).context("Guest application save failed")?;
+    ).context("Guest application save request failed")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let bytes =
-            super::super::read_bounded(&file, 4096).context("Guest application save failed")?;
+        let bytes = super::super::read_bounded(&file, 4096)
+            .context("Guest application saved file could not be read")?;
         if bytes == marker.as_bytes() {
             break;
         }

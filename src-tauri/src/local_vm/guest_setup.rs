@@ -152,6 +152,33 @@ done
     }
 
     #[test]
+    fn owned_setup_can_launch_a_guest_shebang_provider_without_inherited_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let selected = paths(home.path());
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let node = crate::binpath::resolve("node").expect("Node is a development prerequisite");
+        std::os::unix::fs::symlink(node, bin.join("node")).unwrap();
+        let program = home.path().join("provider.js");
+        script(&program, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({home:process.env.HOME, inheritedControl:Object.keys(process.env).some(k=>k.startsWith('TERMINALX_')||k.startsWith('RACCOON_')), inheritedAuth:['OPENAI_API_KEY','CODEX_HOME','CODEX_ACCESS_TOKEN'].some(k=>k in process.env)}))\n");
+        let output = finite(
+            &program,
+            &[],
+            &selected,
+            &AtomicBool::new(false),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(output.code, 0, "{}", String::from_utf8_lossy(&output.err));
+        let receipt: Value = serde_json::from_slice(&output.bytes).unwrap();
+        assert_eq!(
+            receipt,
+            json!({"home":home.path(),"inheritedControl":false,"inheritedAuth":false})
+        );
+        assert!(selected.exits.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn explicit_account_check_retains_bounded_evidence_and_never_starts_sign_in() {
         for mode in ["existing", "pending"] {
             let home = tempfile::tempdir().unwrap();
@@ -1009,13 +1036,25 @@ impl OwnedChild {
             }
         }
         let inherited = read.as_raw_fd();
+        // Retained guest CLIs may be npm/shebang launchers. Use the disclosed
+        // guest tool locations, never the host owner's inherited PATH.
+        let guest_path = std::env::join_paths([
+            paths.home.join(".terminalx-local/bin"),
+            paths.home.join(".local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+        ])?;
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", WATCHDOG, "terminalx-guest-setup"])
             .arg(program)
             .args(args)
             .env_clear()
             .env("HOME", &paths.home)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("PATH", guest_path)
             .env("TERM", "dumb")
             .env("NO_COLOR", "1")
             .env("LANG", "en_US.UTF-8")
