@@ -14,10 +14,14 @@ struct Hook(Child);
 
 impl Hook {
     fn start(serve: &Serve, world: &AgentWorld, launch: &Value, event: &str) -> Self {
+        Self::at_socket(&serve.socket, world, launch, event)
+    }
+
+    fn at_socket(socket: &std::path::Path, world: &AgentWorld, launch: &Value, event: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_terminalx-serve"))
             .args(["hook", event, "--local-owner-decision"])
             .env_clear().env("HOME", &world.home).env("TERMINALX_HOME", &world.data)
-            .env("RACCOON_HOOK_SOCKET", &serve.socket)
+            .env("RACCOON_HOOK_SOCKET", socket)
             .env("RACCOON_SESSION_ID", launch["RACCOON_SESSION_ID"].as_str().unwrap())
             .env("RACCOON_TAB_ID", launch["RACCOON_TAB_ID"].as_str().unwrap())
             .env("RACCOON_HOOK_TOKEN", launch["RACCOON_HOOK_TOKEN"].as_str().unwrap())
@@ -74,6 +78,25 @@ fn owner_pretool_report_survives_the_complete_hook_round_trip() {
     serve.control("runtime.session.stop", json!({"sessionId":launch["RACCOON_SESSION_ID"], "tabId":launch["RACCOON_TAB_ID"]}));
     let denied = Hook::start(&serve, &world, &launch, "PreToolUse").reply();
     assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn a_retired_owner_socket_blocks_the_tool_without_claiming_a_human_refusal() {
+    let (world, _serve, launch) = start("bypassPermissions");
+    let retired = world.data.join("retired-owner.sock");
+    for event in ["PreToolUse", "PermissionRequest"] {
+        let reply = Hook::at_socket(&retired, &world, &launch, event).reply();
+        let output = &reply["hookSpecificOutput"];
+        let (decision, reason) = if event == "PreToolUse" {
+            (&output["permissionDecision"], &output["permissionDecisionReason"])
+        } else {
+            (&output["decision"]["behavior"], &output["decision"]["message"])
+        };
+        assert_eq!(decision, "deny", "a disconnected owner must still fail closed");
+        let reason = reason.as_str().expect("explain why the tool was blocked");
+        assert!(!reason.contains("user declined"), "a missing owner is not a human refusal: {reason}");
+        assert!(reason.contains("TerminalX"), "identify the unavailable permission authority: {reason}");
+    }
 }
 
 #[test]
