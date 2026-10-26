@@ -1,8 +1,8 @@
-# Interim comparison video
+# Zeron and TerminalX comparison video
 
-[Play or download the video](comparison-interim.mp4) — 5 minutes 50 seconds, 1600 × 1000, H.264/AAC, 25 fps. Enable English captions in a player that supports MP4 subtitle tracks; the [separate SRT](captions.srt) works with players that need a sidecar file.
+[Play or download the video](comparison.mp4) — **9 minutes 2 seconds**, a narrated, chaptered walkthrough with 1600 × 1000 H.264 video, AAC audio and English captions at 25 fps. Enable English subtitles in a player that supports MP4 subtitle tracks; the [separate SRT](captions.srt) works with players that need a sidecar file.
 
-This is an **interim evidence review**. It combines actual Zeron VM footage and screenshots with editorial explanation. TerminalX sections describe its verified fresh installation and source-confirmed features; they do not depict a completed TerminalX UI walkthrough. The last chapter explains the remaining work. Narration uses macOS's synthetic Samantha voice, generated locally.
+The video combines actual footage and screenshots from both fresh Lume installations with editorial explanation. TerminalX was tested through the guest's Cua service in the background without host desktop input. Both apps used Codex 0.164.0 without provider credentials. Observed behavior, source-confirmed capabilities and recommendations have distinct labels. Narration uses macOS's synthetic Samantha voice, generated locally.
 
 - [Full transcript](transcript.md)
 - [Chapter timings and evidence labels](chapters.json)
@@ -10,7 +10,9 @@ This is an **interim evidence review**. It combines actual Zeron VM footage and 
 - [Improvement backlog](../improvements.md)
 - [Original screenshot and clip provenance](../evidence.md)
 
-The video moves through onboarding, agent installation, launch controls, worktrees and the signed-out failure, diffs, browser, Appshots setup, provider breadth, TerminalX's installation and strengths, and the proposed improvements. Successful inference, cloud/sync, voice and Appshots capture were not tested.
+The 23 chapters cover methodology, onboarding, agent installation, launch controls, worktree creation, authentication failures, the real agent terminal, files/editing/diffs, browser navigation, attention, settings, screen-context capture, providers, desktop-process recovery, TerminalX's workflow strengths and prioritized improvements. The final chapter states the coverage limits.
+
+Neither product completed authenticated coding. Cloud/sync, voice, Appshots capture and production updating were not exercised. Different capture geometry and TerminalX's Dev build preclude a controlled density or performance ranking. Runtime/process survival is distinguished from restoration of browser tabs and shell scrollback.
 
 ## Rebuild
 
@@ -23,6 +25,6 @@ python3 docs/research/zeron-comparison/video/render.py \
   --work-dir /tmp/zeron-comparison-render
 ```
 
-The renderer reads [storyboard.json](storyboard.json), the committed screenshots and the three cropped clips. It regenerates the MP4, SRT, chapter JSON and transcript. Its intermediate narration and scene files stay in the work directory. Timings can vary with the installed voice version; captions and chapters are calculated from the newly generated audio.
+The renderer reads [storyboard.json](storyboard.json), the committed screenshots and four cropped source clips. It regenerates the MP4, SRT, chapter JSON and transcript. Intermediate narration and scene files stay in the work directory. Timings can vary with the installed voice version; captions and chapters are calculated from the newly generated audio.
 
-The full ten-minute source recording remains in the local working directory named in the evidence ledger. It is not required to rebuild this edit. The committed excerpts preserve observed action timing; longer narration holds the last frame. Screenshots are cropped and scaled for readability, and title cards are editorial graphics rather than reconstructed application UI.
+Both full ten-minute source recordings remain in the local working directory named in the evidence ledger. They are not required to rebuild this edit. The committed excerpts preserve observed action timing; longer narration holds the last frame. Screenshots are cropped and scaled for readability, and title cards are editorial graphics rather than reconstructed application UI. The TerminalX excerpt begins after the operator installed Codex and does not depict an in-app installer.

@@ -38,7 +38,7 @@ def stamp(seconds):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--output", type=pathlib.Path, default=ROOT / "comparison-interim.mp4")
+    parser.add_argument("--output", type=pathlib.Path, default=ROOT / "comparison.mp4")
     args = parser.parse_args()
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -127,9 +127,9 @@ def main():
     captions.write_text("\n".join(f"{i}\n{stamp(start)} --> {stamp(end)}\n{textwrap.fill(line, 84)}\n"
                                   for i, (start, end, line) in enumerate(subtitles, 1)))
     (ROOT / "chapters.json").write_text(json.dumps(chapters, indent=2, ensure_ascii=False) + "\n")
-    (ROOT / "transcript.md").write_text("# Interim comparison video transcript\n\n" + "\n".join(transcript))
+    (ROOT / "transcript.md").write_text("# Zeron and TerminalX comparison video transcript\n\n" + "\n".join(transcript))
     metadata = work / "metadata.txt"
-    metadata.write_text(";FFMETADATA1\ntitle=Zeron and TerminalX - interim evidence review\n" + "".join(
+    metadata.write_text(";FFMETADATA1\ntitle=Zeron and TerminalX - fresh VM comparison\n" + "".join(
         f"[CHAPTER]\nTIMEBASE=1/1000\nSTART={round(c['start'] * 1000)}\nEND={round(c['end'] * 1000)}\ntitle={c['title']}\n"
         for c in chapters))
     segment_list = work / "segments.txt"

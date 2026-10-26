@@ -1,85 +1,139 @@
-# Interim comparison video transcript
+# Zeron and TerminalX comparison video transcript
 
 ## 00:00:00 — Zeron × TerminalX
 
-INTERIM COMPARISON · 26 OCT 2026
+FRESH VM COMPARISON · 26 OCT 2026
 
-This interim comparison examines Zeron and TerminalX in separate fresh macOS virtual machines created from the same Lume base. Zeron was exercised directly. TerminalX was built and launched, but its desktop walkthrough is pending a host Accessibility repair. The video distinguishes observed behavior from source-confirmed features. Narration is synthetic, and no successful authenticated agent run is claimed.
+This comparison tests Zeron and TerminalX in separate fresh macOS virtual machines from the same Lume base. Both used the same Codex version and local fixture, without provider credentials. TerminalX was a development build; Zeron was a published release. The video separates observed behavior from source-confirmed features. Narration is synthetic. Different capture geometry means these images are not a controlled density or performance benchmark.
 
-## 00:00:25 — 01 · A guided first run
-
-ZERON · OBSERVED
-
-Zeron starts with a guided sequence: choose an appearance, decide whether to sync, and install an agent. The sync step can be skipped, so local use does not require an application account. The sequence is clear, but a microphone permission prompt appeared before I asked to use voice. TerminalX should adopt helpful setup guidance while requesting permissions only at the point of use.
-
-## 00:00:48 — 02 · Install is part of the product
-
-ZERON · OBSERVED FOOTAGE
-
-In the clean Zeron VM, clicking Install beside Codex started an inline installation and then marked the provider available. This is a concrete onboarding advantage. TerminalX currently detects existing command-line agents and links out to installation instructions. The opportunity is a guided installation and login handoff with progress, cancellation and a reliable re-check.
-
-## 00:01:10 — 03 · Keep the launch context nearby
+## 00:00:27 — 01 · Zeron guides the first run
 
 ZERON · OBSERVED
 
-The composer keeps the project, device, model, reasoning level, branch and checkout choice close to the prompt. Choosing a new worktree makes isolation an explicit decision before work starts. TerminalX already has these kinds of controls. The improvement is to group them around the questions a user must answer: which agent, where it runs, what files it changes, and which permissions apply.
+Zeron starts with a guided sequence: choose an appearance, decide whether to sync, install an agent, then open a project. Sync can be skipped, so local use does not require an application account. A microphone permission prompt appeared before voice was requested. TerminalX should borrow the useful guidance while requesting permissions when the feature is invoked.
 
-## 00:01:34 — 04 · Worktree, shell and a real failure
-
-ZERON · OBSERVED FOOTAGE
-
-The first prompt created a real Git worktree. A terminal opened in that checkout, and the print-working-directory command confirmed the location. Because Codex had no account credentials, the chat eventually showed a signed-out error with a login action. This exposes an opportunity for both products: distinguish installed from authenticated before a run begins, and preserve the draft when setup is needed.
-
-## 00:01:58 — 05 · Inspect changes beside the conversation
+## 00:00:49 — 02 · Installation stays in the app
 
 ZERON · OBSERVED FOOTAGE
 
-Zeron combines files, Markdown preview, terminal, diffs and browser surfaces in the workspace. This diff shows three lines deliberately added by the test operator, not by an agent. The working-tree scope and added-line count make the result understandable. TerminalX already supports rich changes and editor views. Prioritize clear scope, provenance and a stable way to open each tool.
+Clicking Install beside Codex started an inline installation and updated the provider row when it finished. This is a concrete onboarding advantage: the next step remains in the product instead of requiring the user to find a shell and installation instructions. Installed did not mean authenticated. The subsequent task still needed a provider login.
 
-## 00:02:22 — 06 · Browser and presentation controls
+## 00:01:09 — 03 · TerminalX starts with local work
+
+TERMINALX · OBSERVED
+
+The fresh TerminalX screen offers a local project, a GitHub project and quick start. Application sign-in is optional. A missing-agent notice links to Claude Code, Codex, re-check and agent settings. This is a useful fast path for existing command-line users. A guided readiness checklist would help someone starting from an empty Mac.
+
+## 00:01:29 — 04 · Detection works; setup is external
+
+TERMINALX · OBSERVED FOOTAGE
+
+TerminalX agent settings show installation commands and external links. Get it opened the official Codex documentation in Safari. After the test operator installed the matching standalone binary, re-check correctly detected Codex and showed its path. This footage begins after that installation. The new composer nevertheless initially selected missing Claude Code. Prefer an available provider when the default cannot start.
+
+## 00:01:54 — 05 · Zeron keeps launch choices nearby
 
 ZERON · OBSERVED
 
-I loaded a public page inside Zeron and switched the workspace to dark appearance. The embedded page followed that appearance. Settings also expose accents, material choices and distinct font controls in source. TerminalX has themes, adjustable scale, a browser and an editor already. Better discoverability and measured readability are stronger priorities than simply adding more decoration.
+Zeron keeps project, device, model, reasoning level, branch and checkout close to the prompt. The checkout picker makes current checkout versus a new worktree an explicit decision. For both products, the user should be able to explain which agent runs, where it runs, what files it changes and which permissions apply before starting.
 
-## 00:02:46 — 07 · Context capture deserves its own flow
+## 00:02:15 — 06 · TerminalX has the core controls
+
+TERMINALX · OBSERVED
+
+TerminalX exposes model, effort, permissions, worktree and automation choices. Its model list refreshed to include GPT-6.1 Sol; the test selected High effort. Both apps received the prompt: read readme dot m d. TerminalX used the requested bypass mode in the disposable fixture, with automation switches off. The improvement is clearer grouping and readiness, rather than adding controls already present.
+
+## 00:02:41 — 07 · Zeron creates a worktree, then needs login
+
+ZERON · OBSERVED FOOTAGE
+
+The prompt created a real Zeron worktree. A separate shell opened there, and print working directory verified the location. Because Codex was signed out, the chat eventually showed an authentication error with a login action. This gives the user a specific reason for the failure, although a preflight readiness check could have caught it sooner.
+
+## 00:03:00 — 08 · TerminalX recovery needs the real cause
+
+TERMINALX · OBSERVED
+
+TerminalX also created the worktree, initially showed Working, and then reported unconfirmed prompt delivery after about twenty-eight seconds. The recovery notice suggested checking the terminal and possibly pressing Enter. The actual prerequisite was provider sign-in. Recognizing that state would give the user a direct setup action instead of generic delivery troubleshooting.
+
+## 00:03:22 — 09 · The real CLI makes recovery inspectable
+
+TERMINALX · OBSERVED
+
+Switching the agent tab to terminal revealed the real Codex process waiting for login. No provider credentials were supplied. This shared chat and terminal process is a TerminalX strength: users can inspect exactly what the agent is waiting for. A separate shell tab also opened in the worktree and passed the same working-directory check. Agent terminal and ordinary shell are distinct tools.
+
+## 00:03:45 — 10 · Zeron’s changes stay beside the task
+
+ZERON · OBSERVED FOOTAGE
+
+The test operator deliberately added three README lines to exercise the diff. This was not an agent-generated edit. Zeron showed the working-tree scope, added-line count and expandable diff beside the conversation. The file tree and Markdown preview were also exercised. These are practical workspace capabilities to compare directly.
+
+## 00:04:05 — 11 · TerminalX previews and edits the file
+
+TERMINALX · OBSERVED
+
+TerminalX opened the README in Markdown preview, switched to source, and saved the same three-line addition. Independent Git readback confirmed three additions and no deletions. At this VM’s narrow width, sidebar and tool panels reduced the document area. Improve focus and tool discovery while preserving the working editor and existing pane controls.
+
+## 00:04:25 — 12 · Diff scope is already explicit
+
+TERMINALX · OBSERVED
+
+The runtime inspection corrected an early source-only hypothesis: TerminalX already displays scope, target branch and merge-base information. Its scope menu offers All changes, Uncommitted changes and Last turn. Only All changes was exercised here. The improvement list therefore does not propose adding missing scope labels. Mixed staged, untracked and turn-specific changes need a separate test.
+
+## 00:04:50 — 13 · Zeron embeds the browser
+
+ZERON · OBSERVED
+
+Zeron loaded a public page inside its workspace browser. Switching to dark appearance also changed the embedded page’s presentation. Its neighboring file, terminal and diff surfaces keep the task context close. The test establishes navigation and appearance behavior, not browser performance or full application-preview compatibility.
+
+## 00:05:11 — 14 · TerminalX browser and navigation work
+
+TERMINALX · OBSERVED
+
+TerminalX loaded the same public URL in a workspace browser tab, with a live preview and an Open window action. The CLI confirmed the URL and workspace association. Its interaction model differs from Zeron’s inline browser. A controlled Settings open-and-close test retained the selected browser. Command-palette search also found the README, session and workspace.
+
+## 00:05:33 — 15 · Attention has a home
+
+TERMINALX · OBSERVED
+
+TerminalX’s dashboard placed the blocked session in Needs you. That is useful when work spans several projects. The routing worked; the explanation should name provider setup when that is the blocker. Later, Stop changed the session to Stopped and removed the live Codex process. Stopped is not the same as completed.
+
+## 00:05:51 — 16 · Improve readability before adding themes
+
+TERMINALX · OBSERVED SETTINGS
+
+TerminalX already offers four themes, light and dark modes, transcript text sizing, layout options and editable shortcuts. Dark appearance survived reopening. Zeron adds accent, material and separate font controls, with theme import confirmed in source. Prioritize measured contrast, focus, text scaling and narrow-window usability. These screenshots do not establish accessibility compliance for either product.
+
+## 00:06:18 — 17 · Capture-to-draft is a distinct opportunity
 
 ZERON · SETUP OBSERVED, CAPTURE UNTESTED
 
-Zeron exposes Appshots as a user-triggered context-capture workflow, with a shortcut, destination and permission explanation. The setup screen promises review before sending. I did not enable capture or validate that workflow end to end. TerminalX could connect its floating chat and attachment support into a similar capture-to-draft experience while preserving protected windows and human-only confirmations.
+Zeron’s Appshots setup describes a global capture shortcut, destination, optional accessibility text and review before sending. Capture itself was not enabled in this test. TerminalX could connect floating chat and attachments into a user-triggered capture-to-draft workflow. Voice and transcription controls exist in both products, but no audio was recorded. Dictation should remain distinct from live voice conversation.
 
-## 00:03:10 — 08 · Breadth versus a focused agent model
+## 00:06:44 — 18 · Breadth requires lifecycle quality
 
-SOURCE-CONFIRMED · SEE REPORT LINKS
+SOURCE-CONFIRMED · RUNTIME LIMITS IN REPORT
 
-Zeron defines ten production agent harness identities in the inspected release. Only Codex was installed and attempted in this walkthrough. TerminalX deliberately offers Claude Code and Codex for new work, with legacy Cursor and OpenCode adapters hidden. Broader provider support is a product decision. Each additional provider needs reliable authentication, status, interruption, resume and permission behavior, not just a new picker entry.
+Zeron defines ten production harness identities in the inspected release. TerminalX offers Claude Code and Codex, with legacy adapters hidden. Only Codex was installed and attempted in these walkthroughs. Additional providers need reliable authentication, status, interruption, resume and permissions. Both projects also implement remote capabilities. Local settings inspection does not establish cloud or multi-device parity.
 
-## 00:03:37 — 09 · TerminalX: verified installation boundary
+## 00:07:11 — 19 · Runtime survives; workspace context is lost
 
-TERMINALX · CLI VERIFIED, UI PENDING
+TERMINALX · DESKTOP-PROCESS RESTART TEST
 
-TerminalX was built from the comparison branch and installed in a second fresh clone, without Zeron data or installed agents. Its command-line interface confirmed version zero point two point nineteen, an active local runtime, zero projects and zero sessions. The host computer-use helper then refused the new Lume window. A human Accessibility repair is required, so the remaining TerminalX discussion is based on source rather than a completed desktop walkthrough.
+The lifecycle test terminated only the TerminalX desktop process, then reopened it. The local runtime and waiting Codex process retained their process identities. The app reconnected, and the saved diff, dark mode and shell tab remained. It asked for a session selection; the previous browser tab was absent. Restore recoverable workspace and browser context. This was a process-termination test, not a verified normal Quit or full reboot test.
 
-## 00:04:05 — 10 · Preserve TerminalX’s distinctive strengths
+## 00:07:38 — 20 · Preserve TerminalX’s workflow strengths
 
-TERMINALX · SOURCE-CONFIRMED
+OBSERVED FOUNDATION · PIPELINE CONFIRMED IN SOURCE
 
-TerminalX gives chat and terminal views of the same real agent command-line process. That is a different interaction model from Zeron’s structured Codex harness and separate shell. TerminalX also provides a cross-project attention dashboard and an issue-to-pull-request workflow with independent review and merge checks. These are strengths to preserve. A competing pull-request viewer should not be treated as equivalent to a gated review pipeline.
+TerminalX’s real agent terminal and attention dashboard were observed directly. Its issue-to-pull-request workflow, independent review and commit-bound merge gates are documented in source and were not exercised against GitHub in these VMs. Preserve these strengths. A pull-request viewer and a gated review pipeline represent different levels of workflow support.
 
-## 00:04:30 — 11 · The first improvements to ship
+## 00:07:59 — 21 · Ship readiness and recovery first
 
-RECOMMENDATIONS · VALIDATE WITH USERS
+RECOMMENDATIONS · 14 ITEMS WITH ACCEPTANCE CRITERIA
 
-Start with guided installation and a truthful readiness state. Then make application login, provider login and execution location unmistakably different. Group launch controls around user decisions, and keep the effective permission mode visible. A compact current-plan tray could complement the existing attention dashboard. Prompt delivery and recovery should also say exactly what was confirmed and what action is needed next.
+Start with guided installation, available-provider selection and truthful readiness states: missing, signed out, ready or unknown. Make unconfirmed delivery explain the last confirmed stage and a safe next action. Preserve the draft through login and avoid duplicate retries. Next, restore workspace context after a desktop restart and simplify launch and tool discovery. The report gives evidence, priorities, effort estimates and acceptance criteria for fourteen proposals.
 
-## 00:04:55 — 12 · Next: improve the tools already present
+## 00:08:29 — 22 · What this comparison establishes
 
-RECOMMENDATIONS · 14 ITEMS IN THE REPORT
+LOCAL WALKTHROUGH COMPLETE · LIMITS EXPLICIT
 
-The next increment should make existing tools easier to find: files, terminal, browser, changes and history. Add clearer diff scope, searchable settings and notification previews. Validate contrast, font scaling, keyboard access and narrow layouts with measurements. Capture-to-draft is a distinct product opportunity. Provider expansion and theme imports should follow demonstrated demand rather than a feature-count contest.
-
-## 00:05:22 — What remains before the comparison is complete
-
-BLOCKED ON ACCESSIBILITY · CHECKS PASSED
-
-The accompanying report contains a detailed feature matrix, fourteen prioritized improvements, acceptance criteria, screenshots and reproduction notes. TypeScript checks, all three thousand three hundred eighty-seven tests, and the TerminalX Dev build passed. The work remains incomplete until the TerminalX desktop walkthrough is recorded. Authenticated agent execution, sync, cloud compute and voice also remain explicitly unverified.
+The local comparison covers fresh setup, signed-out launches, worktrees, shells, files, diffs, browsers and settings. TerminalX also received attention, stop and desktop-restart checks. Neither product completed authenticated coding. Cloud, sync, voice, Appshots capture, production updating and performance rankings remain outside the verified scope. Both VMs are stopped and retained. The report and evidence ledger let you trace each recommendation to an observation or an exact source version.

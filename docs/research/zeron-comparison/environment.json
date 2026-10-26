@@ -24,5 +24,20 @@
     "os": "macOS 26.5.2 (25F84)",
     "lume": "0.6.1"
   },
-  "authentication": "No host provider credentials copied; no authenticated/cloud end-to-end runs."
+  "authentication": "No host provider credentials copied; no authenticated/cloud end-to-end runs.",
+  "continuation": {
+    "method": "Direct guest Cua Spacesd MCP and process/file APIs; no host desktop input",
+    "cua_cli_version": "0.7.0",
+    "cua_spacesd_version": "0.7.0",
+    "actual_terminalx_guest_display": "1024x768",
+    "terminalx_window": "1024x675; 1024x680 after relaunch",
+    "matched_agent": "Codex 0.164.0",
+    "matched_model": "gpt-6.1-sol",
+    "matched_effort": "high",
+    "prompt": "read readme.md",
+    "terminalx_permission_mode": "bypassPermissions",
+    "gui_walkthrough": "completed",
+    "zeron_vm_final_state": "stopped",
+    "terminalx_vm_final_state": "stopped"
+  }
 }

@@ -1,86 +1,140 @@
 [
   {
     "start": 0.0,
-    "end": 25.08,
+    "end": 27.2,
     "title": "Zeron × TerminalX",
-    "evidence": "INTERIM COMPARISON · 26 OCT 2026"
+    "evidence": "FRESH VM COMPARISON · 26 OCT 2026"
   },
   {
-    "start": 25.08,
-    "end": 48.2,
-    "title": "01 · A guided first run",
+    "start": 27.2,
+    "end": 49.36,
+    "title": "01 · Zeron guides the first run",
     "evidence": "ZERON · OBSERVED"
   },
   {
-    "start": 48.2,
-    "end": 70.4,
-    "title": "02 · Install is part of the product",
+    "start": 49.36,
+    "end": 69.28,
+    "title": "02 · Installation stays in the app",
     "evidence": "ZERON · OBSERVED FOOTAGE"
   },
   {
-    "start": 70.4,
-    "end": 94.80000000000001,
-    "title": "03 · Keep the launch context nearby",
+    "start": 69.28,
+    "end": 89.84,
+    "title": "03 · TerminalX starts with local work",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 89.84,
+    "end": 114.76,
+    "title": "04 · Detection works; setup is external",
+    "evidence": "TERMINALX · OBSERVED FOOTAGE"
+  },
+  {
+    "start": 114.76,
+    "end": 135.4,
+    "title": "05 · Zeron keeps launch choices nearby",
     "evidence": "ZERON · OBSERVED"
   },
   {
-    "start": 94.80000000000001,
-    "end": 118.24000000000001,
-    "title": "04 · Worktree, shell and a real failure",
+    "start": 135.4,
+    "end": 161.24,
+    "title": "06 · TerminalX has the core controls",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 161.24,
+    "end": 180.76000000000002,
+    "title": "07 · Zeron creates a worktree, then needs login",
     "evidence": "ZERON · OBSERVED FOOTAGE"
   },
   {
-    "start": 118.24000000000001,
-    "end": 142.32,
-    "title": "05 · Inspect changes beside the conversation",
+    "start": 180.76000000000002,
+    "end": 202.60000000000002,
+    "title": "08 · TerminalX recovery needs the real cause",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 202.60000000000002,
+    "end": 225.32000000000002,
+    "title": "09 · The real CLI makes recovery inspectable",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 225.32000000000002,
+    "end": 245.04000000000002,
+    "title": "10 · Zeron’s changes stay beside the task",
     "evidence": "ZERON · OBSERVED FOOTAGE"
   },
   {
-    "start": 142.32,
-    "end": 166.16,
-    "title": "06 · Browser and presentation controls",
+    "start": 245.04000000000002,
+    "end": 265.88,
+    "title": "11 · TerminalX previews and edits the file",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 265.88,
+    "end": 290.52,
+    "title": "12 · Diff scope is already explicit",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 290.52,
+    "end": 311.24,
+    "title": "13 · Zeron embeds the browser",
     "evidence": "ZERON · OBSERVED"
   },
   {
-    "start": 166.16,
-    "end": 190.68,
-    "title": "07 · Context capture deserves its own flow",
+    "start": 311.24,
+    "end": 333.24,
+    "title": "14 · TerminalX browser and navigation work",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 333.24,
+    "end": 351.88,
+    "title": "15 · Attention has a home",
+    "evidence": "TERMINALX · OBSERVED"
+  },
+  {
+    "start": 351.88,
+    "end": 378.8,
+    "title": "16 · Improve readability before adding themes",
+    "evidence": "TERMINALX · OBSERVED SETTINGS"
+  },
+  {
+    "start": 378.8,
+    "end": 404.44,
+    "title": "17 · Capture-to-draft is a distinct opportunity",
     "evidence": "ZERON · SETUP OBSERVED, CAPTURE UNTESTED"
   },
   {
-    "start": 190.68,
-    "end": 217.56,
-    "title": "08 · Breadth versus a focused agent model",
-    "evidence": "SOURCE-CONFIRMED · SEE REPORT LINKS"
+    "start": 404.44,
+    "end": 431.12,
+    "title": "18 · Breadth requires lifecycle quality",
+    "evidence": "SOURCE-CONFIRMED · RUNTIME LIMITS IN REPORT"
   },
   {
-    "start": 217.56,
-    "end": 245.44,
-    "title": "09 · TerminalX: verified installation boundary",
-    "evidence": "TERMINALX · CLI VERIFIED, UI PENDING"
+    "start": 431.12,
+    "end": 458.8,
+    "title": "19 · Runtime survives; workspace context is lost",
+    "evidence": "TERMINALX · DESKTOP-PROCESS RESTART TEST"
   },
   {
-    "start": 245.44,
-    "end": 270.52,
-    "title": "10 · Preserve TerminalX’s distinctive strengths",
-    "evidence": "TERMINALX · SOURCE-CONFIRMED"
+    "start": 458.8,
+    "end": 479.8,
+    "title": "20 · Preserve TerminalX’s workflow strengths",
+    "evidence": "OBSERVED FOUNDATION · PIPELINE CONFIRMED IN SOURCE"
   },
   {
-    "start": 270.52,
-    "end": 295.59999999999997,
-    "title": "11 · The first improvements to ship",
-    "evidence": "RECOMMENDATIONS · VALIDATE WITH USERS"
+    "start": 479.8,
+    "end": 509.44,
+    "title": "21 · Ship readiness and recovery first",
+    "evidence": "RECOMMENDATIONS · 14 ITEMS WITH ACCEPTANCE CRITERIA"
   },
   {
-    "start": 295.59999999999997,
-    "end": 322.2,
-    "title": "12 · Next: improve the tools already present",
-    "evidence": "RECOMMENDATIONS · 14 ITEMS IN THE REPORT"
-  },
-  {
-    "start": 322.2,
-    "end": 349.96,
-    "title": "What remains before the comparison is complete",
-    "evidence": "BLOCKED ON ACCESSIBILITY · CHECKS PASSED"
+    "start": 509.44,
+    "end": 541.8,
+    "title": "22 · What this comparison establishes",
+    "evidence": "LOCAL WALKTHROUGH COMPLETE · LIMITS EXPLICIT"
   }
 ]
