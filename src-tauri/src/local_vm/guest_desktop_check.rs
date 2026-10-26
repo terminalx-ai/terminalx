@@ -19,6 +19,21 @@ pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
         "Guest application save request failed" => {
             if error
                 .chain()
+                .any(|cause| cause.to_string() == "Guest native menu path unavailable")
+            {
+                "guest_native_desktop_save_menu_missing"
+            } else if error
+                .chain()
+                .any(|cause| cause.to_string() == "Guest native menu item disabled")
+            {
+                "guest_native_desktop_save_menu_disabled"
+            } else if error
+                .chain()
+                .any(|cause| cause.to_string() == "Guest native menu focus unverified")
+            {
+                "guest_native_desktop_save_menu_focus_unverified"
+            } else if error
+                .chain()
                 .any(|cause| cause.to_string() == "Setup helper ended without confirmed outcome")
             {
                 "guest_native_desktop_save_request_interrupted"
@@ -54,6 +69,22 @@ fn call(tool: &str, arguments: Value, paths: &Paths, closed: &AtomicBool) -> Res
         closed,
         Duration::from_secs(20),
     )?;
+    if tool == "invoke_menu" {
+        // Map only fixed public Driver refusal categories. Never retain the
+        // response text, arbitrary menu content, paths or process identifiers.
+        for bytes in [&result.bytes, &result.err] {
+            let text = String::from_utf8_lossy(bytes);
+            if text.contains("invoke_menu: path segment") && text.contains("was not found") {
+                bail!("Guest native menu path unavailable");
+            }
+            if text.contains("invoke_menu: path segment") && text.contains("is disabled") {
+                bail!("Guest native menu item disabled");
+            }
+            if text.contains("did not become stably key and frontmost") {
+                bail!("Guest native menu focus unverified");
+            }
+        }
+    }
     if result.code != 0 {
         bail!("Guest desktop verification was refused; no input was replayed");
     }
