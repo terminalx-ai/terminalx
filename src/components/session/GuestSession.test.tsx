@@ -48,9 +48,11 @@ const event = (payload: Payload): AgentEvent => ({ id: `e${++seq}`, seq, session
 const hostSays = (payload: Payload) => act(() => { const next = { event: event(payload) }; for (const listener of [...mocks.listeners]) listener("session.event", next); });
 const stops = () => mocks.requests.filter((request) => request.method === "session.stop").map((request) => request.params);
 const open = async () => {
+  const firstRequest = mocks.requests.length;
   render(<GuestSessionHost />);
   await screen.findByLabelText("Prompt to agent");
-  await waitFor(() => expect(mocks.requests.some((request) => request.method === "session.tail")).toBe(true));
+  // A previous mount's tail must not mark this guest ready before its tabs load.
+  await waitFor(() => expect(mocks.requests.slice(firstRequest).some((request) => request.method === "session.tail")).toBe(true));
 };
 const click = async (name: string) => {
   fireEvent.click(screen.getByRole("button", { name }));

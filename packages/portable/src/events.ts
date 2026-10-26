@@ -160,6 +160,8 @@ export type Payload =
       toolUseId: string;
       toolName: string;
       input: unknown;
+      /** Provider session directory; a tool's explicit workdir may differ. */
+      cwd?: string;
       title?: string;
       description?: string;
       options: PermissionOption[];

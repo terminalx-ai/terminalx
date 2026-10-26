@@ -134,8 +134,9 @@ pub fn run_within_reporting(
 }
 
 /// Run `command` to its end or to the deadline, whichever comes first, and
-/// return what it printed. At the deadline its whole process group is killed.
-/// For a call that goes to a remote and whose answer is needed.
+/// return what it printed. The deadline includes draining both output pipes;
+/// at expiry its whole process group is killed, even if the direct child has
+/// already exited. For a call whose complete answer is needed.
 pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) -> std::result::Result<String, RunError> {
     use std::io::Read;
     use std::process::Stdio;
@@ -158,8 +159,10 @@ pub(crate) fn output_within(mut command: Command, timeout: std::time::Duration) 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            // A wrapper can exit while a background child retains its pipes.
+            // Do not join a reader until EOF, or accept output after expiry.
+            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() && std::time::Instant::now() < deadline => break status,
+            Ok(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
             ended => {
                 #[cfg(unix)]
                 // SAFETY: signals the process group this function just created.
@@ -1220,6 +1223,20 @@ pub fn remote_url(cwd: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_deadline_includes_inherited_stdout_and_stderr() {
+        for redirect in ["2>/dev/null", ">/dev/null"] {
+            let mut command = Command::new("/bin/sh");
+            // The direct child exits, but its background child keeps one
+            // output pipe open. Successful early output must not defeat the
+            // deadline while waiting for the remaining EOF.
+            command.args(["-c", &format!("sleep 2 {redirect} & printf '  --no-daemon\\n'; exit 0")]);
+            let result = output_within(command, std::time::Duration::from_millis(50));
+            assert!(matches!(result, Err(RunError::TimedOut)), "{redirect}: {result:?}");
+        }
+    }
 
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

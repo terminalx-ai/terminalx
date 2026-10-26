@@ -967,6 +967,7 @@ fn codex_readers_serialize_drain_through_application() {
             manager.pump(&rt, &tail);
             // This approval belongs to the continuation, never the old abort.
             manager.apply(&mut rt.lock().unwrap(), Payload::PermissionRequested {
+                cwd: None,
                 request_id: "continuation-approval".into(), tool_use_id: "next-tool".into(), tool_name: "Bash".into(),
                 input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
             }, None);
@@ -1692,6 +1693,7 @@ fn drained_old_launch_cannot_settle_successor() {
         }
         let receipt = rig.compose_confirmed("successor receipt");
         rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+            cwd: None,
             request_id: "successor-approval".into(), tool_use_id: "successor-tool".into(), tool_name: "Bash".into(),
             input: json!({"command":"ls"}), title: None, description: None, options: vec![],
         }, None);
@@ -1748,6 +1750,7 @@ fn old_hooks_cannot_mutate_successor_after_pump() {
             }
             let receipt = rig.compose_confirmed("still awaiting acceptance");
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+                cwd: None,
                 request_id: "retained".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
                 input: json!({"command":"ls"}), title: None, description: None, options: vec![],
             }, None);
@@ -1949,6 +1952,7 @@ fn restart_completion_cannot_take_a_replaced_or_cancelled_slot() {
                     rt.engine = Engine::OpenCode(opencode::OpenCode::new(1, "/unused", None, None, "manual"));
                     rt.open_turn();
                     rig.manager.apply(&mut rt, Payload::PermissionRequested {
+                        cwd: None,
                         request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
                         input: json!({"command":"ls"}), title: None, description: None, options: vec![],
                     }, None);
@@ -2003,6 +2007,7 @@ fn delayed_idle_restart_defers_to_new_work_on_the_same_launch() {
         let receipt = if state == "turn" {
             let receipt = rig.compose_confirmed("new work on the same launch");
             rig.manager.apply(&mut rig.rt.lock().unwrap(), Payload::PermissionRequested {
+                cwd: None,
                 request_id: "same-launch-approval".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
                 input: json!({"command":"ls"}), title: None, description: None, options: vec![],
             }, None);
@@ -2062,6 +2067,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
             rt.engine = Engine::OpenCode(opencode::OpenCode::new(1, "/unused", None, None, "manual"));
             rt.open_turn();
             rig.manager.apply(&mut rt, Payload::PermissionRequested {
+                cwd: None,
                 request_id: "successor".into(), tool_use_id: "tool".into(), tool_name: "Bash".into(),
                 input: json!({"command":"ls"}), title: None, description: None, options: vec![],
             }, None);

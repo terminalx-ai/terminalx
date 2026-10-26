@@ -14,16 +14,20 @@ struct Hook(Child);
 
 impl Hook {
     fn start(serve: &Serve, world: &AgentWorld, launch: &Value, event: &str) -> Self {
+        Self::at_socket(&serve.socket, world, launch, event)
+    }
+
+    fn at_socket(socket: &std::path::Path, world: &AgentWorld, launch: &Value, event: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_terminalx-serve"))
             .args(["hook", event, "--local-owner-decision"])
             .env_clear().env("HOME", &world.home).env("TERMINALX_HOME", &world.data)
-            .env("RACCOON_HOOK_SOCKET", &serve.socket)
+            .env("RACCOON_HOOK_SOCKET", socket)
             .env("RACCOON_SESSION_ID", launch["RACCOON_SESSION_ID"].as_str().unwrap())
             .env("RACCOON_TAB_ID", launch["RACCOON_TAB_ID"].as_str().unwrap())
             .env("RACCOON_HOOK_TOKEN", launch["RACCOON_HOOK_TOKEN"].as_str().unwrap())
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().unwrap();
-        child.stdin.take().unwrap().write_all(br#"{"tool_name":"Bash","tool_input":{"command":"pwd"}}"#).unwrap();
+        child.stdin.take().unwrap().write_all(br#"{"cwd":"/workspace/app","tool_name":"Bash","tool_input":{"command":"pwd","description":"Inspect the current directory"}}"#).unwrap();
         Self(child)
     }
 
@@ -77,6 +81,25 @@ fn owner_pretool_report_survives_the_complete_hook_round_trip() {
 }
 
 #[test]
+fn a_retired_owner_socket_blocks_the_tool_without_claiming_a_human_refusal() {
+    let (world, _serve, launch) = start("bypassPermissions");
+    let retired = world.data.join("retired-owner.sock");
+    for event in ["PreToolUse", "PermissionRequest"] {
+        let reply = Hook::at_socket(&retired, &world, &launch, event).reply();
+        let output = &reply["hookSpecificOutput"];
+        let (decision, reason) = if event == "PreToolUse" {
+            (&output["permissionDecision"], &output["permissionDecisionReason"])
+        } else {
+            (&output["decision"]["behavior"], &output["decision"]["message"])
+        };
+        assert_eq!(decision, "deny", "a disconnected owner must still fail closed");
+        let reason = reason.as_str().expect("explain why the tool was blocked");
+        assert!(!reason.contains("user declined"), "a missing owner is not a human refusal: {reason}");
+        assert!(reason.contains("TerminalX"), "identify the unavailable permission authority: {reason}");
+    }
+}
+
+#[test]
 fn owner_permission_decisions_still_require_an_answer() {
     let (world, serve, launch) = start("manual");
     for (action, expected) in [("permissions.allow", "allow"), ("permissions.deny", "deny")] {
@@ -86,6 +109,10 @@ fn owner_permission_decisions_still_require_an_answer() {
             (!pending["permissions"].as_array().unwrap().is_empty()).then_some(pending)
         });
         assert_eq!(pending["permissions"][0]["input"]["command"], "pwd");
+        let events = serve.events(launch["RACCOON_TAB_ID"].as_str().unwrap());
+        let request = events.iter().find(|event| event["payload"]["requestId"] == pending["permissions"][0]["requestId"]).unwrap();
+        assert_eq!(request["payload"]["cwd"], "/workspace/app", "context survives the real hook process and owner socket");
+        assert_eq!(request["payload"]["description"], "Inspect the current directory");
         serve.control(action, json!({"request":pending["permissions"][0]["requestId"]}));
         assert_eq!(hook.reply()["hookSpecificOutput"]["decision"]["behavior"], expected);
     }
