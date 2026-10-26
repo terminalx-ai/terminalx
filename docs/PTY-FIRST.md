@@ -588,6 +588,35 @@ thing to get wrong on every upgrade. The answer is cached against a digest of
 `hooks.json`, so the short-lived child runs when TerminalX moves or is
 upgraded, not on every tab.
 
+The home is shared; the running engine must belong to the tab's launch.
+Codex 0.164.0 can attach each TUI to a shared app-server daemon, whose process
+environment still contains the first tab's hook identity and socket. After
+that owner exits, even a new TUI with the right environment sends its hooks
+to the retired owner: `SessionStart` never reaches TerminalX and deciding
+hooks fail closed. Fresh and resumed TerminalX tabs therefore pass
+`--no-daemon`, which keeps hooks in the current launch's environment even
+when a shared daemon already exists. Before preparing the managed home or
+spawning either a fresh or resumed TUI, TerminalX probes the resolved executable's
+`--help` with a five-second deadline and requires its `--no-daemon` option.
+Unsupported versions (including the previously documented 0.152.0/0.153.4) get
+an actionable upgrade message; 0.164.0 is verified. Failed or timed-out probes
+also stop launch. There is no fallback to the shared daemon. The probe is repeated
+for each launch so an upgrade at the same executable path takes effect without
+restarting TerminalX or trusting cached capability state.
+The existing daemon, other sessions, hook trust and permission
+mode are left alone. A failed owner connection is reported as unavailable
+permission authority, not as a human refusing the action.
+
+The opt-in regression uses the installed Codex, a disposable home and a
+private daemon with a deliberately old identity. It checks fresh and resumed
+`SessionStart` receipts against the current launch, with a loopback-only
+provider and fixture credentials; it uses no real account or remote model:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml --lib \
+  fresh_and_resumed_tabs_keep_their_hook_routing_with_a_shared_daemon -- --ignored
+```
+
 Two startup dialogs would otherwise eat the first prompt, and both are handled
 before the CLI starts:
 
@@ -706,9 +735,14 @@ It is built on **`PreToolUse`**, which fires for every tool and can answer:
 ```
 
 A denial blocks the call and the model is told `Command blocked by PreToolUse
-hook: <reason>`; the reason is required, and `permissionDecision: "ask"` was
-probed and does nothing useful (the tool simply runs). An allow at `PreToolUse`
-does *not* satisfy the sandbox, so an escalating command reaches
+hook: <reason>`; the reason is required. In Codex 0.164.0, an approved,
+unchanged tool must receive `{}`. A bare `permissionDecision: "allow"` is
+rejected with `PreToolUse hook returned unsupported permissionDecision:allow`;
+that decision is supported only alongside rewritten `updatedInput`. `ask` is
+also unsupported. This is checked against the
+[0.164.0 hook parser](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/hooks/src/engine/output_parser.rs).
+
+Acknowledging `PreToolUse` does *not* satisfy the sandbox, so an escalating command reaches
 `PermissionRequest` a moment later with the same `tool_input.command`. One tool
 must not cost two cards, so the answer is remembered for the turn under the
 tool and its target and reused for the request that follows.
@@ -716,6 +750,13 @@ tool and its target and reused for the request that follows.
 Permission modes map as `plan → -a on-request -s read-only`, everything else
 `→ -a on-request -s workspace-write` (with the `PreToolUse` gate for "Ask every
 time"), and `bypassPermissions → --dangerously-bypass-approvals-and-sandbox`.
+
+In bypass, auto and plan modes, `PreToolUse` reports activity and acknowledges
+with `{}` rather than requesting another approval or overriding Codex's policy.
+The hook still enforces TerminalX's checkout reservations and authenticates the
+owning launch. Those app restrictions are separate from Codex's command
+permissions. Losing that authenticated owner currently fails closed; it must
+identify an owner/routing failure, not claim that a person declined the tool.
 
 One thing `SessionStart` is *not* good for here: readiness. Codex fires it
 when the session is created, which is at the first prompt — 20 ms before
