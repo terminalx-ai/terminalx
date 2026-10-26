@@ -459,6 +459,8 @@ export function unavailableText(answer: WorkClaimsAnswer | null, hasCloud = fals
       return `Sign in to see work on your other machines and your team’s. ${showing}`;
     case "offline":
       return `Shared work status is unavailable offline. ${showing}`;
+    case "unsupported":
+      return `Shared work status is unavailable: your account service has not reported support for it. ${showing}`;
     default:
       return `Shared work status is unavailable. ${showing}`;
   }

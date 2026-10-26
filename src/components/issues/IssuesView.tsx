@@ -935,7 +935,7 @@ export function IssuesView({
                 </div>
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
-              {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
+              {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} note={workNote} />}
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <SessionAgentControls selection={agentSelection} pipeline={!pipeline && (cloud || pipelineOffered) ? pipelineLaunch : undefined} />
               </div>

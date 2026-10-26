@@ -1138,4 +1138,26 @@ describe("who is working on an issue (#441)", () => {
     expect(await within(await row("Repair session target")).findByText("You · this Mac")).toBeTruthy();
     expect((await screen.findByTestId("issues-work-note")).textContent).toMatch(/^Sign in to see work on your other machines/);
   });
+
+  it("explains missing server support and recovers remote work on the next visible refresh (#642)", async () => {
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    claims = { available: false, reason: "unsupported", now: NOW, liveForSeconds: 300, claims: [] };
+    (sessionStore as { sessions: unknown[] }).sessions = [localSession()];
+    render(<IssuesView />);
+    expect(await within(await row("Repair session target")).findByText("You · this Mac")).toBeTruthy();
+    expect((await screen.findByTestId("issues-work-note")).textContent).toContain("your account service has not reported support for it");
+    const first = await row("Fix login timeout");
+    fireEvent.click(first);
+    const detail = within(screen.getByTestId("issue-detail"));
+    expect(await detail.findByText(/your account service has not reported support for it/)).toBeTruthy();
+
+    claims = { available: true, now: NOW, liveForSeconds: 300, claims: [claim({ person: { name: "Me", you: true }, device: { id: "studio", label: "Studio" }, sessionId: "s9" })] };
+    fireEvent(document, new Event("visibilitychange"));
+    expect(await within(first).findByText("You · on Studio")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("issues-work-note")).toBeNull());
+    expect((await detail.findByTestId("issue-worker")).textContent).toContain("You · Studio");
+    expect(detail.queryByText(/your account service has not reported support for it/)).toBeNull();
+    expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(false);
+    visibility.mockRestore();
+  });
 });
