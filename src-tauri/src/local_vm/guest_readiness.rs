@@ -211,7 +211,7 @@ pub(super) fn account_binding(home: &Path) -> Result<AccountBinding> {
                 }
                 if name.ends_with("config.toml") {
                     let mut bytes = super::read_bounded(&home.join(name), PROBE_LIMIT as usize)?;
-                    let config = std::str::from_utf8(&bytes)?.parse::<toml::Value>()?;
+                    let config: toml::Value = toml::from_str(std::str::from_utf8(&bytes)?)?;
                     if config.get("profile").is_some() {
                         use zeroize::Zeroize as _;
                         bytes.zeroize();
@@ -736,7 +736,7 @@ fn inspect_provider(home: &Path, harness: Harness) -> Provider {
     let config = super::read_bounded(&home.join(".codex/config.toml"), PROBE_LIMIT as usize)
         .ok()
         .and_then(|b| String::from_utf8(b).ok())
-        .and_then(|s| s.parse::<toml::Value>().ok());
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok());
     if config.as_ref().is_some_and(|c| c.get("profile").is_some())
         || config
             .as_ref()
@@ -1157,6 +1157,27 @@ esac
         let missing =
             inspect_desktop_with(&home.path().join("absent"), home.path(), session).unwrap();
         assert_eq!(missing.driver.check.state, "missing");
+    }
+
+    #[test]
+    fn explicit_account_binding_accepts_a_real_toml_configuration_document() {
+        let home = tempfile::tempdir().unwrap();
+        let account = home.path().join(".codex");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("codex")).unwrap();
+        let config = b"cli_auth_credentials_store = \"keyring\"\n[features]\nresponses_websockets_v2 = true\n";
+        std::fs::write(account.join("config.toml"), config).unwrap();
+        assert!(
+            account_binding(home.path()).is_ok(),
+            "Valid configuration must be parsed as a TOML document"
+        );
+        assert_eq!(std::fs::read(account.join("config.toml")).unwrap(), config);
+        // The binding observes absence; it must not create or read credentials.
+        assert!(!account.join("auth.json").exists());
+        std::fs::write(account.join("config.toml"), b"profile = \"other\"\n").unwrap();
+        assert!(account_binding(home.path()).is_err());
     }
 
     #[test]

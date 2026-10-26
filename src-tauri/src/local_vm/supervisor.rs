@@ -43,6 +43,30 @@ pub fn guest_plist(env: &Environment) -> String {
         ("PATH","/Users/lume/.terminalx-local/bin:/Users/lume/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
     ],&format!("{}/runtime/guest.log",host::GUEST_HOME))
 }
+
+/// Called only after the selected guest's worker/setup quiescence is verified.
+/// Positional arguments are the exact agent label and already verified plist.
+pub(super) const RELOAD_GUEST_AGENT: &str = r#"
+set -eu
+domain="gui/$(/usr/bin/id -u)"
+service="$domain/$1"
+# bootout acknowledges the request before a slow process has left launchd.
+# Keep the old service's identity until it is absent; never retry bootstrap.
+/bin/launchctl print "$domain" >/dev/null
+if /bin/launchctl print "$service" >/dev/null 2>&1; then
+    /bin/launchctl bootout "$service"
+fi
+attempts=0
+while /bin/launchctl print "$service" >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 100 ]; then
+        echo 'Guest runtime service is still exiting; no replacement was started' >&2
+        exit 1
+    fi
+    /bin/sleep 0.1
+done
+/bin/launchctl bootstrap "$domain" "$2"
+"#;
 static ADMISSION: RwLock<()> = RwLock::new(());
 static STOPPING: AtomicBool = AtomicBool::new(false);
 pub(crate) fn stopping() -> bool {
@@ -764,6 +788,85 @@ mod tests {
         assert!(admit(&life).is_err());
         assert!(admit_exclusive(&life).is_err());
         assert!(ensure_running(&AtomicBool::new(true)).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guest_agent_reload_waits_for_a_slow_existing_service_to_leave_launchd() {
+        let directory = tempfile::tempdir().unwrap();
+        let label = format!("com.terminalx.test.guest-reload.{}", journal::new_id());
+        let service = format!("gui/{}/{label}", unsafe { libc::geteuid() });
+        // This exact disposable service is the only one cleanup may stop.
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("/bin/launchctl")
+                    .args(["bootout", &self.0])
+                    .output();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    if Command::new("/bin/launchctl")
+                        .args(["print", &self.0])
+                        .output()
+                        .is_ok_and(|result| !result.status.success())
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        let _cleanup = Cleanup(service);
+        let ready = directory.path().join("ready");
+        let script = directory.path().join("slow-exit.sh");
+        fs::write(&script, "trap '/bin/sleep 2; exit 0' TERM\n/usr/bin/touch \"$1\"\nwhile :; do /bin/sleep 30 & wait $!; done\n").unwrap();
+        let agent = directory.path().join("agent.plist");
+        fs::write(
+            &agent,
+            plist(
+                &label,
+                &[
+                    "/bin/sh".into(),
+                    script.to_str().unwrap().into(),
+                    ready.to_str().unwrap().into(),
+                ],
+                &[],
+                directory.path().join("agent.log").to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        let reload = || {
+            Command::new("/bin/sh")
+                .args(["-c", RELOAD_GUEST_AGENT, "terminalx-guest-install", &label])
+                .arg(&agent)
+                .output()
+                .unwrap()
+        };
+        let wait_ready = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                ready.exists(),
+                "The real disposable LaunchAgent did not start"
+            );
+        };
+        let first = reload();
+        assert!(
+            first.status.success(),
+            "{}",
+            String::from_utf8_lossy(&first.stderr)
+        );
+        wait_ready();
+        fs::remove_file(&ready).unwrap();
+        let replacement = reload();
+        assert!(
+            replacement.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replacement.stderr)
+        );
+        wait_ready();
     }
 
     #[test]

@@ -1141,7 +1141,7 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
         b"",
         BUDGET,
     )?;
-    let script=format!("set -eu; cd '{GUEST_HOME}/bin'; test \"$(shasum -a 256 terminalx-serve.new | cut -d ' ' -f1)\" = '{checksum}'; chmod 700 '{GUEST_HOME}' '{GUEST_HOME}/runtime'; chmod 600 '{GUEST_HOME}/identity.json'; chmod 755 terminalx-serve.new; mv terminalx-serve.new terminalx-serve; launchctl bootout gui/$(id -u)/com.terminalx.local-guest 2>/dev/null || true; launchctl bootstrap gui/$(id -u) /Users/lume/Library/LaunchAgents/com.terminalx.local-guest.plist");
+    let script=format!("set -eu; cd '{GUEST_HOME}/bin'; test \"$(shasum -a 256 terminalx-serve.new | cut -d ' ' -f1)\" = '{checksum}'; chmod 700 '{GUEST_HOME}' '{GUEST_HOME}/runtime'; chmod 600 '{GUEST_HOME}/identity.json'; chmod 755 terminalx-serve.new; mv terminalx-serve.new terminalx-serve; {}",super::supervisor::RELOAD_GUEST_AGENT);
     cua(
         &[
             "sb",
@@ -1152,10 +1152,13 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
             "/bin/sh",
             "-c",
             &script,
+            "terminalx-guest-install",
+            "com.terminalx.local-guest",
+            "/Users/lume/Library/LaunchAgents/com.terminalx.local-guest.plist",
         ],
         b"",
         BUDGET,
-    )?;
+    ).context("The verified guest runtime was copied, but its LaunchAgent handoff failed. Inspect the exact guest service before recovering setup; the VM and Driver were not restarted")?;
     let expected = journal::digest(&fs::read(runtime)?);
     for _ in 0..6 {
         if guest_rpc(

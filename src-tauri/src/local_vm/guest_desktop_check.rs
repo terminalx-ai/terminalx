@@ -10,6 +10,24 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+pub(super) fn failure_reason(error: &anyhow::Error) -> &'static str {
+    // Only our fixed stage labels may leave the guest; Driver output, screen
+    // content, document paths and arbitrary OS errors are never persisted.
+    match error.to_string().as_str() {
+        "Guest native input failed" => "guest_native_desktop_input_unverified",
+        "Guest native readback failed" => "guest_native_desktop_readback_unverified",
+        "Guest application save failed"
+        | "Guest application save was not verified; no shortcut was replayed" => {
+            "guest_native_desktop_save_unverified"
+        }
+        "Guest check document close failed"
+        | "Guest check document close was not verified; inspect the retained document" => {
+            "guest_native_desktop_close_unverified"
+        }
+        _ => "guest_native_desktop_check_incomplete_inspect_document",
+    }
+}
+
 fn call(tool: &str, arguments: Value, paths: &Paths, closed: &AtomicBool) -> Result<Value> {
     let encoded = serde_json::to_string(&arguments)?;
     let result = finite(
@@ -138,20 +156,23 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         json!({"pid":pid,"window_id":window,"session":session,"element_token":token,"text":marker}),
         paths,
         closed,
-    )?;
+    )
+    .context("Guest native input failed")?;
     // A generic action receipt is insufficient. Require a fresh exact-window
     // native readback, then a separate application save/file round trip.
-    let snapshot = call("get_window_state", target.clone(), paths, closed)?;
-    editor(&snapshot, pid, window, &marker)?;
+    let snapshot = call("get_window_state", target.clone(), paths, closed)
+        .context("Guest native readback failed")?;
+    editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
     call(
         "hotkey",
         json!({"pid":pid,"window_id":window,"session":session,"keys":["cmd","s"],"delivery_mode":"foreground"}),
         paths,
         closed,
-    )?;
+    ).context("Guest application save failed")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let bytes = super::super::read_bounded(&file, 4096)?;
+        let bytes =
+            super::super::read_bounded(&file, 4096).context("Guest application save failed")?;
         if bytes == marker.as_bytes() {
             break;
         }
@@ -167,10 +188,11 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
         json!({"pid":pid,"window_id":window,"session":session,"keys":["cmd","w"],"delivery_mode":"foreground"}),
         paths,
         closed,
-    )?;
+    ).context("Guest check document close failed")?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let windows = call("list_windows", json!({"pid":pid}), paths, closed)?;
+        let windows = call("list_windows", json!({"pid":pid}), paths, closed)
+            .context("Guest check document close failed")?;
         let still_present = windows["windows"]
             .as_array()
             .context("Driver window inventory missing")?

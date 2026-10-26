@@ -48,6 +48,8 @@ Codex executable, account configuration and credential-file metadata. Passive
 refresh never reads the keychain. A newer failed/unknown check supersedes older
 success; configuration changes, expiry or a changed boot require a new explicit
 check. This local receipt does not prove network access or provider entitlement.
+Configuration is parsed as a TOML document, including its tables; parsing a
+single TOML value incorrectly rejects an otherwise valid retained account.
 
 Explicit actions own bounded guest children and checkpoint intent before
 effects. Start computer control uses the public no-permissions-gate launch mode;
@@ -147,6 +149,10 @@ transcripts, permission waits and result collection belong to that runtime.
 The existing headless runtime is reused; Linux binaries cannot substitute for
 this build. The release workflow includes a macOS arm64 runtime artifact,
 architecture check, self-test and checksum inventory.
+Replacing an already quiescent guest runtime waits up to ten seconds for its
+old LaunchAgent to disappear after `bootout`, then submits `bootstrap` once.
+Acknowledgement of `bootout` alone does not prove service removal. A timeout
+retains an unknown setup result without force-killing or replaying activation.
 
 Control uses the pinned Cua CLI's authenticated guest execution
 transport, forwarding bounded JSON over stdin to a guest helper. The helper

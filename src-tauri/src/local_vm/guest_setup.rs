@@ -465,6 +465,10 @@ else: sys.exit(99)
                 assert!(!document.exists());
             } else {
                 assert_eq!(receipt.status, Status::OutcomeUnknown);
+                assert_eq!(
+                    receipt.detail.as_deref(),
+                    Some("guest_native_desktop_save_unverified")
+                );
                 assert!(receipt.verification.is_none());
                 assert!(document.exists());
                 assert!(!home.path().join("closed").exists());
@@ -1464,16 +1468,15 @@ fn driver_action(
                 Duration::from_secs(20),
             )?;
             if result.code == 0 && captured_desktop(&result.bytes) {
-                if desktop_check::verify(paths, closed).is_ok() {
-                    Ok((
+                match desktop_check::verify(paths, closed) {
+                    Ok(()) => Ok((
                         Status::Complete,
                         "explicit_guest_desktop_input_readback_verified",
-                    ))
-                } else {
-                    Ok((
+                    )),
+                    Err(error) => Ok((
                         Status::OutcomeUnknown,
-                        "guest_native_desktop_check_incomplete_inspect_document",
-                    ))
+                        desktop_check::failure_reason(&error),
+                    )),
                 }
             } else {
                 Ok((
