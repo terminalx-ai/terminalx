@@ -559,7 +559,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     guard.strict = false;
     guard.local = () => null;
     guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
-    guard.handlers.github_identity = () => ({ login: "trade100x", source: "ssh", email: "me@example.com", repo: "me/api" });
+    guard.handlers.github_identity = () => ({ login: "trade100x", source: "ssh", email: "me@example.com", repo: "me/api", remoteHost: "github" });
     const local: SessionEntry = {
       id: "local-gh",
       projectPath: "/Users/me/shop",
@@ -586,6 +586,37 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("session-title")).toBeNull();
     // Asked about the folder the session works in, once.
     expect(guard.calls.filter((call) => call.command === "github_identity").map((call) => call.args)).toEqual([{ projectPath: "/Users/me/shop", refresh: false }]);
+  });
+
+  it.each([
+    [null, "session-local-only", "On this computer only: no remote yet"],
+    ["gitlab", "session-gitlab-remote", "On GitLab"],
+    ["other", "session-other-remote", "On a Git remote"],
+  ] as const)("marks a project whose remote is %s by where it lives, not with GitHub's mark", async (remoteHost, testId, label) => {
+    guard.strict = false;
+    guard.local = () => null;
+    guard.handlers.work_status = () => ({ isRepo: true, dirty: false, branch: "main", ahead: 0, behind: 0 });
+    // The GitHub CLI is signed in all the same: that alone does not put the project on GitHub.
+    guard.handlers.github_identity = () => ({ login: "trade100x", source: "gh", email: "me@example.com", repo: null, remoteHost });
+    const local: SessionEntry = {
+      id: `home-${testId}`,
+      projectPath: `/Users/me/${testId}`,
+      cwd: `/Users/me/${testId}`,
+      branch: "main",
+      title: "Setup",
+      created: "",
+      modified: "",
+      archived: false,
+      pinned: false,
+      worktreeRemoved: false,
+      tabs: [{ id: `ht-${testId}`, harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }],
+    };
+    upsertSession(local);
+    render(wrap(<SessionView session={local} sidebarOpen onToggleSidebar={() => undefined} />));
+    const mark = await screen.findByTestId(testId);
+    expect(mark.getAttribute("aria-label")).toBe(label);
+    expect(screen.getByTestId("session-breadcrumb").firstElementChild).toBe(mark);
+    expect(screen.queryByTestId("session-github-account")).toBeNull();
   });
 
   it("in the main window, is named a quick chat and says where it runs instead of showing a project or a branch", async () => {

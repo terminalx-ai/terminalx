@@ -2,8 +2,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { SessionPipelineControls } from "./SessionPipelineControls";
 import { LocalShareButton } from "./ShareSessionDialog";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Terminal } from "@/icons";
+import { CalendarClock, ChevronRight, CircleDot, Cloud, Copy, Ellipsis, Folder, FolderOpen, GitBranch, Globe, Laptop, LogoGitlab, MessageSquare, MessageSquarePlus, PanelLeft, PanelRight, Server, Terminal } from "@/icons";
 import { describeGithubIdentity, refreshGithubIdentity, useGithubIdentity } from "@/lib/githubIdentity";
+import type { GithubIdentity } from "@/lib/api";
 import { toggleTabView, useTabViews } from "@/lib/tabViews";
 import { followedSelection, isTerminalTab, tabViewIn } from "@/lib/tabFront";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -214,6 +215,33 @@ function GithubMark({ className }: { className?: string }) {
     <svg viewBox="0 0 16 16" aria-hidden className={className} fill="currentColor">
       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
     </svg>
+  );
+}
+
+const HOME_CHIP = "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-veil-raised hover:text-foreground";
+
+/** The header's first mark: where the project's origin remote is hosted, or this computer when there is none. */
+function ProjectHome({ identity, onRefresh }: { identity: GithubIdentity; onRefresh: () => void }) {
+  // An older backend says nothing of the host: a GitHub repo is still known by its name.
+  const host = identity.remoteHost ?? (identity.repo ? "github" : null);
+  if (host === "github") {
+    const label = identity.login ? `Connected to GitHub as ${identity.login}` : "On GitHub";
+    return (
+      <WithTooltip label={identity.login ? `${label}. ${describeGithubIdentity(identity)}` : `On GitHub${identity.repo ? `: ${identity.repo}` : ""}`}>
+        <button type="button" onClick={onRefresh} aria-label={label} className={HOME_CHIP} data-testid="session-github-account">
+          <GithubMark className="size-3.5" />
+        </button>
+      </WithTooltip>
+    );
+  }
+  const [Icon, label, testId] =
+    host === "gitlab" ? [LogoGitlab, "On GitLab", "session-gitlab-remote"] : host === "other" ? [Server, "On a Git remote", "session-other-remote"] : [Laptop, "On this computer only: no remote yet", "session-local-only"];
+  return (
+    <WithTooltip label={label}>
+      <span role="img" aria-label={label} className={HOME_CHIP} data-testid={testId}>
+        <Icon className="size-3.5" />
+      </span>
+    </WithTooltip>
   );
 }
 
@@ -521,20 +549,8 @@ export function SessionView({
           ) : (
           /* A cloud header in a narrow window gives way in order (see HEADER_CHIP_YIELDS), and clips rather than run under the buttons on the right. */
           <div className={cn("flex min-w-0 flex-1 items-center gap-1.5 px-1 text-sm", cloud && "overflow-hidden")} data-testid="session-breadcrumb">
-            {/* The GitHub account the folder is connected to, first: the mark alone, the account on hover; a click asks GitHub again. */}
-            {githubIdentity?.login && (
-              <WithTooltip label={`Connected to GitHub as ${githubIdentity.login}. ${describeGithubIdentity(githubIdentity)}`}>
-                <button
-                  type="button"
-                  onClick={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)}
-                  aria-label={`Connected to GitHub as ${githubIdentity.login}`}
-                  className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-veil-raised hover:text-foreground"
-                  data-testid="session-github-account"
-                >
-                  <GithubMark className="size-3.5" />
-                </button>
-              </WithTooltip>
-            )}
+            {/* Where the project lives, first: GitHub's mark (the account on hover; a click asks GitHub again), GitLab's, another host, or this computer when it has no remote yet. */}
+            {githubIdentity && <ProjectHome identity={githubIdentity} onRefresh={() => void refreshGithubIdentity(session.link?.path ?? session.cwd)} />}
             {/* A cloud session that goes by its project's name (untitled, or locked with nothing else to name) has one title, not the same one twice. */}
             {!(cloud && cloud.projectName === session.title) && (
               <>

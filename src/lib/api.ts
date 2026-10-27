@@ -2315,6 +2315,8 @@ export interface GithubIdentity {
   source: "ssh" | "gh" | null;
   email: string | null;
   repo: string | null;
+  /** Where the origin remote is hosted; `null` for a project with no remote, on this computer only. */
+  remoteHost?: "github" | "gitlab" | "other" | null;
 }
 /** Sessions started from an issue, carried on to a pull request, a review and a merge. */
 export const issuePipelines = {
