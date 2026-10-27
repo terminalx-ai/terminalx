@@ -12,7 +12,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -21,9 +22,32 @@ pub struct LiveChild {
     pub pid: u32,
     pub epoch: u64,
     stdin: Mutex<Option<ChildStdin>>,
+    terminal: Arc<Mutex<Option<TerminalReceipt>>>,
+}
+
+/// Reader termination is separate from leader exit. Only Eof confirms drain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReaderEnd { Eof, ReadError, Panicked, Cancelled }
+
+/// Observed after both reader threads have joined. This does not certify that
+/// descendants/process-group members are gone, or that journal delivery succeeded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalReceipt {
+    pub pid: u32,
+    pub epoch: u64,
+    pub leader_reaped: bool,
+    pub code: Option<i32>,
+    pub stdout: ReaderEnd,
+    pub stderr: ReaderEnd,
+    pub exit_callback_panicked: bool,
 }
 
 impl LiveChild {
+    /// None while the leader or either owned reader has not finished.
+    pub fn terminal_receipt(&self) -> Option<TerminalReceipt> {
+        self.terminal.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub fn write_line(&self, line: &str) -> Result<()> {
         let mut guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
         let stdin = guard.as_mut().context("child stdin closed")?;
@@ -102,62 +126,97 @@ impl Host {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-        let mut child = cmd.spawn().with_context(|| format!("spawn {}", spec.program.display()))?;
+        let child = cmd.spawn().with_context(|| format!("spawn {}", spec.program.display()))?;
         let pid = child.id();
-
-        // A kill or a newer spawn may have raced the fork.
-        let stale = self.kill_gen.load(Ordering::SeqCst) != gen
-            || self.epochs.lock().unwrap().get(key).copied() != Some(epoch);
-        if stale {
-            terminate(pid);
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            bail!("start was cancelled");
-        }
-
-        let stdout = child.stdout.take().context("no stdout")?;
-        let stderr = child.stderr.take().context("no stderr")?;
-        let stdin = child.stdin.take().context("no stdin")?;
-        let live = Arc::new(LiveChild { pid, epoch, stdin: Mutex::new(Some(stdin)) });
-        self.children.lock().unwrap().insert(key.to_string(), live.clone());
-
-        {
-            let sink = sink.clone();
-            std::thread::Builder::new().name(format!("stdout-{key}")).spawn(move || {
-                let reader = BufReader::with_capacity(1 << 16, stdout);
-                for line in reader.split(b'\n').flatten() {
-                    let s = String::from_utf8_lossy(&line).trim_end_matches('\r').to_string();
-                    if !s.is_empty() {
-                        sink.stdout_line(s);
+        let mut start = StartingChild { child: Some(child), readers: Vec::new() };
+        let terminal = Arc::new(Mutex::new(None));
+        let setup = (|| -> Result<Arc<LiveChild>> {
+            let child = start.child.as_mut().unwrap();
+            let stdout = child.stdout.take().context("no stdout")?;
+            let stderr = child.stderr.take().context("no stderr")?;
+            let stdin = child.stdin.take().context("no stdin")?;
+            let live = Arc::new(LiveChild { pid, epoch, stdin: Mutex::new(Some(stdin)), terminal: terminal.clone() });
+            let out_sink = sink.clone();
+            start.readers.push(start_reader(format!("stdout-{key}"), move || {
+                read_stdout(stdout, |line| out_sink.stdout_line(line))
+            })?);
+            let err_sink = sink.clone();
+            start.readers.push(start_reader(format!("stderr-{key}"), move || {
+                for line in BufReader::new(stderr).lines() {
+                    match line {
+                        Ok(line) => err_sink.stderr_line(line),
+                        Err(_) => return ReaderEnd::ReadError,
                     }
                 }
-            })?;
-        }
-        {
-            let sink = sink.clone();
-            std::thread::Builder::new().name(format!("stderr-{key}")).spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    sink.stderr_line(line);
-                }
-            })?;
-        }
-        {
-            let key = key.to_string();
+                ReaderEnd::Eof
+            })?);
+
+            // The wait worker receives ownership only after every fallible
+            // thread start. Failed setup cannot dispatch into the caller's tab
+            // mutex: readers are parked on private, one-shot start channels.
+            let (tx, rx) = mpsc::channel::<StartingChild>();
             let children = self.children.clone();
-            std::thread::Builder::new().name(format!("wait-{key}")).spawn(move || {
-                let code = wait_child(child);
-                // Only forget the child if it is still the one registered.
-                let mut map = children.lock().unwrap();
-                if map.get(&key).map(|c| c.pid) == Some(pid) {
-                    map.remove(&key);
+            let owned_key = key.to_string();
+            let waiter = std::thread::Builder::new().name(format!("wait-{key}")).spawn(move || {
+                if let Ok(mut started) = rx.recv() {
+                    let mut child = started.child.take().unwrap();
+                    let readers = std::mem::take(&mut started.readers);
+                    let handles: Vec<_> = readers.into_iter().map(|reader| reader.begin()).collect();
+                    let status = child.wait();
+                    let code = status.as_ref().ok().and_then(|s| s.code());
+                    // On wait failure still attempt owned cleanup, without
+                    // manufacturing a successful exit status.
+                    let reaped = status.is_ok() || stop_and_reap(&mut child).is_ok();
+                    let mut map = children.lock().unwrap();
+                    if map.get(&owned_key).map(|c| (c.pid, c.epoch)) == Some((pid, epoch)) {
+                        map.remove(&owned_key);
+                    }
+                    drop(map);
+                    let exit_callback_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.exited(pid, code))).is_err();
+                    let receipt = finish_readers(pid, epoch, reaped, code, handles, exit_callback_panicked);
+                    *terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(receipt);
                 }
-                drop(map);
-                sink.exited(pid, code);
             })?;
+
+            // Hold epoch and registry together through final admission. kill_all
+            // increments its generation before taking the registry lock.
+            let epochs = self.epochs.lock().unwrap();
+            let mut map = self.children.lock().unwrap();
+            if self.kill_gen.load(Ordering::SeqCst) != gen || epochs.get(key).copied() != Some(epoch) {
+                drop(map);
+                drop(epochs);
+                drop(tx);
+                let _ = waiter.join();
+                bail!("start was cancelled");
+            }
+            map.insert(key.to_string(), live.clone());
+            drop(map);
+            drop(epochs);
+            // Release Host gates before permitting callbacks. A concurrent kill
+            // now sees the registered child; it cannot invalidate cleanup ownership.
+            let owned = StartingChild { child: start.child.take(), readers: std::mem::take(&mut start.readers) };
+            if let Err(err) = tx.send(owned) {
+                start = err.0;
+                let mut map = self.children.lock().unwrap();
+                if map.get(key).map(|c| (c.pid, c.epoch)) == Some((pid, epoch)) { map.remove(key); }
+                drop(map);
+                let _ = waiter.join();
+                bail!("child wait worker unavailable");
+            }
+            Ok(live)
+        })();
+        match setup {
+            Ok(live) => Ok(live),
+            Err(error) => {
+                // Independent of tab callbacks and Host registry membership.
+                // Attempt every cleanup step even if an earlier one fails.
+                let cleanup = start.rollback();
+                match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(error.context(format!("partial start cleanup failed: {cleanup}"))),
+                }
+            }
         }
-        Ok(live)
     }
 
     pub fn kill(&self, key: &str) {
@@ -209,8 +268,87 @@ pub(crate) fn group_or_process_alive(pid: u32) -> bool {
     is_alive(pid)
 }
 
-fn wait_child(mut child: Child) -> Option<i32> {
-    child.wait().ok().and_then(|s| s.code())
+// A parked reader owns its pipe but cannot read or call a sink before admission.
+struct StartingReader {
+    permit: mpsc::Sender<()>,
+    handle: JoinHandle<ReaderEnd>,
+}
+
+impl StartingReader {
+    fn begin(self) -> JoinHandle<ReaderEnd> {
+        let _ = self.permit.send(());
+        self.handle
+    }
+    fn cancel(self) -> ReaderEnd {
+        drop(self.permit);
+        join_reader(self.handle)
+    }
+}
+
+fn start_reader(name: String, read: impl FnOnce() -> ReaderEnd + Send + 'static) -> std::io::Result<StartingReader> {
+    let (permit, ready) = mpsc::channel();
+    let handle = std::thread::Builder::new().name(name).spawn(move || {
+        if ready.recv().is_err() { return ReaderEnd::Cancelled; }
+        read()
+    })?;
+    Ok(StartingReader { permit, handle })
+}
+
+fn join_reader(handle: JoinHandle<ReaderEnd>) -> ReaderEnd {
+    handle.join().unwrap_or(ReaderEnd::Panicked)
+}
+
+fn finish_readers(pid: u32, epoch: u64, leader_reaped: bool, code: Option<i32>, handles: Vec<JoinHandle<ReaderEnd>>, exit_callback_panicked: bool) -> TerminalReceipt {
+    let mut ends = handles.into_iter().map(join_reader);
+    TerminalReceipt {
+        pid, epoch, leader_reaped, code,
+        stdout: ends.next().unwrap(), stderr: ends.next().unwrap(),
+        exit_callback_panicked,
+    }
+}
+
+fn read_stdout(reader: impl std::io::Read, mut emit: impl FnMut(String)) -> ReaderEnd {
+    for line in BufReader::with_capacity(1 << 16, reader).split(b'\n') {
+        let Ok(line) = line else { return ReaderEnd::ReadError; };
+        let line = String::from_utf8_lossy(&line).trim_end_matches('\r').to_string();
+        if !line.is_empty() { emit(line); }
+    }
+    ReaderEnd::Eof
+}
+
+struct StartingChild {
+    child: Option<Child>,
+    readers: Vec<StartingReader>,
+}
+
+impl StartingChild {
+    fn rollback(&mut self) -> std::io::Result<()> {
+        // No reader has received a permit. Cancel/join each independently of
+        // process teardown (and therefore independently of inherited pipe EOF).
+        let mut reader_failed = false;
+        for reader in self.readers.drain(..) {
+            reader_failed |= reader.cancel() != ReaderEnd::Cancelled;
+        }
+        let process = self.child.take().map(|mut child| stop_and_reap(&mut child)).unwrap_or(Ok(()));
+        process?;
+        if reader_failed { return Err(std::io::Error::other("startup reader failed while cancelling")); }
+        Ok(())
+    }
+}
+
+impl Drop for StartingChild {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() { log::error!("partial child start cleanup: {error}"); }
+    }
+}
+
+fn stop_and_reap(child: &mut Child) -> std::io::Result<()> {
+    // No delayed PID-based escalation for a failed launch. Keep the Child until
+    // wait has attempted reaping. kill errors alone do not prove it is alive:
+    // it may already have exited. Successful wait is the teardown evidence.
+    kill_now(child.id());
+    let _ = child.kill();
+    child.wait().map(|_| ())
 }
 
 /// SIGTERM the group and the pid, then SIGKILL whatever is left after 2s. The
@@ -416,3 +554,7 @@ mod tests {
         host.kill_all();
     }
 }
+
+#[cfg(test)]
+#[path = "host_lifecycle_tests.rs"]
+mod lifecycle_tests;
