@@ -27,6 +27,8 @@ export interface StreamBlock {
 
 export interface TabLog {
   loaded: boolean;
+  /** True only after a manager history read reconciled current ownership. */
+  compactionContinuityKnown?: boolean;
   events: AgentEvent[];
   stream: StreamBlock[];
   status: TabStatus;
@@ -151,16 +153,14 @@ export function applyEvent(ev: AgentEvent) {
 export async function loadTab(sessionId: string, tabId: string) {
   const k = key(sessionId, tabId);
   const log = getLog(k);
-  if (log.loaded) return;
+  if (log.loaded && log.compactionContinuityKnown) return;
   const events = await agent.loadEvents(sessionId, tabId);
   const fresh = logs.get(k);
   // The tab may have closed while its persisted history was being read.
   if (!fresh) return;
   // Events that streamed in while loading are newer than the file; keep them.
-  const seen = new Set(events.map((e) => e.id));
-  fresh.events = [...events, ...fresh.events.filter((e) => !seen.has(e.id))];
-  fresh.loaded = true;
-  touch(k, true);
+  fresh.compactionContinuityKnown = true;
+  mergeTabEvents(sessionId, tabId, events);
 }
 
 /** The tab's log as it stands, outside React. */
@@ -170,7 +170,8 @@ export function getTabLog(sessionId: string, tabId: string): TabLog {
 
 /** Indicators the runtime never saves; their seq may be reused after it restarts. */
 function transient(ev: AgentEvent) {
-  return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started";
+  return ev.payload.type === "usage_update" || ev.payload.type === "model_request_started"
+    || (ev.payload.type === "context_compaction_lifecycle" && !ev.payload.persisted);
 }
 
 /**
@@ -255,6 +256,10 @@ let reconciling = false;
 export async function reconcileAgentEvents() {
   if (reconciling) return;
   reconciling = true;
+  for (const [k, log] of logs) {
+    log.compactionContinuityKnown = false;
+    dirty.add(k);
+  }
   // A frame requested before suspension need not be delivered on resume.
   if (frame !== null) cancelAnimationFrame(frame);
   flush();
@@ -279,7 +284,11 @@ export async function reconcileAgentEvents() {
         try {
           const events = await agent.loadEvents(session.id, tab.id);
           // Navigation/closure while the read was pending must not resurrect a log.
-          if (logs.has(k)) mergeTabEvents(session.id, tab.id, events);
+          const current = logs.get(k);
+          if (current) {
+            current.compactionContinuityKnown = true;
+            mergeTabEvents(session.id, tab.id, events);
+          }
         } catch {
           // Keep the existing conversation; a later resume retries the read.
         }

@@ -1,6 +1,6 @@
 /**
- * Disabled design slice for #644: no producer, reader or package export uses
- * this module. Inputs are normalized evidence, NOT provider wire messages.
+ * Shared ordered fold for #644. Inputs are normalized evidence, NOT provider
+ * wire messages. The transcript admits only explicitly confirmed starts.
  * `item_started` records an observation; it does not prove work began after
  * provider gates and must not enable a spinner without emitter verification.
  *

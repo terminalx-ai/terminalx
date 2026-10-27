@@ -35,6 +35,7 @@ it("merges missed chat history with concurrent events and verified status withou
     await recovery;
   });
   expect(hook.result.current.events.map((e) => e.id)).toEqual(["before", "missed", "live"]);
+  expect(hook.result.current.compactionContinuityKnown).toBe(true);
   expect(mocks.loadEvents).toHaveBeenCalledTimes(2);
   expect(mocks.patchTab).toHaveBeenCalledWith("synthetic", "tab", { status: "waiting" });
   hook.unmount();
@@ -49,10 +50,12 @@ it("retains history on failed recovery and retries on the next resume", async ()
   mocks.loadEvents.mockRejectedValueOnce(new Error("unavailable"));
   await act(() => store.reconcileAgentEvents());
   expect(hook.result.current.events.map((e) => e.id)).toEqual(["before"]);
+  expect(hook.result.current.compactionContinuityKnown).toBe(false);
   expect(mocks.patchTab).not.toHaveBeenCalled();
   mocks.loadEvents.mockResolvedValueOnce([event("before", 1), event("after", 2)]);
   await act(() => store.reconcileAgentEvents());
   expect(hook.result.current.events.map((e) => e.id)).toEqual(["before", "after"]);
+  expect(hook.result.current.compactionContinuityKnown).toBe(true);
   hook.unmount();
 });
 
@@ -65,4 +68,36 @@ it("does not overwrite a live status update with an older resume snapshot", asyn
   finish([{ id: "synthetic", tabs: [{ id: "tab", status: "waiting" }] }]);
   await recovery;
   expect(mocks.patchTab).not.toHaveBeenCalled();
+});
+
+it("keeps compaction unknown during a pending reconnect read, then restores only reconciled history", async () => {
+  const store = await import("./agentEvents");
+  const { buildTranscript } = await import("./transcript");
+  mocks.sessions = [{ id: "synthetic", tabs: [{ id: "tab", status: "in_progress" }] }];
+  const scope = { sessionId: "synthetic", tabId: "tab", conversationId: null, provider: "synthetic", threadId: "thread", subagentId: null };
+  const history: AgentEvent[] = [
+    { ...event("open", 1), payload: { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "connection_opened", generation: 1 } } },
+    { ...event("start", 2), payload: { type: "context_compaction_lifecycle", persisted: true, confirmedStart: true, evidence: { scope, type: "item_started", generation: 1, turnId: "turn", itemId: "item" } } },
+  ];
+  mocks.loadEvents.mockResolvedValueOnce(history);
+  await store.loadTab("synthetic", "tab");
+  const hook = renderHook(() => store.useTabLog("synthetic", "tab"));
+  const projection = () => {
+    const log = store.getTabLog("synthetic", "tab");
+    return buildTranscript(log.events, false, { compactionContinuityKnown: log.compactionContinuityKnown });
+  };
+  expect(projection().compacting).toBe(true);
+  let finish!: (events: AgentEvent[]) => void;
+  mocks.listSessions.mockResolvedValue(mocks.sessions);
+  mocks.loadEvents.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  await act(async () => {
+    const pending = store.reconcileAgentEvents();
+    await Promise.resolve();
+    expect(projection().compacting).toBe(false);
+    finish([...history, { ...event("lost", 3), payload: { type: "context_compaction_lifecycle", persisted: true, evidence: { scope, type: "continuity_lost", generation: 1, reason: "restarted" } } }]);
+    await pending;
+  });
+  expect(projection().compacting).toBe(false);
+  expect(projection().turns.flatMap(t => t.work)).toContainEqual(expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "unknown" }) }));
+  hook.unmount();
 });

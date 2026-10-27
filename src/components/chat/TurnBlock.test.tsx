@@ -155,4 +155,20 @@ describe("a compaction", () => {
     expect(screen.getByText(/Context compacted from 220k to 14k tokens/)).toBeDefined();
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  it("preserves reported zero and small counts and leaves missing counts absent", () => {
+    const view = render(<TurnBlock turn={compacted({ preTokens: 17, postTokens: 0 })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted from 17 to 0 tokens")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Context compacted")).toBeDefined();
+  });
+
+  it("renders stopped and uncertain work without claiming successful compaction", () => {
+    const lifecycle = { turnId: "turn", itemId: "item", generation: 1, retrying: false, state: "stopped", stoppedBy: "interrupted" };
+    const view = render(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction stopped: turn interrupted")).toBeDefined();
+    view.rerender(<TurnBlock turn={compacted({ preTokens: undefined, postTokens: undefined, lifecycle: { ...lifecycle, state: "unknown" }, uncertain: true })} sessionId="s" stream={[]} working={false} />);
+    expect(screen.getByText("Compaction status unknown: could not save status")).toBeDefined();
+    expect(screen.queryByText(/Context compacted/)).toBeNull();
+  });
 });

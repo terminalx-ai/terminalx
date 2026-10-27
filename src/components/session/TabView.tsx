@@ -211,7 +211,10 @@ export function TabView({
 
   // Nothing is running in a conversation that is only being read.
   const live = !readOnly && (tab.status === "in_progress" || tab.status === "waiting");
-  const transcript = useMemo(() => buildTranscript(events, live), [events, log.version, live]);
+  const transcript = useMemo(() => buildTranscript(events, live, {
+    conversationId: conversation,
+    compactionContinuityKnown: log.compactionContinuityKnown ?? false,
+  }), [events, log.version, live, conversation, log.compactionContinuityKnown]);
   // Whether the session's checkout differs from where the conversation
   // started, by tree diff, so a shell heredoc counts as much as an edit tool.
   const range = useMemo(() => changeRange(events, session.baseRef), [events, log.version, session.baseRef]);

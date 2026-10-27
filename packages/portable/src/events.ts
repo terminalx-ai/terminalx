@@ -1,3 +1,6 @@
+import type { CompactionEvidence } from "./compactionLifecycle";
+export type { CompactionEvidence, CompactionScope } from "./compactionLifecycle";
+
 /**
  * Portable twin of src-tauri/src/events.rs. Field names are the serde wire
  * contract: payload `type` and enum values are snake_case, fields camelCase.
@@ -179,6 +182,9 @@ export type Payload =
   | { type: "model_request_started" }
   | ({ type: "usage_update" } & Usage)
   | { type: "context_compaction_started" }
+  /** Additive scoped evidence. Only an admitted after-gates start is confirmed.
+   * persisted=false reports append uncertainty, never restart-recoverable success. */
+  | { type: "context_compaction_lifecycle"; evidence: CompactionEvidence; confirmedStart?: boolean; persisted: boolean }
   | { type: "context_compacted"; preTokens?: number; postTokens?: number }
   /** What the agent kept of the conversation the compaction before it folded away; never a prompt (#524). */
   | { type: "compaction_summary"; text: string }
