@@ -871,10 +871,20 @@ fn ask_app(event: &str, stdin: &str) -> Option<Value> {
 }
 
 fn denied_hook(event: &str) -> Value {
+    // There was no authenticated answer from the owner. Stay fail-closed,
+    // but do not attribute a disconnected or stale launch to a human denial.
+    let reason = "TerminalX could not verify this session's permissions. The action was blocked because the session owner is unavailable or no longer recognizes this launch.";
     if event == "PreToolUse" {
-        crate::harness::codex::pty::pre_tool_decision(false)
+        serde_json::json!({ "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }})
     } else {
-        crate::harness::codex::pty::permission_decision(false)
+        serde_json::json!({ "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": { "behavior": "deny", "message": reason },
+        }})
     }
 }
 

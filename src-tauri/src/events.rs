@@ -343,6 +343,9 @@ pub enum Payload {
         tool_use_id: String,
         tool_name: String,
         input: Value,
+        /// The provider's session directory. A tool may specify a different workdir in its input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

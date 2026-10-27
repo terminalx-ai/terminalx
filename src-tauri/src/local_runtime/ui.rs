@@ -66,14 +66,17 @@ fn connected(runtime: &Desktop) -> anyhow::Result<ConnectionState> {
 }
 
 #[tauri::command]
-pub async fn local_runtime_status(state: State<'_, AppState>) -> Result<ConnectionState, String> {
+pub async fn local_runtime_status(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<ConnectionState, String> {
     let Some(runtime) = state.runtime() else { return Ok(ConnectionState::Unavailable { message: state.runtime_error.lock().unwrap().clone() }) };
-    tauri::async_runtime::spawn_blocking(move || connected(&runtime).unwrap_or_else(|error| ConnectionState::Unavailable { message: format!("{error:#}") }))
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.window_connection(window.label()).and_then(|()| connected(&runtime))
+            .unwrap_or_else(|error| ConnectionState::Unavailable { message: format!("{error:#}") })
+    })
         .await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-pub async fn local_runtime_reconnect(app: AppHandle) -> Result<ConnectionState, String> {
+pub async fn local_runtime_reconnect(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
     static RECONNECT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _reconnect = RECONNECT.lock().await;
     let previous = app.state::<AppState>().runtime();
@@ -89,6 +92,21 @@ pub async fn local_runtime_reconnect(app: AppHandle) -> Result<ConnectionState, 
             Ok(result)
         }).await.map_err(|error| error.to_string())?;
     };
+    // A failed PTY reader must not revoke healthy windows or the owner lease.
+    // The requesting page reloads to acquire fresh taps and replay snapshots.
+    if previous.attachment().is_ok() {
+        let label = window.label().to_owned();
+        return tauri::async_runtime::spawn_blocking(move || {
+            connected(&previous).map_err(|error| format!("{error:#}"))?;
+            if previous.window_connection(&label).is_err() {
+                // A newer shared failure must not be mistaken for a view-only
+                // failure or return the earlier control snapshot as success.
+                previous.attachment().map_err(|error| format!("{error:#}"))?;
+                previous.detach_window(&label);
+            }
+            connected(&previous).map_err(|error| format!("{error:#}"))
+        }).await.map_err(|error| error.to_string())?;
+    }
     if !app.state::<AppState>().runtime().as_ref().is_some_and(|current| Arc::ptr_eq(current, &previous)) {
         return Err("The desktop connection changed while reconnecting. Try again.".into());
     }

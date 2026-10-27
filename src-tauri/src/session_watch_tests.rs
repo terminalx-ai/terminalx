@@ -364,6 +364,39 @@ fn a_pretool_report_from_a_replaced_launch_is_not_acknowledged() {
     assert!(reply.output.is_none(), "a stale launch must still fail closed at the owner bridge");
 }
 
+#[test]
+fn permission_context_survives_the_hook_without_changing_tool_input() {
+    for (gate, input, reason) in [
+        ("PreToolUse", json!({"command":"git status --short --branch"}), "Approval is required because this session is set to Ask every time."),
+        ("PermissionRequest", json!({"cmd":"pwd", "workdir":"/workspace/other", "justification":"Inspect the selected checkout"}), "Inspect the selected checkout"),
+    ] {
+        let rig = Rig::in_mode(CliKind::Codex, "manual");
+        let manager = rig.manager.clone();
+        let frame = HookFrame {
+            session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: gate.into(),
+            payload: json!({"cwd":"/workspace/app", "tool_name":"Bash", "tool_input":input}),
+        };
+        let worker = std::thread::spawn(move || manager.on_hook(frame));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let request = loop {
+            if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+            assert!(Instant::now() < deadline, "the hook must publish a permission request");
+            std::thread::sleep(MOMENT);
+        };
+        let event = rig.events().into_iter().find(|e| matches!(e.payload, Payload::PermissionRequested { .. })).unwrap();
+        {
+            let rt = rig.rt.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { unreachable!() };
+            p.decisions[&request].sender.send(Decision::Deny).unwrap();
+        }
+        worker.join().unwrap();
+        let payload = serde_json::to_value(event.payload).unwrap();
+        assert_eq!(payload["cwd"], "/workspace/app", "the hook's directory must reach the recorded permission event");
+        assert_eq!(payload["description"], reason);
+        assert_eq!(payload["input"], input, "display context must not rewrite the provider's tool arguments");
+    }
+}
+
 /// A send opens the turn before the input thread types anything. Silence
 /// before that send must not make the new turn look stalled (#237).
 #[test]
@@ -899,6 +932,7 @@ fn a_silent_turn_waiting_for_approval_is_counted_separately() {
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
             request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(),
             input: json!({ "command": "ls" }), title: None, description: None, options: vec![],
         }, None);
@@ -1643,7 +1677,7 @@ fn a_pending_permission_still_waits_for_input_after_a_failed_command() {
     rig.append(&failed_command(CliKind::Claude, "call-1"));
     {
         let mut rt = rig.rt.lock().unwrap();
-        rig.manager.apply(&mut rt, Payload::PermissionRequested { request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
+        rig.manager.apply(&mut rt, Payload::PermissionRequested { cwd: None, request_id: "r1".into(), tool_use_id: "call-2".into(), tool_name: "Bash".into(), input: json!({ "command": "rm file" }), title: None, description: None, options: vec![] }, None);
     }
     assert_eq!(rig.status(), TabStatus::Waiting);
     assert_eq!(rig.recovery(), None);
@@ -1954,6 +1988,7 @@ fn no_enter_is_written_while_the_cli_is_asking_something_an_enter_would_answer()
     {
         let mut rt = rig.rt.lock().unwrap();
         rig.manager.apply(&mut rt, Payload::PermissionRequested {
+            cwd: None,
             request_id: "r1".into(), tool_use_id: "call-9".into(), tool_name: "Bash".into(),
             input: json!({ "command": "rm -rf build" }), title: None, description: None, options: vec![],
         }, None);

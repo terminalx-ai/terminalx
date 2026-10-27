@@ -87,7 +87,7 @@ beforeEach(() => {
 });
 afterEach(async () => { await event({ kind: "stopped" }); cleanup(); });
 
-it.each(["success", "rejection"] as const)("binds deferred A %s to A and retains B for its own send", async outcome => {
+it.each(["success", "rejection"] as const)("binds deferred A %s to A while pending ownership preserves B and blocks repeat sends", async outcome => {
   const a = deferred();
   const onSend = vi.fn().mockImplementationOnce(() => a.promise).mockResolvedValue(undefined);
   await mount(onSend);
@@ -95,6 +95,11 @@ it.each(["success", "rejection"] as const)("binds deferred A %s to A and retains
   edit("open Parakeet files");
   await send();
   expect(onSend).toHaveBeenNthCalledWith(1, "open Parakeet files", []);
+  const pending = screen.getByRole("button", { name: "Sending" });
+  expect(pending.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(pending);
+  expect(onSend).toHaveBeenCalledTimes(1);
+  expect(learnCalls()).toHaveLength(0);
   edit("");
   await record("open parcel files");
   expect(box().value).toBe("open parcel files");
@@ -103,8 +108,10 @@ it.each(["success", "rejection"] as const)("binds deferred A %s to A and retains
     expect(learnCalls()).toHaveLength(1);
     expect(learnCalls()[0][1]).toMatchObject({ before: "open paraquet files", after: "open Parakeet files" });
   } else expect(learnCalls()).toHaveLength(0);
-  // A completion must not consume B. Composer may clear the draft on A success;
-  // restore/edit B explicitly before B's own send, without recording it again.
+  // #637 preserves B's visible draft; #439 separately retains B's learning
+  // candidate. A's success still learns A even after it loses draft ownership.
+  expect(box().value).toBe("open parcel files");
+  expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
   edit("open package files");
   await send();
   expect(learnCalls()).toHaveLength(outcome === "success" ? 2 : 1);

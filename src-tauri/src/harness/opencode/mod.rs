@@ -405,6 +405,7 @@ impl OpenCode {
                 let patterns = p["patterns"].as_array().map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).filter(|list| !list.is_empty());
                 let mut out = self.commit_open_text();
                 out.push(Action::Emit(Payload::PermissionRequested {
+                    cwd: None,
                     request_id,
                     tool_use_id: p["callID"].as_str().or_else(|| p["tool"]["callID"].as_str()).unwrap_or("").into(),
                     tool_name: tool,

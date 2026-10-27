@@ -36,6 +36,57 @@
   Learn a single word correction even when surrounding capitalization or terminal
   punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
 
+### Chat
+
+- Show sending progress immediately and prevent repeat submissions while a message
+  is pending. Preserve newer drafts and recalled text, and keep pending sends and
+  errors visible across tab remounts and cloud reconnects. (#637)
+
+- Keep issue confirmations compact and scrollable with visible decision controls
+  and originating-session context. Background requests wait for explicit review
+  without interrupting another conversation; human approval remains required. (#641)
+- Show clear delivery progress when continuing in a new session, remove the submitted
+  handoff draft, and preserve any edits made while the handoff is starting. (#635)
+
+- Open a mobile machine’s sessions without restarting an active connection, and
+  load its sessions automatically after reconnecting. (#633)
+
+- Recover unavailable live connections automatically without restarting agents or
+  resending prompts, while preserving unsent drafts and isolating unrelated window
+  connection failures. (#643)
+
+## 0.2.20
+
+### Codex sessions and permissions
+
+- Keep fresh and resumed Codex sessions isolated from the shared daemon so
+  hooks use the current tab and runtime, fixing false tool-call refusals after
+  restarting TerminalX. Accept unchanged approved tools with a supported hook
+  reply, and explain when the session owner is unavailable instead of claiming
+  the user declined. Explicit denials and human-only controls remain enforced. (#639)
+- Check that the installed Codex supports `--no-daemon` before preparing or
+  starting a session; 0.164.0 is verified. Unsupported versions receive an
+  actionable upgrade message. Keep the capability check within its deadline,
+  including subprocesses that retain output pipes after their parent exits. (#639)
+
+### Documentation
+
+- Add a fresh-VM Zeron comparison, narrated walkthrough and prioritized
+  improvement backlog, with account-dependent features marked untested. (#640)
+
+## 0.2.19
+
+### Permissions
+
+- Fix local sessions rejecting tool calls with “The user declined this action”
+  when nobody declined them. Authenticated tool reports now leave the provider's
+  own permission policy in charge; missing replies, stale launches and explicit
+  denials remain blocked. (#632)
+- Show the full command, working directory and approval reason in local and shared
+  permission cards, including Codex commands. Preserve whitespace and long command
+  suffixes, wrap long lines and keep approval buttons reachable in narrow and
+  floating windows. (#632)
+
 ## 0.2.18
 
 ### Background sessions

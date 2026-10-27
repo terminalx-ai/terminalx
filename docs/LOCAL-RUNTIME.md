@@ -473,10 +473,38 @@ with production startup still using the in-process backend.
 
 The connection notice separates unavailable live state from session history. It
 subscribes before reading status, ignores older status results after a disconnect,
-and reconnects only when explicitly requested. A reconnect closes old view leases
+and rechecks current window health on disconnect events. It attempts reader
+recovery after 1, 2 and 4 seconds, then leaves manual reconnect available while
+checking for independent recovery every 5 seconds. A terminal-view failure is
+scoped to its window's shared PTY connection; healthy windows and cloud session
+connections are not declared unavailable by that event. Only a failed shared
+event connection needs desktop-wide reattachment. A reconnect closes old view leases
 before opening a replacement event attachment to the same owner generation; it
 never replays input or silently follows a replacement runtime. Successful
-reattachment reloads the view once to rebuild snapshots and PTY taps. Pairing must
+reattachment rechecks current health before reloading the view to rebuild snapshots
+and PTY taps. Only unsent drafts positively identified by the loaded local session
+index are checkpointed to window-scoped session storage before that reload and
+consumed by the next document, without sending them. Cloud and issue drafts keep
+their existing scoped persistence; unclassified draft IDs and the legacy all-draft
+checkpoint are never restored through the local handoff. Recovery waits for the
+local index to load before checkpointing. Recovery also waits until each cloud
+draft matches text acknowledged by its account-scoped cache, with no queued or
+in-flight write for that tab. Pending, failed or unsavable drafts keep the
+document open; a health poll can finish recovery after a later successful save.
+Cache mutations, including deletion, are serialized by account, organization,
+workspace and tab beyond individual store lifetimes. Returning A -> B -> A
+cannot let an old issued mutation overtake the replacement store's save. Recovery
+also waits for detached stores' outstanding mutations before destroying the
+document that owns this ordering. Deletion and uncertain results invalidate
+matching saved-draft evidence. This barrier is synchronous with checkpoint/reload and does not rely on
+the best-effort unmount flush. If
+checkpointing fails, the page stays open with its drafts. The attempt budget is
+also window-scoped session storage, recorded before native recovery and retained
+across reloads/remounts. Neither reader release nor a connected control read
+replenishes it: automatic attempts are conservatively limited to three per window
+browsing lifetime, with manual recovery still available. This avoids assuming an
+absent replacement reader has recovered. Manual clicks during a pending health
+read are coalesced and honored after it completes. Pairing must
 bind its new account-scoped owner adapter before production reconnect is enabled.
 
 The first intercepted quit offers keep-running, stop-all, and cancellation. Only

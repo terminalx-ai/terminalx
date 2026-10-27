@@ -402,6 +402,7 @@ impl Acp {
                 self.asks.insert(request_id.clone(), rid);
                 let mut out = self.flush();
                 out.push(Action::Emit(Payload::PermissionRequested {
+                    cwd: None,
                     request_id,
                     tool_use_id,
                     tool_name: kind.into(),

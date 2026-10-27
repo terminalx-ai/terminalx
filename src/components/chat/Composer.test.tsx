@@ -1088,3 +1088,70 @@ describe("autocorrect in the composer (#525)", () => {
     expect(correctionsOf(box)).toEqual({ spellcheck: "false", autocorrect: "off", autocapitalize: "off" });
   });
 });
+
+// #637: hold the delivery promise independently of any agent response.
+describe("pending send acknowledgment", () => {
+  it.each(["click", "keyboard"])("acknowledges %s immediately and submits once until acceptance", async (action) => {
+    let accept!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: "hello" } });
+    if (action === "click") fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    else fireEvent.keyDown(field, { key: "Enter" });
+    expect(screen.getByRole("status").textContent).toBe("Sending…");
+    expect(screen.getByRole("button", { name: "Sending" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("hello", []);
+    expect((field as HTMLTextAreaElement).value).toBe("hello");
+    await act(async () => accept());
+    expect(screen.queryByText("Sending…")).toBeNull();
+    expect((field as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it.each(["next draft", "", "hello"])("preserves edits ending in %j after acceptance", async (next) => {
+    let accept!: () => void;
+    render(<TestComposer onSend={() => new Promise<void>((resolve) => { accept = resolve; })} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    fireEvent.change(field, { target: { value: "intermediate edit" } });
+    fireEvent.change(field, { target: { value: next } });
+    await act(async () => accept());
+    expect((field as HTMLTextAreaElement).value).toBe(next);
+  });
+
+  it("keeps the draft and stops showing progress on refusal without resending", async () => {
+    let refuse!: (error: Error) => void;
+    const onSend = vi.fn(() => new Promise<void>((_, reject) => { refuse = reject; }));
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox");
+    fireEvent.change(field, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await act(async () => refuse(new Error("delivery uncertain")));
+    expect(screen.queryByText("Sending…")).toBeNull();
+    expect((field as HTMLTextAreaElement).value).toBe("hello");
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+  });
+});
+
+
+it("retains an image added while an earlier image is being sent", async () => {
+  let accept!: () => void;
+  let imageId = 0;
+  vi.mocked(crypto.randomUUID).mockImplementation(() => `image-${++imageId}` as ReturnType<typeof crypto.randomUUID>);
+  openDialog.mockResolvedValueOnce(["/tmp/first.png"]).mockResolvedValueOnce(["/tmp/next.png"]);
+  invoke.mockImplementation(async (_command, { path }) => ({ name: path.endsWith("first.png") ? "first.png" : "next.png", mediaType: "image/png", data: "AQID" }));
+  const onSend = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
+  render(<TestComposer onSend={onSend} />);
+  fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  await screen.findByAltText("first.png");
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+  await screen.findByAltText("next.png");
+  await act(async () => accept());
+  expect(screen.queryByAltText("first.png")).toBeNull();
+  expect(screen.getByAltText("next.png")).toBeTruthy();
+  expect(onSend).toHaveBeenCalledExactlyOnceWith("", [{ name: "first.png", mediaType: "image/png", data: "AQID" }]);
+});

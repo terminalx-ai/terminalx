@@ -37,6 +37,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
   const [worktree, setWorktree] = useState(into?.worktree ?? false);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [delivering, setDelivering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [destination, setDestination] = useState<Launched>();
@@ -95,6 +96,7 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
     if (startingRef.current || !context || !settings || sent) return;
     startingRef.current = true;
     setStarting(true);
+    setDelivering(false);
     setError(null);
     try {
       const prompt = preparedPrompt.current ?? continuationPrompt(context, mode, into?.project.path);
@@ -102,9 +104,10 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
       const created = (launched: Launched) => {
         if (active.current) setDestination(launched);
       };
+      const confirming = () => { if (active.current) setDelivering(true); };
       const result = into
-        ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination)
-        : await launchContinuation(context, settings, prompt, created, destination);
+        ? await moveChatToProject({ id: session.id, title: source.title?.trim() || session.title }, { projectPath: into.project.path, worktree }, settings, prompt, created, destination, confirming)
+        : await launchContinuation(context, settings, prompt, created, destination, confirming);
       if (!active.current) {
         if (result.stage !== "delivered") onLateError?.(result.error);
         return;
@@ -171,11 +174,12 @@ export function ContinuationDialog({ session, source, into, onClose, onLateError
           </fieldset>
           {context?.partialCapture && <p className="mt-3 text-xs text-muted-foreground">Focused mode will use a bounded partial capture of recent saved conversation history. Older content is omitted.</p>}
         </>}
+        {starting && delivering && <p role="status" className="mt-4 text-sm text-muted-foreground">Waiting for the new session to confirm receipt. You can open it to follow progress; do not send the handoff again.</p>}
         {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
         <DialogFooter>
           <Button variant="ghost" disabled={!canClose} onClick={close}>{destination ? "Open New Session" : "Cancel"}</Button>
           {!loading && (!context || !settings) && <Button variant="secondary" onClick={() => setAttempt((n) => n + 1)}>Retry</Button>}
-          {!sent && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />Starting…</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
+          {!sent && <Button disabled={loading || starting || !context || !settings} onClick={() => void start()}>{starting ? <><LoaderCircle className="size-4 animate-spin" />{delivering ? "Confirming delivery…" : "Starting…"}</> : destination ? "Retry Start" : into ? "Link and Start" : "Start New Session"}</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

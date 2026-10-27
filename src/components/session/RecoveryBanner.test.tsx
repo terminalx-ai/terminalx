@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyRecovery } from "@/lib/recovery";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { askDetail } from "@/components/chat/AskCards";
-import type { PendingAsk } from "@/lib/transcript";
+import { buildTranscript, type PendingAsk } from "@/lib/transcript";
+import type { AgentEvent } from "@/types/events";
 import { WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { FakeAgentRuntime } from "@/test/fakeAgentRuntime";
 import { usePickerModels } from "@/lib/cloudModels";
@@ -18,6 +19,28 @@ const props = () => ({ kind: null, waiting: false, asks: [], busy: false, models
 afterEach(cleanup);
 
 describe("session recovery UI smoke", () => {
+  it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
+    // The real Codex PreToolUse event has Bash + command, not the original
+    // exec_command arguments the previous UI-only fixture supplied.
+    const event: AgentEvent = JSON.parse(`{
+      "id":"permission-event", "sessionId":"s", "tabId":"t", "harness":"codex", "seq":1, "ts":"2026-10-26T00:00:00Z",
+      "payload":{"type":"permission_requested", "requestId":"r", "toolUseId":"", "toolName":"Bash",
+        "input":{"command":"git status --short --branch"}, "cwd":"/workspace/app",
+        "description":"Approval is required because this session is set to Ask every time.", "options":[]}
+    }`);
+    const { rerender } = render(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
+    expect(screen.getByText("/workspace/app")).toBeTruthy();
+    expect(screen.getByText(/Session directory:/)).toBeTruthy();
+    expect(screen.getByText("Approval is required because this session is set to Ask every time.")).toBeTruthy();
+    if (event.payload.type !== "permission_requested") throw new Error("permission fixture");
+    event.payload.input = { command: "pwd", workdir: "/workspace/other", justification: "Inspect the selected checkout" };
+    rerender(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
+    expect(screen.getByText("/workspace/other")).toBeTruthy();
+    expect(screen.getByText(/Working directory:/)).toBeTruthy();
+    expect(screen.queryByText("/workspace/app")).toBeNull();
+    expect(screen.getByText("Inspect the selected checkout")).toBeTruthy();
+  });
+
   it("shows the full local Codex command, working directory and reason before approval", () => {
     const command = `printf 'keep  two spaces\\n'\n${"echo next\n".repeat(40)}echo final-command`;
     const local: PendingAsk = { ...ask, toolName: "exec_command", input: { cmd: command, workdir: "/workspace/app", justification: "Run the focused regression test" }, description: undefined };

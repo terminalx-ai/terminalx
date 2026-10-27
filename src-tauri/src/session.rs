@@ -3011,6 +3011,7 @@ impl SessionManager {
         env: &mut Vec<(String, String)>,
         grant: &crate::cloud_grants::LaunchGrant,
     ) -> Result<CliLaunch> {
+        let launcher = codex::pty::Launcher::resolve()?;
         let route = grant.route.as_ref();
         // A route's provider serves the model the route names (PRO-18), not
         // the account's list, so neither the tab's model nor a substitute
@@ -3060,13 +3061,12 @@ impl SessionManager {
             self.publish(rt, Payload::Status { text: "The previous Codex conversation is no longer on this machine; starting a new one.".into() }, None);
             resume = None;
         }
-        let command = codex::pty::launch_command(codex::pty::LaunchOptions {
+        let command = launcher.command(codex::pty::LaunchOptions {
             resume: resume.as_deref(),
             model: &model,
             effort: tab.effort.as_deref(),
             permission_mode: &tab.permission_mode,
-        })
-        .ok_or_else(|| anyhow!("Codex is not installed. Install it and log in, then try again."))?;
+        });
         // The route's model provider, as user-level overrides.
         let command = format!("{command}{}", route.map(|route| route.codex_args.as_str()).unwrap_or_default());
         Ok(CliLaunch {
@@ -4284,9 +4284,15 @@ impl SessionManager {
                     request_id: request_id.clone(),
                     tool_use_id: String::new(),
                     title: Some(claude::mapper::tool_title(&tool_name, &input)),
-                    // Codex explains itself in the tool input when it wants an
-                    // escalation; Claude says nothing here.
-                    description: input["description"].as_str().map(String::from),
+                    // PreToolUse can reduce a Codex shell call to just Bash +
+                    // command. Explain our gate when no agent reason survived;
+                    // never invent a justification or change the tool input.
+                    description: ["justification", "description"].iter()
+                        .find_map(|field| input[*field].as_str().filter(|s| !s.trim().is_empty()))
+                        .map(String::from)
+                        .or_else(|| (kind == CliKind::Codex && gate == "PreToolUse" && codex::asks_every_tool(&p.mode))
+                            .then(|| "Approval is required because this session is set to Ask every time.".into())),
+                    cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
                     options: claude::mapper::build_options(&suggestions),
                     tool_name: tool_name.clone(),
                     input: input.clone(),
@@ -4835,8 +4841,9 @@ mod tests {
         let answered = out(CliKind::Claude, "PermissionRequest", Decision::Answers(json!({"answers": {"q": "a"}})));
         assert_eq!(answered["hookSpecificOutput"]["decision"]["updatedInput"]["answers"]["q"], "a");
 
-        // Codex: two events, two shapes, and neither takes anything extra —
-        // it fails the hook closed if updatedInput is so much as present.
+        // Codex: an unchanged allowed PreToolUse call is an acknowledgement.
+        // A bare permissionDecision:allow is rejected by Codex 0.164.0.
+        assert_eq!(out(CliKind::Codex, "PreToolUse", Decision::Allow), json!({}));
         let gate = out(CliKind::Codex, "PreToolUse", Decision::Deny);
         assert_eq!(gate["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(gate["hookSpecificOutput"]["permissionDecision"], "deny");

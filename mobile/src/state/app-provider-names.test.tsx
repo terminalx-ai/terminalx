@@ -10,6 +10,7 @@ const fake = vi.hoisted(() => ({
   stage: null as null | ((stage: string, attempt: number) => void),
   connected: null as null | (() => void),
   describe: vi.fn(),
+  summaries: vi.fn(),
   forgetPairing: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
@@ -65,7 +66,7 @@ vi.mock("../data/host-api", () => ({
   HostApi: class { resetConnection() {}
     describe = fake.describe;
     forgetPairing = fake.forgetPairing;
-    summaries = async () => [];
+    summaries = fake.summaries;
   },
 }));
 
@@ -91,8 +92,9 @@ beforeEach(async () => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   fake.storage.clear();
   fake.credentialRead = null;
-  for (const mock of [fake.describe, fake.forgetPairing, fake.start, fake.stop, fake.restart]) mock.mockReset();
+  for (const mock of [fake.summaries, fake.describe, fake.forgetPairing, fake.start, fake.stop, fake.restart]) mock.mockReset();
   fake.describe.mockResolvedValue(null);
+  fake.summaries.mockResolvedValue([]);
   fake.forgetPairing.mockResolvedValue(true);
   fake.paired = HOST;
   await savePairedHost(HOST, { v: 1, deviceToken: "token" });
@@ -214,13 +216,14 @@ it("takes the name from the pairing link at once, and falls back for a bare code
 
 it("reconnects the active computer in place, and connects another one", async () => {
   fake.start.mockClear();
+  await connected();
   await act(async () => app.connectHost(app.hosts[0]!));
   await act(async () => app.reconnectHost(HOST.id));
   expect(fake.restart).toHaveBeenCalledTimes(1);
-  expect(fake.start).toHaveBeenCalledTimes(1);
+  expect(fake.start).not.toHaveBeenCalled();
   await act(async () => app.disconnectHost());
   await act(async () => app.reconnectHost(HOST.id));
-  expect(fake.start).toHaveBeenCalledTimes(2);
+  expect(fake.start).toHaveBeenCalledTimes(1);
 });
 
 it("asks the connected computer to drop this phone before forgetting it, and forgets it either way", async () => {
@@ -239,4 +242,123 @@ it("asks the connected computer to drop this phone before forgetting it, and for
   await act(async () => app.forgetHost(HOST.id));
   expect(fake.forgetPairing).not.toHaveBeenCalled();
   expect(await readHosts()).toEqual([]);
+});
+
+const summary = (id: string) => ({ id, title: id, project: "project", worktree: "worktree", modified: "now", tabs: [] });
+
+it("selects the connected Mac without clearing its sessions or restarting it (#633)", async () => {
+  await connected();
+  fake.summaries.mockResolvedValue([summary("existing")]);
+  await act(async () => app.refreshSessions());
+  fake.start.mockClear();
+  fake.restart.mockClear();
+  let finish!: (values: unknown[]) => void;
+  fake.summaries.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  await act(async () => { expect(await app.connectHost(app.hosts[0]!)).toBe(true); });
+  expect(app.sessions).toEqual([summary("existing")]);
+  expect(fake.start).not.toHaveBeenCalled();
+  expect(fake.restart).not.toHaveBeenCalled();
+  await act(async () => finish([summary("fresh")]));
+  expect(app.sessions).toEqual([summary("fresh")]);
+});
+
+it.each(["connecting", "reconnecting", "cant-connect", "unreachable"])("loads sessions after selecting a %s Mac", async (stage) => {
+  await act(async () => fake.stage!(stage, 3));
+  fake.restart.mockClear();
+  await act(async () => { expect(await app.connectHost(app.hosts[0]!)).toBe(true); });
+  expect(fake.restart).toHaveBeenCalledTimes(stage === "connecting" || stage === "reconnecting" ? 0 : 1);
+  expect(fake.summaries).not.toHaveBeenCalled();
+  fake.summaries.mockResolvedValue([summary("resumed")]);
+  await connected();
+  await act(async () => fake.connected!());
+  expect(app.sessions).toEqual([summary("resumed")]);
+});
+
+it("drains the reconnect refresh even when the previous summary request rejects", async () => {
+  let fail!: (cause: Error) => void;
+  fake.summaries.mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+  let pending!: Promise<void>;
+  await act(async () => { pending = app.refreshSessions(); });
+  fake.summaries.mockResolvedValue([summary("after-reconnect")]);
+  await connected();
+  await act(async () => fake.connected!());
+  await act(async () => { fail(new Error("old connection closed")); await pending; });
+  expect(app.sessions).toEqual([summary("after-reconnect")]);
+  expect(app.error).toBeNull();
+  expect(app.loadingSessions).toBe(false);
+});
+
+it("keeps current summary failures visible", async () => {
+  fake.summaries.mockRejectedValueOnce(new Error("Could not read sessions"));
+  await act(async () => app.refreshSessions());
+  expect(app.error).toBe("Could not read sessions");
+  expect(app.loadingSessions).toBe(false);
+});
+
+it("ignores late credentials after another selection or disconnect", async () => {
+  const other = { ...HOST, id: "host-bbbb2222" };
+  for (const cancel of [() => app.connectHost(HOST), () => app.disconnectHost()]) {
+    let finish!: (value: string) => void;
+    fake.credentialRead = () => new Promise((resolve) => { finish = resolve; });
+    let pending!: Promise<boolean>;
+    await act(async () => { pending = app.connectHost(other); });
+    await act(async () => { await cancel(); });
+    fake.start.mockClear();
+    await act(async () => { finish(JSON.stringify({ v: 1, deviceToken: "token" })); expect(await pending).toBe(false); });
+    expect(fake.start).not.toHaveBeenCalled();
+  }
+});
+
+it("rejects late summaries and errors from a previous selection", async () => {
+  const other = { ...HOST, id: "host-bbbb2222" };
+  await savePairedHost(other, { v: 1, deviceToken: "other-token" });
+  for (const reject of [false, true]) {
+    await act(async () => app.connectHost(HOST));
+    let finish!: (value: unknown) => void;
+    fake.summaries.mockImplementationOnce(() => new Promise((resolve, fail) => { finish = reject ? fail : resolve; }));
+    let pending!: Promise<void>;
+    await act(async () => { pending = app.refreshSessions(); });
+    await act(async () => app.connectHost(other));
+    await act(async () => { finish(reject ? new Error("old host failed") : [summary("old")]); await pending; });
+    expect(app.sessions).toEqual([]);
+    expect(app.error).toBeNull();
+  }
+});
+
+it("loads the newly selected computer only when its connection becomes usable", async () => {
+  const other = { ...HOST, id: "host-bbbb2222" };
+  await savePairedHost(other, { v: 1, deviceToken: "other-token" });
+  await connected();
+  fake.summaries.mockResolvedValue([summary("old")]);
+  await act(async () => app.refreshSessions());
+  fake.summaries.mockClear();
+  await act(async () => { expect(await app.connectHost(other)).toBe(true); });
+  expect(app.activeHost?.id).toBe(other.id);
+  expect(app.sessions).toEqual([]);
+  expect(fake.summaries).not.toHaveBeenCalled();
+  fake.summaries.mockResolvedValue([summary("new")]);
+  await connected();
+  await act(async () => fake.connected!());
+  expect(app.sessions).toEqual([summary("new")]);
+});
+
+it.each([null, new Error("Credential storage unavailable")])("keeps credential failures on the current selection: %s", async (failure) => {
+  fake.credentialRead = async () => { if (failure) throw failure; return null; };
+  fake.start.mockClear();
+  await act(async () => { expect(await app.connectHost({ ...HOST, id: "host-bbbb2222" })).toBe(false); });
+  expect(app.activeHost?.id).toBe(HOST.id);
+  // readHostCredential deliberately treats secure-store failures as unavailable credentials.
+  expect(app.error).toBe("The device credential is unavailable. Pair this computer again.");
+  expect(fake.start).not.toHaveBeenCalled();
+});
+
+it("reports malformed stored credentials without leaving an unhandled selection rejection", async () => {
+  fake.credentialRead = async () => "{";
+  let expected = "";
+  try { JSON.parse("{"); } catch (cause) { expected = (cause as Error).message; }
+  fake.start.mockClear();
+  await act(async () => { expect(await app.connectHost({ ...HOST, id: "host-bbbb2222" })).toBe(false); });
+  expect(app.error).toBe(expected);
+  expect(app.activeHost?.id).toBe(HOST.id);
+  expect(fake.start).not.toHaveBeenCalled();
 });
