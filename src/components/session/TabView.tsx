@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agent as agentApi, errorMessage, type ImageInput } from "@/lib/api";
+import { agent as agentApi, errorMessage, pty, type ImageInput } from "@/lib/api";
 import { applyEvent, getTabLog, useTabLog } from "@/lib/agentEvents";
 import { buildTranscript, conversationEvents, type Transcript } from "@/lib/transcript";
-import { getDraft, setDraft, useDraft } from "@/lib/drafts";
+import { clearComposerSendError, composerSendScope, useComposerSend } from "@/lib/composerSends";
+import { getDraft, setDraft, subscribeDrafts, useDraft } from "@/lib/drafts";
 import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
@@ -22,9 +23,9 @@ import { History, MessageSquare, Play } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { useRowMenu } from "@/components/ui/useRowMenu";
-import { useTerminals } from "@/lib/terminal";
+import { openTerminal, useTerminals } from "@/lib/terminal";
 import { cn } from "@/lib/cn";
-import { clearTabViewError, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
+import { clearTabViewError, enterTerminalView, forgetTabView, isPtyFirst, leaveTerminalView, startTabAgent, useTabViews } from "@/lib/tabViews";
 import { byHandLock, isByHand, isTerminalTab, resumable, tabPaneId, tabViewIn, type Resumable } from "@/lib/tabFront";
 import { useSessionStore } from "@/lib/sessions";
 import { classifyRecovery, RECOVERY_MESSAGES, RECOVERY_PROMPT, recoveryFromEvents } from "@/lib/recovery";
@@ -97,7 +98,17 @@ export function TabView({
   const isGit = useSessionIsGit(session);
   const log = useTabLog(backend.logSessionId, tab.id);
   const draft = useDraft(tab.id);
-  const [error, setError] = useState<string | null>(null);
+  const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
+  // A cloud command's refusal says what happened to it (queued, view only, no key yet).
+  const commandError = (e: unknown) => {
+    const message = e instanceof Error ? e.message : null;
+    if (message && message === backend.readOnlyReason) return message;
+    return cloudCommandError(e);
+  };
+  const sendScope = composerSendScope(backend, tab.id);
+  const sendState = useComposerSend(sendScope);
+  const [localError, setError] = useState<string | null>(null);
+  const error = localError ?? (sendState.error != null ? (local ? safeError(sendState.error) : commandError(sendState.error)) : null);
   const views = useTabViews();
   // A cloud tab's terminal view (PRO-86) attaches to its CLI on the VM; it is
   // only there while the runtime serves it, else the tab shows its chat.
@@ -152,13 +163,7 @@ export function TabView({
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
   const recovery = !backend.caps.recovery || readOnly ? null : eventRecovery ?? (error || viewError ? classifyRecovery(error ?? viewError!) : null);
-  const safeError = (e: unknown) => RECOVERY_MESSAGES[classifyRecovery(String(e))];
-  // A cloud command's refusal says what happened to it (queued, view only, no key yet).
-  const commandError = (e: unknown) => {
-    const message = e instanceof Error ? e.message : null;
-    if (message && message === backend.readOnlyReason) return message;
-    return cloudCommandError(e);
-  };
+
 
   const backendRef = useRef(backend);
   backendRef.current = backend;
@@ -237,6 +242,10 @@ export function TabView({
       if (blockedRef.current) throw new Error(blockedRef.current);
       setError(null);
       setStopped(false);
+      let draftEdited = false;
+      const unsubscribeDraft = subscribeDrafts((id) => {
+        if (id === tab.id) draftEdited = true;
+      });
       try {
         const out = await backend.send(tab.id, text, images);
         for (const ev of out.events) applyEvent(ev);
@@ -244,8 +253,10 @@ export function TabView({
       } catch (e) {
         setError(local ? safeError(e) : commandError(e));
         backend.setTabStatus(tab.id, "waiting");
-        setDraft(tab.id, getDraft(tab.id) || text);
+        if (!draftEdited) setDraft(tab.id, getDraft(tab.id) || text);
         throw e;
+      } finally {
+        unsubscribeDraft();
       }
     },
     [backend, local, tab.id],
@@ -301,12 +312,13 @@ export function TabView({
       // A queued cloud stop ends the turn on the runtime; there is nothing local to resume.
       if (backend.caps.recovery) setStopped(true);
       setError(null);
+      clearComposerSendError(sendScope);
       clearTabViewError(tab.id);
     }).catch((e) => setError(local ? safeError(e) : commandError(e))).finally(() => {
       recoveryLock.current = false;
       setRecovering(false);
     });
-  }, [backend, local, tab.id, gate?.mayStop]);
+  }, [backend, local, tab.id, gate?.mayStop, sendScope]);
 
   const retry = async (model?: string) => {
     if (recoveryLock.current) return;
@@ -324,6 +336,7 @@ export function TabView({
       setStopped(false);
       for (const ev of out.events) applyEvent(ev);
       setError(null);
+      clearComposerSendError(sendScope);
       clearTabViewError(tab.id);
       // Recovery never touches the unsent composer draft or attachments.
     } catch (e) { setError(safeError(e)); }
@@ -402,12 +415,31 @@ export function TabView({
   );
   const deciding = !!outbox && transcript.pendingAsks.some((ask) => outbox.deciding(ask.requestId));
 
+  // Signed out of the agent itself (not TerminalX's account): Claude Code signs in
+  // from its own prompt, so its terminal is shown with `/login` typed; Codex signs
+  // in from a command of its own, run in a shell tab. Other agents say how themselves.
+  const signInAgent = !local || recovery !== "signed_out"
+    ? undefined
+    : ptyFirst && tab.harness === "claude"
+      ? async () => {
+          try {
+            await enterTerminalView(session, tab);
+            // The command, then Return on its own, as a key and not as pasted text.
+            await pty.write(paneId, "/login");
+            await new Promise((done) => setTimeout(done, 120));
+            await pty.write(paneId, "\r");
+          } catch (e) { setError(safeError(e)); }
+        }
+      : tab.harness === "codex"
+        ? () => void openTerminal(session.id, session.cwd, 100, 24, { title: "Codex sign-in", command: "codex login" }).catch((e) => setError(safeError(e)))
+        : undefined;
+
   // Pending requests and recovery sit with the composer in the chat, where the
   // reply goes; over a terminal there is no composer, so they head the pane.
   const banner = (placement: "top" | "composer") => (
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
-        onRetry={retry} onStop={stop} onContinue={() => {
+        onRetry={retry} onStop={stop} onSignIn={signInAgent} onContinue={() => {
           if (recoveryLock.current) return;
           recoveryLock.current = true;
           setRecovering(true);
@@ -418,6 +450,8 @@ export function TabView({
         }} />
   );
 
+  // What the worktree's branch changes, over the composer: a local chat on its own branch.
+
   const chat = (
     <Chat
       sessionId={backend.logSessionId}
@@ -425,7 +459,8 @@ export function TabView({
       stream={log.stream}
       cwd={local ? session.cwd : undefined}
       live={live}
-      loading={!readOnly && !!tab.loadingHistory}
+      // Until the saved conversation is read, an empty chat is one still loading, not one with nothing in it.
+      loading={!readOnly && (!!tab.loadingHistory || (local && !log.loaded))}
       progressing={live && tab.status === "in_progress" && !recovery && !transcript.pendingAsks.length}
       answering={answering || deciding}
       onAnswerPermission={answerPermission}
@@ -464,6 +499,7 @@ export function TabView({
           </div>
         )}
         <Composer
+          sendScope={sendScope}
           tab={tab}
           cwd={local ? session.cwd : undefined}
           // A tab that is not on screen asks its runtime for nothing: on a runtime that answers

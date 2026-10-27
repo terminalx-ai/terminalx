@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 
 const { moveChatToProject, continuationPrompt } = await import("./continuation");
 const sessions = await import("./sessions");
-const { getDraft } = await import("./drafts");
+const { getDraft, setDraft } = await import("./drafts");
 
 const chat: SessionEntry = {
   id: "chat-1", projectPath: "/store/Chats", cwd: "/store/Chats", title: "Plan the login page", created: "", modified: "", pinned: false, archived: false, worktreeRemoved: false, activeTab: "chat-tab",
@@ -121,3 +121,65 @@ describe("moving a chat into a project", () => {
     expect(continuationPrompt(context, "focused")).toContain("This is the same shared workspace");
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+it.each(["archive", "retry"].flatMap((phase) => ["delivered", "delivery"].flatMap((stage) => ["untouched", "identical", "empty"].map((edit) => ({ phase, stage, edit })))))(
+  "preserves move ownership across $phase: $edit, $stage", async ({ phase, stage, edit }) => {
+    const entered = deferred<void>();
+    const gate = deferred<void>();
+    const sending = deferred<void>();
+    const delivery = deferred<{ events: [] }>();
+    let starts = 0;
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "list_harnesses") return [{ id: "codex", available: true }];
+      if (command === "create_session") return created;
+      if (command === "ensure_tab_started" && ++starts === 1 && phase === "retry") {
+        entered.resolve();
+        return gate.promise;
+      }
+      if (command === "set_session_archived" && phase === "archive") {
+        entered.resolve();
+        return gate.promise;
+      }
+      if (command === "send_message") { sending.resolve(); return delivery.promise; }
+      return undefined;
+    });
+    const run = (existing?: Parameters<typeof moveChatToProject>[5]) => moveChatToProject(
+      { id: chat.id, title: chat.title }, { projectPath: "/repos/web", worktree: true }, selected, prompt, vi.fn(), existing,
+    );
+    let running = run();
+    await entered.promise;
+    expect(getDraft("work-tab")).toBe(prompt);
+    expect(calls("send_message")).toHaveLength(0);
+    if (edit !== "untouched") setDraft("work-tab", "user edit");
+    if (phase === "retry") {
+      gate.reject(new Error("spawn failed"));
+      const failed = await running;
+      expect(failed.stage).toBe("launch");
+      expect(calls("set_session_archived")).toHaveLength(0);
+      if (edit !== "untouched") setDraft("work-tab", edit === "empty" ? "" : prompt);
+      running = run(failed.launched);
+    } else {
+      if (edit !== "untouched") setDraft("work-tab", edit === "empty" ? "" : prompt);
+      gate.resolve();
+    }
+    await sending.promise;
+    const expected = edit === "identical" ? prompt : "";
+    expect(getDraft("work-tab")).toBe(expected);
+    if (stage === "delivered") delivery.resolve({ events: [] });
+    else delivery.reject(new Error("uncertain delivery"));
+    const result = await running;
+    expect(result.stage).toBe(stage);
+    expect(getDraft("work-tab")).toBe(edit === "untouched" && stage === "delivery" ? prompt : expected);
+    expect(calls("create_session")).toHaveLength(1);
+    expect(calls("send_message")).toHaveLength(1);
+    expect(calls("send_message")[0][1]).toMatchObject({ text: prompt, confirmDelivery: true });
+    expect(order("ensure_tab_started")).toBeLessThan(order("set_session_archived"));
+  },
+);

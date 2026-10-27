@@ -88,6 +88,8 @@ mod harness;
 pub mod hooks;
 #[cfg(feature = "desktop")]
 mod issue_control;
+#[cfg(feature = "desktop")]
+mod issue_confirmation;
 mod issue_pipeline;
 mod issue_ops;
 mod issues;
@@ -98,6 +100,7 @@ mod keychain;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
+mod local_vm;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -319,7 +322,7 @@ pub fn run() {
             let endpoint = hooks::prepare_control()?;
             let asking = app.handle().clone();
             let ask: issue_control::Ask = Arc::new(move |question: issue_control::Question| {
-                tauri::async_runtime::block_on(commands::cloud_control_question(asking.clone(), question.title, question.message, question.agree))
+                tauri::async_runtime::block_on(issue_confirmation::ask(asking.clone(), question))
             });
             control::WindowControl::new(sink, computer.clone(), browser.clone())
                 .serve(app.handle().clone(), endpoint.clone(), pairing.clone(), ask)?;
@@ -606,6 +609,8 @@ pub fn run() {
             commands::pty_kill,
             commands::terminal_perf_reply,
             commands::cloud_control_reply,
+            issue_confirmation::issue_confirmation_pending,
+            issue_confirmation::issue_confirmation_reply,
             commands::cloud_control_setting,
             commands::cloud_control_set_setting,
             commands::cloud_control_confirm,
@@ -628,6 +633,12 @@ pub fn run() {
             commands::list_workspaces,
             commands::preview_workspace_name,
             commands::rename_workspace,
+            commands::rename_branch,
+            commands::local_vm_status,
+            commands::local_vm_start,
+            commands::local_vm_stop,
+            commands::local_vm_reset,
+            commands::local_vm_start_runtime,
             commands::adopt_agent_title,
             commands::project_overview,
             commands::copy_text,

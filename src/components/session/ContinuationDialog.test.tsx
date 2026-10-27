@@ -57,7 +57,7 @@ it("starts the new tab with exactly the source conversation's settings", async (
   mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
   open(); await loaded();
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, sourceSettings, continuationPrompt(context, "focused"), expect.any(Function), undefined));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, sourceSettings, continuationPrompt(context, "focused"), expect.any(Function), undefined, expect.any(Function)));
 });
 it("switches provider to that provider's saved settings, keeps the mode, and launches exactly that", async () => {
   mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
@@ -66,7 +66,7 @@ it("switches provider to that provider's saved settings, keeps the mode, and lau
   expect(shown()).toEqual(["Codex", "GPT-6 Mini", "Medium", "Plan"]);
   fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, continuationPrompt(context, "full"), expect.any(Function), undefined));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6-mini", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, continuationPrompt(context, "full"), expect.any(Function), undefined, expect.any(Function)));
 });
 it("keeps the dialog's choices to this launch, leaving the saved preferences as they were", async () => {
   mocks.launch.mockResolvedValue({ stage: "delivered", launched: { sessionId: session.id, tab: { id: "new" } } });
@@ -77,7 +77,7 @@ it("keeps the dialog's choices to this launch, leaving the saved preferences as 
   fireEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-6" }));
   expect(shown()).toEqual(["Codex", "GPT-6", "Medium", "Plan"]);
   fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, expect.any(String), expect.any(Function), undefined));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(context, { harness: "codex", model: "gpt-6", effort: "medium", permissionMode: "plan", pipeline: { autoMerge: false, resolveConflicts: false } }, expect.any(String), expect.any(Function), undefined, expect.any(Function)));
   expect(getPrefs()).toMatchObject(saved);
 });
 it("falls back to the configured provider and disables full mode with an explanation", async () => {
@@ -190,6 +190,7 @@ describe("linking a chat to a project", () => {
       continuationPrompt(chatContext, "focused", "/repos/web"),
       expect.any(Function),
       undefined,
+      expect.any(Function),
     );
     expect(mocks.launch).not.toHaveBeenCalled();
   });
@@ -266,4 +267,37 @@ describe("linking a chat to a project", () => {
     expect(mocks.move.mock.calls[1][5]).toEqual(launched);
     expect(mocks.move.mock.calls[1][3]).toBe(mocks.move.mock.calls[0][3]);
   });
+});
+
+it.each(["delivered", "delivery"])("shows confirmation progress and handles delayed %s without another send", async (stage) => {
+  let created!: () => void;
+  let confirming!: () => void;
+  let finish!: (value: unknown) => void;
+  const launched = { sessionId: session.id, tab: { id: "new" } };
+  mocks.launch.mockImplementation((_context, _settings, _prompt, onCreated, _existing, onDelivering) => {
+    created = () => onCreated(launched);
+    confirming = onDelivering;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  const view = open(); await loaded();
+  fireEvent.click(screen.getByRole("radio", { name: /Full session transcript/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Start New Session" }));
+  expect(screen.getByRole("button", { name: "Starting…" }).hasAttribute("disabled")).toBe(true);
+  act(created);
+  expect(view.onClose).not.toHaveBeenCalled();
+  act(confirming);
+  const progress = screen.getByRole("button", { name: "Confirming delivery…" });
+  expect(progress.hasAttribute("disabled")).toBe(true);
+  expect(screen.queryByRole("button", { name: "Starting…" })).toBeNull();
+  expect(screen.getByText(/do not send the handoff again/)).toBeTruthy();
+  fireEvent.click(progress);
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  await act(async () => { finish(stage === "delivered" ? { stage, launched } : { stage, launched, error: "Uncertain delivery; inspect before retrying" }); });
+  if (stage === "delivered") expect(view.onClose).toHaveBeenCalledTimes(1);
+  else {
+    expect(view.onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toContain("Uncertain delivery");
+    expect(screen.queryByRole("button", { name: /Start|Confirming/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open New Session" })).toBeTruthy();
+  }
 });

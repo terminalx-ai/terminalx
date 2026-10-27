@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Terminal
+
+- Cancel pending atlas warm-up when its final terminal owner is disposed, while
+  preserving warm-up for remaining shared owners. Native memory acceptance
+  remains unresolved. (#232)
+
+### Chat
+
+- Clarify the CLI guide to keep simple issue filing and context checks in the
+  current conversation, with separate sessions reserved for authorized work. (#634)
+- Show sending progress immediately and prevent repeat submissions while a message
+  is pending. Preserve newer drafts and recalled text, and keep pending sends and
+  errors visible across tab remounts and cloud reconnects. (#637)
+
+- Keep issue confirmations compact and scrollable with visible decision controls
+  and originating-session context. Background requests wait for explicit review
+  without interrupting another conversation; human approval remains required. (#641)
+- Show clear delivery progress when continuing in a new session, remove the submitted
+  handoff draft, and preserve any edits made while the handoff is starting. (#635)
+
+- Open a mobile machine’s sessions without restarting an active connection, and
+  load its sessions automatically after reconnecting. (#633)
+
+- Recover unavailable live connections automatically without restarting agents or
+  resending prompts, while preserving unsent drafts and isolating unrelated window
+  connection failures. (#643)
+
 ## 0.2.20
 
 ### Codex sessions and permissions

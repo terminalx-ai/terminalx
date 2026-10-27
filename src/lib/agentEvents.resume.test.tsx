@@ -115,6 +115,43 @@ function compactionHistory(): AgentEvent[] {
   ];
 }
 
+it("finishes a failed initial load without attesting continuity and permits a later read", async () => {
+  const store = await import("./agentEvents");
+  const failure = new Error("unreadable history");
+  mocks.loadEvents.mockRejectedValueOnce(failure);
+  await expect(store.loadTab("synthetic", "tab")).rejects.toBe(failure);
+  expect(store.getTabLog("synthetic", "tab").loaded).toBe(true);
+  expect(store.getTabLog("synthetic", "tab").compactionContinuityKnown).not.toBe(true);
+  mocks.loadEvents.mockResolvedValueOnce(compactionHistory());
+  await store.loadTab("synthetic", "tab");
+  expect(store.getTabLog("synthetic", "tab").compactionContinuityKnown).toBe(true);
+  expect(mocks.loadEvents).toHaveBeenCalledTimes(2);
+});
+
+it("does not finish a current load when an invalidated or replaced read rejects", async () => {
+  const store = await import("./agentEvents");
+  mocks.listSessions.mockResolvedValue([]);
+  for (const change of ["invalidate", "recreate"] as const) {
+    store.dropTabLog("synthetic", "tab");
+    let rejectOld!: (error: Error) => void;
+    mocks.loadEvents.mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }));
+    const pending = store.loadTab("synthetic", "tab");
+    const failure = new Error(change);
+    const rejected = expect(pending).rejects.toBe(failure);
+    if (change === "invalidate") await store.reconcileAgentEvents();
+    else {
+      store.dropTabLog("synthetic", "tab");
+      store.applyEvent(event("replacement", 7));
+    }
+    const current = store.getTabLog("synthetic", "tab");
+    expect(current.loaded).toBe(false);
+    rejectOld(failure);
+    await rejected;
+    expect(store.getTabLog("synthetic", "tab")).toBe(current);
+    expect(current.compactionContinuityKnown).not.toBe(true);
+  }
+});
+
 it("rejects an initial pre-invalidation response but admits a current read across ordinary flushes", async () => {
   const store = await import("./agentEvents");
   const { buildTranscript } = await import("./transcript");

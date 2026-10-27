@@ -478,6 +478,27 @@ impl ControlService {
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
         }
+        // The Local VM (`local_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
+        if let Some(action) = command.strip_prefix("vm.") {
+            let vm_error = |error: anyhow::Error| ControlError::new("vm_failed", format!("{error:#}"), Some("See `terminalx skills get local-vm`.".to_string()));
+            let result = match action {
+                "status" => Ok(json!(crate::local_vm::status())),
+                "start" => crate::local_vm::start().map(|status| json!(status)).map_err(vm_error),
+                "stop" => crate::local_vm::stop().map(|status| json!(status)).map_err(vm_error),
+                "call" => {
+                    let tool = params["tool"].as_str().unwrap_or_default();
+                    let arguments = params["arguments"].as_str().unwrap_or("{}");
+                    crate::local_vm::call(tool, arguments).map(|output| json!({"output": output})).map_err(vm_error)
+                }
+                "tools" => crate::local_vm::tools(params["tool"].as_str()).map(|output| json!({"output": output})).map_err(vm_error),
+                "screenshot" => crate::local_vm::screenshot(params["out"].as_str().map(std::path::PathBuf::from)).map(|path| json!({"path": path})).map_err(vm_error),
+                other => Err(ControlError::new("invalid_arguments", format!("Unknown vm command {other}."), None::<String>)),
+            };
+            if matches!(action, "start" | "stop") {
+                self.sink.emit(crate::local_vm::CHANGED_EVENT, &json!({}));
+            }
+            return result;
+        }
         if command.starts_with("computer.") || command.starts_with("browser.") {
             return Err(ControlError::new(
                 "unsupported",
@@ -769,6 +790,7 @@ impl ControlService {
                         title: p.title,
                         use_worktree: p.use_worktree,
                         on_main: p.on_main,
+                        checkout_branch: None,
                         base_ref: None,
                         worktree_name: None,
                         issue: issue.as_ref().map(|issue| issue.reference.clone()),
@@ -1085,7 +1107,7 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
             Target::Linear { .. } => None,
         };
         // Shown in the question as the caller's claim, never trusted.
-        let session_title = caller.session.as_deref().and_then(|session| resolve_session(session).ok()).map(|session| session.title);
+        let session = caller.session.as_deref().and_then(|session| resolve_session(session).ok());
         let gate = |write: &Write, subject: &str, issue_repo: Option<&str>| {
             let subject = Subject {
                 issue: subject,
@@ -1093,7 +1115,8 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
                 project_name: &project.name,
                 // The switch is the project's, and applies only to an issue that is verifiably its own.
                 routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
-                session_title: session_title.as_deref(),
+                session_title: session.as_ref().map(|s| s.title.as_str()),
+                session_id: session.as_ref().map(|s| s.id.as_str()),
             };
             authorize(write, &subject, questions)
         };

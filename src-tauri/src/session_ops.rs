@@ -88,6 +88,9 @@ pub struct NewSession {
     /// A requested worktree name (an issue slug); sanitised and made unique.
     #[serde(default)]
     pub worktree_name: Option<String>,
+    /// An existing branch to check out in the new worktree, instead of a new branch.
+    #[serde(default)]
+    pub checkout_branch: Option<String>,
     /// Explicit acknowledgement that a requested worktree should be skipped.
     #[serde(default)]
     pub on_main: bool,
@@ -244,7 +247,10 @@ fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::r
             Some(name) => name,
             None => available_worktree_name(project_path, generated_name, None)?,
         };
-        let wt = git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?;
+        let wt = match req.checkout_branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+            Some(branch) => git::checkout_worktree(project_path, &name, branch).map_err(err)?,
+            None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
+        };
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
         entry.branch = Some(wt.branch);
@@ -594,6 +600,51 @@ pub(crate) fn rename_workspace_entries(project_path: &str, path: &str, requested
             }
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRename {
+    pub branch: String,
+    pub project: projects::Project,
+    pub sessions: Vec<SessionEntry>,
+}
+
+/// Rename a branch in git, wherever it is checked out, without moving its
+/// worktree: the sessions on it and its sidebar label follow it.
+pub(crate) fn rename_branch_entries(project_path: &str, from: &str, to: &str) -> std::result::Result<BranchRename, WorkspaceError> {
+    let _naming = WORKSPACE_NAMING.lock();
+    let project = projects::canonical(project_path).map_err(err)?;
+    let root = Path::new(&project);
+    let to = to.trim();
+    if from.is_empty() || to.is_empty() {
+        return Err(WorkspaceError::InvalidArguments("A branch needs a name.".into()));
+    }
+    if git::run(root, &["check-ref-format", "--branch", to]).is_err() {
+        return Err(WorkspaceError::InvalidArguments(format!("\"{to}\" is not a valid branch name.")));
+    }
+    if from == to {
+        let project = projects::move_branch_label(project_path, from, to).map_err(err)?;
+        return Ok(BranchRename { branch: to.to_string(), project, sessions: Vec::new() });
+    }
+    if git::branch_exists(root, to) {
+        return Err(WorkspaceError::InvalidArguments(format!("A branch named {to} already exists.")));
+    }
+    git::run(root, &["branch", "-m", from, to]).map_err(err)?;
+    let sessions = index::update(|sessions| {
+        let mut affected = Vec::new();
+        for session in sessions {
+            let here = projects::canonical(&session.project_path).map(|path| path == project).unwrap_or(session.project_path == project);
+            if here && session.branch.as_deref() == Some(from) {
+                session.branch = Some(to.to_string());
+                affected.push(session.clone());
+            }
+        }
+        Ok(affected)
+    })
+    .map_err(err)?;
+    let project = projects::move_branch_label(project_path, from, to).map_err(err)?;
+    Ok(BranchRename { branch: to.to_string(), project, sessions })
 }
 
 pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
@@ -1090,6 +1141,7 @@ mod tests {
             base_ref: None,
             worktree_name: None,
             on_main: false,
+            checkout_branch: None,
             issue: None,
             automation: None,
             cwd: None,
@@ -1415,6 +1467,7 @@ mod tests {
             base_ref: None,
             worktree_name: None,
             on_main: false,
+            checkout_branch: None,
             issue: None,
             automation: None,
             cwd: Some(cwd.into()),

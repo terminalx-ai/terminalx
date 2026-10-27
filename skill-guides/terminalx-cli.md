@@ -60,6 +60,16 @@ agent process is running.
 
 ### Start a session
 
+Keep work in the current conversation by default. Create another session only when the
+person requests a new conversation, delegates work to another agent, or authorizes a workflow
+that needs a separate session (such as a handoff or issue pipeline). Existing authorization
+is sufficient; do not ask again for each session in that workflow.
+
+Filing an issue, reading context, checking repository metadata, and other lightweight subtasks
+do not by themselves authorize another session. Do that work directly in the current
+conversation. If essential information is missing, ask there instead of starting a helper.
+This applies to project sessions, quick chats, and cloud sessions alike.
+
 ```text
 terminalx sessions create \
   --project <project> \
@@ -110,8 +120,11 @@ terminalx sessions create --quick \
   --json
 ```
 
-A quick chat is a session with no project. Use it for a question or a one-off task that
-belongs to no attached project; do not attach a folder as a project just to ask something.
+A quick chat is a visible, persistent session with no project. When a separate conversation
+is authorized as described above, use it for a question or a one-off task that belongs to no
+attached project; do not attach a folder as a project just to ask something. A quick chat is
+not a private scratch helper: even a read-only prompt creates a sidebar entry and can leave
+that session needing attention if prompt delivery cannot be confirmed.
 It runs in a scratch directory of its own under the TerminalX home, with no worktree and no
 branch, and the returned `path` is that directory. `--cwd` runs it in an existing directory
 instead; that directory is used as it is and is not added as a project.
@@ -189,6 +202,12 @@ worktree's uncommitted and unpushed counts from `worktrees list` before deleting
 
 ### Issues
 
+For a request to file an issue, gather any needed context directly in the current conversation
+and use `terminalx issues create`. Filing an issue does not require `sessions create --quick`
+or `sessions create --issue`; the latter starts a separate agent working on an existing issue.
+Do not start a context-check helper or an implementation session unless the person also
+authorized that work.
+
 ```text
 terminalx issues list --project <project> [--provider github|linear] \
   [--assigned-to-me] [--team <id>] [--search <text>] --json
@@ -228,8 +247,12 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
 Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX asks the person in a native dialog that
-names the issue, the action and the whole text, whoever runs the command. A refusal answers
+other people see it and may notify them, so TerminalX shows a pending request in the main
+window, whoever runs the command. The person chooses Review to see the reported session,
+project, target, action and complete text in a bounded, scrollable dialog. Background requests
+do not open the dialog or switch conversations. Only the explicit action button approves;
+Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
+40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
 what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
 lines is refused before anyone is asked; link to the details instead. A project can let comments and

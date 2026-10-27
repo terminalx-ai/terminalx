@@ -1,0 +1,27 @@
+{
+  "package": "@xterm/addon-webgl",
+  "version": "0.19.0",
+  "upstreamPackageCommit": "f447274f430fd22513f6adbf9862d19524471c04",
+  "patch": "patches/@xterm__addon-webgl@0.19.0.patch",
+  "patchSha256": "bbe00f1d880385d74f3812bc9418b0fd773f8db199245ff02a4071f3bc90f266",
+  "files": {
+    "src/TextureAtlas.ts": {
+      "originalSha256": "d6e171b9ceed0027e2aa96acd8e39387e0819813ab666ed731c6b597c0dff398",
+      "patchedSha256": "979138cb00851cd2f08de6a632fbc693fe2f57dcdda295bc87b36586a61b6e2e"
+    },
+    "lib/addon-webgl.js": {
+      "entry": "main",
+      "originalSha256": "b85f8d4b3e9756bebb757e3fe47134d70f03ea3d6b187624426d2e2b65dec06c",
+      "patchedSha256": "f31c5b72884479fcdfed324e77978ec8cbda76d6e90f35ffcea49fb37084ba4c"
+    },
+    "lib/addon-webgl.mjs": {
+      "entry": "module",
+      "originalSha256": "5ac2cbbb8a861ba99176eda0ee91f10c08de32d091e3488edf699ad111131ebb",
+      "patchedSha256": "80b7dab124f9434334af5402367358871ba246f7d58f5bab107b32133f84a8c7"
+    }
+  },
+  "materialized": true,
+  "patchedTestsExecuted": true,
+  "validationScope": "2026-10-27 private frozen offline install; six selected lifecycle cases passed, seven unrelated cases excluded; full checks outstanding",
+  "nativeAcceptance": "FAIL unchanged"
+}

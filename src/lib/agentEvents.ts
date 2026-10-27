@@ -171,7 +171,18 @@ export async function loadTab(sessionId: string, tabId: string) {
   const log = getLog(k);
   if (log.loaded && log.compactionContinuityKnown) return;
   const token = historyReadToken(log);
-  const events = await agent.loadEvents(sessionId, tabId);
+  let events: AgentEvent[];
+  try {
+    events = await agent.loadEvents(sessionId, tabId);
+  } catch (error) {
+    // Unreadable history is shown as none, not as a load that never ends.
+    const fresh = logs.get(k);
+    if (fresh && fresh.admission === token.incarnation && fresh.admission.generation === token.generation) {
+      fresh.loaded = true;
+      touch(k, true);
+    }
+    throw error;
+  }
   // A pre-gap response is history, not a current ownership attestation. Drop
   // it rather than re-admitting it into an invalidated/recreated reader.
   admitHistoryRead(sessionId, tabId, token, events);
