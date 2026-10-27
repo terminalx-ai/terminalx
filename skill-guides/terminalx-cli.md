@@ -228,8 +228,12 @@ it, or a file, for a comment with quotes, backticks or several lines. `--to`, `-
   answers `{"issue": …}`, re-read from GitHub or Linear after the change.
 
 Reading needs no confirmation. **Every write is an outward action**: it changes the issue where
-other people see it and may notify them, so TerminalX asks the person in a native dialog that
-names the issue, the action and the whole text, whoever runs the command. A refusal answers
+other people see it and may notify them, so TerminalX shows a pending request in the main
+window, whoever runs the command. The person chooses Review to see the reported session,
+project, target, action and complete text in a bounded, scrollable dialog. Background requests
+do not open the dialog or switch conversations. Only the explicit action button approves;
+Cancel request refuses, while Escape leaves it pending. Unanswered requests expire after
+40 seconds. Computer-use actions remain paused while a request is pending. A refusal answers
 `declined` (or `expired`, `busy`, `backoff`) and nothing is changed: do not retry, tell the person
 what you wanted to do instead. A comment, title or description longer than 4000 characters or 40
 lines is refused before anyone is asked; link to the details instead. A project can let comments and

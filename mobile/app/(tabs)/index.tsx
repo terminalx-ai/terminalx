@@ -26,8 +26,7 @@ export default function MachinesScreen() {
   useEffect(() => { if (session) void refreshMachines(); }, [refreshMachines, session]);
 
   const connect = async (host: (typeof app.hosts)[number]) => {
-    await app.connectHost(host);
-    router.dismissTo("/(tabs)/sessions");
+    if (await app.connectHost(host)) router.dismissTo("/(tabs)/sessions");
   };
 
   if (!app.ready) return <Screen><EmptyState title="Loading" detail="Reading this installation's device-only credentials." busy /></Screen>;
