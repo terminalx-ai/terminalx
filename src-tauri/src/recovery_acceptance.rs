@@ -298,21 +298,23 @@ fn recovered_phase(app: &tauri::AppHandle, log: &mut std::fs::File, permit: &Ver
             persist(log, &json!({"phase":"checkpoint-witness","value":value}))?;
         }
     }
-    // Output can be emitted just after the reload; wait only within this phase
-    // deadline for bytes strictly beyond BOTH previously captured PTY cursors.
+    // Establish a NEW owner cursor after reload/checkpoint validation. Merely
+    // replaying bytes produced between the baseline and fault is insufficient.
+    let live_barrier = fixture::bind(&native_evidence(app)?)?;
+    ensure!(permit.0.same_lifetimes(&live_barrier), "post-reload identity changed");
     let fresh = loop {
         let bound = fixture::bind(&native_evidence(app)?)?;
         ensure!(permit.0.same_lifetimes(&bound), "process/start/send identity changed");
         let visible = view_cursors(&bound)?;
-        if bound_before.fresh_output(&bound) && visible.iter().zip(&visible_before)
-            .all(|((id,n),(old_id,old_n))| id == old_id && n > old_n) { break bound; }
+        if live_barrier.fresh_output(&bound) && visible.iter().zip(&visible_before)
+            .all(|((id,n),(old_id,_))| id == old_id && live_barrier.cursors.get(id).is_some_and(|barrier| n > barrier)) { break bound; }
         ensure!(Instant::now() < deadline, "no fresh PTY output");
         std::thread::sleep(Duration::from_millis(250));
     };
     ensure!(counts() == now_calls && *ACTIVE_RECONNECTS.lock().unwrap() == [0,0], "late extra reconnect");
     persist(log, &json!({"phase":"recovered","shared":shared,"cleared":cleared,"manual":manual,
         "before":before,"after":after,"calls":now_calls,"native":fresh,
-        "viewBefore":visible_before,"viewAfter":view_cursors(&fresh)?}))
+        "viewBefore":visible_before,"postReloadBarrier":live_barrier,"viewAfter":view_cursors(&fresh)?}))
 }
 
 fn scenario(app: &tauri::AppHandle, log: &mut std::fs::File) -> Result<()> {
