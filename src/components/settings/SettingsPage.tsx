@@ -178,7 +178,7 @@ function GeneralTab() {
       {CLOUD_CONTROL_HAS_SETTING && (
         <SettingRow
           label={CLOUD_CONTROL_SETTING}
-          description={`Off: the terminalx command line cannot see or change cloud workspaces. ${CLOUD_CONTROL_POLICY === "both" ? "On: any agent running in a local session can list them, read their conversations and send messages to running workspaces. Starting, stopping or creating a workspace still asks you in this window each time." : "On: any agent running in a local session can list them, read their conversations, send messages, and start, stop or create workspaces in your organizations, which can cost money."}`}
+          description={`Off: the terminalx command line cannot see or change cloud workspaces. On: agents in local sessions can list workspaces, read conversations, send messages, launch sessions, and resume or create workspaces within your permissions. This authorizes billed compute without another confirmation. ${CLOUD_CONTROL_POLICY === "both" ? "Stopping a workspace still asks you each time." : "Stopping is also allowed."}`}
           control={
             <Switch
               aria-label={CLOUD_CONTROL_SETTING}
