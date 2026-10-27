@@ -77,8 +77,11 @@ focus the host viewer. Other windows and host
 applications are never selected. A refusal, ambiguous target or missing readback
 pauses setup without repeating input; an uncertain check document stays under
 `~/.terminalx-local/setup-checks` for inspection. A running VM, generic reply or
-PNG cannot make setup Ready. Live validation of this new check and fresh
-onboarding remain open.
+PNG cannot make setup Ready. On 2026-10-27, pilot guest `128f5efc` completed
+this native input/readback/save/close check through the background guest
+transport, with no host viewer interaction. The existing guest account check
+also passed without starting sign-in. The viewer was open; viewer-closed,
+locked-host and fresh-onboarding acceptance remain open.
 
 The conversation footer lets the user select a task prompt and specific
 project-relative context files. It inherits the parent's provider harness,
@@ -341,7 +344,7 @@ explicit direction.
 | Recovered work starts from fresh remote main | Exact checkpoint `fa0f4fa8` integrated with remote main `76a7d7b2` on 2026-10-26. |
 | Automated TypeScript/UI/invariant checks | Recorded by author in external `pro114-status.json`; rerun after final edits. |
 | Real macOS guest provider worker + transcript/PTY reconnect | Historical scoped guest tasks and fresh RPC-client reconnect passed; desktop reopen and interrupted-provider resume remain pending. |
-| Native guest app + browser input/readback; untouched host sentinel | Historical Calculator and trusted Safari input/readback passed at checkpoint `fa0f4fa8`; new setup document check and complete host-isolation acceptance remain pending. |
+| Native guest app + browser input/readback; untouched host sentinel | Historical Calculator and trusted Safari input/readback passed at checkpoint `fa0f4fa8`. Guest `128f5efc` passed the new native setup document input/readback/save/close check through background transport on 2026-10-27. Complete host-isolation acceptance remains pending. |
 | Host locked ≥15 minutes + terminal work + GUI action | Pending human participation; never inferred from unlocked pilot. |
 | Display off + viewer closed | Pending separately. |
 | Guest lock + supported recovery | Pending. |
