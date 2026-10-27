@@ -127,6 +127,7 @@ try {
       await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
       await page.getByText(`${count * 6} total`, { exact: true }).waitFor();
       if (count) await page.getByText("Check the synthetic layout", { exact: true }).first().waitFor();
+      assert.equal(await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("plugin:updater|check")), null, "layout fixture reports no available update");
       await page.evaluate(async ({ textScale }) => {
         await document.fonts.ready;
         if (textScale) {
