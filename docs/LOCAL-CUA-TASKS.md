@@ -71,7 +71,9 @@ and native editor, and types a nonce through Driver. It requires fresh native
 readback, identical bytes saved by the application, and confirmation that the
 same document closed before removing the file. Native Save/Close menu actions
 use Driver's exact-window foreground verification inside the pinned English
-guest profile. Other windows and host
+guest profile; the existing file exposes File → Save, without an ellipsis.
+All checks use the guest transport and its own desktop; they do not open or
+focus the host viewer. Other windows and host
 applications are never selected. A refusal, ambiguous target or missing readback
 pauses setup without repeating input; an uncertain check document stays under
 `~/.terminalx-local/setup-checks` for inspection. A running VM, generic reply or

@@ -233,12 +233,13 @@ pub(super) fn verify(paths: &Paths, closed: &AtomicBool) -> Result<()> {
     let snapshot = call("get_window_state", target.clone(), paths, closed)
         .context("Guest native readback failed")?;
     editor(&snapshot, pid, window, &marker).context("Guest native readback failed")?;
-    // The pinned English TextEdit profile exposes this native menu path.
+    // This existing .txt file already has a destination. The pinned English
+    // TextEdit profile exposes "Save", not a dialog-opening "Save…" command.
     // Driver resolves it live only after confirming this exact window is key.
     // A missing/disabled menu is a refusal, never a reason to replay a shortcut.
     call(
         "invoke_menu",
-        json!({"pid":pid,"window_id":window,"session":session,"path":["File","Save…"]}),
+        json!({"pid":pid,"window_id":window,"session":session,"path":["File","Save"]}),
         paths,
         closed,
     )

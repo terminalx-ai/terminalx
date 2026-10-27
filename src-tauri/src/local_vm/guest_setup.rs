@@ -470,7 +470,9 @@ elif tool == 'get_window_state':
 elif tool == 'type_text':
  (h/'typed').write_text(args['text']); print('{}')
 elif tool == 'invoke_menu':
- if args['path']==['File','Save…'] and (h/'save').read_text()=='yes': doc.write_text((h/'typed').read_text())
+ # Driver 0.28.0's actual guest TextEdit snapshot exposes Save (no ellipsis)
+ # for this existing .txt document; Save As… is a separate native item.
+ if args['path']==['File','Save'] and (h/'save').read_text()=='yes': doc.write_text((h/'typed').read_text())
  if args['path']==['File','Close']: (h/'closed').touch()
  print('{}')
 else: sys.exit(99)
