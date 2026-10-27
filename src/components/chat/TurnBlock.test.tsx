@@ -156,3 +156,19 @@ describe("a compaction", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 });
+
+it("lists the files a finished turn changed, folding the rest, and hides them when turned off", () => {
+  setPrefs({ turnChanges: true, foldToolCalls: false });
+  const value = turn([]);
+  const edit = (path: string) => ({ kind: "tool", key: path, call: { callId: path, name: "Edit", toolType: "file_edit", input: { file_path: path }, edits: [{ path, kind: "update", oldText: "a", newText: "b\nc" }], result: { text: "" } } });
+  value.work = ["/repo/a.css", "/repo/b.html", "/repo/c.ts", "/repo/d.ts"].map(edit) as Turn["work"];
+  value.completed = { status: "ok", ts: "2026-10-03T00:00:01Z" };
+  const { rerender } = render(<TooltipProvider><TurnBlock turn={value} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  const row = screen.getByTestId("turn-changes");
+  expect(row.textContent).toBe("a.css+2 −1b.html+2 −1+2 more+4 −2");
+  fireEvent.click(screen.getByText("+2 more"));
+  expect(screen.getByTestId("turn-changes").textContent).toContain("d.ts");
+  setPrefs({ turnChanges: false });
+  rerender(<TooltipProvider><TurnBlock turn={{ ...value }} sessionId="s" cwd="/repo" stream={[]} working={false} /></TooltipProvider>);
+  expect(screen.queryByTestId("turn-changes")).toBeNull();
+});

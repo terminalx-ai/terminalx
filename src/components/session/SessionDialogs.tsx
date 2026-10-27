@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { api, errorMessage, type QuickChatScratch } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { closeLinkIssue, closeMoveToProject, closeRenameSession, useDialogs } from "@/lib/dialogs";
-import { moveQuickChatToProject, renameSession, useSessionStore } from "@/lib/sessions";
+import { conversationTitle, moveQuickChatToProject, renameConversation, useSessionStore } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
 import { TabDialogs } from "./TabDialogs";
 import { LinkIssueDialog } from "./LinkIssueDialog";
@@ -34,7 +34,9 @@ export function SessionDialogs() {
 }
 
 function RenameSessionDialog({ session, onClose }: { session: SessionEntry; onClose: () => void }) {
-  const [title, setTitle] = useState(session.title);
+  // The name the sidebar shows, which is the agent tab's title once it has one.
+  const shown = conversationTitle(session);
+  const [title, setTitle] = useState(shown);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const input = useRef<HTMLInputElement>(null);
@@ -44,11 +46,11 @@ function RenameSessionDialog({ session, onClose }: { session: SessionEntry; onCl
   const wanted = title.trim();
   const save = async () => {
     if (!wanted || saving) return;
-    if (wanted === session.title) return onClose();
+    if (wanted === shown) return onClose();
     setSaving(true);
     setError(null);
     try {
-      await renameSession(session.id, wanted);
+      await renameConversation(session, wanted);
       onClose();
     } catch (e) {
       setError(errorMessage(e));

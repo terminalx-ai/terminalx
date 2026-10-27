@@ -152,7 +152,18 @@ export async function loadTab(sessionId: string, tabId: string) {
   const k = key(sessionId, tabId);
   const log = getLog(k);
   if (log.loaded) return;
-  const events = await agent.loadEvents(sessionId, tabId);
+  let events: AgentEvent[];
+  try {
+    events = await agent.loadEvents(sessionId, tabId);
+  } catch (error) {
+    // Unreadable history is shown as none, not as a load that never ends.
+    const fresh = logs.get(k);
+    if (fresh) {
+      fresh.loaded = true;
+      touch(k, true);
+    }
+    throw error;
+  }
   const fresh = logs.get(k);
   // The tab may have closed while its persisted history was being read.
   if (!fresh) return;

@@ -376,6 +376,15 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
         if v["isVisibleInTranscriptOnly"].as_bool() == Some(true) {
             return None;
         }
+        // Written for the record only: a resumed session's report on a
+        // background task the session before left running. The CLI shows the
+        // line and starts no turn, so a turn opened here would never close.
+        if v["queueTranscriptOnly"].as_bool() == Some(true) {
+            if let Some(summary) = tagged(&text_of(&v["message"]["content"]), "summary").filter(|summary| !summary.is_empty()) {
+                out.push(Payload::Status { text: summary.into() });
+            }
+            return None;
+        }
         // Ahead of the meta check: a scheduled prompt is written as meta, and
         // dropping it left the CLI working on a turn the tab thought was over.
         if let Some(started_by) = started_by(&v) {
@@ -902,6 +911,20 @@ mod tests {
         // A notification with no summary still says what it is.
         let (p, _) = started_by_of(&started_record("task_notification", origin, "<task-notification><task-id>b1</task-id></task-notification>"));
         assert_eq!(said(&p), ["A background task reported in"]);
+    }
+
+    /// A resumed session reports a background task the one before left
+    /// running, for the record only (`queueTranscriptOnly`): the CLI shows the
+    /// line and stays idle. Opening a turn for it left the tab "Working" with
+    /// nothing running.
+    #[test]
+    fn a_report_written_for_the_record_only_is_a_line_and_opens_no_turn() {
+        let content = r#"<task-notification>\n<task-id>bn60s1dtw</task-id>\n<status>stopped</status>\n<summary>Background shell command didn't finish before the previous session ended</summary>\n</task-notification>"#;
+        let origin = r#","origin":{"kind":"task-notification"},"queueSkipAttachments":true,"queueTranscriptOnly":true"#;
+        let line = started_record("task_notification", origin, content).replace(r#""turnOrigin":"task_notification","#, "");
+        let (p, mark) = started_by_of(&line);
+        assert_eq!(mark, None);
+        assert!(matches!(p.as_slice(), [Payload::Status { text }] if text == "Background shell command didn't finish before the previous session ended"), "{p:?}");
     }
 
     #[test]
