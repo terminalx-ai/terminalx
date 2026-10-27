@@ -65,6 +65,26 @@ impl Desktop {
 
     pub fn attachment(&self) -> Result<AttachmentIdentity> { self.events.attachment() }
 
+    #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+    pub(crate) fn acceptance_eof(&self, shared: bool) -> Result<()> {
+        if shared { return self.events.acceptance_eof(); }
+        self.windows.lock().unwrap().get("main")
+            .ok_or_else(|| anyhow::anyhow!("fixture main reader is not attached"))?.acceptance_eof()
+    }
+
+    /// Fixed read-only calls on this Desktop's pinned client, never rediscovery.
+    #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+    pub(crate) fn acceptance_owner(&self) -> Result<serde_json::Value> {
+        let status: serde_json::Value = self.client.call("status", serde_json::json!({}))?;
+        Ok(serde_json::json!({"pid":status["pid"], "epoch":status["localRuntime"]["epoch"],
+            "nativeTray":status["localRuntime"]["nativeTray"]}))
+    }
+
+    #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+    pub(crate) fn acceptance_output(&self, pane: &str) -> Result<serde_json::Value> {
+        self.client.call("runtime.pty.output", serde_json::json!({"id":pane}))
+    }
+
     /// PTY transport is shared by this window's panes, not by every session
     /// or every window. A healthy event publisher does not prove it is live.
     pub fn window_connection(&self, window: &str) -> Result<()> {

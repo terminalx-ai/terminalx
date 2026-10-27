@@ -122,6 +122,14 @@ impl Bridge {
         state.close();
     }
 
+    /// Private acceptance only: let the real reader observe EOF. Intentional
+    /// disconnect would suppress the event under test by setting detached.
+    #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+    pub(crate) fn acceptance_eof(&self) -> Result<()> {
+        self.state.lock().unwrap().write.shutdown(Shutdown::Both)?;
+        Ok(())
+    }
+
     pub fn attachment(&self) -> Result<super::client::AttachmentIdentity> {
         if !self.state.lock().unwrap().connected { bail!("local runtime event connection is closed"); }
         Ok(self.attachment.clone())

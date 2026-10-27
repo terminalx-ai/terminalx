@@ -100,6 +100,8 @@ mod keychain;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
+#[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+mod recovery_acceptance;
 mod memory_baseline;
 mod merged_cleanup;
 mod models;
@@ -338,6 +340,8 @@ pub fn run() {
                 log::error!("attach background runtime: {error:#}");
             }
             work_claims.start(app.handle().clone());
+            #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+            recovery_acceptance::install(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
