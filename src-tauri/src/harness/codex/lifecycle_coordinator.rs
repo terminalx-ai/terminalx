@@ -20,7 +20,7 @@ const CAPACITY: usize = 64;
 /// Opaque in-process capability. Arc identity prevents ABA or cross-domain
 /// aliasing even when backend numbers match. Not a serializable wire token.
 #[derive(Clone)]
-pub(crate) struct Stream { identity: Arc<()>, pub backend: u64 }
+pub(crate) struct Stream { identity: Arc<()>, pub backend: u64, namespace: Option<std::path::PathBuf> }
 impl Stream {
     /// Compare with the reader's adopted token when handling queued data.
     /// Equality is logical stream identity, never a physical ownership lease.
@@ -134,14 +134,26 @@ pub(crate) enum Update {
     Frames { stream: Stream, frames: Vec<Frame> },
     Resync,
 }
+pub(crate) enum OwnerOpen { Create, Restart }
 impl Coordinator {
+    /// Dormant physical backend-lease entry point. Never call for a viewer
+    /// reconnect. A retained sink/subscription prevents a replacement owner.
+    pub fn open_owned(domain: Domain, path: &std::path::Path, mode: OwnerOpen) -> Result<Self> {
+        let journal = match mode {
+            OwnerOpen::Create => Journal::create_owned(path)?,
+            OwnerOpen::Restart => Journal::begin_owned(path)?,
+        };
+        Self::adopt(domain, journal)
+    }
+
     /// Explicit process-local adoption after caller obtained a fresh persisted
     /// owner handle. Does not begin a journal or spawn/stop/migrate a provider.
     pub fn adopt(domain: Domain, journal: Journal<Envelope>) -> Result<Self> {
+        let namespace = journal.owned_namespace().map(std::path::Path::to_path_buf);
         let (tx, rx) = mpsc::sync_channel(CAPACITY);
         let bridge = TypedAdmission::new(journal, tx)?;
         let projection = bridge.0.lock().map_err(|_| anyhow::anyhow!("bridge poisoned"))?.projection.clone();
-        let stream = Stream { identity: Arc::new(()), backend: projection.backend };
+        let stream = Stream { identity: Arc::new(()), backend: projection.backend, namespace };
         let coordinator = Self { domain, stream, delivery: Arc::new(Mutex::new(Delivery {
             transport: OwnedTransport::new(bridge.clone()), bridge, receiver: rx, pending: VecDeque::new(),
             projection, subscribers: HashMap::new(), next_subscriber: 0, degraded: false,
@@ -151,6 +163,9 @@ impl Coordinator {
             let mut current = coordinator.domain.current.lock().map_err(|_| anyhow::anyhow!("domain poisoned"))?;
             if current.as_ref().is_some_and(|old| old.backend >= coordinator.stream.backend) {
                 bail!("nonmonotonic backend adoption");
+            }
+            if current.as_ref().is_some_and(|old| old.namespace != coordinator.stream.namespace) {
+                bail!("delivery domain journal namespace changed");
             }
             *current = Some(coordinator.stream.clone());
         }
@@ -251,3 +266,7 @@ impl Drop for Subscription {
 #[cfg(test)]
 #[path = "lifecycle_coordinator_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lifecycle_ownership_tests.rs"]
+mod ownership_tests;

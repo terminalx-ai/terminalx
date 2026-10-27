@@ -122,21 +122,34 @@ pub(crate) struct Journal<T> {
     backend_generation: u64,
     degraded: bool,
     payload: PhantomData<T>,
+    // Held through every coordinator/sink/subscription reference to this owner.
+    owner_lease: Option<OwnerLease>,
 }
 
 impl<T: Serialize + DeserializeOwned> Journal<T> {
     /// Only for an explicitly new storage identity. Existing files are never
     /// overwritten; reconnect/restart must use begin, not create-on-error.
-    pub fn create(path: &Path) -> Result<Self> { Self::start(path, true) }
+    pub fn create(path: &Path) -> Result<Self> { Self::start(path, true, false) }
 
     /// Explicit new owner, NOT a UI reconnect/read operation. Paths must belong
     /// to a private store directory; caller owns directory creation and retains
     /// the stable .lock sidecar. Never point this at a legacy AgentEvent log.
     pub fn begin(path: &Path) -> Result<Self> {
-        Self::start(path, false)
+        Self::start(path, false, false)
     }
 
-    fn start(path: &Path, create: bool) -> Result<Self> {
+    /// Explicit lifetime-owned variant, for the dormant coordinator only.
+    pub fn create_owned(path: &Path) -> Result<Self> { Self::start(path, true, true) }
+    pub fn begin_owned(path: &Path) -> Result<Self> { Self::start(path, false, true) }
+    pub fn owned_namespace(&self) -> Option<&Path> {
+        self.owner_lease.as_ref().map(|lease| lease.namespace.as_path())
+    }
+
+    fn start(path: &Path, create: bool, retain_owner: bool) -> Result<Self> {
+        // ALL generation barriers participate, including legacy raw begin.
+        // Acquire before the transaction: refusal must not append a barrier.
+        let lease = OwnerLease::acquire(path)?;
+        let path = lease.namespace.as_path();
         let generation = super::transaction::run(&path.with_extension("lock"), LOCK_TIMEOUT, || {
             let (bytes, snapshot) = read::<T>(path, create)?;
             if create && snapshot.watermark != 0 { bail!("journal already exists"); }
@@ -145,7 +158,8 @@ impl<T: Serialize + DeserializeOwned> Journal<T> {
             replace(path, bytes, &barrier)?;
             Ok(sequence)
         })?;
-        Ok(Self { path: path.into(), backend_generation: generation, degraded: false, payload: PhantomData })
+        Ok(Self { path: path.into(), backend_generation: generation, degraded: false, payload: PhantomData,
+            owner_lease: if retain_owner { Some(lease) } else { None } })
     }
 
     pub fn backend_generation(&self) -> u64 { self.backend_generation }
@@ -288,3 +302,49 @@ fn replace<T: Serialize + DeserializeOwned>(path: &Path, mut bytes: Vec<u8>, bat
 #[cfg(test)]
 #[path = "batch_journal_tests.rs"]
 mod tests;
+
+/// Stable, nonblocking advisory lease, separate from the short transaction
+/// lock. Never unlink/replace this sidecar. Trusted private parent directory
+/// and local OS locking are prerequisites; not protection from hostile rename.
+struct OwnerLease { _file: fs::File, namespace: PathBuf }
+impl OwnerLease {
+    fn acquire(path: &Path) -> Result<Self> {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let namespace = fs::canonicalize(parent)?.join(path.file_name().context("journal filename required")?);
+        if fs::symlink_metadata(&namespace).is_ok_and(|m| m.file_type().is_symlink()) {
+            bail!("journal namespace must not be a symlink");
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(namespace.with_extension("owner.lock")).context("open journal owner lease")?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() { bail!("journal owner lease is not a regular file"); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // SAFETY: geteuid has no preconditions.
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
+                bail!("journal owner lease is not private");
+            }
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file, namespace }),
+            Err(fs::TryLockError::WouldBlock) => bail!("journal lifetime owner is still held"),
+            Err(fs::TryLockError::Error(error)) => Err(error).context("lock journal lifetime owner"),
+        }
+        // Drop unlocks/closes; no steal, unlink or namespace cleanup.
+    }
+}
+
+impl Drop for OwnerLease {
+    fn drop(&mut self) {
+        // Same fork-before-exec consideration as store::activity::Collector:
+        // release this owner's lock even if a fork briefly inherited the fd.
+        let _ = self._file.unlock();
+    }
+}
