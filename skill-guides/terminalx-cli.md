@@ -60,6 +60,16 @@ agent process is running.
 
 ### Start a session
 
+Keep work in the current conversation by default. Create another session only when the
+person requests a new conversation, delegates work to another agent, or authorizes a workflow
+that needs a separate session (such as a handoff or issue pipeline). Existing authorization
+is sufficient; do not ask again for each session in that workflow.
+
+Filing an issue, reading context, checking repository metadata, and other lightweight subtasks
+do not by themselves authorize another session. Do that work directly in the current
+conversation. If essential information is missing, ask there instead of starting a helper.
+This applies to project sessions, quick chats, and cloud sessions alike.
+
 ```text
 terminalx sessions create \
   --project <project> \
@@ -110,8 +120,11 @@ terminalx sessions create --quick \
   --json
 ```
 
-A quick chat is a session with no project. Use it for a question or a one-off task that
-belongs to no attached project; do not attach a folder as a project just to ask something.
+A quick chat is a visible, persistent session with no project. When a separate conversation
+is authorized as described above, use it for a question or a one-off task that belongs to no
+attached project; do not attach a folder as a project just to ask something. A quick chat is
+not a private scratch helper: even a read-only prompt creates a sidebar entry and can leave
+that session needing attention if prompt delivery cannot be confirmed.
 It runs in a scratch directory of its own under the TerminalX home, with no worktree and no
 branch, and the returned `path` is that directory. `--cwd` runs it in an existing directory
 instead; that directory is used as it is and is not added as a project.
@@ -188,6 +201,12 @@ response lists their ids under `removedSessions`. The branch is retained. Inspec
 worktree's uncommitted and unpushed counts from `worktrees list` before deleting it.
 
 ### Issues
+
+For a request to file an issue, gather any needed context directly in the current conversation
+and use `terminalx issues create`. Filing an issue does not require `sessions create --quick`
+or `sessions create --issue`; the latter starts a separate agent working on an existing issue.
+Do not start a context-check helper or an implementation session unless the person also
+authorized that work.
 
 ```text
 terminalx issues list --project <project> [--provider github|linear] \

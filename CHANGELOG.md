@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+### Issue work status
+
+- Refresh shared issue work when the account service changes its supported
+  capabilities, and republish actual linked sessions after support returns.
+  Explain when the account service has not reported support; shared activity
+  still requires a supported backend. (#642)
+
 ### Chat
 
+- Clarify the CLI guide to keep simple issue filing and context checks in the
+  current conversation, with separate sessions reserved for authorized work. (#634)
 - Show sending progress immediately and prevent repeat submissions while a message
   is pending. Preserve newer drafts and recalled text, and keep pending sends and
   errors visible across tab remounts and cloud reconnects. (#637)
