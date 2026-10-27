@@ -8,6 +8,12 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Terminal
+
+- Cancel pending atlas warm-up when its final terminal owner is disposed, while
+  preserving warm-up for remaining shared owners. Native memory acceptance
+  remains unresolved. (#232)
+
 ### Chat
 
 - Clarify the CLI guide to keep simple issue filing and context checks in the

@@ -34,6 +34,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/components/session/SessionAgentControls", () => ({ SessionAgentControls: () => null }));
+vi.mock("@/components/session/AgentMenu", () => ({ AgentMenu: () => null }));
 vi.mock("@/lib/useSessionAgent", () => ({ useSessionAgent: () => ({ harness: sessionStore.harnesses[0], modelId: null, effort: null }) }));
 vi.mock("@/lib/issuePipeline", async (original) => ({
   ...(await original<typeof import("@/lib/issuePipeline")>()),
