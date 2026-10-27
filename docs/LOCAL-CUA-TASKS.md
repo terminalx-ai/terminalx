@@ -32,6 +32,15 @@ leave an unready VM running only after fresh, bound guest inspection proves
 task/history agreement and exit of every retained setup helper. Unknown action
 receipts remain unknown, and shutdown does not mark setup Ready.
 
+The runtime step checks the serving guest executable against the host owner,
+not just whether it answers. A mismatch offers **Review guest update…** when
+the same bound guest is idle. Confirmation queues the existing durable setup
+path with the retained provider and all prior receipts. The installer checks
+fresh guest quiescence before reloading the guest TerminalX service. It does
+not restart the VM, Driver, sign-in or permissions. Reopening the UI observes
+the saved request; an interrupted installer remains unknown until explicitly
+reviewed, with no automatic retry.
+
 Passive readiness uses version/status, attributed permission status, safe local
 file-store authentication evidence, and console/display metadata. It never
 launches Driver, captures pixels, refreshes credentials, discovers models or
@@ -281,6 +290,14 @@ its health-check password is not an account-creation setting. The published
 initial account is not a production credential. This implementation neither
 persists it nor guesses, enters, resets or copies passwords. A supported secure
 account-personalization path and fresh guided setup remain release gates.
+
+Apple's supported
+[guest provisioning API](https://developer.apple.com/documentation/virtualization/vzmacguestprovisioningoptions)
+can configure the initial account on first boot after restore, but requires
+macOS 27 on both host and guest. The acceptance host is macOS 26.3.1 with SDK
+26.5, and pinned Lume does not expose this API. It cannot establish acceptance
+on this host or personalize the retained pilot; no OS upgrade or account
+change is part of the current validation.
 
 Upstream golden-image testing includes SIP-disabled/TCC-seeded variants. Those
 are not a supported product shortcut. No permission inheritance is claimed for

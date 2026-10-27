@@ -27,6 +27,33 @@ beforeEach(() => { localStorage.clear(); mocks.invoke.mockReset(); mocks.invoke.
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("guided local VM setup", () => {
+  it("offers a confirmed guest runtime update with the retained provider and no automatic effects", async () => {
+    mount(setupReport({ runtimeUpdateAvailable: true,
+      steps: [{ id: "runtime", label: "Update TerminalX in this guest", state: "waiting", actionCode: "environment.setup" },
+        { id: "desktop", label: "Verify desktop access", state: "waiting", actionCode: "desktop.verify" }] }));
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Verify desktop access" })).toBeNull();
+    confirm("Review guest update…");
+    await waitFor(() => expect(calls("environment.setup")).toHaveLength(1));
+    expect(calls("environment.setup")[0][1].params).toMatchObject({ environmentId: environment.id, generation: environment.generation, harness: "codex", confirm: true });
+    expect(calls("environment.install")).toHaveLength(0);
+    expect(calls("environment.setupAction")).toHaveLength(0);
+    const saved = loadPendingSetup(current())!;
+    expect(saved.kind).toBe("setup");
+    expect(calls("environment.setup")[0][1].params).toEqual(saved.params);
+  });
+
+  it.each(["manual", "tasks", "admission"])("does not offer a cached runtime update while %s blocks it", (condition) => {
+    const readiness = setupReadiness();
+    if (condition === "manual") readiness.manualControl = true;
+    if (condition === "tasks") readiness.activeTaskTargets = [task().target];
+    if (condition === "admission") readiness.actionAdmission.state = "unknown";
+    mount(setupReport({ runtimeUpdateAvailable: true, readiness,
+      steps: [{ id: "runtime", label: "Update guest runtime", state: "waiting", actionCode: "environment.setup" }] }));
+    expect(screen.queryByRole("button", { name: "Review guest update…" })).toBeNull();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
   it("checks retained account credentials explicitly without opening a new sign-in", async () => {
     mount(setupReport({
       steps: [{ id: "provider", label: "Guest sign-in", state: "waiting", actionCode: "provider.codexAccount.verify" }],

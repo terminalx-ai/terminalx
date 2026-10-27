@@ -145,6 +145,8 @@ export interface LocalVmSetupReport {
   readiness?: LocalVmSetupReadiness | null;
   lastCheckedAt: string | null;
   detail: string | null;
+  /** Owner verified a different serving runtime; an explicit setup recovery can update it. */
+  runtimeUpdateAvailable?: boolean;
   /** Receipt of the initial, explicitly confirmed setup request, when retained by the owner. */
   idempotencyKey?: string;
   action?: LocalVmSetupActionReceipt | null;

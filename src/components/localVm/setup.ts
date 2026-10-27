@@ -38,6 +38,7 @@ export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {
       report.action?.action === "provider.codexDeviceLogin.start" && ["working", "needsAttention"].includes(report.action.status)
       ? ["provider.codexDeviceLogin.cancel"] : [];
   }
+  if (report.steps.some((step) => step.id === "runtime" && step.actionCode === "environment.setup")) return [];
   const pending = report.action && ["working", "needsAttention", "outcomeUnknown"].includes(report.action.status);
   const candidates = [...new Set(report.steps.filter((step) => step.state !== "complete").map((step) => step.actionCode).filter((action): action is LocalVmSetupAction => SETUP_ACTIONS.some((candidate) => candidate === action)))];
   return candidates.filter((action) => {
@@ -47,6 +48,14 @@ export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {
     if (action === "provider.codexDeviceLogin.start" && readiness.provider.state === "authenticated") return false;
     return true;
   });
+}
+
+export function runtimeUpdateAvailable(report: LocalVmSetupReport): boolean {
+  const read = report.readiness;
+  return report.runtimeUpdateAvailable === true && report.status === "needsAttention" && !!read &&
+    !read.manualControl && read.activeTaskTargets.length === 0 && read.actionAdmission.state === "ready" &&
+    (!report.action || ["complete", "failed"].includes(report.action.status)) &&
+    report.steps.some((step) => step.id === "runtime" && step.state === "waiting" && step.actionCode === "environment.setup");
 }
 
 /** The code is shown for deliberate human use; no browser opens or sign-in runs automatically. */

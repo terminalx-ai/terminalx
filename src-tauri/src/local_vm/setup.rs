@@ -108,7 +108,8 @@ pub fn queue(journal: &Journal, params: Value) -> Result<Value> {
         }
         if env.manual_control || unfinished {bail!("Return desktop control and resolve unfinished tasks before changing guest setup");}
         if let Some(prior)=&env.setup {
-            if !matches!(prior["status"].as_str(),Some("failed"|"outcomeUnknown")) {bail!("This environment already has active setup history; inspect its current operation");}
+            let updating=runtime_update_available(env,prior) && prior["harness"]==request.harness;
+            if !updating && !matches!(prior["status"].as_str(),Some("failed"|"outcomeUnknown")) {bail!("This environment already has active setup history; inspect its current operation");}
             let mut history=prior["history"].as_array().cloned().unwrap_or_default();
             let mut previous=prior.clone();previous.as_object_mut().context("Damaged setup history")?.remove("history");history.push(previous);
             let mut report=initial(env,&request.harness,&request.idempotency_key)?;
@@ -169,6 +170,47 @@ fn check_binding(env: &Environment, harness: &str, value: &Value) -> Result<()> 
     Ok(())
 }
 
+fn runtime_matches(readiness: &Value) -> bool {
+    readiness["runtime"]["executableSha256"]
+        .as_str()
+        .is_some_and(|guest| bootstrap::owner_runtime_sha256().is_ok_and(|owner| guest == owner))
+}
+
+fn runtime_mismatch(readiness: &Value) -> bool {
+    readiness["runtime"]["executableSha256"]
+        .as_str()
+        .is_some_and(|guest| {
+            guest.len() == 64
+                && guest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && bootstrap::owner_runtime_sha256().is_ok_and(|owner| guest != owner)
+        })
+}
+
+// Recompute from bound evidence; a cached UI flag never authorizes an update.
+// Queueing retains intent only. The existing installer checks fresh guest
+// task/history quiescence again before replacing or reloading its service.
+fn runtime_update_available(env: &Environment, report: &Value) -> bool {
+    let read = &report["readiness"];
+    report["protocol"] == PROTOCOL
+        && report["environmentId"] == env.id
+        && report["generation"] == env.generation
+        && report["status"] == "needsAttention"
+        && check_binding(env, report["harness"].as_str().unwrap_or(""), read).is_ok()
+        && read["runtime"]["state"] == "ready"
+        && runtime_mismatch(read)
+        && !env.manual_control
+        && read["manualControl"] == false
+        && read["activeTaskTargets"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && read["actionAdmission"]["state"] == "ready"
+        && (report["action"].is_null()
+            || matches!(
+                report["action"]["status"].as_str(),
+                Some("complete" | "failed")
+            ))
+}
+
 pub fn inspect(journal: &Journal, params: Value) -> Result<Value> {
     let current = env(journal, &params)?;
     let harness = host::field(&params, "harness")?;
@@ -207,6 +249,11 @@ fn record_readiness(
                     && check["installedExecutableSha256"]==bootstrap::DRIVER.executable_sha256;
                 step["state"]=json!(if prepared_driver || matches!(check["state"].as_str(),Some("ready"|"granted"|"authenticated"|"usable"|"verified")) {"complete"} else {"waiting"});
                 step["detail"]=check["reasonCode"].clone();step["actionCode"]=check["actionCode"].clone();
+                if id=="runtime" && !runtime_matches(readiness) {
+                    step["state"]=json!("waiting");
+                    step["detail"]=json!(if runtime_mismatch(readiness) {"The guest is connected, but its TerminalX service differs from this app. Review the guest update after its active work finishes."} else {"The serving guest runtime could not be verified. Refresh setup status before continuing."});
+                    step["actionCode"]=if runtime_mismatch(readiness) {json!("environment.setup")} else {Value::Null};
+                }
             }
         }
         report["detail"]=json!("Follow the contextual guest approval/account steps. Passive checks never request permissions, log in, or claim live capture.");
@@ -235,6 +282,10 @@ fn record_readiness(
             if !ready(target,report) {
                 report["status"]=json!("needsAttention");report["detail"]=json!("Serving runtime identity or current-boot desktop verification is incomplete; a running VM alone is not Ready.");
             }
+        }
+        report["runtimeUpdateAvailable"]=json!(runtime_update_available(target,report));
+        if report["runtimeUpdateAvailable"]==true {
+            report["detail"]=json!("Review the guest update to match this app. Existing task history, provider sign-in and permissions are retained; the VM is not recreated.");
         }
         Ok(())
     })
@@ -664,9 +715,7 @@ pub fn ready(env: &Environment, report: &Value) -> bool {
                 })
         })
         && check_binding(env, report["harness"].as_str().unwrap_or(""), read).is_ok()
-        && read["runtime"]["executableSha256"].as_str()
-            == bootstrap::owner_runtime_sha256().ok().as_deref()
-        && read["runtime"]["executableSha256"].is_string()
+        && runtime_matches(read)
         && matches!(read["driver"]["state"].as_str(), Some("ready" | "running"))
         && read["driver"]["installedVersion"] == super::desktop::DRIVER_VERSION
         && read["driver"]["installedExecutableSha256"] == bootstrap::DRIVER.executable_sha256
@@ -838,6 +887,108 @@ mod tests {
         assert_eq!(receipt["status"], "complete");
         let saved = serde_json::to_string(&journal.read().unwrap()).unwrap();
         assert!(!saved.contains("loginId"));
+    }
+
+    #[test]
+    fn runtime_mismatch_offers_confirmed_recovery_without_erasing_prior_receipts() {
+        let (_dir, journal, env, params) = fixture();
+        queue(&journal, params.clone()).unwrap();
+        journal.transaction(|state| {
+            let report = state.environments.get_mut(&env.id).unwrap().setup.as_mut().unwrap();
+            report["status"] = json!("needsAttention");
+            for step in report["steps"].as_array_mut().unwrap() { step["state"] = json!("complete"); }
+            report["operations"] = json!({"retained-proof":{"digest":"a".repeat(64),"receipt":{"action":"desktop.verify","idempotencyKey":"retained-proof","status":"complete"}}});
+            Ok(())
+        }).unwrap();
+        let readiness = json!({"protocol":1,"environmentId":env.id,"generation":env.generation,
+            "runtime":{"state":"ready","identity":{"protocol":journal::PROTOCOL,"environmentId":env.id,"generation":env.generation},"executableSha256":"b".repeat(64)},
+            "driver":{"state":"running","installedVersion":super::super::desktop::DRIVER_VERSION,"installedExecutableSha256":bootstrap::DRIVER.executable_sha256},
+            "accessibility":{"state":"granted"},"screenRecording":{"state":"granted"},"provider":{"harness":"codex","state":"authenticated"},
+            "manualControl":false,"activeTaskTargets":[],"actionAdmission":{"state":"ready"}});
+        record_readiness(&journal, &env, "codex", &readiness).unwrap();
+        let observed = journal.read().unwrap().environments[&env.id]
+            .setup
+            .clone()
+            .unwrap();
+        let runtime = observed["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == "runtime")
+            .unwrap();
+        assert_eq!(
+            runtime["state"], "waiting",
+            "A connected runtime with different bytes is not complete"
+        );
+        assert_eq!(observed["runtimeUpdateAvailable"], true);
+        assert_eq!(observed["status"], "needsAttention");
+        let mut update = params.clone();
+        update["idempotencyKey"] = json!("update-runtime");
+        let mut refused = update.clone();
+        refused["confirm"] = json!(false);
+        assert!(queue(&journal, refused).is_err());
+        let mut changed_provider = update.clone();
+        changed_provider["harness"] = json!("claude");
+        assert!(queue(&journal, changed_provider).is_err());
+        assert_eq!(
+            journal.read().unwrap().environments[&env.id]
+                .setup
+                .as_ref()
+                .unwrap(),
+            &observed
+        );
+        for (pointer, value) in [
+            (
+                "/readiness/runtime/executableSha256",
+                json!(bootstrap::owner_runtime_sha256().unwrap()),
+            ),
+            ("/readiness/runtime/executableSha256", json!("unverified")),
+            ("/readiness/generation", json!(journal::new_id())),
+            ("/readiness/actionAdmission/state", json!("unknown")),
+            ("/readiness/manualControl", json!(true)),
+            ("/readiness/activeTaskTargets", json!([{}])),
+            ("/status", json!("working")),
+        ] {
+            journal
+                .transaction(|state| {
+                    let report = state
+                        .environments
+                        .get_mut(&env.id)
+                        .unwrap()
+                        .setup
+                        .as_mut()
+                        .unwrap();
+                    *report = observed.clone();
+                    *report.pointer_mut(pointer).unwrap() = value;
+                    // This old cached flag must not override the actual evidence.
+                    assert_eq!(report["runtimeUpdateAvailable"], true);
+                    Ok(())
+                })
+                .unwrap();
+            let before = serde_json::to_value(journal.read().unwrap()).unwrap();
+            assert!(queue(&journal, update.clone()).is_err(), "{pointer}");
+            assert_eq!(
+                serde_json::to_value(journal.read().unwrap()).unwrap(),
+                before
+            );
+        }
+        journal
+            .transaction(|state| {
+                state.environments.get_mut(&env.id).unwrap().setup = Some(observed.clone());
+                Ok(())
+            })
+            .unwrap();
+        let queued = queue(&journal, update.clone()).unwrap();
+        assert_eq!(queued["status"], "queued");
+        assert_eq!(queued["history"][0], observed);
+        assert_eq!(queued["operations"], observed["operations"]);
+        assert_eq!(
+            queue(&journal, update).unwrap(),
+            queued,
+            "Same key only observes its durable request"
+        );
+        assert_eq!(journal.read().unwrap().environments.len(), 1);
+        assert!(journal.read().unwrap().tasks.is_empty());
     }
 
     #[test]
