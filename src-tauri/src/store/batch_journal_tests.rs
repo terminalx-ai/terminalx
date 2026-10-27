@@ -214,3 +214,115 @@ fn ordinary_typed_payload_returns_a_receipt_and_replays_after_restart() {
     assert_eq!(snapshot.batches[1], receipt);
     assert_eq!(snapshot.batches[1].changes[0].required, "retained");
 }
+
+#[test]
+fn ordered_enqueue_retains_transaction_ownership_against_another_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Value>::create(&path).unwrap();
+    let (queue, receiver) = mpsc::sync_channel(1);
+    let (checked, observed) = mpsc::channel();
+    let mut competitor = None;
+    let other_path = path.clone();
+    let accepted = journal.commit_ordered_with(replacement(), |pending| {
+        competitor = Some(std::thread::spawn(move || {
+            // A separate descriptor observes the real stable lock, not a
+            // bridge-local mutex. Then the second Journal handle attempts begin.
+            let lock = fs::OpenOptions::new().read(true).write(true).open(other_path.with_extension("lock")).unwrap();
+            assert!(matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+            checked.send(()).unwrap();
+            Journal::<Value>::begin(&other_path).unwrap().backend_generation()
+        }));
+        observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(queue.try_send(pending).is_ok());
+        Ok(())
+    }).unwrap();
+    assert_eq!(accepted.publication(), Publication::Queued);
+    let later_generation = competitor.unwrap().join().unwrap();
+    assert!(later_generation > accepted.receipt().sequence);
+    let pending = receiver.try_recv().unwrap();
+    assert_eq!(pending.state(), DeliveryState::Pending);
+    assert!(pending.receipt().is_none());
+    // No outer transport/bridge locks in this fixture. A real coordinator must
+    // drop those first; this ticket alone does not assert current-owner status.
+    assert!(accepted.release_delivery());
+    assert_eq!(pending.receipt().unwrap(), accepted.receipt());
+    assert!(!accepted.release_delivery());
+}
+
+#[test]
+fn queue_full_preserves_the_accepted_receipt_and_degrades_without_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Value>::create(&path).unwrap();
+    let (queue, receiver) = mpsc::sync_channel(1);
+    let first = journal.commit_ordered(vec![json!("first")], &queue).unwrap();
+    let lost = journal.commit_ordered(replacement(), &queue).unwrap();
+    assert_eq!(lost.publication(), Publication::Lost(EnqueueLoss::Full));
+    assert_eq!(lost.receipt().sequence, first.receipt().sequence + 1);
+    assert!(journal.is_degraded());
+    assert!(!lost.release_delivery());
+    let before = fs::read(&path).unwrap();
+    assert!(journal.commit_ordered(replacement(), &queue).is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    drop(first); // A queued but unreleased acceptance must never become ready.
+    let pending = receiver.try_recv().unwrap();
+    assert_eq!(pending.state(), DeliveryState::Abandoned);
+    assert!(pending.receipt().is_none());
+    let mut restarted = Journal::<Value>::begin(&path).unwrap();
+    assert_eq!(&restarted.snapshot().unwrap().batches[2], lost.receipt());
+}
+
+#[test]
+fn disconnected_queue_is_persisted_but_not_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Value>::create(&path).unwrap();
+    let (queue, receiver) = mpsc::sync_channel(1);
+    drop(receiver);
+    let accepted = journal.commit_ordered(replacement(), &queue).unwrap();
+    assert_eq!(accepted.publication(), Publication::Lost(EnqueueLoss::Disconnected));
+    assert!(journal.is_degraded());
+    assert!(!accepted.release_delivery());
+    assert!(journal.snapshot().is_err());
+    let mut restarted = Journal::<Value>::begin(&path).unwrap();
+    assert_eq!(&restarted.snapshot().unwrap().batches[1], accepted.receipt());
+}
+
+#[test]
+fn enqueue_panic_retains_receipt_and_abandons_even_an_already_queued_ticket() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Value>::create(&path).unwrap();
+    let (queue, receiver) = mpsc::sync_channel(1);
+    // Private fault-injection seam, not an exposed user callback API. Exercise
+    // the ambiguous "sent, then panic" case without losing persisted evidence.
+    let accepted = journal.commit_ordered_with(replacement(), |pending| {
+        assert!(queue.try_send(pending).is_ok());
+        panic!("source fixture enqueue panic");
+    }).unwrap();
+    assert_eq!(accepted.publication(), Publication::Panicked);
+    assert!(journal.is_degraded());
+    assert!(!accepted.release_delivery());
+    let pending = receiver.try_recv().unwrap();
+    assert_eq!(pending.state(), DeliveryState::Abandoned);
+    assert!(pending.receipt().is_none());
+    assert!(journal.commit(replacement()).is_err());
+    let mut restarted = Journal::<Value>::begin(&path).unwrap();
+    assert_eq!(&restarted.snapshot().unwrap().batches[1], accepted.receipt());
+}
+
+#[test]
+fn ordered_precommit_write_failure_neither_returns_receipt_nor_enqueues() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lifecycle.jsonl");
+    let mut journal = Journal::<Value>::create(&path).unwrap();
+    let before = fs::read(&path).unwrap();
+    let obstacle = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::create_dir(&obstacle).unwrap();
+    let (queue, receiver) = mpsc::sync_channel(1);
+    assert!(journal.commit_ordered(replacement(), &queue).is_err());
+    assert!(journal.is_degraded());
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
+}

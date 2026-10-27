@@ -23,6 +23,8 @@ use std::fs;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -48,6 +50,71 @@ pub(crate) struct Snapshot<T> {
     pub watermark: u64,
     pub backend_generation: u64,
     pub batches: Vec<Batch<T>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnqueueLoss { Full, Disconnected }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Publication { Queued, Lost(EnqueueLoss), Panicked }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeliveryState { Pending, Ready, Abandoned }
+
+const PENDING: u8 = 0;
+const READY: u8 = 1;
+const ABANDONED: u8 = 2;
+
+/// A queue can wake its receiver while producer locks are still held. This
+/// ticket exposes no receipt until the producer explicitly releases delivery.
+/// No callbacks, EventSink or user handlers are invoked by this module.
+pub(crate) struct PendingBatch<T> {
+    receipt: Arc<Batch<T>>,
+    delivery: Arc<AtomicU8>,
+}
+
+impl<T> PendingBatch<T> {
+    pub fn state(&self) -> DeliveryState {
+        match self.delivery.load(Ordering::Acquire) {
+            READY => DeliveryState::Ready,
+            ABANDONED => DeliveryState::Abandoned,
+            _ => DeliveryState::Pending,
+        }
+    }
+
+    pub fn receipt(&self) -> Option<&Batch<T>> {
+        (self.state() == DeliveryState::Ready).then_some(self.receipt.as_ref())
+    }
+}
+
+/// Every Ok value means persisted, even when enqueue was lost or panicked.
+/// Receipt access is immutable. Publication failure never authorizes resending
+/// provider input or rolling back the journal; recover by replay instead.
+pub(crate) struct Accepted<T> {
+    receipt: Arc<Batch<T>>,
+    publication: Publication,
+    delivery: Arc<AtomicU8>,
+}
+
+impl<T> Accepted<T> {
+    pub fn receipt(&self) -> &Batch<T> { &self.receipt }
+    pub fn publication(&self) -> Publication { self.publication }
+
+    /// Call ONLY after dropping transport/bridge and all other producer gates.
+    /// The journal lock is already released on return from commit_ordered.
+    /// This is delivery eligibility, not acknowledgement or owner freshness.
+    /// The future coordinator must enforce outer-lock scope and epoch fencing.
+    pub fn release_delivery(&self) -> bool {
+        self.publication == Publication::Queued
+            && self.delivery.compare_exchange(PENDING, READY, Ordering::Release, Ordering::Relaxed).is_ok()
+    }
+}
+
+impl<T> Drop for Accepted<T> {
+    fn drop(&mut self) {
+        // Dropping under an outer gate must NOT enable a waiting receiver.
+        let _ = self.delivery.compare_exchange(PENDING, ABANDONED, Ordering::Release, Ordering::Relaxed);
+    }
 }
 
 pub(crate) struct Journal<T> {
@@ -90,17 +157,63 @@ impl<T: Serialize + DeserializeOwned> Journal<T> {
 
     pub fn commit(&mut self, changes: Vec<T>) -> Result<Batch<T>> {
         if self.degraded { bail!("journal continuity is degraded"); }
-        let result = super::transaction::run(&self.path.with_extension("lock"), LOCK_TIMEOUT, || {
-            if changes.is_empty() { bail!("empty journal change batch"); }
-            let (bytes, snapshot) = read::<T>(&self.path, false)?;
-            if snapshot.backend_generation != self.backend_generation { bail!("journal owner superseded"); }
-            let sequence = snapshot.watermark.checked_add(1).context("journal sequence exhausted")?;
-            let batch = Batch { version: VERSION, sequence, backend_generation: self.backend_generation, changes };
-            replace(&self.path, bytes, &batch)?;
-            Ok(batch) // The only receipt; no receipt on write, sync or rename failure.
-        });
+        let result = super::transaction::run(&self.path.with_extension("lock"), LOCK_TIMEOUT, || self.persist(changes));
         if result.is_err() { self.degraded = true; }
         result
+    }
+
+    /// Close B1's commit-versus-enqueue window. Only concrete try_send runs
+    /// under transaction ownership, never a caller-provided callback. The
+    /// receiver cannot inspect the batch before explicit delivery release.
+    /// B2/B3 (outer ownership, subscribers and delivery order) remain separate.
+    pub fn commit_ordered(&mut self, changes: Vec<T>, queue: &mpsc::SyncSender<PendingBatch<T>>) -> Result<Accepted<T>> {
+        self.commit_ordered_with(changes, |pending| queue.try_send(pending).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => EnqueueLoss::Full,
+            mpsc::TrySendError::Disconnected(_) => EnqueueLoss::Disconnected,
+        }))
+    }
+
+    // Private seam for the concrete queue operation and deterministic boundary
+    // drafts. Never expose this closure as a general publication/handler API.
+    fn commit_ordered_with(
+        &mut self,
+        changes: Vec<T>,
+        enqueue: impl FnOnce(PendingBatch<T>) -> std::result::Result<(), EnqueueLoss>,
+    ) -> Result<Accepted<T>> {
+        if self.degraded { bail!("journal continuity is degraded"); }
+        let result = super::transaction::run(&self.path.with_extension("lock"), LOCK_TIMEOUT, || {
+            let receipt = Arc::new(self.persist(changes)?);
+            let delivery = Arc::new(AtomicU8::new(PENDING));
+            let pending = PendingBatch { receipt: receipt.clone(), delivery: delivery.clone() };
+            let publication = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| enqueue(pending))) {
+                Ok(Ok(())) => Publication::Queued,
+                Ok(Err(loss)) => Publication::Lost(loss),
+                Err(payload) => {
+                    // An arbitrary panic payload's destructor could panic too.
+                    // Retain neither its text nor a raw provider-facing reason.
+                    // The handle is degraded below; do not invoke that drop.
+                    std::mem::forget(payload);
+                    Publication::Panicked
+                }
+            };
+            if publication != Publication::Queued { delivery.store(ABANDONED, Ordering::Release); }
+            Ok(Accepted { receipt, publication, delivery })
+        });
+        if result.as_ref().map_or(true, |accepted| accepted.publication != Publication::Queued) {
+            self.degraded = true;
+        }
+        result
+    }
+
+    /// Caller must hold the stable transaction lock through any ordered enqueue.
+    fn persist(&self, changes: Vec<T>) -> Result<Batch<T>> {
+        if changes.is_empty() { bail!("empty journal change batch"); }
+        let (bytes, snapshot) = read::<T>(&self.path, false)?;
+        if snapshot.backend_generation != self.backend_generation { bail!("journal owner superseded"); }
+        let sequence = snapshot.watermark.checked_add(1).context("journal sequence exhausted")?;
+        let batch = Batch { version: VERSION, sequence, backend_generation: self.backend_generation, changes };
+        replace(&self.path, bytes, &batch)?;
+        Ok(batch) // No receipt on serialization, write, sync or rename failure.
     }
 
     /// Read and watermark share the commit serialization boundary. This alone
