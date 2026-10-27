@@ -27,7 +27,10 @@ receipts live in the owner journal. Reopening Settings observes that history
 without replaying creation, installers, sign-in or permissions. Interrupted
 setup offers explicit review of the existing VM and retains prior uncertainty.
 A missing response or dead helper never proves guest work stopped; unresolved
-setup keeps the owner/deletion hold.
+setup keeps idle auto-exit and deletion blocked. Explicit host shutdown can
+leave an unready VM running only after fresh, bound guest inspection proves
+task/history agreement and exit of every retained setup helper. Unknown action
+receipts remain unknown, and shutdown does not mark setup Ready.
 
 Passive readiness uses version/status, attributed permission status, safe local
 file-store authentication evidence, and console/display metadata. It never
@@ -139,8 +142,13 @@ environment explicitly opted in; display sleep and locking remain available.
 Normal quit detaches the desktop. Both owner socket and unattached tray stop
 use the same admission fence. Stop all and quit refuses while VM effects are
 in flight or unresolved guest work/manual control/provisioning remains, before
-revoking attachments or claiming any worker stopped. Resolve those tasks and
-return manual control first; Stop VM remains a separate explicit environment
+revoking attachments or claiming any worker stopped. An idle setup that needs
+attention (for example, an expired account check or different runtime version)
+does not permanently prevent an explicit owner update. Shutdown checks fresh
+guest task histories, all retained setup operation identities, helper exit
+evidence, and an unchanged host journal under exclusive VM admission. An
+unreachable guest, missing receipt or unproven helper exit still refuses it.
+Resolve unfinished tasks and return manual control first; Stop VM remains a separate explicit environment
 action. Stopping a host Cua client proves no guest cancellation. Provisioning
 cancellation before dispatch or after an uncertain restart can still require
 explicit inspection/reconciliation; a cancellation request is not a completed

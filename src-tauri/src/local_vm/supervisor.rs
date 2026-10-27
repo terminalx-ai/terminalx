@@ -144,7 +144,7 @@ pub fn has_work() -> bool {
 pub fn prepare_stop() -> Result<RwLockWriteGuard<'static, ()>> {
     let guard = ADMISSION.try_write().map_err(|_| anyhow::anyhow!("A Local VM operation is in flight; Stop all was refused before changing owner state. Wait for it or request task/provision cancellation, then retry."))?;
     if has_work() {
-        bail!("Resolve or cancel Local VM tasks/provisioning and return manual desktop control before Stop all and quit. Guest VMs are stopped only through their explicit environment action.");
+        super::owner_shutdown::verify(&Journal::open_existing(&host::root()?)?)?;
     }
     Ok(guard)
 }

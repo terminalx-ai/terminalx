@@ -1229,7 +1229,7 @@ fn deletion_preview(journal: &Journal, env: &Environment) -> Value {
     )
 }
 
-fn provision_settled(env: &Environment) -> bool {
+pub(super) fn provision_settled(env: &Environment) -> bool {
     env.provision.is_none()
         || super::provisioning::adopted(env)
         || env.provision.as_ref().is_some_and(|p| {
@@ -1248,7 +1248,7 @@ fn validate_deletion_work(env: &Environment, tasks: &[&Task], work: &Value) -> R
 // complete matching history and an affirmative zero-owned-group observation.
 // Destruction additionally requires the independent attempt/boot and inventory
 // proofs below; a runtime update never creates deletion authorization.
-fn validate_quiescent_history(
+pub(super) fn validate_quiescent_history(
     env: &Environment,
     tasks: &[&Task],
     work: &Value,

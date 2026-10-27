@@ -7,6 +7,7 @@ pub mod bootstrap;
 pub mod guest;
 pub mod host;
 pub mod journal;
+mod owner_shutdown;
 mod process;
 pub mod provisioning;
 pub mod supervisor;

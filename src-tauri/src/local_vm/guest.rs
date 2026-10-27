@@ -2548,6 +2548,281 @@ mod tests {
     }
 
     #[test]
+    fn idle_unready_setup_allows_owner_shutdown_only_with_fresh_guest_history() {
+        let (_home, guest, task) = setup();
+        let journal =
+            Journal::open_existing(&crate::store::root().unwrap().join("host-journal")).unwrap();
+        journal.cancel(&task.target).unwrap();
+        guest.cancel(&task.target).unwrap();
+        journal
+            .transaction(|state| {
+                let env = state
+                    .environments
+                    .get_mut(&task.target.environment_id)
+                    .unwrap();
+                let mut report =
+                    super::super::setup::initial(env, "codex", "setup-without-readiness")?;
+                report["status"] = json!("needsAttention");
+                env.setup = Some(report);
+                Ok(())
+            })
+            .unwrap();
+        let before_host = serde_json::to_value(journal.read().unwrap()).unwrap();
+        let before_guest = fs::read(guest.base.join("runtime").join(STATE)).unwrap();
+        assert!(super::super::supervisor::state_busy(
+            &journal.read().unwrap()
+        ));
+        let check = || {
+            super::super::owner_shutdown::verify_using(&journal, |env| {
+                assert_eq!(env.id, task.target.environment_id);
+                guest.dispatch(request(&guest, "environment.disposition", json!({})))
+            })
+        };
+        check().expect("An explicitly stopped owner may leave a proven idle, unready VM running");
+        assert_eq!(
+            serde_json::to_value(journal.read().unwrap()).unwrap(),
+            before_host
+        );
+        assert_eq!(
+            fs::read(guest.base.join("runtime").join(STATE)).unwrap(),
+            before_guest
+        );
+        assert!(
+            super::super::supervisor::state_busy(&journal.read().unwrap()),
+            "Idle auto-exit must still retain setup awaiting attention"
+        );
+        for (field, value) in [
+            ("activeOwnedGroups", json!(1)),
+            ("manualControl", json!(true)),
+            ("complete", json!(false)),
+            ("generation", json!(new_id())),
+            ("setupOperations", Value::Null),
+        ] {
+            assert!(
+                super::super::owner_shutdown::verify_using(&journal, |_| {
+                    let mut disposition = guest.disposition()?;
+                    disposition[field] = value.clone();
+                    Ok(disposition)
+                })
+                .is_err(),
+                "{field}"
+            );
+        }
+        assert!(
+            super::super::owner_shutdown::verify_using(&journal, |_| bail!("offline guest"))
+                .is_err()
+        );
+        assert!(super::super::owner_shutdown::verify_using(&journal, |_| {
+            let work = guest.disposition()?;
+            journal.transaction(|state| {
+                state.enabled = !state.enabled;
+                Ok(())
+            })?;
+            Ok(work)
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("history changed"));
+    }
+
+    #[test]
+    fn owner_shutdown_preserves_unknown_actions_and_requires_proven_helper_exit() {
+        let (_home, guest, task) = setup();
+        let journal =
+            Journal::open_existing(&crate::store::root().unwrap().join("host-journal")).unwrap();
+        journal.cancel(&task.target).unwrap();
+        guest.cancel(&task.target).unwrap();
+        let key = "interrupted-desktop-check";
+        let params = request(
+            &guest,
+            "environment.setupAction",
+            json!({
+                "action":"desktop.verify", "idempotencyKey":key, "confirm":true
+            }),
+        )
+        .params;
+        // Exercise the durable guest receipt path without invoking a desktop or
+        // provider. An unknown result alone never proves the helper has exited.
+        let receipt = guest
+            .setup_action_using(&params, |actor, params, _, _| {
+                actor.test_receipt(
+                    setup::Receipt {
+                        action: params.action,
+                        idempotency_key: params.idempotency_key,
+                        status: setup::Status::OutcomeUnknown,
+                        detail: Some("interrupted_test_helper".into()),
+                        verification: None,
+                        account_verification: None,
+                    },
+                    false,
+                );
+                Ok(())
+            })
+            .unwrap();
+        journal
+            .transaction(|state| {
+                let env = state
+                    .environments
+                    .get_mut(&task.target.environment_id)
+                    .unwrap();
+                let mut report = super::super::setup::initial(env, "codex", "interrupted-setup")?;
+                report["status"] = json!("outcomeUnknown");
+                report["operations"] =
+                    json!({key:{"digest":digest(&serde_json::to_vec(&params)?),"receipt":receipt}});
+                report["action"] = receipt.clone();
+                env.setup = Some(report);
+                Ok(())
+            })
+            .unwrap();
+        let check =
+            || super::super::owner_shutdown::verify_using(&journal, |_| guest.disposition());
+        assert!(
+            check().is_err(),
+            "An unknown, unexited helper still holds the owner"
+        );
+        {
+            let mut state = guest.state.lock().unwrap();
+            state
+                .setup_operations
+                .get_mut(key)
+                .unwrap()
+                .helper_exit_confirmed = true;
+            guest.save(&state).unwrap();
+        }
+        let before_host = serde_json::to_value(journal.read().unwrap()).unwrap();
+        let before_guest = fs::read(guest.base.join("runtime").join(STATE)).unwrap();
+        check().unwrap();
+        assert_eq!(
+            serde_json::to_value(journal.read().unwrap()).unwrap(),
+            before_host
+        );
+        assert_eq!(
+            fs::read(guest.base.join("runtime").join(STATE)).unwrap(),
+            before_guest
+        );
+        assert_eq!(
+            journal.read().unwrap().environments[&task.target.environment_id]
+                .setup
+                .as_ref()
+                .unwrap()["action"]["status"],
+            "outcomeUnknown"
+        );
+        for (pointer, value) in [
+            (
+                format!("/setupOperations/{key}/helperExitConfirmed"),
+                json!(false),
+            ),
+            (
+                format!("/setupOperations/{key}/generation"),
+                json!(new_id()),
+            ),
+            (
+                format!("/setupOperations/{key}/receipt/action"),
+                Value::Null,
+            ),
+            (
+                format!("/setupOperations/{key}/receipt/status"),
+                json!("working"),
+            ),
+            (format!("/setupOperations/{key}/digest"), json!("damaged")),
+        ] {
+            assert!(
+                super::super::owner_shutdown::verify_using(&journal, |_| {
+                    let mut work = guest.disposition()?;
+                    *work.pointer_mut(&pointer).unwrap() = value.clone();
+                    Ok(work)
+                })
+                .is_err(),
+                "{pointer}"
+            );
+        }
+        let original = journal.read().unwrap().environments[&task.target.environment_id]
+            .setup
+            .clone()
+            .unwrap();
+        for (pointer, value) in [
+            ("/action/idempotencyKey".to_string(), json!("lost-key")),
+            ("/steps".to_string(), json!([])),
+            ("/generation".to_string(), json!(new_id())),
+            (format!("/operations/{key}/receipt/action"), Value::Null),
+        ] {
+            journal
+                .transaction(|state| {
+                    let report = state
+                        .environments
+                        .get_mut(&task.target.environment_id)
+                        .unwrap()
+                        .setup
+                        .as_mut()
+                        .unwrap();
+                    *report = original.clone();
+                    *report.pointer_mut(&pointer).unwrap() = value;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(check().is_err(), "{pointer}");
+        }
+        journal
+            .transaction(|state| {
+                let report = state
+                    .environments
+                    .get_mut(&task.target.environment_id)
+                    .unwrap()
+                    .setup
+                    .as_mut()
+                    .unwrap();
+                *report = original.clone();
+                report["history"] = json!([original]);
+                Ok(())
+            })
+            .unwrap();
+        check().unwrap();
+        journal
+            .transaction(|state| {
+                let report = state
+                    .environments
+                    .get_mut(&task.target.environment_id)
+                    .unwrap()
+                    .setup
+                    .as_mut()
+                    .unwrap();
+                report["history"][0]["operations"][key]["digest"] = json!("a".repeat(64));
+                Ok(())
+            })
+            .unwrap();
+        assert!(check()
+            .unwrap_err()
+            .to_string()
+            .contains("identity changed"));
+        journal
+            .transaction(|state| {
+                state
+                    .environments
+                    .get_mut(&task.target.environment_id)
+                    .unwrap()
+                    .setup = Some(original);
+                Ok(())
+            })
+            .unwrap();
+        // A proven different boot permits host shutdown but retains the exact
+        // unknown receipt. This changes only a disposable test's old record.
+        {
+            let mut state = guest.state.lock().unwrap();
+            let operation = state.setup_operations.get_mut(key).unwrap();
+            operation.helper_exit_confirmed = false;
+            operation.boot_identity = Some(new_id());
+            guest.save(&state).unwrap();
+        }
+        check().unwrap();
+        assert_eq!(
+            guest.state.lock().unwrap().setup_operations[key]
+                .receipt
+                .status,
+            setup::Status::OutcomeUnknown
+        );
+    }
+
+    #[test]
     fn setup_action_intent_precedes_effect_and_exact_receipt_is_atomic_idempotent() {
         let (_home, guest, _task) = setup();
         let params = request(

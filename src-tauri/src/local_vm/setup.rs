@@ -10,13 +10,24 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub const PROTOCOL: u64 = 1;
-const ACTIONS: &[&str] = &[
+pub(super) const ACTIONS: &[&str] = &[
     "driver.start",
     "driver.requestPermissions",
     "provider.codexDeviceLogin.start",
     "provider.codexDeviceLogin.cancel",
     "provider.codexAccount.verify",
     "desktop.verify",
+];
+pub(super) const STEP_IDS: &[&str] = &[
+    "tools",
+    "vm",
+    "transport",
+    "runtime",
+    "driver",
+    "accessibility",
+    "screenRecording",
+    "provider",
+    "desktop",
 ];
 
 pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
@@ -639,23 +650,12 @@ pub fn busy(env: &Environment) -> bool {
 pub fn ready(env: &Environment, report: &Value) -> bool {
     let read = &report["readiness"];
     let proof = &report["desktopVerification"];
-    let ids = [
-        "tools",
-        "vm",
-        "transport",
-        "runtime",
-        "driver",
-        "accessibility",
-        "screenRecording",
-        "provider",
-        "desktop",
-    ];
     report["status"] == "ready"
         && report["environmentId"] == env.id
         && report["generation"] == env.generation
         && report["steps"].as_array().is_some_and(|steps| {
-            steps.len() == ids.len()
-                && ids.iter().all(|id| {
+            steps.len() == STEP_IDS.len()
+                && STEP_IDS.iter().all(|id| {
                     steps
                         .iter()
                         .filter(|s| s["id"] == *id && s["state"] == "complete")
