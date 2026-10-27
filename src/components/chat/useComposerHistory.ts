@@ -79,7 +79,8 @@ const same = (a: string[], b: string[]) => a.length === b.length && a.every((tex
  * Past the newest message Down brings back the draft that was being typed.
  *
  * The composer calls `onKeyDown` only when no menu has the arrows; it returns
- * true when it took the key. `sent` ends the browsing after a send and returns
+ * true when it took the key. `captureSend` captures the browsing owned by a send;
+ * its completion ends only that browsing and returns
  * the draft to put back: the one set aside when a recalled message was sent.
  */
 export function useComposerHistory({
@@ -137,6 +138,8 @@ export function useComposerHistory({
     if (next < 0 || next > last) return false;
 
     e.preventDefault();
+    // Each navigation has its own identity, even within the same browse.
+    state = { ...state, lines: [...state.lines] };
     state.lines[state.at] = value;
     state.at = next;
     state.shown = state.lines[next];
@@ -151,11 +154,15 @@ export function useComposerHistory({
     return true;
   };
 
-  const sent = (): string => {
-    const state = browsing.get(id);
-    browsing.delete(id);
-    return state && state.at < state.lines.length - 1 ? state.lines[state.lines.length - 1] : "";
+  const captureSend = () => {
+    const submitted = browsing.get(id);
+    const restored = submitted && submitted.at < submitted.lines.length - 1 ? submitted.lines[submitted.lines.length - 1] : "";
+    return (): string | undefined => {
+      if (browsing.get(id) !== submitted) return undefined;
+      browsing.delete(id);
+      return restored;
+    };
   };
 
-  return { onKeyDown, sent };
+  return { onKeyDown, captureSend };
 }

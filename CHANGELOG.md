@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+### Chat
+
 - Clarify the CLI guide to keep simple issue filing and context checks in the
   current conversation, with separate sessions reserved for authorized work. (#634)
+- Show sending progress immediately and prevent repeat submissions while a message
+  is pending. Preserve newer drafts and recalled text, and keep pending sends and
+  errors visible across tab remounts and cloud reconnects. (#637)
+
 - Keep issue confirmations compact and scrollable with visible decision controls
   and originating-session context. Background requests wait for explicit review
   without interrupting another conversation; human approval remains required. (#641)
