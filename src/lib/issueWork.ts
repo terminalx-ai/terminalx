@@ -475,7 +475,10 @@ export function useWorkClaims(projectPath: string | null | undefined, provider: 
   const [read, setRead] = useState<{ answer: WorkClaimsAnswer | null; receivedAt: number; of: string }>({ answer: null, receivedAt: 0, of: "" });
   const urls = useMemo(() => [...new Set(issueUrls)].sort(), [issueUrls]);
   const urlsKey = urls.join("\n");
-  const of = `${accountScope}\n${projectPath}\n${provider}\n${urlsKey}`;
+  const { status } = useAccount();
+  // Also fences title-bar readers and capability-only account announcements.
+  const accountKey = JSON.stringify([accountScope, status.state, status.context?.account, status.workClaims]);
+  const of = `${accountKey}\n${projectPath}\n${provider}\n${urlsKey}`;
   const asking = useRef(0);
   useEffect(() => {
     if (!projectPath || urls.length === 0) return;
@@ -499,7 +502,7 @@ export function useWorkClaims(projectPath: string | null | undefined, provider: 
       document.removeEventListener("visibilitychange", visible);
     };
     // `urls` is named by `urlsKey`.
-  }, [projectPath, provider, urlsKey, refreshKey, every, accountScope]);
+  }, [projectPath, provider, urlsKey, refreshKey, every, accountKey]);
   return read.of === of ? read : { answer: null, receivedAt: 0 };
 }
 

@@ -696,6 +696,8 @@ export interface AccountStatus {
   memberWorkspaces?: boolean;
   /** The server takes `wake: false` on an agent command and refuses a stopped workspace instead of starting it (`cloud.workspaces.agent-command-wake.v1`, PRO-89). */
   agentCommandWake?: boolean;
+  /** True only when the account service reports account.work-claims.v1. */
+  workClaims?: boolean;
 }
 
 /** One organization of the catalog feed: its list, or why it was not listed (the others are unaffected). */
