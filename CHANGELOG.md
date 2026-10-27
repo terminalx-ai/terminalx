@@ -9,6 +9,32 @@
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
 
+## 0.2.21
+
+### Sessions and workspace
+
+- Create sessions from a compact dialog with a combined agent menu, branch picker
+  and searchable GitHub or Linear issues. Keep unsent prompts when the dialog
+  closes, reuse an open branch or check out another branch in a new worktree,
+  and name new worktrees from the prompt or issue. (#651)
+- Add a Linux desktop in the Computer panel using Docker or Podman, with live
+  viewing, manual control and agent computer tools. The container has no host
+  mounts, its viewer listens on loopback, and Stop and Reset check ownership. (#651)
+- Add a resizable terminal dock, per-turn changed files, branch renaming and
+  clearer loading and signed-out states. Fix transcript-only task notifications
+  leaving a conversation stuck on Working. (#651)
+
+### Updates
+
+- Check for updates shortly after launch and every four hours in release builds.
+  Show an Update button and a dismissible notice with Update and relaunch. (#651)
+
+### Permissions
+
+- Preserve the session directory and supplied approval reason through live events
+  and transcript replay. Prefer an explicit tool working directory, and explain
+  when Ask every time caused the permission request. (#636)
+
 ### Terminal
 
 - Cancel pending atlas warm-up when its final terminal owner is disposed, while
