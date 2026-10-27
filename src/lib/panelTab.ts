@@ -1,7 +1,7 @@
 import { getPrefs, setPrefs } from "@/lib/prefs";
 
-/** The tabs of a session's right panel. Ports is a cloud session's only, for someone who may use previews. */
-export type PanelTab = "changes" | "repo" | "pr" | "files" | "ports";
+/** The tabs of a session's right panel. Ports is a cloud session's only, for someone who may use previews; Computer a local session's. */
+export type PanelTab = "changes" | "repo" | "pr" | "files" | "ports" | "computer";
 
 let pending: PanelTab | null = null;
 const listeners = new Set<(tab: PanelTab) => void>();

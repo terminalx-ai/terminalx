@@ -5,16 +5,48 @@ VM, passing unit tests, or the earlier unlocked UI pilot does not establish
 the locked-host guarantee. Do not enable release claims or mark PRO-114 done
 until the evidence matrix below is completed with real product sessions.
 
+## What main already provides
+
+Main at `5a1c872376e7232692387b5dbc18c4238d6332e7` includes
+[PR #651](https://github.com/terminalx-ai/raccoon/pull/651). Its **Computer → Local
+VM** is a Linux XFCE container managed through Docker or Podman. It supplies an
+embedded noVNC viewer, start/stop/reset controls, viewer reconnect, and Cua
+computer tools for newly launched host agents. It is useful for Linux desktop
+and browser tasks without foregrounding a host viewer.
+
+That feature does not move the agent, shell or files into a macOS guest. Its
+viewer control switch is not the task workflow lease below, and reconnecting
+the viewer does not reconcile or resume a guest worker. It does not implement
+macOS first-account provisioning, guest provider authorization, or this
+feature's durable task and artifact contract. Its source and fixture tests
+also do not establish fresh macOS onboarding or host-lock/sleep acceptance.
+
+The integrated branch keeps the Linux implementation in `container_vm.rs` and
+the macOS task implementation in `local_vm/`; public commands are unchanged.
+A validated macOS guest worker receives only its bound guest desktop adapter,
+never an additional container adapter. The Linux viewer is an existing UI
+foundation to evaluate for later shared desktop work; PRO-117 remains queued.
+
 ## Execution and retained identity
 
-Settings → Environments enables Local Cua. Creating a guest is an explicit
-operation after the allocation, download and storage disclosure. Enrollment
-accepts only an existing `local:<name>` Lume macOS VM; it does not enroll the
-host desktop or require a cloud organization/account.
+Settings → Environments enables Local Cua. Fresh macOS guest creation is
+currently unavailable: the pinned profile cannot securely personalize the
+first account and bind its transport to that account. The owner refuses new
+creation before reserving or downloading anything. Older queued intents are
+retained with an explicit capability refusal, including their original setup
+and request receipts; reopening observes them without retrying effects. An
+existing exact receipt remains discoverable and cannot be replaced by a new
+creation request. Desktop or sign-in evidence cannot complete this missing
+capability or mark such an environment Ready.
 
-The normal Create flow queues guided setup with one confirmed disclosure of
-image/tool downloads, VM resources, retained storage and provider costs. The
-persistent owner prepares pinned Cua/Lume tools in its private cache, verifies
+Enrollment
+accepts only an existing `local:<name>` Lume macOS VM; it does not enroll the
+host desktop or require a cloud organization/account. Enrollment neither
+creates nor secures that VM's account, and readiness checks still apply.
+
+The retained guided setup path discloses image/tool downloads, VM resources,
+retained storage and provider costs. The persistent owner prepares pinned
+Cua/Lume tools in its private cache, verifies
 archive/executable hashes and Developer ID signatures, and installs its matching
 arm64 guest runtime automatically. There is no binary picker or guest shell
 procedure. Existing compatible signed Driver and Codex installations are

@@ -100,6 +100,7 @@ mod keychain;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
+mod container_vm;
 #[cfg(unix)]
 pub mod local_vm;
 mod memory_baseline;
@@ -635,6 +636,12 @@ pub fn run() {
             commands::list_workspaces,
             commands::preview_workspace_name,
             commands::rename_workspace,
+            commands::rename_branch,
+            commands::local_vm_status,
+            commands::local_vm_start,
+            commands::local_vm_stop,
+            commands::local_vm_reset,
+            commands::local_vm_start_runtime,
             commands::adopt_agent_title,
             commands::project_overview,
             commands::copy_text,

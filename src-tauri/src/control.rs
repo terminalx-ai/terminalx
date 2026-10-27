@@ -514,6 +514,27 @@ impl ControlService {
             let params = if action == "sessions.create" { cloud_issue_start(params)? } else { params };
             return crate::cloud_control::call(self.sink.as_ref(), action, params);
         }
+        // The Local VM (`container_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
+        if let Some(action) = command.strip_prefix("vm.") {
+            let vm_error = |error: anyhow::Error| ControlError::new("vm_failed", format!("{error:#}"), Some("See `terminalx skills get local-vm`.".to_string()));
+            let result = match action {
+                "status" => Ok(json!(crate::container_vm::status())),
+                "start" => crate::container_vm::start().map(|status| json!(status)).map_err(vm_error),
+                "stop" => crate::container_vm::stop().map(|status| json!(status)).map_err(vm_error),
+                "call" => {
+                    let tool = params["tool"].as_str().unwrap_or_default();
+                    let arguments = params["arguments"].as_str().unwrap_or("{}");
+                    crate::container_vm::call(tool, arguments).map(|output| json!({"output": output})).map_err(vm_error)
+                }
+                "tools" => crate::container_vm::tools(params["tool"].as_str()).map(|output| json!({"output": output})).map_err(vm_error),
+                "screenshot" => crate::container_vm::screenshot(params["out"].as_str().map(std::path::PathBuf::from)).map(|path| json!({"path": path})).map_err(vm_error),
+                other => Err(ControlError::new("invalid_arguments", format!("Unknown vm command {other}."), None::<String>)),
+            };
+            if matches!(action, "start" | "stop") {
+                self.sink.emit(crate::container_vm::CHANGED_EVENT, &json!({}));
+            }
+            return result;
+        }
         if command.starts_with("computer.") || command.starts_with("browser.") {
             return Err(ControlError::new(
                 "unsupported",
@@ -807,6 +828,7 @@ impl ControlService {
                         title: p.title,
                         use_worktree: p.use_worktree,
                         on_main: p.on_main,
+                        checkout_branch: None,
                         base_ref: None,
                         worktree_name: None,
                         issue: issue.as_ref().map(|issue| issue.reference.clone()),

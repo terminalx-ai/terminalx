@@ -38,6 +38,22 @@ use crate::{git, pty, store};
 #[path = "session_follow.rs"]
 pub mod follow;
 
+/// A guest task's validated desktop binding is exclusive. The optional host
+/// container must neither add another desktop nor probe a runtime in the guest.
+fn computer_launch_config(
+    mut config: crate::cloud_config::LaunchConfig,
+    guest: crate::cloud_config::LaunchConfig,
+    host_args: impl FnOnce(bool) -> String,
+) -> crate::cloud_config::LaunchConfig {
+    if guest.args.is_empty() {
+        config.args.push_str(&host_args(config.args.contains("--append-system-prompt")));
+    } else {
+        config.env.extend(guest.env);
+        config.args.push_str(&guest.args);
+    }
+    config
+}
+
 #[derive(Clone)]
 pub struct PendingAsk {
     pub tool_use_id: String,
@@ -2864,13 +2880,12 @@ impl SessionManager {
         // agent credential always wins.
         let config = crate::cloud_config::launch_config(&tab.harness, &pane);
         #[cfg(unix)]
-        let config = {
-            let mut config = config;
-            let guest_config = crate::local_vm::guest::launch_config(&rt.session_id, &rt.tab_id, &tab.harness)?;
-            config.env.extend(guest_config.env);
-            config.args.push_str(&guest_config.args);
-            config
-        };
+        let guest = crate::local_vm::guest::launch_config(&rt.session_id, &rt.tab_id, &tab.harness)?;
+        #[cfg(not(unix))]
+        let guest = crate::cloud_config::LaunchConfig::default();
+        let config = computer_launch_config(config, guest, |appends_prompt| {
+            crate::container_vm::launch_args(&tab.harness, appends_prompt)
+        });
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
@@ -4639,6 +4654,30 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+
+    #[test]
+    fn a_bound_guest_provider_never_receives_or_probes_the_host_container() {
+        use crate::cloud_config::LaunchConfig;
+        for args in [" --strict-mcp-config --mcp-config 'guest binding'", " -c 'mcp_servers={guest_computer={}}'"] {
+            let cloud = LaunchConfig { env: vec![("CLOUD_SETTING".into(), "kept".into())], args: " --model configured".into() };
+            let guest = LaunchConfig { env: vec![("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())], args: args.into() };
+            let merged = computer_launch_config(cloud, guest, |_| panic!("must not inspect or route the host container"));
+            assert_eq!(merged.args, format!(" --model configured{args}"));
+            assert_eq!(merged.env, [("CLOUD_SETTING".into(), "kept".into()), ("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())]);
+        }
+    }
+
+    #[test]
+    fn a_host_provider_keeps_the_container_and_existing_prompt() {
+        use crate::cloud_config::LaunchConfig;
+        let cloud = LaunchConfig { env: vec![], args: " --append-system-prompt 'workspace'".into() };
+        let merged = computer_launch_config(cloud, LaunchConfig::default(), |appends_prompt| {
+            crate::container_vm::agent_args("claude", "docker", appends_prompt)
+        });
+        assert!(merged.args.contains("cua-driver"));
+        assert_eq!(merged.args.matches("--append-system-prompt").count(), 1);
+        assert!(merged.args.starts_with(" --append-system-prompt 'workspace' --mcp-config "));
+    }
 
     #[test]
     fn permission_timeout_disconnects_before_runtime_lock_cleanup() {
