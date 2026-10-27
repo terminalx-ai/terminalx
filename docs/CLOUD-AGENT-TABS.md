@@ -173,8 +173,25 @@ In a cloud tab's terminal view Escape is typed into the agent's screen with
 | `session.configure` | manage, idempotent | `{ sessionId, tabId, model?, effort?, mode? }` → `{ tab: AgentTabInfo }` |
 | `session.markRead` | participate | `{ sessionId, tabId }` → `{}` |
 | `session.nudge` | participate | `{}` → `{}` (poll the mailbox now) |
-| `session.create` | manage, idempotent | unchanged (+ `tab: AgentTabInfo` in the result); one session with one agent tab per call |
+| `session.create` | manage, idempotent | one session with one agent tab per call (`tab: AgentTabInfo` in the result); optional selected checkout through `session-repository/1` |
 | `session.close` | manage, idempotent | `{ sessionId, tabId?, remove? }`. `remove` also drops the tab from the list and its checkpoints |
+
+`session-repository/1` adds `repository: { identity, directory }` to
+`session.create`. The desktop carries the selected `github.com/owner/name`
+identity and its advertised workspace-relative `targetDirectory`; it refuses
+missing metadata or an older runtime instead of silently starting at the root.
+The runtime verifies confinement, a committed checkout and matching origin
+before writing settings or creating a session/worktree. A missing or mismatched
+checkout returns `repository_checkout_unavailable`; it does not clone, fetch,
+reset or initialize a blank repository. The existing manager authority and
+idempotency checks still apply.
+
+Repository sessions use that checkout as their project, including worktrees and
+pipelines. Workspace-wide session/agent/pipeline visibility includes confined
+nested checkout projects; existing root sessions remain intact. Git discovery
+also includes nested checkouts beside an older blank root. Genuine blank projects
+omit `repository` and retain the existing root initialization behavior. No
+automatic migration of old sessions or change to the older root is performed.
 
 `AgentTabInfo`:
 
