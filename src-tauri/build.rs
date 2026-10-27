@@ -1,5 +1,7 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(terminalx_recovery_acceptance)");
+    println!("cargo:rerun-if-env-changed=TERMINALX_RECOVERY_PYTHON_PATH");
+    println!("cargo:rerun-if-env-changed=TERMINALX_RECOVERY_PYTHON_SHA256");
     // Share the homepage with the frontend instead of maintaining a second repo target.
     println!("cargo:rerun-if-changed=../src/lib/repo.ts");
     let repo = std::fs::read_to_string("../src/lib/repo.ts").expect("read repository identity");

@@ -77,6 +77,8 @@ pub async fn local_runtime_status(window: tauri::WebviewWindow, state: State<'_,
 
 #[tauri::command]
 pub async fn local_runtime_reconnect(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
+    #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+    let _acceptance_call = crate::recovery_acceptance::record_reconnect(window.label());
     static RECONNECT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _reconnect = RECONNECT.lock().await;
     let previous = app.state::<AppState>().runtime();

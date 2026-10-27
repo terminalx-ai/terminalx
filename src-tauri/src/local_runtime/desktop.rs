@@ -144,6 +144,16 @@ impl Desktop {
         if !windows.contains_key(window) {
             windows.insert(window.into(), Bridge::connect_views(&self.client, self.sink.clone())?);
         }
+        #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
+        let tap = {
+            let label = window.to_owned();
+            let tap = tap;
+            Box::new(move |bytes: &[u8]| {
+                let accepted = tap(bytes);
+                if accepted { crate::recovery_acceptance::record_view_bytes(&label, bytes); }
+                accepted
+            }) as Tap
+        };
         windows[window].attach(id, token, tap)
     }
 
