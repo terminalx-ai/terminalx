@@ -33,7 +33,8 @@ impl From<&Scope> for ExportScope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+// Portable reducer evidence uses snake_case tags and camelCase fields.
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum Signal {
     ConnectionOpened,
     ContinuityLost { reason: Loss },

@@ -37,7 +37,8 @@ pub(crate) struct Scope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+// Preserve the journal format's snake_case fields inside camelCase variant tags.
+#[serde(rename_all = "camelCase", rename_all_fields = "snake_case", deny_unknown_fields)]
 pub(crate) enum Observation {
     /// Admission must cover loss of the previous scope and the new binding
     /// together. In particular, switching conversation cannot orphan its state.
