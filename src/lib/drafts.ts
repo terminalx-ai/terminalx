@@ -32,6 +32,8 @@ export function checkpointDraftsForRecovery(localTabIds: Iterable<string>) {
   const local = new Set(localTabIds);
   sessionStorage.setItem(RECOVERY_DRAFTS, JSON.stringify([...drafts].filter(([id]) => local.has(id))));
 }
+const revisions = new Map<string, number>();
+let nextRevision = 0;
 const listeners = new Map<string, Set<() => void>>();
 /** Told of every change, e.g. to keep a cloud tab's draft with its cache. */
 const changes = new Set<(tabId: string, text: string) => void>();
@@ -40,10 +42,18 @@ export function getDraft(tabId: string): string {
   return drafts.get(tabId) ?? "";
 }
 
-export function setDraft(tabId: string, text: string) {
+/** Changes on every write, including identical text; forgetting a draft invalidates it. */
+export function getDraftRevision(tabId: string): number | undefined {
+  return revisions.get(tabId);
+}
+
+export function setDraft(tabId: string, text: string): number {
+  const revision = ++nextRevision;
+  revisions.set(tabId, revision);
   drafts.set(tabId, text);
   for (const l of listeners.get(tabId) ?? []) l();
   for (const change of changes) change(tabId, text);
+  return revision;
 }
 
 /** Forget the drafts of the tabs that match, e.g. another account's cloud tabs. Views showing one go empty. */
@@ -51,6 +61,7 @@ export function clearDrafts(matches: (tabId: string) => boolean) {
   for (const tabId of [...drafts.keys()]) {
     if (!matches(tabId)) continue;
     drafts.delete(tabId);
+    revisions.delete(tabId);
     for (const l of listeners.get(tabId) ?? []) l();
   }
 }
