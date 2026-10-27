@@ -295,6 +295,13 @@ initial account is not a production credential. This implementation neither
 persists it nor guesses, enters, resets or copies passwords. A supported secure
 account-personalization path and fresh guided setup remain release gates.
 
+The pinned Cua 0.7.0 macOS transport also delegates command execution to
+`lume ssh` with its default guest account. Its macOS adapter does not expose
+the account/key binding used by its separate generic SSH transport. Secure
+fresh setup therefore needs both a supported first-account provisioner and
+an execution transport bound to that account; changing only health-check
+credentials cannot satisfy this contract.
+
 Apple's supported
 [guest provisioning API](https://developer.apple.com/documentation/virtualization/vzmacguestprovisioningoptions)
 can configure the initial account on first boot after restore, but requires
@@ -370,7 +377,7 @@ explicit direction.
 
 | Gate | Current evidence |
 | --- | --- |
-| Recovered work starts from fresh remote main | Exact checkpoint `fa0f4fa8` integrated with remote main `76a7d7b2` on 2026-10-26. |
+| Recovered work starts from fresh remote main | Exact checkpoint `fa0f4fa8` preserved and integrated; remote main `c205fbe4` merged into the author branch at `244db5c1` on 2026-10-27. |
 | Automated TypeScript/UI/invariant checks | Recorded by author in external `pro114-status.json`; rerun after final edits. |
 | Real macOS guest provider worker + transcript/PTY reconnect | Historical scoped guest tasks and fresh RPC-client reconnect passed; desktop reopen and interrupted-provider resume remain pending. |
 | Native guest app + browser input/readback; untouched host sentinel | Historical Calculator and trusted Safari input/readback passed at checkpoint `fa0f4fa8`. Guest `128f5efc` passed the new native setup document input/readback/save/close check through background transport on 2026-10-27. Complete host-isolation acceptance remains pending. |
