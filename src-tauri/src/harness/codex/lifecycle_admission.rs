@@ -228,3 +228,7 @@ impl Admission for TypedAdmission {
 #[cfg(test)]
 #[path = "lifecycle_admission_tests.rs"]
 mod tests;
+
+// Dormant coordinator; no Engine, provider or UI constructs it.
+#[path = "lifecycle_coordinator.rs"]
+pub(crate) mod coordinator;
