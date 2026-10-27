@@ -252,38 +252,23 @@ describe("issue session targets", () => {
   it("does not clear the workspace destination during Strict Mode effect replay", async () => {
     vi.mocked(clearNewSessionPreset).mockClear();
     render(<StrictMode><NewSessionView /></StrictMode>);
-    await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "preview_workspace_name")).toBe(true));
     expect(clearNewSessionPreset).not.toHaveBeenCalled();
   });
 
-  it("previews and customises the workspace name for a new session", async () => {
+  it("names a new session's worktree after what it is asked to do", async () => {
     render(<NewSessionView />);
-
-    const preview = await screen.findByRole("button", { name: /Workspace quiet-amber-fox/ });
-    fireEvent.doubleClick(preview);
-    const input = screen.getByRole("textbox", { name: "Workspace name" });
-    fireEvent.change(input, { target: { value: "My Focused Workspace" } });
-    fireEvent.keyDown(input, { key: "Enter" });
-    await screen.findByRole("button", { name: /Workspace my-focused-workspace/ });
-
-    fireEvent.change(screen.getByPlaceholderText("Describe the task. A worktree is created when you send."), {
-      target: { value: "Build the feature" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "preview_workspace_name")).toBe(true));
+    fireEvent.change(screen.getByPlaceholderText("What do you want to work on?"), { target: { value: "Build the checkout feature" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
     const [, args] = invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }];
-    expect(args.req).toMatchObject({ useWorktree: true, worktreeName: "my-focused-workspace" });
+    expect(args.req).toMatchObject({ useWorktree: true, worktreeName: "build-checkout-feature" });
   });
 
-  it("ignores a composer's one-off choice and resets the choice for the next issue", async () => {
-    const composer = render(<NewSessionView />);
-    const composerSwitch = screen.getByRole("switch", { name: /worktree/i });
-    fireEvent.click(composerSwitch);
-    expect(composerSwitch.getAttribute("aria-checked")).toBe("false");
-    expect(getPrefs().useWorktree).toBe(true);
-    composer.unmount();
-
+  it("resets an issue's one-off worktree choice for the next issue", async () => {
     render(<IssuesView />);
     fireEvent.click(await screen.findByText("Fix login timeout"));
     await screen.findByText("First issue body.");
@@ -395,14 +380,40 @@ function launchRequest() {
   return call![1].req;
 }
 
+// Agent, model, effort and permissions are one menu: the efforts in it, the models one level in.
+const shownModel = () => screen.getByTestId("agent-model").textContent;
+const shownEffort = () => screen.queryByTestId("agent-effort")?.textContent ?? null;
+
+async function openAgentMenu() {
+  fireEvent.click(screen.getByTestId("agent-menu"));
+  return screen.findByRole("menu");
+}
+
+async function modelMenu() {
+  const top = await openAgentMenu();
+  fireEvent.keyDown(within(top).getByRole("menuitem", { name: /^Model/ }), { key: "ArrowRight" });
+  await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true }).length).toBe(2));
+  return screen.getAllByRole("menu", { hidden: true }).at(-1)!;
+}
+
+async function closeMenus() {
+  for (const menu of screen.queryAllByRole("menu", { hidden: true }).reverse()) fireEvent.keyDown(menu, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu", { hidden: true })).toBeNull());
+}
+
 async function pickModel(name: string) {
-  fireEvent.click(screen.getByTitle("Model"));
-  fireEvent.click(await screen.findByRole("menuitemradio", { name }));
+  fireEvent.click(within(await modelMenu()).getByRole("menuitemradio", { name, hidden: true }));
+  await closeMenus();
 }
 
 async function pickEffort(name: string) {
-  fireEvent.click(screen.getByTitle("Effort"));
-  fireEvent.click(await screen.findByRole("menuitemradio", { name }));
+  fireEvent.click(within(await openAgentMenu()).getByRole("menuitemradio", { name }));
+  await closeMenus();
+}
+
+async function pickAgent(name: string) {
+  fireEvent.click(within(await openAgentMenu()).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+  await closeMenus();
 }
 
 async function openIssue(provider: "github" | "linear", onCreated = vi.fn()) {
@@ -425,7 +436,11 @@ describe("the pipeline an issue session starts", () => {
     protected: { migrations: true, deploy: true, security: true, paths: [] }, ignoredChecks: [],
     ...patch,
   });
-  const mergeSwitch = () => screen.getByRole("switch", { name: MERGE_SWITCH });
+  // A pipeline's own switch is on its panel; the one for a start is behind the start row's options.
+  const mergeSwitch = () => {
+    if (!screen.queryByRole("switch", { name: MERGE_SWITCH })) fireEvent.click(screen.getByRole("button", { name: "Session options" }));
+    return screen.getByRole("switch", { name: MERGE_SWITCH });
+  };
   async function open(title = "Fix login timeout", onCreated = vi.fn()) {
     render(<IssuesView onCreated={onCreated} />);
     fireEvent.click(await screen.findByText(title));
@@ -648,9 +663,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
   it.each(["claude", "codex"])("matches New Session defaults and launch choices for %s", async (agent) => {
     setPrefs({ lastAgent: agent });
     const composer = render(<NewSessionView useWorktree={false} />);
-    const labels = ["Agent", "Model", "Effort"].map((title) => screen.getByTitle(title).textContent);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Synthetic task" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(upsertSession).toHaveBeenCalled());
     const tab = launchRequest().tab;
     expect(tab).toEqual(agent === "codex"
@@ -661,7 +675,6 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     vi.mocked(upsertSession).mockClear();
 
     await openIssue(provider);
-    expect(["Agent", "Model", "Effort"].map((title) => screen.getByTitle(title).textContent)).toEqual(labels);
     expect((await startIssue()).tab).toEqual(tab);
     // Merely showing defaults does not overwrite saved preferences.
     expect(getPrefs().lastModel).toEqual({});
@@ -672,8 +685,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     setPrefs({ lastAgent: "codex", lastModel: { codex: "gpt-5.6-sol", claude: "sonnet" }, lastEffort: { codex: "high", claude: "max" }, lastMode: "manual" });
     const onCreated = vi.fn();
     const view = await openIssue(provider, onCreated);
-    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
-    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    expect(shownModel()).toBe("GPT-5.6 Sol");
+    expect(shownEffort()).toBe("High");
     await pickModel("GPT-6 Astra");
     await pickEffort("Medium");
     expect(getPrefs().lastModel).toEqual({ codex: "gpt-6-astra", claude: "sonnet" });
@@ -692,25 +705,22 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     expect(startPipeline).toHaveBeenCalledWith("session-1", "tab-1", false);
     view.unmount();
     render(<NewSessionView />);
-    expect(screen.getByTitle("Agent").textContent).toBe("Codex");
-    expect(screen.getByTitle("Model").textContent).toBe("GPT-6 Astra");
-    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
+    const agent = screen.getByTestId("agent-menu");
+    expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium");
+    expect(agent.getAttribute("title")).toMatch(/^Codex · /);
   });
 
   it("switches agents using each provider's saved model and supported efforts", async () => {
     setPrefs({ lastModel: { claude: "opus", codex: "gpt-5.6-sol" }, lastEffort: { claude: "max", codex: "medium" } });
     await openIssue(provider);
-    fireEvent.click(screen.getByTitle("Agent"));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Codex" }));
-    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
-    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
-    fireEvent.click(screen.getByTitle("Model"));
-    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "Fixed effort model"]);
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-    fireEvent.click(screen.getByTitle("Agent"));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Claude Code" }));
-    expect(screen.getByTitle("Model").textContent).toBe("Opus (latest · Opus 5.5)");
-    expect(screen.getByTitle("Effort").textContent).toBe("Max");
+    await pickAgent("Codex");
+    expect(shownModel()).toBe("GPT-5.6 Sol");
+    expect(shownEffort()).toBe("Medium");
+    expect(within(await modelMenu()).getAllByRole("menuitemradio", { hidden: true }).map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "Fixed effort model"]);
+    await closeMenus();
+    await pickAgent("Claude Code");
+    expect(shownModel()).toMatch(/^Opus/);
+    expect(shownEffort()).toBe("Max");
     expect(getPrefs().lastAgent).toBe("claude");
     expect((await startIssue()).tab).toMatchObject({ harness: "claude", model: "opus", effort: "max" });
   });
@@ -719,14 +729,13 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     setPrefs({ lastAgent: "codex", lastEffort: { codex: "high" } });
     await openIssue(provider);
     await pickModel("GPT-5.6 Sol");
-    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    expect(shownEffort()).toBe("High");
     await pickModel("GPT-6 Astra");
     await pickEffort("Extra high");
     await pickModel("GPT-5.6 Sol");
-    expect(screen.getByTitle("Effort").textContent).toBe("High");
-    fireEvent.click(screen.getByTitle("Effort"));
-    expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["Medium", "High"]);
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(shownEffort()).toBe("High");
+    expect(within(await openAgentMenu()).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Medium", "High"]);
+    await closeMenus();
     expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
   });
 
@@ -734,42 +743,40 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     setPrefs({ lastAgent: "codex", lastEffort: { codex: "xhigh" } });
     await openIssue(provider);
     await pickModel("Fixed effort model");
-    expect(screen.queryByTitle("Effort")).toBeNull();
+    expect(shownEffort()).toBeNull();
     expect((await startIssue()).tab).toMatchObject({ model: "fixed-model", effort: null });
   });
 
   it.each(["retired-model", "opus"])("replaces stale model %s and unsupported saved effort with valid defaults", async (saved) => {
     setPrefs({ lastAgent: "codex", lastModel: { codex: saved }, lastEffort: { codex: "max" } });
     await openIssue(provider);
-    expect(screen.getByTitle("Model").textContent).toBe("GPT-6 Astra");
-    expect(screen.getByTitle("Effort").textContent).toBe("Medium");
+    expect(shownModel()).toBe("GPT-6 Astra");
+    expect(shownEffort()).toBe("Medium");
     expect((await startIssue()).tab).toMatchObject({ harness: "codex", model: "gpt-6-astra", effort: "medium" });
   });
 
   it("opens, navigates, and selects model and effort with the keyboard", async () => {
     setPrefs({ lastAgent: "codex" });
     await openIssue(provider);
-    const modelButton = screen.getByTitle("Model");
-    modelButton.focus();
-    fireEvent.keyDown(modelButton, { key: "ArrowDown" });
-    const sol = await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" });
+    const button = screen.getByTestId("agent-menu");
+    button.focus();
+    fireEvent.keyDown(button, { key: "ArrowDown" });
+    const top = await screen.findByRole("menu");
+    fireEvent.keyDown(within(top).getByRole("menuitem", { name: /^Model/ }), { key: "ArrowRight" });
+    const sol = await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol", hidden: true });
     await waitFor(() => expect(document.activeElement).toBe(sol));
     fireEvent.keyDown(sol, { key: "ArrowDown" });
-    const astra = screen.getByRole("menuitemradio", { name: "GPT-6 Astra" });
+    const astra = screen.getByRole("menuitemradio", { name: "GPT-6 Astra", hidden: true });
     await waitFor(() => expect(document.activeElement).toBe(astra));
     fireEvent.keyDown(astra, { key: "Enter" });
     expect(vi.mocked(refreshModels)).toHaveBeenCalled();
-    await waitFor(() => expect(document.activeElement).toBe(modelButton));
-    const effortButton = screen.getByTitle("Effort");
-    effortButton.focus();
-    fireEvent.keyDown(effortButton, { key: " " });
-    const low = await screen.findByRole("menuitemradio", { name: "Low" });
-    await waitFor(() => expect(document.activeElement).toBe(low));
-    fireEvent.keyDown(low, { key: "End" });
-    const extraHigh = screen.getByRole("menuitemradio", { name: "Extra high" });
-    await waitFor(() => expect(document.activeElement).toBe(extraHigh));
+    await waitFor(() => expect(document.activeElement).toBe(button));
+    expect(shownModel()).toBe("GPT-6 Astra");
+    fireEvent.keyDown(button, { key: " " });
+    const extraHigh = await screen.findByRole("menuitemradio", { name: "Extra high" });
+    extraHigh.focus();
     fireEvent.keyDown(extraHigh, { key: "Enter" });
-    await waitFor(() => expect(document.activeElement).toBe(effortButton));
+    await waitFor(() => expect(document.activeElement).toBe(button));
     expect((await startIssue()).tab).toMatchObject({ model: "gpt-6-astra", effort: "xhigh" });
   });
 
@@ -778,8 +785,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     const view = await openIssue(provider);
     catalog.models = models.filter((m) => m.id !== "gpt-6-astra");
     view.rerender(<IssuesView />);
-    expect(screen.getByTitle("Model").textContent).toBe("GPT-5.6 Sol");
-    expect(screen.getByTitle("Effort").textContent).toBe("High");
+    expect(shownModel()).toBe("GPT-5.6 Sol");
+    expect(shownEffort()).toBe("High");
     expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
   });
 
@@ -787,8 +794,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     catalog.models = [];
     setPrefs({ lastAgent: "codex", lastModel: { codex: "opus" }, lastEffort: { codex: "max" } });
     await openIssue(provider);
-    expect(screen.queryByTitle("Model")).toBeNull();
-    expect(screen.queryByTitle("Effort")).toBeNull();
+    expect(shownModel()).toBe("Codex");
+    expect(shownEffort()).toBeNull();
     expect((await startIssue()).tab).toMatchObject({ harness: "codex", model: "", effort: null });
   });
 });

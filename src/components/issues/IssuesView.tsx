@@ -2,7 +2,7 @@ import { usePipelineLaunch } from "@/lib/pipelineLaunch";
 import { setPipelineResolveConflicts } from "@/lib/issuePipeline";
 import { EmptyView } from "@/components/start/EmptyView";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { Check, ChevronDown, Cloud, Copy, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
+import { Check, ChevronDown, Cloud, Copy, ExternalLink, Github, LogoLinear, FolderGit2, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, Users } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
 import { bindingText, matchesShortcut, useKeymap } from "@/lib/shortcuts";
@@ -22,7 +22,9 @@ import { IssueStatusPicker } from "@/components/issues/IssueStatusPicker";
 import { IssueWorkPanel, TakenIssueDialog } from "@/components/issues/IssueWork";
 import { issueKey as writeKey, useIssueWrites } from "@/components/issues/issueWrites";
 import { IssueDescription, IssueLabels, IssuePriority, IssueTitle, editableIssue, useIssueEdits } from "@/components/issues/IssueFields";
-import { SessionAgentControls } from "@/components/session/SessionAgentControls";
+import { AgentMenu } from "@/components/session/AgentMenu";
+import { ConnectLinear } from "@/components/session/IssuePicker";
+import { SessionOptions } from "@/components/session/SessionOptions";
 import { AgentLoginsLink } from "@/components/cloud/AgentLoginsLink";
 import { cloudStartError, useCloudProjectChoices } from "@/components/session/CloudNewSession";
 import { useSessionAgent } from "@/lib/useSessionAgent";
@@ -167,7 +169,8 @@ export function IssuesView({
   // The issues changed here since the list was read, by `provider:id`. One that no longer matches the filter stays
   // until the next read, dimmed, rather than vanish under the pointer.
   const [changedHere, setChangedHere] = useState<ReadonlySet<string>>(new Set());
-  const [loading, setLoading] = useState(false);
+  // Loading from the start: "no issues" is only said once they have been read.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ message: string; organizationId: string | null } | null>(null);
   const [selected, setSelected] = useState<Issue | null>(null);
   const [detail, setDetail] = useState<Issue | null>(null);
@@ -341,12 +344,15 @@ export function IssuesView({
 
   // The list itself. Search is debounced because GitHub runs it server-side.
   useEffect(() => {
-    if (!projectPath) return;
+    // Nothing to read: not loading either, or the refresh would spin on with nothing coming.
+    if (!projectPath) return setLoading(false);
     if (provider === "linear" && !linear?.connected) {
       setList([]);
+      setLoading(false);
       return;
     }
     let live = true;
+    setLoading(true);
     const t = window.setTimeout(async () => {
       setLoading(true);
       setError(null);
@@ -788,13 +794,26 @@ export function IssuesView({
               {error.organizationId && <AgentLoginsLink message={error.message} organizationId={error.organizationId} className="ml-2" />}
             </div>
           )}
-          {emptyReason ? (
-            <div className="flex flex-col items-start gap-2 px-4 py-6 text-sm text-muted-foreground">
-              <span>{emptyReason}</span>
-              {provider === "linear" && linear && !linear.connected && (
-                <span className="flex items-center gap-1 text-xs text-faint">
-                  <Settings2 className="size-3.5" /> {settingsKeys ? `Press ${bindingText(settingsKeys)}, then Integrations.` : "Open Settings, then Integrations."}
-                </span>
+          {emptyReason && provider === "linear" && linear && !linear.connected ? (
+            <div className="flex flex-col items-center px-4 py-10">
+              <ConnectLinear onConnected={() => setLinear({ connected: true })} />
+              <span className="flex items-center gap-1 text-[11px] text-faint">
+                <Settings2 className="size-3" /> Or in Settings → Integrations{settingsKeys ? ` (${bindingText(settingsKeys)})` : ""}
+              </span>
+            </div>
+          ) : emptyReason ? (
+            <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">
+              {provider === "github" ? <Github className="size-6 text-faint" aria-hidden /> : <LogoLinear className="size-6 text-faint" aria-hidden />}
+              <span className="max-w-[44ch] text-sm text-muted-foreground">{emptyReason}</span>
+              {provider === "github" && ghOk === false && (
+                <div className="mt-1 flex flex-wrap justify-center gap-2">
+                  <Button size="sm" onClick={() => void openUrl("https://cli.github.com").catch(() => {})}>
+                    Install GitHub CLI <ExternalLink />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setTick((n) => n + 1)}>
+                    Check again
+                  </Button>
+                </div>
               )}
             </div>
           ) : shownList.length === 0 && !loading ? (
@@ -806,6 +825,10 @@ export function IssuesView({
                   : filter.state === "open"
                     ? "No open issues match."
                     : "No issues match."}
+            </div>
+          ) : shownList.length === 0 ? (
+            <div role="status" className="flex items-center gap-1.5 px-4 py-6 text-sm text-faint">
+              <Loader2 className="size-3.5 animate-spin" /> Loading issues…
             </div>
           ) : (
             <ul className="px-2 pb-4">
@@ -936,70 +959,83 @@ export function IssuesView({
               )}
               {edits.error && <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">{edits.error}</div>}
               {current && <IssueWorkPanel workers={workOf(current) ?? []} now={work.now} />}
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <SessionAgentControls selection={agentSelection} pipeline={!pipeline && (cloud || pipelineOffered) ? pipelineLaunch : undefined} />
-              </div>
-              {/* Where it runs, and the buttons. The buttons take a line of their own
-                  when the pane is too narrow for both, rather than sit on the words. */}
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5" data-testid="issue-start-row">
-                {cloud ? (
-                  <span className="flex min-w-0 flex-1 basis-56 items-center gap-1 whitespace-nowrap text-[11px] text-faint">
-                    <Cloud className="size-3.5 shrink-0" />
-                    in new worktree <span className="truncate font-mono text-foreground">{issueWorktreeName(selected.identifier, selected.title)}</span> of a cloud workspace
-                  </span>
-                ) : !isGit ? <span className="text-xs text-faint">In folder · no Git</span> : <label className="flex min-w-0 flex-1 basis-56 items-center gap-2 text-[11px] text-faint">
-                  <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
-                  <span className={cn("flex min-w-0 items-center gap-1 whitespace-nowrap", !useWorktree && "text-warning")}>
-                    <GitBranch className="size-3.5 shrink-0" />
-                    {useWorktree ? (
-                      <>
-                        in new worktree <span className="truncate font-mono text-foreground">{issueWorktreeName(selected.identifier, selected.title)}</span> from{" "}
-                        <span className="font-mono text-foreground">{status?.defaultBranch ?? "default"}</span>
-                      </>
-                    ) : (
-                      <>
-                        on <span className="font-mono">{status?.branch ?? "main"}</span>
-                      </>
+              <div className="mt-1 rounded-xl bg-well/60 p-1.5 hairline" data-testid="issue-start-card">
+                {/* Where it runs, and the buttons. The buttons take a line of their own
+                    when the pane is too narrow for both, rather than sit on the words. */}
+                <div className="flex flex-wrap items-center gap-x-1 gap-y-1.5" data-testid="issue-start-row">
+                  <AgentMenu selection={agentSelection} disabled={starting} />
+                  {cloud ? (
+                    <span className="flex min-w-0 flex-1 basis-40 items-center gap-1 whitespace-nowrap px-1 text-[11px] text-faint" title="A new worktree of a cloud workspace">
+                      <Cloud className="size-3.5 shrink-0" />
+                      <span className="truncate font-mono">{issueWorktreeName(selected.identifier, selected.title)}</span>
+                      <span className="shrink-0">· cloud workspace</span>
+                    </span>
+                  ) : !isGit ? (
+                    <span className="px-1 text-xs text-faint">Folder · no Git</span>
+                  ) : (
+                    <label className="flex min-w-0 flex-1 basis-40 items-center gap-1.5 px-1 text-[11px] text-faint" title={useWorktree ? `A new branch from ${status?.defaultBranch ?? "the default branch"}, in its own worktree` : "Works directly on the project's checkout"}>
+                      <Switch aria-label="Start issue in a new worktree" size="sm" checked={useWorktree} onCheckedChange={setUseWorktree} />
+                      <span className={cn("flex min-w-0 items-center gap-1 whitespace-nowrap", !useWorktree && "text-warning")}>
+                        <GitBranch className="size-3.5 shrink-0" />
+                        {useWorktree ? (
+                          <>
+                            <span className="truncate font-mono text-muted-foreground">{issueWorktreeName(selected.identifier, selected.title)}</span>
+                            <span className="shrink-0">from</span> <span className="shrink-0 font-mono text-muted-foreground">{status?.defaultBranch ?? "default"}</span>
+                          </>
+                        ) : (
+                          <>
+                            on <span className="font-mono">{status?.branch ?? "main"}</span>
+                          </>
+                        )}
+                      </span>
+                    </label>
+                  )}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {!pipeline && (cloud || pipelineOffered) && <SessionOptions pipeline={pipelineLaunch} />}
+                    {openLinked && (
+                      <Button variant="ghost" size="sm" onClick={openLinked}>
+                        Open session
+                      </Button>
                     )}
-                  </span>
-                </label>}
-                <div className="ml-auto flex shrink-0 items-center gap-2">
-                  {openLinked && (
-                    <Button variant="secondary" size="sm" onClick={openLinked}>
-                      Open session
+                    <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start(false)}>
+                      {starting ? <Loader2 className="animate-spin" /> : null}
+                      Start session
                     </Button>
-                  )}
-                  <Button size="sm" variant="accent" disabled={starting || detailLoading || (cloud ? !harness || cloud.mayStart !== true || !cloud.project.selected : !harness?.available)} onClick={() => void start(false)}>
-                    {starting ? <Loader2 className="animate-spin" /> : null}
-                    Start session
-                  </Button>
+                  </div>
                 </div>
+                {(() => {
+                  // At most one quiet line under the row: what stops a start, else what it will do.
+                  const line =
+                    cloud && cloud.mayStart === false
+                      ? "Starting a session in this organization's cloud workspaces needs an owner or admin."
+                      : cloud && !cloud.project.selected
+                        ? "This repository is no longer selected for cloud workspaces in its organization, so no session starts in them."
+                        : pipeline
+                          ? null
+                          : cloud
+                            ? pipelineDefaults.enabled
+                              ? "A pull request is opened and reviewed in the workspace when the work is done. It stops at Ready to merge, and you merge it here."
+                              : null
+                            : isGit && pipelineDefaults.enabled && !useWorktree
+                              ? "No pull request is opened for a session on the project’s own checkout."
+                              : null;
+                  return line ? (
+                    <p className="px-2 pb-0.5 pt-1.5 text-[11px] text-faint" data-testid={cloud && !pipeline && cloud.mayStart !== false && cloud.project.selected ? "issue-cloud-pipeline" : undefined}>
+                      {line}
+                    </p>
+                  ) : null;
+                })()}
+                {startNote && (
+                  <p role="status" className="flex items-start gap-1.5 px-2 pb-0.5 pt-1.5 text-[11px] text-muted-foreground" data-testid="issue-start-note">
+                    <span>{startNote}</span>
+                    {cloud && cloudPlan?.kind === "create" && (
+                      <button type="button" className="shrink-0 text-foreground underline-offset-2 hover:underline" onClick={() => startCloudSessionIn(cloud.project.key)}>
+                        New session…
+                      </button>
+                    )}
+                  </p>
+                )}
               </div>
-              {cloud && cloud.mayStart === false && (
-                <span className="text-[11px] text-faint">Starting a session in this organization's cloud workspaces needs an owner or admin.</span>
-              )}
-              {cloud && cloud.mayStart !== false && !cloud.project.selected && (
-                <span className="text-[11px] text-faint">This repository is no longer selected for cloud workspaces in its organization, so no session starts in them.</span>
-              )}
-              {startNote && (
-                <p role="status" className="flex items-start gap-1.5 text-[11px] text-muted-foreground" data-testid="issue-start-note">
-                  <span>{startNote}</span>
-                  {cloud && cloudPlan?.kind === "create" && (
-                    <button type="button" className="shrink-0 text-foreground underline-offset-2 hover:underline" onClick={() => startCloudSessionIn(cloud.project.key)}>
-                      New session…
-                    </button>
-                  )}
-                </p>
-              )}
-              {pipeline ? null : cloud ? (
-                pipelineDefaults.enabled && (
-                  <span className="text-[11px] text-faint" data-testid="issue-cloud-pipeline">
-                    A pull request is opened and reviewed in the workspace when the work is done. It stops at Ready to merge, and you merge it here.
-                  </span>
-                )
-              ) : (
-                isGit && pipelineDefaults.enabled && <span className="text-[11px] text-faint">No pull request is opened for a session on the project’s own checkout.</span>
-              )}
             </div>
             {/* Launch controls, findings and comments share a scroll region so
                 a tall header cannot strand Start session below the viewport. */}
