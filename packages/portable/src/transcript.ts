@@ -156,16 +156,18 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
  * one the tab began with (whose events come before any marker). A
  * conversation that was left and picked up again is all of its stretches.
  *
- * A log with no marker is one conversation and is returned as it is, so a
- * tab that never changed hands costs nothing here.
+ * Scoped lifecycle corrections can arrive after a later conversation's
+ * marker. Their explicit scope takes precedence over positional membership.
  */
 export function conversationEvents(events: AgentEvent[], conversation: string | null): AgentEvent[] {
-  if (!events.some((event) => event.payload.type === "conversation")) return conversation === null ? events : [];
+  if (!events.some((event) => event.payload.type === "conversation" || event.payload.type === "context_compaction_lifecycle")) return conversation === null ? events : [];
   const own: AgentEvent[] = [];
   let under: string | null = null;
   for (const event of events) {
     if (event.payload.type === "conversation") under = event.payload.id ?? null;
-    else if (under === conversation) own.push(event);
+    else if (event.payload.type === "context_compaction_lifecycle") {
+      if (event.payload.evidence.scope.conversationId === conversation) own.push(event);
+    } else if (under === conversation) own.push(event);
   }
   return own;
 }
