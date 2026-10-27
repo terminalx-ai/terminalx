@@ -69,6 +69,17 @@ describe("one confirmed local VM onboarding", () => {
     expect((screen.getByLabelText("Environment name") as HTMLInputElement).value).toBe("");
   });
 
+  it("recognizes the original creation queue after a later setup recovery replaced the current request", async () => {
+    const first = mount(); choose(); fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
+    await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
+    const pending = loadPendingSetup()!; first.unmount();
+    const prior = setupReport({ idempotencyKey: pending.params.idempotencyKey, status: "outcomeUnknown", readiness: null });
+    const enrolled = { ...environment, name: "My selected VM", sandbox: "local:selected-mac", setup: setupReport({ idempotencyKey: "newer-recovery", history: [prior] }) };
+    mount([enrolled]);
+    await waitFor(() => expect(loadPendingSetup()).toBeNull());
+    expect(calls("environment.create")).toHaveLength(1);
+  });
+
   it("does not create when the durable request cannot be saved or is unreadable", async () => {
     const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Setup storage full"); });
     const first = mount(); choose(); fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));

@@ -21,10 +21,19 @@ export function loadPendingSetup(environment?: LocalVmEnvironment): PendingSetup
 }
 
 export function pendingSetupAcknowledged(report: LocalVmSetupReport, pending: PendingSetup): boolean {
-  if (pending.kind === "create") return report.idempotencyKey === pending.params.idempotencyKey && report.harness === pending.params.harness;
+  if (report.protocol !== 1) return false;
+  const requests = [report, ...(Array.isArray(report.history) ? report.history : [])].filter((prior) =>
+    prior?.protocol === 1 && prior.environmentId === report.environmentId && prior.generation === report.generation);
+  if (pending.kind === "create") return requests.some((prior) => prior.idempotencyKey === pending.params.idempotencyKey && prior.harness === pending.params.harness);
   if (report.environmentId !== pending.params.environmentId || report.generation !== pending.params.generation) return false;
-  return pending.kind === "setup" ? report.idempotencyKey === pending.params.idempotencyKey && report.harness === pending.params.harness
-    : report.harness === pending.harness && report.action?.idempotencyKey === pending.params.idempotencyKey && report.action.action === pending.params.action && ["working", "needsAttention", "complete", "failed"].includes(report.action.status);
+  if (pending.kind === "setup") return requests.some((prior) => prior.idempotencyKey === pending.params.idempotencyKey && prior.harness === pending.params.harness);
+  // The current action can advance before an older view receives its reply.
+  // Prefer the keyed canonical receipt; an unknown/malformed operation must
+  // never be overridden by an older action snapshot or recovery history.
+  const retained = report.operations?.[pending.params.idempotencyKey];
+  const receipt = retained === undefined ? report.action : retained?.receipt;
+  return report.harness === pending.harness && receipt?.idempotencyKey === pending.params.idempotencyKey &&
+    receipt.action === pending.params.action && ["working", "needsAttention", "complete", "failed"].includes(receipt.status);
 }
 
 export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {

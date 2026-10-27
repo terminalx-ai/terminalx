@@ -150,6 +150,10 @@ export interface LocalVmSetupReport {
   /** Receipt of the initial, explicitly confirmed setup request, when retained by the owner. */
   idempotencyKey?: string;
   action?: LocalVmSetupActionReceipt | null;
+  /** Keyed canonical receipts survive a newer current action and setup recovery. */
+  operations?: Record<string, { receipt: LocalVmSetupActionReceipt }>;
+  /** Prior setup requests retained by the owner when recovery queues a new request. */
+  history?: LocalVmSetupReport[];
 }
 
 export interface LocalVmSetupActionReceipt {

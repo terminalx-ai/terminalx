@@ -144,6 +144,45 @@ describe("guided local VM setup", () => {
     expect(mocks.reconcile).toHaveBeenCalled();
   });
 
+  it("reconciles a reopened action from its retained receipt after a newer action became current", async () => {
+    mocks.invoke.mockRejectedValue(new Error("Setup reply lost"));
+    const first = mount(); confirm();
+    await screen.findByText(/Setup reply lost/);
+    const saved = loadPendingSetup(current())!; first.unmount();
+    const oldReceipt = { action: "desktop.verify" as const, idempotencyKey: saved.params.idempotencyKey, status: "complete" as const };
+    mount(setupReport({ action: { action: "provider.codexAccount.verify", idempotencyKey: "newer-action", status: "complete" },
+      operations: { [saved.params.idempotencyKey]: { receipt: oldReceipt } } }));
+    await waitFor(() => expect(loadPendingSetup(current())).toBeNull());
+    expect(calls("environment.setupAction")).toHaveLength(1);
+    expect(calls("environment.setup")).toHaveLength(0);
+  });
+
+  it("retains uncertainty when the canonical operation contradicts an older current-action receipt", async () => {
+    const first = mount(); confirm();
+    await waitFor(() => expect(calls("environment.setupAction")).toHaveLength(1));
+    const saved = loadPendingSetup(current())!; first.unmount();
+    const action = { action: "desktop.verify" as const, idempotencyKey: saved.params.idempotencyKey, status: "complete" as const };
+    mount(setupReport({ action, operations: { [saved.params.idempotencyKey]: { receipt: { ...action, status: "outcomeUnknown" } } } }));
+    expect(loadPendingSetup(current())).toEqual(saved);
+    expect(screen.getByText(/A setup request is awaiting a retained acknowledgment/)).toBeTruthy();
+    expect(calls("environment.setupAction")).toHaveLength(1);
+  });
+
+  it("acknowledges an earlier setup queue from bound recovery history after reopening", async () => {
+    const first = mount(null); confirm("Set up this VM");
+    await waitFor(() => expect(calls("environment.setup")).toHaveLength(1));
+    const saved = loadPendingSetup(current())!; first.unmount();
+    const prior = setupReport({ idempotencyKey: saved.params.idempotencyKey, status: "outcomeUnknown" });
+    const report = setupReport({ idempotencyKey: "newer-recovery", history: [{ ...prior, generation: "different-generation" }] });
+    const view = mount(report);
+    expect(loadPendingSetup(current())).toEqual(saved);
+    current().setup = { ...report, history: [prior] }; view.rerender(<EnvironmentsTab />);
+    await waitFor(() => expect(loadPendingSetup(current())).toBeNull());
+    expect(calls("environment.setup")).toHaveLength(1);
+    expect(calls("environment.setupAction")).toHaveLength(0);
+    expect(screen.getByRole("status", { name: "VM setup status" }).textContent).toBe("Setup needs your attention");
+  });
+
   it("retains a pending action when the same environment changes provider settings", async () => {
     const first = mount(); confirm();
     await waitFor(() => expect(calls("environment.setupAction")).toHaveLength(1));

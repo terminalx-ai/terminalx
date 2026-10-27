@@ -26,6 +26,10 @@ Full environment/generation/provider binding, setup intent and keyed action
 receipts live in the owner journal. Reopening Settings observes that history
 without replaying creation, installers, sign-in or permissions. Interrupted
 setup offers explicit review of the existing VM and retains prior uncertainty.
+Saved UI requests reconcile against their exact keyed operation or retained
+setup queue history even when a newer request is current. Environment,
+generation, provider, action and request-key checks still apply. A canonical
+unknown action cannot be cleared by an older success snapshot.
 A missing response or dead helper never proves guest work stopped; unresolved
 setup keeps idle auto-exit and deletion blocked. Explicit host shutdown can
 leave an unready VM running only after fresh, bound guest inspection proves
