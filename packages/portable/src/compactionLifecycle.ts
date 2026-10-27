@@ -48,7 +48,8 @@ type Observation =
   // A strictly increasing, journal-assigned generation; not a clock or progress.
   | { readonly type: "connection_opened"; readonly generation: number }
   | { readonly type: "continuity_lost"; readonly generation: number; readonly reason: "disconnected" | "exited" | "restarted" }
-  | ({ readonly type: "item_started" | "item_completed"; readonly generation: number } & CompactionIdentity)
+  | ({ readonly type: "item_started"; readonly generation: number } & CompactionIdentity)
+  | ({ readonly type: "item_completed"; readonly generation: number } & CompactionIdentity)
   // Separately admitted positive history evidence. Never a generic active status.
   | ({ readonly type: "completion_reconciled" } & CompactionIdentity)
   | { readonly type: "turn_error"; readonly generation: number; readonly turnId: string; readonly willRetry: boolean }
