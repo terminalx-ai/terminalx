@@ -2114,7 +2114,7 @@ fn compaction_append_failure_emits_uncertainty_and_latches_admission() {
     let rig = Rig::new();
     let scope = compaction_rig_scope(&rig);
     let token = rig.manager.bind_compaction(scope, rig.tail.clone(), 0).unwrap();
-    let mut rt = rig.rt.lock().unwrap();
+    let rt = rig.rt.lock().unwrap();
     let generation = rt.seq;
     // An incomplete prior record is a deterministic append failure, not a
     // platform-dependent permission failure or a provider request.
