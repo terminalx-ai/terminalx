@@ -4,6 +4,7 @@ import type { PaneAgent, ShellPane, TabPtyEvent } from "@/lib/api";
 import type { SessionEntry, TabEntry } from "@/types/session";
 import { byHandLock, defaultTabView, followedSelection, tabLabel, tabPaneId, tabViewIn } from "./tabFront";
 import { buildTranscript, conversationEvents } from "./transcript";
+import compactionProviderSwitch from "./fixtures/compaction-provider-switch.json";
 
 /**
  * Tabs follow what runs in their terminal (#437), as a window sees it.
@@ -260,6 +261,24 @@ describe("the conversations of one tab", () => {
   let seq = 0;
   const event = (harness: string, payload: Payload): AgentEvent => ({ id: `e${++seq}`, sessionId: "s1", tabId: "t", harness, seq, ts: at(seq), payload });
   const prompts = (events: AgentEvent[]) => buildTranscript(events, false).turns.flatMap((turn) => (turn.prompt ? [turn.prompt.text] : []));
+
+  it("folds the manager's retained-provider loss shape after a cross-provider switch", () => {
+    // This source-derived shape is also asserted against actual manager
+    // returned/saved events in session_watch_tests.rs. It is not a live capture.
+    const log = compactionProviderSwitch as AgentEvent[];
+    const project = (events: AgentEvent[], conversationId: string | null) => buildTranscript(conversationEvents(events, conversationId), false, { conversationId, compactionContinuityKnown: true });
+    const loss = log[log.length - 1];
+    expect(loss.harness).toBe("claude");
+    expect(loss.payload).toMatchObject({ evidence: { scope: { provider: "claude", conversationId: null }, type: "continuity_lost" } });
+    const a = project(log, null);
+    expect(a.compacting).toBe(false);
+    expect(a.turns.flatMap(t => t.work)).toEqual([expect.objectContaining({ kind: "compaction", lifecycle: expect.objectContaining({ state: "unknown" }) })]);
+    expect(project(log, "B").turns).toEqual([]);
+    expect(project(log, "B").compacting).toBe(false);
+    // Preserve the frontend equality gate: the old contradictory envelope
+    // is rejected, so it cannot resolve A. Fixing the producer is essential.
+    expect(project([...log.slice(0, -1), { ...loss, harness: "codex" }], null).compacting).toBe(true);
+  });
 
   it("are kept apart in the one log: each is its own chat, and one picked up again is all of its stretches", () => {
     const log = [

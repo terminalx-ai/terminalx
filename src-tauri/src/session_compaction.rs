@@ -54,7 +54,9 @@ fn generation(observation: &CompactionObservation) -> Option<u64> {
 fn stamp(rt: &mut TabRuntime, evidence: CompactionEvidence, confirmed_start: bool, persisted: bool) -> AgentEvent {
     rt.seq += 1;
     AgentEvent {
-        id: uuid::Uuid::now_v7().to_string(), session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), harness: rt.harness.clone(),
+        // A retained operation may belong to the provider before this tab
+        // switched harnesses. Keep its validated scope and envelope aligned.
+        id: uuid::Uuid::now_v7().to_string(), session_id: rt.session_id.clone(), tab_id: rt.tab_id.clone(), harness: evidence.scope.provider.clone(),
         seq: rt.seq, ts: index::now(), message_ts: None,
         subagent: evidence.scope.subagent_id.clone().map(|id| SubagentRef { id, label: None }),
         payload: Payload::ContextCompactionLifecycle { evidence, confirmed_start, persisted },

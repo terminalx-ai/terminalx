@@ -2135,3 +2135,58 @@ fn compaction_append_failure_emits_uncertainty_and_latches_admission() {
     assert!(rig.manager.publish_compaction(&token, completion(), false).is_err());
     assert_eq!(std::fs::read(&rig.rt.lock().unwrap().log_path).unwrap(), before);
 }
+
+#[test]
+fn compaction_reconciliation_preserves_old_provider_after_conversation_switch() {
+    let rig = Rig::new();
+    let scope = compaction_rig_scope(&rig);
+    // Use the real load_events path as well as the rig's publication API.
+    let path = store::log_path(SESSION, TAB).unwrap();
+    rig.rt.lock().unwrap().log_path = path.clone();
+    let token = rig.manager.bind_compaction(scope.clone(), rig.tail.clone(), 0).unwrap();
+    let start = || CompactionObservation::ItemStarted {
+        generation: token.generation(), turn_id: "turn".into(), item_id: "item".into(),
+    };
+    assert!(matches!(rig.manager.publish_compaction(&token, start(), true).unwrap(), compaction::Publication::Committed(_)));
+    index::update_tab(SESSION, TAB, |tab| {
+        tab.harness = "codex".into();
+        tab.provider_session_id = Some("thread-B".into());
+        tab.follow.conversation = Some("B".into());
+        Ok(())
+    }).unwrap();
+    {
+        let mut rt = rig.rt.lock().unwrap();
+        rt.harness = "codex".into();
+        if let Engine::Cli(cli) = &mut rt.engine {
+            cli.harness = CliKind::Codex;
+            cli.generation += 1;
+        }
+        rig.manager.publish(&mut rt, Payload::Conversation { id: Some("B".into()), harness: "codex".into(), resumed: false }, None);
+    }
+    // Provider preservation for historical loss must not admit old positive work.
+    assert!(rig.manager.publish_compaction(&token, start(), true).is_err());
+    let returned = rig.manager.load_events(SESSION, TAB).unwrap();
+    let loss = returned.last().unwrap();
+    assert_eq!((&*loss.session_id, &*loss.tab_id, &*loss.harness), (SESSION, TAB, "claude"));
+    assert!(matches!(&loss.payload, Payload::ContextCompactionLifecycle {
+        evidence: CompactionEvidence { scope: retained, observation: CompactionObservation::ContinuityLost { generation, reason: CompactionLoss::Restarted } },
+        persisted: true, ..
+    } if retained == &scope && *generation == token.generation()));
+    let saved: Vec<AgentEvent> = store::read_lines(&path).unwrap();
+    assert_eq!(saved, returned);
+    let seq = rig.rt.lock().unwrap().seq;
+    assert_eq!(rig.manager.load_events(SESSION, TAB).unwrap(), returned);
+    assert_eq!(rig.rt.lock().unwrap().seq, seq, "repeat read must retain the saved loss without another append");
+    assert_eq!(store::read_lines::<AgentEvent>(&path).unwrap(), saved);
+
+    // Shared source-derived wire shape consumed by the real frontend filter/fold.
+    // Only nondeterministic event ids and timestamps are normalized, never
+    // provider/scope/sequence/payload. This is not a captured provider fixture.
+    let mut normalized = returned;
+    for event in &mut normalized {
+        event.id = format!("fixture-{}", event.seq);
+        event.ts.clear();
+    }
+    let expected: serde_json::Value = serde_json::from_str(include_str!("../../src/lib/fixtures/compaction-provider-switch.json")).unwrap();
+    assert_eq!(serde_json::to_value(normalized).unwrap(), expected);
+}
