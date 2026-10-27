@@ -15,25 +15,29 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::harness::host::Sink;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Owner {
     pub session_id: String,
     pub tab_id: String,
     pub subagent_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Scope {
     pub owner: Owner,
     pub conversation_id: Option<String>,
     pub thread_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum Observation {
     /// Admission must cover loss of the previous scope and the new binding
     /// together. In particular, switching conversation cannot orphan its state.
@@ -46,10 +50,12 @@ pub(crate) enum Observation {
     Exited { pid: u32, code: Option<i32> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum TurnOutcome { Completed, Failed, Interrupted }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Envelope {
     pub scope: Scope,
     /// Process-local fence, NOT a durable generation, cursor or dedupe key.
