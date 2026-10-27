@@ -4,6 +4,7 @@
 
 pub mod desktop;
 pub mod bootstrap;
+mod creation;
 pub mod guest;
 pub mod host;
 pub mod journal;

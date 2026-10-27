@@ -47,6 +47,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                     (0..=15).contains(&age)
                 });
             state["supervisor"] = json!({"connected":fresh,"lastSeenAt":last_seen,"detail":health.as_ref().and_then(|v|v.get("detail"))});
+            state["creation"] = super::creation::capability();
             return Ok(state);
         }
         "configure" => {
@@ -625,6 +626,7 @@ fn create(journal: &Journal, params: &Value) -> Result<Value> {
     if harness != "codex" {
         bail!("Guided creation currently prepares Codex only. No machine or download was started; existing other-provider tasks and environments are preserved");
     }
+    super::creation::require_supported()?;
     if let Some(existing) = journal
         .read()?
         .environments
@@ -1542,6 +1544,17 @@ fn apply_patch_bytes(destination: &Path, bytes: &[u8]) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn fresh_creation_refuses_unsupported_account_profile_before_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let journal = Journal::open(temp.path()).unwrap();
+        let before = journal.read().unwrap();
+        let error = create(&journal, &json!({"name":"Guest","vmName":"new","harness":"codex","idempotencyKey":"new-account","confirm":true})).unwrap_err();
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert!(error.to_string().contains("secure first-account"), "{error:#}");
+        }
+        assert_eq!(serde_json::to_value(journal.read().unwrap()).unwrap(), serde_json::to_value(before).unwrap());
+    }
+    #[test]
     fn unsupported_guided_provider_is_refused_before_reserving_or_allocating_a_vm() {
         let temp = tempfile::tempdir().unwrap();
         let journal = Journal::open(temp.path()).unwrap();
@@ -1582,6 +1595,10 @@ mod tests {
         assert_eq!(prior.id, env.id);
         assert!(prior.deleted_at.is_some());
         assert_eq!(journal.read().unwrap().environments.len(), 1);
+        // Disabling fresh creation must still acknowledge an older exact
+        // request, including a retained tombstone, without allocating again.
+        let receipt = create(&journal, &json!({"name":"Guest","vmName":"new","harness":"codex","idempotencyKey":"create-1","confirm":true})).unwrap();
+        assert_eq!(receipt, serde_json::to_value(prior).unwrap());
     }
 
     #[test]

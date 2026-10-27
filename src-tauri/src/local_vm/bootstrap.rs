@@ -80,7 +80,7 @@ fn base(tool: &Tool) -> Result<PathBuf> {
 }
 
 pub fn profile() -> Value {
-    json!({"id":"macos-local-v1","image":host::IMAGE,"imageBytes":host::DOWNLOAD_BYTES,
+    json!({"id":super::creation::PROFILE,"creation":super::creation::capability(),"image":host::IMAGE,"imageBytes":host::DOWNLOAD_BYTES,
         "cpu":4,"memoryBytes":8_589_934_592_u64,"diskLimitBytes":161_061_273_600_u64,
         "tools":[{"name":CUA.name,"version":CUA.version,"downloadBytes":CUA.bytes},
             {"name":LUME.name,"version":LUME.version,"downloadBytes":LUME.bytes},

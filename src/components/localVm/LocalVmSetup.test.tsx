@@ -27,6 +27,18 @@ beforeEach(() => { localStorage.clear(); mocks.invoke.mockReset(); mocks.invoke.
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("guided local VM setup", () => {
+  it("never renders a refused creation as Ready or offers a setup retry to bypass it", () => {
+    const creationCapability = { protocol: 1 as const, profileId: "macos-local-v1", available: false, firstAccountPersonalization: false, accountBoundTransport: false, reasonCode: "secureGuestBootstrapUnavailable" };
+    const view = mount(setupReport({ status: "failed", creationCapability }));
+    expect(screen.getByRole("status", { name: "VM setup status" }).textContent).toBe("New VM creation unavailable");
+    expect((screen.getByRole("button", { name: "Review setup recovery…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Refresh setup status" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Verify desktop access" })).toBeNull();
+    current().setup = setupReport({ status: "ready", creationCapability, steps: [{ id: "desktop", label: "Desktop", state: "complete" }] });
+    view.rerender(<EnvironmentsTab />);
+    expect(screen.getByRole("status", { name: "VM setup status" }).textContent).toBe("New VM creation unavailable");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
   it("offers a confirmed guest runtime update with the retained provider and no automatic effects", async () => {
     mount(setupReport({ runtimeUpdateAvailable: true,
       steps: [{ id: "runtime", label: "Update TerminalX in this guest", state: "waiting", actionCode: "environment.setup" },

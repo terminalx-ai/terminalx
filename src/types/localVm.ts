@@ -154,6 +154,8 @@ export interface LocalVmSetupReport {
   operations?: Record<string, { receipt: LocalVmSetupActionReceipt }>;
   /** Prior setup requests retained by the owner when recovery queues a new request. */
   history?: LocalVmSetupReport[];
+  /** A refused creation remains unavailable through setup recovery or recheck. */
+  creationCapability?: LocalVmCreationCapability;
 }
 
 export interface LocalVmSetupActionReceipt {
@@ -175,10 +177,21 @@ export interface LocalVmSetupAuth {
 
 export interface LocalVmState {
   enabled?: boolean;
+  /** The owner's pinned profile capability, never inferred from VM health. */
+  creation?: LocalVmCreationCapability;
   /** Host heartbeat observation only; disconnection says nothing about task outcomes. */
   supervisor?: { connected: boolean; lastSeenAt: string | null; detail: string | null };
   environments: Record<string, LocalVmEnvironment>;
   tasks: Record<string, LocalVmTask>;
+}
+
+export interface LocalVmCreationCapability {
+  protocol: 1;
+  profileId: string;
+  available: boolean;
+  firstAccountPersonalization: boolean;
+  accountBoundTransport: boolean;
+  reasonCode: string;
 }
 
 /** Reported by the host/guest; missing readiness is never treated as success. */

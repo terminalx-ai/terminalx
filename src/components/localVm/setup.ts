@@ -51,6 +51,7 @@ export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {
   const pending = report.action && ["working", "needsAttention", "outcomeUnknown"].includes(report.action.status);
   const candidates = [...new Set(report.steps.filter((step) => step.state !== "complete").map((step) => step.actionCode).filter((action): action is LocalVmSetupAction => SETUP_ACTIONS.some((candidate) => candidate === action)))];
   return candidates.filter((action) => {
+    if (report.creationCapability?.available === false && action !== "provider.codexDeviceLogin.cancel") return false;
     if (pending && action !== "provider.codexDeviceLogin.cancel") return false;
     if (action === "driver.requestPermissions" && readiness.accessibility.state === "granted" && readiness.screenRecording.state === "granted") return false;
     if (action.startsWith("provider.") && report.harness !== "codex") return false;
@@ -61,7 +62,7 @@ export function setupActions(report: LocalVmSetupReport): LocalVmSetupAction[] {
 
 export function runtimeUpdateAvailable(report: LocalVmSetupReport): boolean {
   const read = report.readiness;
-  return report.runtimeUpdateAvailable === true && report.status === "needsAttention" && !!read &&
+  return report.creationCapability?.available !== false && report.runtimeUpdateAvailable === true && report.status === "needsAttention" && !!read &&
     !read.manualControl && read.activeTaskTargets.length === 0 && read.actionAdmission.state === "ready" &&
     (!report.action || ["complete", "failed"].includes(report.action.status)) &&
     report.steps.some((step) => step.id === "runtime" && step.state === "waiting" && step.actionCode === "environment.setup");
@@ -109,6 +110,7 @@ export function boundReadiness(readiness: LocalVmSetupReadiness, environment: Lo
 }
 
 export function setupStatusLabel(report: LocalVmSetupReport): string {
+  if (report.creationCapability?.available === false) return "New VM creation unavailable";
   switch (report.status) {
     case "queued": return "Setup queued";
     case "working": return "Setting up your VM";

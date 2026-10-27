@@ -296,6 +296,9 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
         if stopped.load(Ordering::Acquire) {
             break;
         }
+        if super::creation::hold_queued(journal, env)? {
+            continue;
+        }
         if env.setup.is_some() {
             if let Err(error) = super::setup::advance(journal, env) {
                 super::setup::interrupted(journal, env, &error)?;
@@ -378,9 +381,13 @@ fn tick(journal: &Journal, stopped: &AtomicBool) -> Result<()> {
     Ok(())
 }
 fn claim_provision(journal: &Journal, env: &Environment) -> Result<bool> {
+    if super::creation::hold_queued(journal, env)? {
+        return Ok(false);
+    }
     journal.transaction(|state| {
         let current=state.environments.get_mut(&env.id).filter(|current|current.generation==env.generation && current.deleted_at.is_none()).context("Environment timeline changed")?;
         if current.provision.as_ref().and_then(|p|p.get("status")).and_then(Value::as_str)!=Some("queued") {return Ok(false);}
+        super::creation::require_supported()?;
         current.provision=Some(host::progress("running","Downloading/checking the pinned image and starting macOS. Cancellation retains partial storage."));
         Ok(true)
     })
@@ -600,6 +607,40 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
 mod tests {
     use super::*;
     #[test]
+    fn legacy_queued_creation_cannot_claim_an_unsupported_account_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(dir.path()).unwrap();
+        let env = journal.enroll("queued", "local:test").unwrap();
+        journal.transaction(|state| {
+            let env = state.environments.get_mut(&env.id).unwrap();
+            env.owned = true;
+            env.provision = Some(json!({"status":"queued"}));
+            env.setup = Some(super::super::setup::initial(env, "codex", "retained-key")?);
+            Ok(())
+        }).unwrap();
+        let env = journal.read().unwrap().environments[&env.id].clone();
+        assert!(!claim_provision(&journal, &env).unwrap());
+        let retained = journal.read().unwrap().environments[&env.id].clone();
+        assert_eq!(retained.generation, env.generation);
+        assert_eq!(retained.setup.as_ref().unwrap()["idempotencyKey"], "retained-key");
+        assert_eq!(retained.provision.as_ref().unwrap()["status"], "failed");
+        let refusal = &retained.provision.as_ref().unwrap()["creationRefusal"];
+        assert_eq!(refusal["environmentId"], env.id);
+        assert_eq!(refusal["generation"], env.generation);
+        assert_eq!(refusal["originalSetup"], json!(env.setup));
+        assert_eq!(refusal["originalProvision"], json!(env.provision));
+        let reopened = Journal::open_existing(dir.path()).unwrap();
+        let before = serde_json::to_value(reopened.read().unwrap()).unwrap();
+        tick(&reopened, &AtomicBool::new(false)).unwrap();
+        super::super::setup::advance(&reopened, &env).unwrap();
+        let request = json!({"environmentId":env.id,"generation":env.generation,"harness":"codex","idempotencyKey":"retained-key","confirm":true});
+        assert_eq!(super::super::setup::queue(&reopened, request.clone()).unwrap(), json!(retained.setup));
+        let mut changed = request;
+        changed["idempotencyKey"] = json!("retry-with-new-key");
+        assert!(super::super::setup::queue(&reopened, changed).is_err());
+        assert_eq!(serde_json::to_value(reopened.read().unwrap()).unwrap(), before);
+    }
+    #[test]
     fn queued_cancellation_cannot_be_overwritten_by_a_stale_provision_claim() {
         let dir = tempfile::tempdir().unwrap();
         let journal = Journal::open(dir.path()).unwrap();
@@ -622,11 +663,10 @@ mod tests {
         journal
             .transaction(|state| {
                 state.environments.get_mut(&env.id).unwrap().provision =
-                    Some(json!({"status":"queued"}));
+                    Some(json!({"status":"running"}));
                 Ok(())
             })
             .unwrap();
-        assert!(claim_provision(&journal, &env).unwrap());
         host::cancel_provision(&journal, &env).unwrap();
         assert_eq!(
             journal.read().unwrap().environments[&env.id]

@@ -16,7 +16,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("local environment lifecycle", () => {
-  it("never provisions on mount and displays the entire pinned profile before deliberate creation", async () => {
+  it("never provisions on mount or offers secure creation without owner capabilities", async () => {
     render(<EnvironmentsTab />);
     expect(mocks.invoke).not.toHaveBeenCalled();
     const profile = screen.getByRole("region", { name: "Local VM creation profile" });
@@ -28,8 +28,9 @@ describe("local environment lifecycle", () => {
     expect(calls("environment.create")).toHaveLength(0);
     fireEvent.click(screen.getByLabelText(/I confirm creation and setup with the pinned image/));
     fireEvent.click(screen.getByRole("button", { name: "Create and set up VM" }));
-    await waitFor(() => expect(calls("environment.create")).toHaveLength(1));
-    expect(calls("environment.create")[0][1].params).toEqual({ name: "New VM", vmName: "new-guest", harness: "codex", idempotencyKey: expect.any(String), confirm: true });
+    fireEvent.submit(screen.getByRole("form", { name: "Create and set up local VM" }));
+    expect(calls("environment.create")).toHaveLength(0);
+    expect(screen.getByText(/Secure guest account setup is unavailable/)).toBeTruthy();
   });
 
   it("persists opt-in through configure and keeps setup disabled until the host reports enabled", async () => {

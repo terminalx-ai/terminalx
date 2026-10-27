@@ -31,7 +31,7 @@ export function EnvironmentsTab() {
     <div className="space-y-5 text-xs">
       <div className="rounded-lg border border-border bg-card p-4 leading-relaxed">
         <h3 className="mb-1 text-sm font-medium">Local Cua · Preview</h3>
-        <p>Opt in to run explicitly selected tasks in a local macOS Cua VM. Create a VM here or enroll an existing one after checking compatibility. Opening Settings or a conversation does not provision or start a VM.</p>
+        <p>Opt in to run explicitly selected tasks in an existing compatible local macOS Cua VM. Secure fresh-VM creation is unavailable with the current profile. Opening Settings or a conversation does not provision or start a VM.</p>
         <p className="mt-2 text-muted-foreground">Tasks share the guest account, files and desktop. Every task holds an exclusive desktop lease for its entire workflow; conflicting tasks queue. Use a separate VM for isolation. Sign in to providers and repositories in the guest; host credentials and conversation history are not copied.</p>
         <p className="mt-2 text-warning">Product reconnect, host-lock, sleep and relaunch acceptance gates are pending. Local compute can still send data to your selected AI provider.</p>
       </div>
@@ -54,7 +54,7 @@ export function EnvironmentsTab() {
         {doctor !== undefined ? <pre aria-label="Cua doctor output" className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-md bg-well p-3">{JSON.stringify(doctor, null, 2)}</pre> : null}
       </section>
 
-      <LocalVmOnboarding enabled={state?.enabled === true} environments={environments} />
+      <LocalVmOnboarding enabled={state?.enabled === true} environments={environments} creation={state?.creation} />
 
       <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-medium">Enrolled environments</h3><Button size="xs" variant="ghost" disabled={refreshing} onClick={() => void refreshLocalVmState()}>Refresh environments</Button></div>
       {error || actionError ? <p role="alert" className="text-destructive">{actionError ?? error}</p> : null}

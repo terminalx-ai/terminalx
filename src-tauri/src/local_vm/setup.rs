@@ -106,6 +106,9 @@ pub fn queue(journal: &Journal, params: Value) -> Result<Value> {
         if let Some(prior)=&env.setup {
             if prior["idempotencyKey"]==request.idempotency_key && prior["harness"]==request.harness { return Ok(prior.clone()); }
         }
+        if super::creation::blocked(env) || env.provision.as_ref().is_some_and(|p|p["status"]=="queued") {
+            super::creation::require_supported()?;
+        }
         if env.manual_control || unfinished {bail!("Return desktop control and resolve unfinished tasks before changing guest setup");}
         if let Some(prior)=&env.setup {
             let updating=runtime_update_available(env,prior) && prior["harness"]==request.harness;
@@ -213,6 +216,9 @@ fn runtime_update_available(env: &Environment, report: &Value) -> bool {
 
 pub fn inspect(journal: &Journal, params: Value) -> Result<Value> {
     let current = env(journal, &params)?;
+    if super::creation::blocked(&current) {
+        super::creation::require_supported()?;
+    }
     let harness = host::field(&params, "harness")?;
     validate_harness(harness)?;
     let readiness = host::guest_rpc(
@@ -234,6 +240,7 @@ fn record_readiness(
     check_binding(target, harness, readiness)?;
     journal.transaction(|state| {
         let env=state.environments.get_mut(&target.id).filter(|e|e.generation==target.generation && e.deleted_at.is_none()).context("Setup timeline changed")?;
+        if super::creation::blocked(env) { super::creation::require_supported()?; }
         let Some(report)=env.setup.as_mut() else { return Ok(()) };
         if report["harness"]!=harness { bail!("Setup provider differs from the retained request"); }
         report["readiness"]=readiness.clone();report["lastCheckedAt"]=json!(journal::now());
@@ -329,6 +336,7 @@ fn action_using(
         let unfinished=state.tasks.values().any(|t|t.target.environment_id==current.id && !t.status.terminal());
         let env=state.environments.get_mut(&current.id).filter(|e|e.generation==current.generation && e.deleted_at.is_none()).context("Setup timeline changed")?;
         let blocked=env.manual_control || unfinished;
+        let creation_blocked=super::creation::blocked(env);
         let report=env.setup.as_mut().context("Confirm guest setup before requesting an action")?;
         if let Some(prior)=report["operations"].get(&request.idempotency_key) {
             if prior["digest"]!=digest { bail!("Setup key already names different input"); }
@@ -337,6 +345,7 @@ fn action_using(
         if blocked {bail!("Return desktop control and resolve unfinished tasks before changing guest setup");}
         let cancel_current=request.action=="provider.codexDeviceLogin.cancel" && report["action"]["action"]=="provider.codexDeviceLogin.start"
             && matches!(report["action"]["status"].as_str(),Some("working"|"needsAttention"));
+        if creation_blocked && !cancel_current { super::creation::require_supported()?; }
         if request.action.starts_with("provider.codex") && report["harness"]!="codex" {bail!("Setup provider differs from the action");}
         if !cancel_current && report["action"]["status"].as_str().is_some_and(|s|matches!(s,"working"|"needsAttention"|"outcomeUnknown")) {
             bail!("Inspect the retained setup action before requesting another operation");
@@ -475,6 +484,9 @@ pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
 /// Called only by the admitted owner controller. Installer steps are recorded
 /// before effects; the supervisor's startup reconciliation never requeues them.
 pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
+    if super::creation::hold_queued(journal, target)? {
+        return Ok(());
+    }
     refresh_actions(journal, target)?;
     let state = journal.read()?;
     let current = state
@@ -699,6 +711,9 @@ pub fn busy(env: &Environment) -> bool {
 }
 
 pub fn ready(env: &Environment, report: &Value) -> bool {
+    if super::creation::blocked(env) {
+        return false;
+    }
     let read = &report["readiness"];
     let proof = &report["desktopVerification"];
     report["status"] == "ready"
@@ -1008,6 +1023,9 @@ mod tests {
             "manualControl":false,"activeTaskTargets":[],"actionAdmission":{"state":"ready"}});
         report["desktopVerification"] = json!({"bootIdentity":boot,"driverExecutableSha256":sha,"verifiedAt":journal::now(),"captureVerified":true,"desktopUsable":true});
         assert!(ready(&env, &report));
+        let mut refused_creation = env.clone();
+        refused_creation.provision = Some(json!({"status":"failed","reasonCode":"secureGuestBootstrapUnavailable"}));
+        assert!(!ready(&refused_creation, &report), "Desktop/account proof cannot complete an unsupported first-account bootstrap");
         report["readiness"]["driver"]["state"] = json!("running");
         assert!(ready(&env, &report));
         let mut explicit = report.clone();
