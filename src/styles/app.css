@@ -419,6 +419,11 @@
 .editor-pane .cm-editor {
   height: 100%;
 }
+/* The gutters stay put while long lines scroll sideways: opaque, so the code
+   passes under the line numbers instead of through them. */
+.editor-pane .cm-editor .cm-gutters {
+  background-color: var(--background);
+}
 
 /* Support reminders yield to approval and update dialogs. Keep their stack
    space so higher-priority agent notices do not jump when a dialog opens. */

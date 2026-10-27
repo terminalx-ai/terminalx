@@ -52,6 +52,11 @@ interface State {
    * with the sidebar kept. Any other navigation clears it.
    */
   selectedCloudWorkspace: string | null;
+  /**
+   * The session the new-session form was opened over: it stays drawn behind
+   * the form, which is a dialog, and closing the form goes back to it.
+   */
+  newSessionReturn: { sessionId: string | null; view: State["view"] } | null;
   /** A new-session form pre-filled from a workspace row. */
   newSessionPreset: { projectPath: string; cwd: string | null } | null;
   /**
@@ -85,6 +90,7 @@ let state: State = {
   workspaces: {},
   workspacesLoading: {},
   selectedCloudWorkspace: null,
+  newSessionReturn: null,
   newSessionPreset: null,
   cloudSessionPreset: null,
   selectedCloudProject: null,
@@ -108,6 +114,9 @@ function set(patch: Partial<State>) {
   // Clear the draft destination when navigating away, not in React cleanup
   // (Strict Mode also runs cleanup when a workspace first mounts).
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId) next.newSessionPreset = null;
+  // Opened from a session, the form remembers it; any other way out forgets it.
+  // Only an explicit "New session" (`openNewSession`, a project's or branch's +) records where to go back to; any way out forgets it.
+  if (next.view !== "new" || next.selectedSessionId) next.newSessionReturn = null;
   // A cloud draft goes the same way, and gives way to any local one.
   if ((patch.view && patch.view !== "new") || patch.selectedSessionId || ("newSessionPreset" in patch && !("cloudSessionPreset" in patch))) next.cloudSessionPreset = null;
   if ("selectedProject" in patch && !("selectedCloudProject" in patch)) next.selectedCloudProject = null;
@@ -367,6 +376,7 @@ export function startCloudSessionIn(projectKey: string) {
     return;
   }
   set({
+    newSessionReturn: returnHere(),
     selectedCloudProject: projectKey,
     selectedSessionId: null,
     view: "new",
@@ -383,7 +393,7 @@ export function selectProjectInSidebar(path: string | null) {
 
 /** Open the new-session form for a project, optionally inside one of its workspaces. */
 export function startSessionIn(projectPath: string, cwd: string | null) {
-  focusProject(projectPath, { selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
+  focusProject(projectPath, { newSessionReturn: returnHere(), selectedSessionId: null, view: "new", newSessionPreset: { projectPath, cwd }, lastProject: projectPath, navigationVersion: state.navigationVersion + 1, selectedAutomationId: null });
 }
 
 const openingWorkspaces = new Map<string, Promise<SessionEntry>>();
@@ -417,6 +427,26 @@ export function openWorkspace(projectPath: string, cwd: string): Promise<Session
     .finally(() => openingWorkspaces.delete(key));
   openingWorkspaces.set(key, request);
   return request;
+}
+
+/** Where the new-session dialog goes back to when it is opened from here; kept when it is already open. */
+function returnHere(): State["newSessionReturn"] {
+  if (state.view === "new" && !state.selectedSessionId) return state.newSessionReturn;
+  return state.loaded ? { sessionId: state.selectedSessionId, view: state.view } : null;
+}
+
+/** "New session" (⌘N, the + buttons): the form, as a dialog over what is shown now. */
+export function openNewSession() {
+  const back = returnHere();
+  selectSession(null);
+  set({ newSessionReturn: back });
+}
+
+/** Close the new-session dialog: back to the session or view it was opened over. */
+export function closeNewSession() {
+  const back = state.newSessionReturn;
+  if (back?.sessionId && state.sessions.some((session) => session.id === back.sessionId)) return selectSession(back.sessionId);
+  set({ view: back && back.view !== "new" ? back.view : "welcome", navigationVersion: state.navigationVersion + 1 });
 }
 
 export function clearNewSessionPreset() {
@@ -574,6 +604,28 @@ export async function pinSession(id: string, pinned: boolean) {
 export async function renameSession(id: string, title: string) {
   await api.renameSession(id, title);
   patchSession(id, { title });
+}
+
+/** A conversation's name: its agent's title for it once there is one. */
+export function conversationTitle(session: SessionEntry): string {
+  const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
+  return tab?.title?.trim() || session.title;
+}
+
+/** Rename a conversation by the title the sidebar shows: the session's, and its tab's when the tab has its own. */
+export async function renameConversation(session: SessionEntry, title: string) {
+  await renameSession(session.id, title);
+  const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
+  if (tab?.title?.trim()) await api.renameTab(session.id, tab.id, title);
+}
+
+/** Rename a branch in git where it is checked out; its sessions and its label go with it. */
+export async function renameBranch(projectPath: string, from: string, to: string) {
+  const renamed = await api.renameBranch(projectPath, from, to);
+  for (const session of renamed.sessions) upsertSession(session);
+  set({ projects: state.projects.map((x) => (x.path === projectPath ? renamed.project : x)) });
+  await refreshWorkspaces(projectPath);
+  return renamed.branch;
 }
 
 /** "Link to issue…": the session works on `issue` from now on, and says so to the reader's other machines and team (#441). */

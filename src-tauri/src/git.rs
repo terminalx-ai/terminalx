@@ -682,6 +682,61 @@ fn create_worktree_with_timeout(project: &Path, name: &str, base: Option<&str>, 
     })
 }
 
+/// A worktree on a branch that already exists, rather than a new one: the
+/// branch is checked out as it is, its commits and upstream kept. A remote
+/// branch (`origin/fix-x`) gets a local branch of its name tracking it.
+pub fn checkout_worktree(project: &Path, name: &str, branch: &str) -> Result<CreatedWorktree> {
+    if name.contains(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_') {
+        bail!("bad worktree name");
+    }
+    if branch.starts_with('-') || branch.contains("..") || branch.trim().is_empty() {
+        bail!("bad branch name");
+    }
+    let path = worktree_path(project, name);
+    std::fs::create_dir_all(worktree_root(project))?;
+    let local = if branch_exists(project, branch) {
+        add_checkout(project, &path, &[branch], branch)?;
+        branch.to_string()
+    } else {
+        let remote = format!("refs/remotes/{branch}");
+        if run(project, &["rev-parse", "--verify", "--quiet", &remote]).is_err() {
+            bail!("no branch named {branch}");
+        }
+        let local = branch.split_once('/').map(|(_, rest)| rest).unwrap_or(branch).to_string();
+        if branch_exists(project, &local) {
+            add_checkout(project, &path, &[&local], &local)?;
+        } else {
+            run(project, &["worktree", "add", "--track", "-b", &local, arg(&path)?, branch])?;
+        }
+        local
+    };
+    ensure_worktree_dir_ignored(project);
+    let base_tree = run(&path, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+    let commit = run(&path, &["rev-parse", "HEAD"])?.trim().to_string();
+    Ok(CreatedWorktree {
+        name: name.to_string(),
+        path: path.to_string_lossy().into_owned(),
+        branch: local,
+        base: commit.clone(),
+        base_tree,
+        worktree_base: Some(WorktreeBase { commit, fetched: false, warning: None }),
+    })
+}
+
+/// `git worktree add <path> <branch>`, saying plainly when the branch is already checked out somewhere.
+fn add_checkout(project: &Path, path: &Path, rest: &[&str], branch: &str) -> Result<()> {
+    let mut args = vec!["worktree", "add", arg(path)?];
+    args.extend_from_slice(rest);
+    run(project, &args).map(|_| ()).map_err(|e| {
+        let text = e.to_string();
+        if text.contains("already checked out") || text.contains("already used by worktree") {
+            anyhow::anyhow!("{branch} is already checked out in another folder. Open that workspace instead, or pick New branch.")
+        } else {
+            e
+        }
+    })
+}
+
 /// Move a TerminalX-managed worktree and rename its matching branch. The
 /// checkout may be dirty; `git worktree move` preserves its contents.
 pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<CreatedWorktree> {
@@ -798,7 +853,7 @@ pub fn is_worktree_of(project: &Path, path: &Path) -> bool {
     is_own_worktree(path) && common_dir(path).is_some_and(|theirs| Some(theirs) == common_dir(project))
 }
 
-fn branch_exists(project: &Path, branch: &str) -> bool {
+pub fn branch_exists(project: &Path, branch: &str) -> bool {
     run_ok(project, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
 }
 
@@ -1248,6 +1303,26 @@ mod tests {
         run(p, &["add", "."]).unwrap();
         run(p, &["commit", "-q", "-m", "init"]).unwrap();
         dir
+    }
+
+    #[test]
+    fn checks_out_an_existing_branch_in_a_worktree_as_it_is() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "-b", "feat/old-work"]).unwrap();
+        std::fs::write(p.join("b.txt"), "kept\n").unwrap();
+        run(p, &["add", "."]).unwrap();
+        run(p, &["commit", "-q", "-m", "old work"]).unwrap();
+        run(p, &["checkout", "-q", "main"]).unwrap();
+        let wt = checkout_worktree(p, "old-work", "feat/old-work").unwrap();
+        assert_eq!(wt.branch, "feat/old-work");
+        assert_eq!(current_branch(Path::new(&wt.path)).as_deref(), Some("feat/old-work"));
+        assert_eq!(std::fs::read_to_string(Path::new(&wt.path).join("b.txt")).unwrap(), "kept\n");
+        assert!(checkout_worktree(p, "nothing", "no-such-branch").is_err());
+        assert!(checkout_worktree(p, "bad", "--force").is_err());
+        let again = checkout_worktree(p, "old-work-2", "feat/old-work").unwrap_err().to_string();
+        assert!(again.contains("already checked out in another folder"), "{again}");
     }
 
     #[test]

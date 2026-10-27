@@ -206,17 +206,17 @@ export function Chat({
           {oldestMounted > 0 && (
             <div className="mb-4 text-center text-xs text-faint">Loading earlier turns…</div>
           )}
-          {!turns.length && !live && (
+          {!turns.length && !live && loading && (
+            // Loading is a label alone; the scene is for a conversation that really is empty.
+            <p role="status" className="flex h-[40vh] min-h-[160px] items-center justify-center gap-1.5 text-xs text-faint">
+              <Loader2 className="size-3 animate-spin" aria-hidden />
+              Loading the conversation…
+            </p>
+          )}
+          {!turns.length && !live && !loading && (
             <div className="flex h-[40vh] min-h-[160px] flex-col justify-end">
               <RaccoonScene />
-              {loading ? (
-                <p role="status" className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs text-faint">
-                  <Loader2 className="size-3 animate-spin" aria-hidden />
-                  Loading the conversation…
-                </p>
-              ) : (
-                <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
-              )}
+              <p className="mt-3 text-center text-xs text-faint">Nothing here yet. Ask for something below.</p>
             </div>
           )}
           {turns.slice(oldestMounted).map((t, i, arr) => {

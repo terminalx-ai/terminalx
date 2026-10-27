@@ -21,7 +21,10 @@ import { isCloudKey } from "@/types/target";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcut } from "@/lib/hotkeys";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { bootSessions, openAgents, openAutomations, openIssues, openSkills, openStats, selectSession, useSessionStore } from "@/lib/sessions";
+import { NewSessionDialog } from "@/components/session/NewSessionDialog";
+import { UpdateNotice } from "./UpdateNotice";
+import { startUpdateChecks } from "@/lib/updates";
+import { bootSessions, closeNewSession, openNewSession, openAgents, openAutomations, openIssues, openSkills, openStats, useSessionStore } from "@/lib/sessions";
 import { applyEvent, subscribeAgentEvents } from "@/lib/agentEvents";
 import { agent, type ImageInput } from "@/lib/api";
 import { loadModels } from "@/lib/models";
@@ -96,6 +99,8 @@ export function AppShell() {
   const [settingsRequest, setSettingsRequest] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // An update is looked for in the background, so it is seen without going to Settings for it.
+  useEffect(() => startUpdateChecks(), []);
   useEffect(() => {
     void subscribeAgentEvents();
     void subscribeTabPty();
@@ -164,7 +169,7 @@ export function AppShell() {
     setSettingsOpen(true);
     setSettingsRequest((count) => count + 1);
   }, []);
-  const newSession = useCallback(() => selectSession(null), []);
+  const newSession = useCallback(() => openNewSession(), []);
   const showIssues = useCallback(() => openIssues(), []);
   const showAgents = useCallback(() => openAgents(), []);
   const showStats = useCallback(() => openStats(), []);
@@ -190,6 +195,9 @@ export function AppShell() {
   const cloudWorkspace = store.selectedCloudWorkspace ?? null;
   // A cloud session (`cloud:…`) renders in the same slot, with the sidebar kept.
   const cloudKey = isCloudKey(store.selectedSessionId) ? store.selectedSessionId : null;
+  // "New session" from a session: a dialog over it, which goes back to it when closed.
+  const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
+  const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
 
   return (
     <div data-app-shell className="flex h-full w-full flex-col">
@@ -254,6 +262,12 @@ export function AppShell() {
                 <ErrorBoundary key={selected.id} label="the session">
                   <SessionView session={selected} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
+              </main> ) : behind ? (
+              <main className={MAIN}>
+                <ErrorBoundary key={behind.id} label="the session">
+                  <SessionView session={behind} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+                </ErrorBoundary>
+                <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />
               </main>
             ) : cloudWorkspace ? (
               <ErrorBoundary key={cloudWorkspace} label="the cloud workspace">
@@ -267,7 +281,8 @@ export function AppShell() {
               </ErrorBoundary>
             ) : (
               <UnselectedWorkspace
-                key={store.view}
+                key={opening ? `${opening.view}:new` : store.view}
+                underDialog={opening && !behind ? opening.view : undefined}
                 sidebarOpen={sidebarOpen}
                 onToggleSidebar={toggleSidebar}
                 onTogglePanel={togglePanel}
@@ -288,18 +303,22 @@ export function AppShell() {
       ) : null}
 
       {paletteOpen ? <CommandPalette open onOpenChange={setPaletteOpen} onOpenSettings={openSettings} onCreated={onCreated} /> : null}
+      <UpdateNotice />
     </div>
   );
 }
 
 /** A pre-session checkout has the same full-height panel frame as a session. */
 function UnselectedWorkspace({
+  underDialog,
   sidebarOpen,
   onToggleSidebar,
   onTogglePanel,
   onOpenSettings,
   onCreated,
 }: {
+  /** The view the new-session dialog was opened over: drawn behind it in place of the form's own page. */
+  underDialog?: ReturnType<typeof useSessionStore>["view"];
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onTogglePanel: () => void;
@@ -308,6 +327,7 @@ function UnselectedWorkspace({
 }) {
   const prefs = usePrefs();
   const store = useSessionStore();
+  const view = underDialog ?? store.view;
   const editors = useEditors();
   const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
@@ -316,22 +336,22 @@ function UnselectedWorkspace({
   const wanted = preset?.projectPath ?? store.selectedProject ?? prefs.lastProject ?? store.lastProject;
   const newProject = store.projects.find((project) => project.path === wanted) ?? store.projects[0] ?? null;
   const issueProject = store.projects.find((project) => project.path === issueProjectPath) ?? null;
-  const project = store.view === "new" ? newProject : store.view === "issues" ? issueProject : null;
-  const cwd = store.view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
+  const project = view === "new" ? newProject : view === "issues" ? issueProject : null;
+  const cwd = view === "new" ? (preset?.cwd ?? project?.path ?? null) : project?.path ?? null;
   const workspace = cwd && project ? (store.workspaces[project.path] ?? []).find((item) => item.path === cwd) : null;
   // A cloud draft has no local checkout to show.
-  const panelAvailable = !!cwd && !!project && !(store.view === "new" && store.cloudSessionPreset);
+  const panelAvailable = !!cwd && !!project && !(view === "new" && store.cloudSessionPreset);
   const checkoutEditorId = cwd ? `checkout:${cwd}` : null;
   const hasCheckoutEditors = !!checkoutEditorId && editors.editors.some((editor) => editor.sessionId === checkoutEditorId);
-  const labelMode = preset?.cwd && store.view === "new" ? "branch" : useWorktree ? "base" : "branch";
+  const labelMode = preset?.cwd && view === "new" ? "branch" : useWorktree ? "base" : "branch";
   // With no local project there is nothing to start a session in: the start screen offers the ways to get one.
   // Not before the projects are read, and not over a cloud draft, which needs no local project.
-  const startScreen = (store.view === "new" || store.view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset;
+  const startScreen = (view === "new" || view === "welcome") && store.loaded && store.projects.length === 0 && !store.cloudSessionPreset;
 
   return (
     <>
       {/* The project overview is one dark surface, top bar included, like the chat. */}
-      <main className={cn(MAIN, store.view === "project" && "bg-chat")}>
+      <main className={cn(MAIN, view === "project" && "bg-chat")}>
         <header
           data-tauri-drag-region="deep"
           className="flex h-(--titlebar-h) shrink-0 items-center gap-1 px-2"
@@ -346,13 +366,13 @@ function UnselectedWorkspace({
           )}
           {/* The dashboard draws its own title, so the strip stays quiet for it. */}
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
-            {store.view === "issues"
+            {view === "issues"
               ? "Issues"
-              : store.view === "agents" || store.view === "skills" || store.view === "stats" || store.view === "project"
+              : view === "agents" || view === "skills" || view === "stats" || view === "project"
                 ? ""
-                : store.view === "automations"
+                : view === "automations"
                   ? "Automations"
-                  : startScreen || store.view === "welcome"
+                  : startScreen || view === "welcome"
                     ? ""
                     : "New session"}
           </span>
@@ -366,25 +386,25 @@ function UnselectedWorkspace({
         </header>
         <section className="@container/editor-host relative flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {store.view === "welcome" && <WelcomeTabActions />}
-            {store.view === "issues" ? (
+            {view === "welcome" && <WelcomeTabActions />}
+            {view === "issues" ? (
               <IssuesView
                 onCreated={onCreated}
                 useWorktree={useWorktree}
                 onUseWorktreeChange={setUseWorktree}
                 onTargetProjectChange={setIssueProjectPath}
               />
-            ) : store.view === "project" && store.selectedProject ? (
+            ) : view === "project" && store.selectedProject ? (
               <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
-            ) : store.view === "agents" ? (
+            ) : view === "agents" ? (
               <AgentDashboard />
-            ) : store.view === "stats" ? (
+            ) : view === "stats" ? (
               <Suspense fallback={viewFallback}>
                 <StatsUsageView />
               </Suspense>
-            ) : store.view === "automations" ? (
+            ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
-            ) : store.view === "skills" ? (
+            ) : view === "skills" ? (
               <SkillsView
                 key={`${store.skillsFilter?.projectPath ?? store.selectedProject ?? "home"}:${store.skillsFilter?.agent ?? "all"}`}
                 projectPath={store.skillsFilter?.projectPath ?? store.selectedProject}
@@ -392,7 +412,7 @@ function UnselectedWorkspace({
               />
             ) : startScreen ? (
               <StartScreen onOpenSettings={onOpenSettings} />
-            ) : store.view === "welcome" ? (
+            ) : view === "welcome" ? (
               <WelcomeScreen />
             ) : (
               <NewSessionView onCreated={onCreated} useWorktree={useWorktree} onUseWorktreeChange={setUseWorktree} />
@@ -413,6 +433,7 @@ function UnselectedWorkspace({
           workspace={workspace?.managed && !workspace.isMain ? { projectPath: project.path, name: workspace.name } : undefined}
         />
       )}
+      {underDialog && <NewSessionDialog onClose={closeNewSession} onCreated={onCreated} />}
     </>
   );
 }
