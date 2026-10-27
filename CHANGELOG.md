@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Clarify the CLI guide to keep simple issue filing and context checks in the
+  current conversation, with separate sessions reserved for authorized work. (#634)
+- Recover unavailable live connections automatically without restarting agents or
+  resending prompts, while preserving unsent drafts and isolating unrelated window
+  connection failures. (#643)
+
 ## 0.2.20
 
 ### Codex sessions and permissions
