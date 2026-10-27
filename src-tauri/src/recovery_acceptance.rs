@@ -71,7 +71,7 @@ const READ_ONLY: &str = r#"(() => {
    const fields = [...document.querySelectorAll('textarea[data-composer]')]
      .filter(e => e.getClientRects().length > 0);
    if (fields.length !== 1) throw Error('expected one visible fixture composer');
-   result = {label, timeOrigin: performance.timeOrigin,
+   result = {label, timeOrigin: performance.timeOrigin, origin:location.origin,
      draft: bounded(fields[0].value, 128),
      attempts: bounded(sessionStorage.getItem('terminalx.localRuntime.attempts.v1'), 8),
      checkpoint: bounded(sessionStorage.getItem('terminalx.localRuntime.localDrafts.v2'), 4096),
@@ -110,6 +110,7 @@ fn validate_snapshot(value: &Value, label: &str) -> Result<()> {
     ensure!(value.get("error").is_none(), "webview observation failed: {value}");
     ensure!(value["label"] == label, "wrong snapshot label");
     ensure!(value["timeOrigin"].as_f64().is_some_and(|n| n.is_finite() && n > 0.0), "invalid document identity");
+    ensure!(value["origin"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256), "invalid document origin");
     ensure!(value["draft"].as_str().is_some_and(|s| s.len() <= 128), "invalid draft");
     for (key, limit) in [("attempts", 8), ("checkpoint", 4096), ("notice", 1024)] {
         ensure!(value.get(key).is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.len() <= limit)), "invalid {key}");
@@ -195,6 +196,84 @@ fn check_budget(snapshot: &Value, calls: u64) -> Result<()> {
     Ok(())
 }
 
+// Observe the original enabled Reconnect button event AND its propagation to
+// the actual reconnect call site. No click, storage write or retry is issued.
+// Coalesced mixed causes are deliberately incomplete, never relabelled manual.
+const MANUAL_WITNESS: &str = r#"(() => {
+  const phase = __PHASE__, label = 'main', timeOrigin = performance.timeOrigin;
+  const origin = location.origin, installed = performance.now();
+  const actions = new WeakSet();
+  let clicks = 0, timer;
+  const click = event => {
+    const button = event.target instanceof Element ? event.target.closest('button') : null;
+    const notice = document.querySelector('[aria-label="Local runtime connection"]');
+    if (!event.isTrusted || !button || !notice?.contains(button) || button.disabled ||
+        button.textContent?.trim() !== 'Reconnect' || !button.getClientRects().length) return;
+    actions.add(event); clicks++;
+  };
+  const cleanup = () => {
+    clearTimeout(timer);
+    window.removeEventListener('click', click, true);
+    window.removeEventListener('terminalx:private-recovery-invocation', invocation);
+    window.removeEventListener('pagehide', cleanup);
+  };
+  const invocation = event => {
+    const action = event.detail?.action;
+    const manual = action instanceof Event && actions.has(action) && action.isTrusted;
+    const result = {phase,label,timeOrigin,origin,installed,clicks,
+      cause:manual ? 'manual' : 'automatic-or-unbound',
+      actionTime:manual ? action.timeStamp : null, invocationTime:performance.now()};
+    cleanup();
+    void window.__TAURI_INTERNALS__.invoke('terminal_perf_reply', {id:phase,result});
+  };
+  window.addEventListener('click', click, true);
+  window.addEventListener('terminalx:private-recovery-invocation', invocation);
+  window.addEventListener('pagehide', cleanup, {once:true});
+  timer = setTimeout(cleanup, 180000);
+  void window.__TAURI_INTERNALS__.invoke('terminal_perf_reply',
+    {id:__ACK__,result:{label,timeOrigin,origin,installed}});
+})()"#;
+
+fn manual_witness(app: &tauri::AppHandle, before: &Value) -> Result<Observation> {
+    let witness = Observation::new();
+    let ack = Observation::new();
+    let script = MANUAL_WITNESS.replace("__PHASE__", &serde_json::to_string(&witness.0)?)
+        .replace("__ACK__", &serde_json::to_string(&ack.0)?);
+    let handle = app.clone();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
+    app.run_on_main_thread(move || {
+        let result = handle.get_webview_window("main").context("manual action window absent")
+            .and_then(|w| w.eval(&script).map_err(Into::into));
+        let _ = tx.try_send(result);
+    })?;
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))??;
+    let installed = ack.complete(deadline.saturating_duration_since(Instant::now()))
+        .context("manual observation not installed")?;
+    for key in ["label", "timeOrigin", "origin"] {
+        ensure!(installed[key] == before[key], "manual observer changed {key}");
+    }
+    Ok(witness)
+}
+
+fn check_manual_action(value: &Value, phase: &str, before: &Value) -> Result<()> {
+    ensure!(serde_json::to_vec(value)?.len() <= 2048, "manual evidence bound");
+    ensure!(value["phase"] == phase, "wrong manual phase");
+    for key in ["label", "timeOrigin", "origin"] {
+        ensure!(value[key] == before[key], "wrong manual {key}");
+    }
+    ensure!(value["cause"] == "manual" && value["clicks"] == 1, "no single trusted manual call origin");
+    let time = |key: &str| -> Result<f64> {
+        value[key].as_f64().filter(|n| n.is_finite() && *n >= 0.0).context("missing action timing")
+    };
+    let installed = time("installed")?;
+    let action = time("actionTime")?;
+    let invocation = time("invocationTime")?;
+    ensure!(installed <= action && action <= invocation && invocation - installed <= 180_000.0,
+        "action outside this bounded observation");
+    Ok(())
+}
+
 /// Read-only pagehide witness. Registration is acknowledged before the fault.
 /// Failure to deliver IPC before document destruction is INCOMPLETE, never a
 /// reason to infer that a checkpoint existed. Both ids retire on every path.
@@ -257,6 +336,8 @@ fn recovered_phase(app: &tauri::AppHandle, log: &mut std::fs::File, permit: &Ver
     ensure!(*ACTIVE_RECONNECTS.lock().unwrap() == [0,0], "prior reconnect still in flight");
     let witnesses = [Some(checkpoint_witness(app,"main")?), if shared { Some(checkpoint_witness(app,"floating")?) } else { None }];
     fault(app, permit, shared)?;
+    let deadline = Instant::now() + if manual { Duration::from_secs(180) } else { PHASE_TIMEOUT };
+    let mut manual_action = None;
     if manual {
         // Already exhausted: demonstrate no automatic reconnect through two
         // health-poll periods before waiting for a real candidate UI action.
@@ -265,9 +346,16 @@ fn recovered_phase(app: &tauri::AppHandle, log: &mut std::fs::File, permit: &Ver
             ensure!(counts() == calls, "automatic retry exceeded lifetime budget");
             std::thread::sleep(Duration::from_millis(250));
         }
-        persist(log, &json!({"phase":"manual-reconnect-required","calls":calls}))?;
+        let witness = manual_witness(app, &before[0])?;
+        ensure!(counts() == calls, "reconnect preceded manual observation");
+        persist(log, &json!({"phase":"manual-reconnect-required","calls":calls,"actionPhase":witness.0,
+            "document":before[0]["timeOrigin"],"window":"main","origin":before[0]["origin"]}))?;
+        let value = witness.complete(deadline.saturating_duration_since(Instant::now()))
+            .context("actual manual invocation evidence missing")?;
+        check_manual_action(&value, &witness.0, &before[0])?;
+        persist(log, &json!({"phase":"manual-action-witness","value":value}))?;
+        manual_action = Some(value);
     }
-    let deadline = Instant::now() + if manual { Duration::from_secs(180) } else { PHASE_TIMEOUT };
     let after = loop {
         ensure!(Instant::now() < deadline, "recovery phase deadline");
         let (Ok(main), Ok(floating)) = (observe(app,"main"), observe(app,"floating")) else {
@@ -313,7 +401,7 @@ fn recovered_phase(app: &tauri::AppHandle, log: &mut std::fs::File, permit: &Ver
     };
     ensure!(counts() == now_calls && *ACTIVE_RECONNECTS.lock().unwrap() == [0,0], "late extra reconnect");
     persist(log, &json!({"phase":"recovered","shared":shared,"cleared":cleared,"manual":manual,
-        "before":before,"after":after,"calls":now_calls,"native":fresh,
+        "before":before,"after":after,"calls":now_calls,"native":fresh,"manualAction":manual_action,
         "viewBefore":visible_before,"postReloadBarrier":live_barrier,"viewAfter":view_cursors(&fresh)?}))
 }
 
@@ -375,6 +463,37 @@ pub(crate) fn install(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delayed_automatic_retry_cannot_satisfy_manual_phase() {
+        let before = json!({"label":"main","timeOrigin":1,"origin":"tauri://localhost"});
+        // At 13 seconds, after the old 12-second silence predicate. Even if
+        // reload/count/checkpoint/output all succeed, this call is not manual.
+        let automatic = json!({"phase":"manual-4","label":"main","timeOrigin":1,
+            "origin":"tauri://localhost","installed":12000,"invocationTime":13000,
+            "actionTime":null,"clicks":0,"cause":"automatic-or-unbound"});
+        assert!(check_manual_action(&automatic,"manual-4",&before).is_err());
+        // A nearby real click does not relabel an automatic call-site cause.
+        let mut nearby = automatic;
+        nearby["clicks"] = json!(1);
+        nearby["actionTime"] = json!(12500);
+        assert!(check_manual_action(&nearby,"manual-4",&before).is_err());
+        assert!(check_manual_action(&Value::Null,"manual-4",&before).is_err());
+    }
+    #[test]
+    fn manual_positive_requires_exact_phase_document_window_and_origin() {
+        // Predicate draft, NOT a fabricated runtime receipt or trusted UI event.
+        let before = json!({"label":"main","timeOrigin":1,"origin":"tauri://localhost"});
+        let valid = json!({"phase":"manual-4","label":"main","timeOrigin":1,
+            "origin":"tauri://localhost","installed":12000,"invocationTime":13001,
+            "actionTime":13000,"clicks":1,"cause":"manual"});
+        assert!(check_manual_action(&valid,"manual-4",&before).is_ok());
+        for (key, wrong) in [("phase",json!("manual-5")),("label",json!("floating")),
+            ("timeOrigin",json!(2)),("origin",json!("foreign")),("clicks",json!(2)),
+            ("actionTime",json!(11999)),("invocationTime",json!(192001))] {
+            let mut stale = valid.clone(); stale[key] = wrong;
+            assert!(check_manual_action(&stale,"manual-4",&before).is_err(), "{key}");
+        }
+    }
     #[test]
     fn delayed_valid_reply_completes_off_dispatch_thread() {
         let request = Observation::new();

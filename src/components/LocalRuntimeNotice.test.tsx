@@ -30,7 +30,7 @@ beforeEach(() => {
   });
   native.listeners.clear();
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 async function mounted(reload = vi.fn()) {
   let view!: ReturnType<typeof render>;
@@ -43,6 +43,47 @@ async function disconnect(event = "local_runtime_disconnected") {
 async function advance(ms: number) {
   await act(async () => vi.advanceTimersByTimeAsync(ms));
 }
+
+it("private oracle reports an automatic call after 13 seconds without manufacturing a manual action", async () => {
+  vi.stubEnv("VITE_TERMINALX_RECOVERY_ACCEPTANCE", "fixed-local-v1");
+  let resolve!: (state: unknown) => void;
+  native.status.mockResolvedValue(unavailable);
+  await mounted();
+  native.status.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  const seen: Event[] = [];
+  const observe = (event: Event) => { seen.push(event); };
+  window.addEventListener("terminalx:private-recovery-invocation", observe);
+  try {
+    await advance(13_000); // First auto check is held beyond the old quiet interval.
+    expect(native.reconnect).not.toHaveBeenCalled();
+    await act(async () => resolve(unavailable));
+    expect(native.reconnect).toHaveBeenCalledOnce();
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as CustomEvent).detail.action).toBeNull();
+  } finally { window.removeEventListener("terminalx:private-recovery-invocation", observe); }
+});
+
+it("private manual call site retains the exact button event after budget exhaustion", async () => {
+  vi.stubEnv("VITE_TERMINALX_RECOVERY_ACCEPTANCE", "fixed-local-v1");
+  native.status.mockResolvedValue(unavailable);
+  native.reconnect.mockRejectedValue("Owner unavailable");
+  await mounted();
+  await advance(60_000);
+  const button = screen.getByRole("button", { name: "Reconnect" });
+  let actual: Event | undefined;
+  button.addEventListener("click", event => { actual = event; }, { once: true });
+  const observe = vi.fn();
+  window.addEventListener("terminalx:private-recovery-invocation", observe);
+  try {
+    await act(async () => fireEvent.click(button));
+    expect(native.reconnect).toHaveBeenCalledTimes(4);
+    expect(observe).toHaveBeenCalledOnce();
+    expect((observe.mock.calls[0][0] as CustomEvent).detail.action).toBe(actual);
+    // JSDOM cannot create trusted input: the native witness must REJECT this
+    // synthetic event. Live trusted-action acceptance remains unexecuted.
+    expect(actual?.isTrusted).toBe(false);
+  } finally { window.removeEventListener("terminalx:private-recovery-invocation", observe); }
+});
 
 it("ignores another window's failure and delayed disconnects when current transport is healthy", async () => {
   const { reload } = await mounted();

@@ -13,6 +13,14 @@ compiles the module, fault/PTY observer and native reconnect counter. The owner
 is built separately without desktop and has none of these. No production
 RPC/invoke handler, feature, dependency or arbitrary script endpoint added.
 
+F1 child additionally requires the private frontend compile input
+`VITE_TERMINALX_RECOVERY_ACCEPTANCE=fixed-local-v1`. Only that frontend emits
+the fixed call-site observation event; ordinary builds with this input absent
+emit nothing. The native listener remains under the original Rust guard and
+private identity checks. Both frontend and native source/pins must be rebuilt
+and reviewed together; no existing artifact supplies this evidence. The small
+frontend origin-metadata plumbing does not decide retries, delays or budgets.
+
 Fixed bundle `com.terminalx.next.dev.recovery643.private3d73b0a4`, root
 `/Users/Shared/tx643-private-recovery-3d73b0a4`, private home/state/bin/fixture,
 scenario `TERMINALX_RECOVERY_ACCEPTANCE=fixed-local-v1`. Root/home/state/bin/
@@ -106,6 +114,31 @@ composer and repeat manual recovery to require no resurrection. Native entry
 counters are per window; storage must equal min(actual calls,3), including
 manual calls after saturation. Missing action/clear handoff times out. Floating
 is unchanged for view-only faults and reloads only for shared repair.
+
+Manual acceptance now requires a bounded read-only witness, installed after
+the quiet interval, for the original trusted click on the visible enabled
+Reconnect button in main. A WeakSet binds that exact DOM Event object to the
+event carried through the real handler's async/pending check and observed at
+the actual reconnect call site. A click near an unrelated automatic invocation
+does not suffice. Coalesced distinct/mixed actions conservatively fail this
+single-action oracle without changing retry behavior. Synthetic clicks are
+rejected; the driver never creates an action. The witness binds pending-request
+phase ID, window, timeOrigin, location.origin, action/install/invocation times
+and exactly one action. A delayed automatic call after12s has no bound manual
+origin and is rejected even if its reload succeeds. The phase still requires
+exact native counts, no active/late extra call, checkpoint and fresh output.
+Both manual phases use this predicate and persist the witness in their evidence.
+The180s manual deadline now includes silence and observation; it is not reset
+after a click. Listeners remove themselves on first call-site observation,
+pagehide or180s timeout; native pending IDs retire on every return. Missing
+frontend flag, missing/lost witness or incompatible event timestamp semantics
+is INCOMPLETE, not permission to infer a manual action.
+
+The two Rust F1 predicate drafts cover delayed-auto/nearby-click rejection and
+manual-positive plus stale phase/document/window/origin/time rejection. Two
+frontend drafts bind a delayed auto call to null action and a manual handler
+to the exact original event. JSDOM input remains untrusted and cannot prove
+live positive acceptance. All four additions are unexecuted source drafts.
 
 Each completed phase is fsynced before progressing. Missing output, truncated
 JSONL, failed fsync, no final record, startup/worker error or absent ready state

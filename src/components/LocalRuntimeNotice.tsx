@@ -13,7 +13,7 @@ const reloadWindow = () => window.location.reload();
 export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => void }) {
   const [state, setState] = useState<LocalRuntimeState | null>(null);
   const [busy, setBusy] = useState(false);
-  const reconnect = useRef(() => {});
+  const reconnect = useRef((_action: Event) => {});
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
 
@@ -24,6 +24,12 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
     let running = false;
     let pending = false;
     let pendingRetry = false;
+    // Private observer metadata only; never participates in retry decisions.
+    let pendingAction: Event | null = null;
+    const noteRetry = (retry: boolean, action: Event | null) => {
+      if (retry) pendingAction = pendingRetry && pendingAction !== action ? null : action;
+      pendingRetry ||= retry;
+    };
     let reloadRequired = false;
     let attempts = recoveryAttempts();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -46,11 +52,11 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
       clearTimeout(timer);
       timer = setTimeout(() => void check(attempts < RECOVERY_DELAYS.length), RECOVERY_DELAYS[attempts] ?? 5_000);
     };
-    async function check(retry = false) {
+    async function check(retry = false, action: Event | null = null) {
       if (cancelled || reloaded) return;
       if (running) {
         pending = true;
-        pendingRetry ||= retry;
+        noteRetry(retry, action);
         if (retry) setBusy(true);
         return;
       }
@@ -64,7 +70,7 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
           state: "unavailable" as const, message: errorMessage(error),
         }));
         if (cancelled || reloaded) return;
-        if (requested !== revision) { pendingRetry ||= retry; return; }
+        if (requested !== revision) { noteRetry(retry, action); return; }
         setState(found);
         if (found.state !== "unavailable") {
           if (reloadRequired && found.state === "connected") recovered();
@@ -73,6 +79,12 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
         if (retry) {
           attempts = recordRecoveryAttempt();
           setBusy(true);
+          // Explicit private frontend build only. This observes the call site,
+          // not merely a click near an unrelated automatic invocation. The
+          // native private observer checks the ORIGINAL trusted DOM event.
+          if (import.meta.env.VITE_TERMINALX_RECOVERY_ACCEPTANCE === "fixed-local-v1") {
+            window.dispatchEvent(new CustomEvent("terminalx:private-recovery-invocation", { detail: { action } }));
+          }
           const attached = await localRuntime.reconnect();
           if (cancelled || reloaded) return;
           if (attached.state === "connected") {
@@ -96,14 +108,16 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
         if (!cancelled && !reloaded) setBusy(false);
         if (pending) {
           const retryNext = pendingRetry;
+          const actionNext = pendingAction;
           pending = false;
           pendingRetry = false;
-          void check(retryNext);
+          pendingAction = null;
+          void check(retryNext, actionNext);
         }
       }
     }
     // Manual recovery grants one attempt, without replenishing the auto budget.
-    reconnect.current = () => { void check(true); };
+    reconnect.current = (action) => { void check(true, action); };
     const disconnected = () => {
       revision++;
       void check();
@@ -137,7 +151,7 @@ export function LocalRuntimeNotice({ reload = reloadWindow }: { reload?: () => v
         <div className="font-medium">Live connection unavailable</div>
         <p className="mt-1 text-muted-foreground">{state.message}</p>
       </div>
-      <Button variant="outline" size="sm" disabled={busy} onClick={() => reconnect.current()}>{busy ? "Reconnecting…" : "Reconnect"}</Button>
+      <Button variant="outline" size="sm" disabled={busy} onClick={(event) => reconnect.current(event.nativeEvent)}>{busy ? "Reconnecting…" : "Reconnect"}</Button>
     </aside>
   );
 }
