@@ -302,7 +302,7 @@ mod tests {
     }
 
     fn project(path: &Path, kind: ProjectKind) -> Project {
-        Project { kind, name: "p".into(), path: canonical(path).to_string_lossy().into_owned(), last_opened: None, color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false }
+        Project { kind, name: "p".into(), path: canonical(path).to_string_lossy().into_owned(), last_opened: None, color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: Default::default() }
     }
 
     #[test]

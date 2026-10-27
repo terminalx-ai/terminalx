@@ -235,3 +235,36 @@ describe("an agent tab that was closed", () => {
     expect(terminal.terminalCounters()).toMatchObject({ instances: 0, panes: 0 });
   });
 });
+
+describe("the right panel's terminal dock", () => {
+  it("opens numbered shells that are the dock's, not tabs", async () => {
+    const terminal = await loadTerminalStore();
+    const tab = await terminal.openTerminal("s1", "/repo");
+    const first = await terminal.openDockTerminal("s1", "/repo");
+    const second = await terminal.openDockTerminal("s1", "/repo");
+
+    expect(terminal.isDockPane(first.id)).toBe(true);
+    expect(terminal.isDockPane(tab.id)).toBe(false);
+    expect(terminal.isDockPane("tab:dock-1")).toBe(false);
+    expect([first.title, second.title]).toEqual(["Terminal 1", "Terminal 2"]);
+    expect(terminal.dockPanes("s1").map((pane) => pane.id)).toEqual([first.id, second.id]);
+    // The tab strip keeps its own shell selected and numbered.
+    expect(terminal.getTerminalState().selected.s1).toEqual({ kind: "terminal", id: tab.id });
+    expect(terminal.getTerminalState().panes.filter((pane) => pane.sessionId === "s1" && !pane.hidden).map((pane) => pane.id)).toEqual([tab.id]);
+    expect(pty.spawn).toHaveBeenLastCalledWith(second.id, "/repo", 80, 12, undefined, "Terminal 2");
+
+    await terminal.closeTerminal(first.id);
+    expect((await terminal.openDockTerminal("s1", "/repo")).title).toBe("Terminal 3");
+  });
+
+  it("lists a dock shell another window opened in the dock", async () => {
+    const terminal = await loadTerminalStore();
+    await terminal.subscribeTerminals();
+    const opened = listen.mock.calls.find(([name]) => name === "pty_opened")![1] as (event: { payload: unknown }) => void;
+    opened({ payload: { id: "s1:dock-abc", sessionId: "s1", title: "Terminal 4", exited: false } });
+
+    const [pane] = terminal.dockPanes("s1");
+    expect(pane).toMatchObject({ id: "s1:dock-abc", title: "Terminal 4", hidden: true, docked: true });
+    expect(terminal.getTerminalState().active.s1).toBeUndefined();
+  });
+});

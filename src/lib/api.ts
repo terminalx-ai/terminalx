@@ -205,6 +205,8 @@ export interface NewSession {
   baseRef?: string | null;
   /** A requested worktree name (an issue slug); sanitised and made unique. */
   worktreeName?: string | null;
+  /** An existing branch to check out in the new worktree, instead of a new branch. */
+  checkoutBranch?: string | null;
   /** Explicit acknowledgement that a requested worktree should be skipped. */
   onMain?: boolean;
   issue?: IssueRef | null;
@@ -313,6 +315,18 @@ export interface WorkspaceRemoveOptions {
   confirmedDigest: string | null;
   /** The sessions the person was told are in the workspace; the removal is refused if that changed. */
   expectedSessions: string[];
+}
+
+/** Where the Local VM stands (`local_vm.rs`). */
+export type LocalVmState = "no_runtime" | "runtime_down" | "not_created" | "stopped" | "running";
+export interface LocalVmStatus {
+  state: LocalVmState;
+  /** `docker` or `podman`. */
+  runtime: string | null;
+  /** Colima is installed, so a stopped Docker can be started from the app. */
+  colima: boolean;
+  /** The noVNC server on loopback, while running. */
+  viewer: { port: number; password: string } | null;
 }
 
 export const api = {
@@ -578,6 +592,17 @@ export const api = {
   /** Save one workspace's tab order, pins, mutes and titles for every window and device. */
   setTabLayout: (workspace: string, layout: TabLayout) => invoke<void>("set_tab_layout", { workspace, layout }),
   renameSession: (sessionId: string, title: string) => invoke<void>("rename_session", { sessionId, title }),
+  renameBranch: (projectPath: string, from: string, to: string) =>
+    invoke<{ branch: string; project: Project; sessions: SessionEntry[] }>("rename_branch", { projectPath, from, to }),
+  localVm: {
+    status: () => invoke<LocalVmStatus>("local_vm_status"),
+    /** Pulls the desktop image the first time; agents started after it is up are offered it. */
+    start: () => invoke<LocalVmStatus>("local_vm_start"),
+    stop: () => invoke<LocalVmStatus>("local_vm_stop"),
+    reset: () => invoke<LocalVmStatus>("local_vm_reset"),
+    /** Start Colima, or open Docker Desktop. */
+    startRuntime: () => invoke<LocalVmStatus>("local_vm_start_runtime"),
+  },
   /** Take the agent's title for a conversation still named automatically; the change arrives as `session_updated`. */
   adoptAgentTitle: (sessionId: string) => invoke<void>("adopt_agent_title", { sessionId }),
   /** A project at a glance: branches, contributors, the newest commits and pull requests. */
