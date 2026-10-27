@@ -4,6 +4,9 @@
 
 - Clarify the CLI guide to keep simple issue filing and context checks in the
   current conversation, with separate sessions reserved for authorized work. (#634)
+- Keep issue confirmations compact and scrollable with visible decision controls
+  and originating-session context. Background requests wait for explicit review
+  without interrupting another conversation; human approval remains required. (#641)
 - Show clear delivery progress when continuing in a new session, remove the submitted
   handoff draft, and preserve any edits made while the handoff is starting. (#635)
 

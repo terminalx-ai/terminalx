@@ -1085,7 +1085,7 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
             Target::Linear { .. } => None,
         };
         // Shown in the question as the caller's claim, never trusted.
-        let session_title = caller.session.as_deref().and_then(|session| resolve_session(session).ok()).map(|session| session.title);
+        let session = caller.session.as_deref().and_then(|session| resolve_session(session).ok());
         let gate = |write: &Write, subject: &str, issue_repo: Option<&str>| {
             let subject = Subject {
                 issue: subject,
@@ -1093,7 +1093,8 @@ fn issue_operation(questions: Option<&crate::issue_control::Ask>, command: &str,
                 project_name: &project.name,
                 // The switch is the project's, and applies only to an issue that is verifiably its own.
                 routine_allowed: project.agent_issue_updates && in_project(issue_repo, project_repo.as_deref()),
-                session_title: session_title.as_deref(),
+                session_title: session.as_ref().map(|s| s.title.as_str()),
+                session_id: session.as_ref().map(|s| s.id.as_str()),
             };
             authorize(write, &subject, questions)
         };
