@@ -121,7 +121,7 @@ impl Bound {
     pub fn visible_cursor(&self, bytes: &[u8]) -> Result<(String,u64)> {
         let text = String::from_utf8_lossy(bytes);
         let mut last = None;
-        for line in text.lines() {
+        for line in text.split_inclusive('\n').filter(|s| s.ends_with('\n')) {
             for (id, pane) in &self.panes {
                 let prefix = format!("TX643:{}:{}:", self.challenge, pane.process.pid);
                 if let Some(n) = line.trim().strip_prefix(&prefix).and_then(|s| s.parse::<u64>().ok()) {
@@ -196,7 +196,8 @@ pub(super) fn bind(evidence: &Value) -> Result<Bound> {
         let (starts, submits, produced) = journal(pid as u32, &nonce)?;
         let decoded = base64::engine::general_purpose::STANDARD.decode(row["output"]["data"].as_str().context("pty bytes")?)?;
         let prefix = format!("TX643:{nonce}:{pid}:");
-        let cursor = String::from_utf8_lossy(&decoded).lines().filter_map(|s| s.trim().strip_prefix(&prefix)?.parse::<u64>().ok()).max().context("no genuine numbered PTY output")?;
+        let cursor = String::from_utf8_lossy(&decoded).split_inclusive('\n').filter(|s| s.ends_with('\n'))
+            .filter_map(|s| s.trim().strip_prefix(&prefix)?.parse::<u64>().ok()).max().context("no complete numbered PTY output")?;
         ensure!(cursor <= produced, "output beyond durable fixture journal");
         let id = row["pane"].as_str().context("pane id")?.to_owned();
         let canonical_messages = row["canonicalUserMessages"].as_u64().context("message counter")?;
@@ -245,6 +246,8 @@ mod tests {
             panes:BTreeMap::from([("p".into(),pane)]),cursors:BTreeMap::from([("p".into(),1)]),
             fake_sha256:"fake".into(),adapter_sha256:"adapter".into() };
         let mut after = before.clone();
+        assert!(before.visible_cursor(b"TX643:nonce:42:2").is_err());
+        assert_eq!(before.visible_cursor(b"TX643:nonce:42:2\r\n").unwrap(), ("p".into(),2));
         assert!(!before.fresh_output(&after));
         after.cursors.insert("p".into(),2);
         assert!(before.fresh_output(&after));
