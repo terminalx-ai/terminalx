@@ -62,7 +62,7 @@ export async function checkForUpdate({ quiet = false }: { quiet?: boolean } = {}
   if (!quiet) emit({ kind: "checking" });
   try {
     const update = await check({ headers: { "X-Raccoon-Channel": getPrefs().updateChannel } });
-    emit(update ? { kind: "available", update } : { kind: "none" });
+    emit(update?.version ? { kind: "available", update } : { kind: "none" });
   } catch (error) {
     emit(quiet ? before : { kind: "error", message: errorMessage(error) });
   }
