@@ -96,6 +96,21 @@ mod tests {
     }
 
     #[test]
+    fn the_sidebar_draws_from_the_same_words() {
+        // The sidebar tells a drawn name from a chosen one without asking; its lists must be these.
+        let ts = include_str!("../../src/lib/worktreeNames.ts");
+        let words = |name: &str| -> Vec<String> {
+            let start = ts.find(&format!("const {name} = new Set([")).unwrap();
+            let body = &ts[start..];
+            let body = &body[body.find('[').unwrap() + 1..body.find("])").unwrap()];
+            body.split(',').map(|word| word.trim().trim_matches('"').to_string()).filter(|word| !word.is_empty()).collect()
+        };
+        assert_eq!(words("ADJECTIVES"), ADJECTIVES);
+        assert_eq!(words("COLORS"), COLORS);
+        assert_eq!(words("ANIMALS"), ANIMALS);
+    }
+
+    #[test]
     fn recognises_shape() {
         assert!(is_worktree_name("quiet-amber-fox"));
         assert!(!is_worktree_name("main"));

@@ -24,12 +24,21 @@ pub const COMPUTER_SKILL_STUB: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../skills/computer-use/SKILL.md"
 ));
+pub const VM_GUIDE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skill-guides/local-vm.md"
+));
+pub const VM_SKILL_STUB: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../skills/local-vm/SKILL.md"
+));
 
 /// Every guide this binary can serve through `terminalx skills get <name>`,
 /// with the discovery stub "Install skills" writes for it.
-pub const SKILLS: [(&str, &str, &str); 2] = [
+pub const SKILLS: [(&str, &str, &str); 3] = [
     ("terminalx-cli", GUIDE, SKILL_STUB),
     ("computer-use", COMPUTER_GUIDE, COMPUTER_SKILL_STUB),
+    ("local-vm", VM_GUIDE, VM_SKILL_STUB),
 ];
 
 const HELP: &str = r#"terminalx — control a running TerminalX app
@@ -94,14 +103,19 @@ Usage:
   terminalx pipelines show PIPELINE [--project PROJECT] [--json]
   terminalx pipelines auto-merge PIPELINE on|off [--project PROJECT] [--json]
   terminalx pipelines stop|resume|advance|review|merge|refresh PIPELINE [--project PROJECT] [--json]
-  terminalx skills get terminalx-cli|computer-use [--full] [--json]
+  terminalx vm status|start|stop [--json]
+  terminalx vm tools [TOOL] [--json]
+  terminalx vm call TOOL [ARGUMENTS_JSON] [--json]
+  terminalx vm screenshot [--out PATH] [--json]
+  terminalx skills get terminalx-cli|computer-use|local-vm [--full] [--json]
 
 Computer use (desktop apps on macOS, Linux and Windows):
 COMPUTER_HELP
 BROWSER_HELP
 
 Use `terminalx skills get terminalx-cli` for the complete guide and
-`terminalx skills get computer-use` for desktop automation."#;
+`terminalx skills get computer-use` for desktop automation, and
+`terminalx skills get local-vm` for the Linux desktop VM."#;
 
 /// The help text with the computer and browser verbs spliced in from their
 /// own modules.
@@ -443,6 +457,24 @@ fn parse_with_stdin(
         "issues" => parse_issues(&mut tokens, stdin),
         "pipelines" => parse_pipelines(&mut tokens),
         "computer" => crate::computer::cli::parse(&mut tokens, stdin),
+        "vm" => {
+            let action = tokens.required_front("vm action (status, start, stop, tools, call or screenshot)")?;
+            let params = match action.as_str() {
+                "status" | "start" | "stop" => json!({}),
+                "call" => {
+                    let tool = tokens.required_front("tool name")?;
+                    let arguments = tokens.take_front().unwrap_or_else(|| "{}".into());
+                    json!({"tool": tool, "arguments": arguments})
+                }
+                "tools" => json!({"tool": tokens.take_front()}),
+                "screenshot" => json!({"out": tokens.option("--out")?}),
+                other => return Err(invalid(format!("Unknown vm action {other}."))),
+            };
+            tokens.finish()?;
+            // The first start downloads the desktop image.
+            let timeout = Duration::from_secs(if action == "start" { 25 * 60 } else { 150 });
+            Ok(Action::Rpc { command: format!("vm.{action}"), params, timeout })
+        }
         "skills" => {
             expect_word(&mut tokens, "get", "skills")?;
             let name = tokens.required_front("skill name")?;
@@ -450,7 +482,7 @@ fn parse_with_stdin(
                 return Err(ControlError::new(
                     "not_found",
                     format!("This binary does not embed a guide named {name}."),
-                    Some("Use terminalx-cli or computer-use exactly.".into()),
+                    Some("Use terminalx-cli, computer-use or local-vm exactly.".into()),
                 ));
             };
             let _full = tokens.flag("--full")?;
@@ -1093,6 +1125,18 @@ mod tests {
             Action::Rpc { command, params, timeout } => (command, params, timeout),
             other => panic!("expected rpc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn vm_commands_reach_the_app_and_the_first_start_may_download() {
+        let (command, _, timeout) = rpc_of(&["vm", "start"]);
+        assert_eq!(command, "vm.start");
+        assert!(timeout >= Duration::from_secs(20 * 60));
+        assert_eq!(rpc_of(&["vm", "call", "launch_app", r#"{"name":"firefox"}"#]).1, json!({"tool": "launch_app", "arguments": r#"{"name":"firefox"}"#}));
+        assert_eq!(rpc_of(&["vm", "call", "list_windows"]).1, json!({"tool": "list_windows", "arguments": "{}"}));
+        assert_eq!(rpc_of(&["vm", "screenshot", "--out", "/tmp/s.png"]).1, json!({"out": "/tmp/s.png"}));
+        assert_eq!(rpc_of(&["vm", "tools"]).1, json!({"tool": null}));
+        assert!(parse(&args(&["vm", "install"])).is_err());
     }
 
     #[test]

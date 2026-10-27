@@ -86,42 +86,44 @@ try {
       await page.getByRole("button", { name: /^Issues/ }).click();
       await page.getByText("Add keyboard navigation to the demo list", { exact: true }).click();
       await page.getByText(/^Synthetic issue:/).waitFor();
-      await page.getByTitle("Agent", { exact: true }).focus();
+      // Agent, model, effort and permissions sit behind one button; every choice is made by keyboard.
+      const agentMenu = page.getByTestId("agent-menu");
+      await agentMenu.focus();
       await page.keyboard.press("Enter");
       await page.getByRole("menuitem", { name: "Codex", exact: true }).focus();
       await page.keyboard.press("Enter");
-      await page.getByTitle("Model", { exact: true }).focus();
-      await page.keyboard.press("ArrowDown");
+      await agentMenu.focus();
+      await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: /^Model/ }).focus();
+      await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: "GPT-6 Astra", exact: true }).waitFor();
-      const menu = await page.getByRole("menu").boundingBox();
+      const menu = await page.getByRole("menu").last().boundingBox();
+      await page.getByRole("menuitemradio", { name: "GPT-6 Astra", exact: true }).focus();
       await page.keyboard.press("Enter");
-      await page.getByTitle("Effort", { exact: true }).focus();
-      await page.keyboard.press("Space");
-      await page.keyboard.press("End");
+      await agentMenu.focus();
       await page.keyboard.press("Enter");
-      assert.equal(await page.getByTitle("Effort", { exact: true }).textContent(), "High");
-      const layout = await page.getByTitle("Model", { exact: true }).evaluate((button) => {
-        const row = button.parentElement;
+      await page.getByRole("menuitemradio", { name: "High", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      assert.equal(await page.getByTestId("agent-effort").textContent(), "High");
+      assert.equal(await page.getByTestId("agent-model").textContent(), "GPT-6 Astra");
+      const layout = await page.getByTestId("issue-start-row").evaluate((row) => {
         const bounds = row.getBoundingClientRect();
-        const buttons = [...row.querySelectorAll("button")];
-        const boxes = buttons.map((node) => node.getBoundingClientRect());
-        const agentBoxes = buttons.filter((node) => ["Agent", "Model", "Effort", "Permissions"].includes(node.title)).map((node) => node.getBoundingClientRect());
+        const boxes = [...row.querySelectorAll("button")].map((node) => node.getBoundingClientRect());
         return {
-          count: agentBoxes.length,
+          agentMenus: row.querySelectorAll('[data-testid="agent-menu"]').length,
           allControls: boxes.length,
           inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
           overlaps: boxes.some((box, index) => boxes.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
-          rows: new Set(agentBoxes.map((box) => box.top)).size,
           scrolls: row.scrollWidth > row.clientWidth,
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "agent, model, effort and permission controls fit": layout.count === 4 && layout.allControls === 7 && layout.inside && !layout.overlaps && !layout.scrolls,
+        "the agent button, worktree switch, options and Start session fit": layout.agentMenus === 1 && layout.allControls === 4 && layout.inside && !layout.overlaps && !layout.scrolls,
         "the model menu fits within the viewport": !!menu && menu.x >= 0 && menu.x + menu.width <= width,
-        ...(width === 800 ? { "controls wrap in the narrow detail pane": layout.rows > 1 } : {}),
       }, layout);
-      // Check the new automation group separately, including both label texts,
-      // switches and cleanup link. Agent rows must still wrap independently.
+      // The automation group lives behind the start row's options button, and
+      // must fit its popover: both label texts, switches and cleanup link.
+      await page.getByRole("button", { name: "Session options", exact: true }).click();
       const automation = page.getByRole("group", { name: "Session automation", exact: true });
       const startRow = await automation.evaluate((pane) => {
         const bounds = pane.getBoundingClientRect();
@@ -131,15 +133,17 @@ try {
           inside: boxes.every((box) => box.left >= bounds.left - 1 && box.right <= bounds.right + 1),
           overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)),
           scrolls: pane.scrollWidth > pane.clientWidth,
+          inViewport: bounds.left >= 0 && bounds.right <= window.innerWidth,
           switches: [...pane.querySelectorAll('[role="switch"]')].map((toggle) => [toggle.getAttribute("aria-label"), toggle.getAttribute("aria-checked")]),
           cleanup: pane.textContent.includes("Delete the workspace after merge:"),
         };
       });
       assert.deepEqual(startRow.switches, [["Resolve conflicts automatically", "false"], ["Merge when green", "false"]]);
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "both automation switches and cleanup setting fit without overlaps": startRow.inside && !startRow.overlaps && !startRow.scrolls && startRow.cleanup,
+        "both automation switches and cleanup setting fit without overlaps": startRow.inside && startRow.inViewport && !startRow.overlaps && !startRow.scrolls && startRow.cleanup,
       }, startRow);
       await automation.getByRole("switch", { name: "Resolve conflicts automatically", exact: true }).click();
+      await page.keyboard.press("Escape");
       // The thread sits under the description, inside the same pane, without a sideways scroll.
       await page.getByText("Synthetic comment: keep Home and End working too.", { exact: true }).waitFor();
       const thread = await page.getByRole("region", { name: "Comments", exact: true }).evaluate((section) => {
@@ -204,7 +208,7 @@ try {
       await page.getByText("Add keyboard navigation to the demo list", { exact: true }).first().click();
       const panel = page.getByTestId("issue-pipeline");
       await panel.waitFor();
-      // With a session on the issue there are two buttons beside the worktree
+      // With a session on the issue there are three buttons beside the worktree
       // choice: they must not be drawn over its words in the narrow pane.
       const startRowAgain = await page.getByTestId("issue-start-row").evaluate((row) => {
         const bounds = row.getBoundingClientRect();
@@ -220,7 +224,7 @@ try {
         };
       });
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "Open session and Start session sit beside the worktree choice, not over it": startRowAgain.buttons === 2 && !startRowAgain.overLabel && !startRowAgain.overEachOther && startRowAgain.inside && !startRowAgain.scrolls,
+        "the agent button, Open session and Start session sit beside the worktree choice, not over it": startRowAgain.buttons === 3 && !startRowAgain.overLabel && !startRowAgain.overEachOther && startRowAgain.inside && !startRowAgain.scrolls,
       }, startRowAgain);
       if (shots) await page.screenshot({ path: join(shots, `issue-pipeline-top-${mode}-${provider}-${width}.png`) });
       await panel.getByRole("button", { name: /^Record/ }).click();
@@ -376,7 +380,7 @@ try {
       await panel.waitFor();
       const startRow = await page.getByTestId("issue-start-row").evaluate((row) => {
         const bounds = row.getBoundingClientRect();
-        const where = row.querySelector("span").getBoundingClientRect();
+        const where = row.querySelector('[title="A new worktree of a cloud workspace"]').getBoundingClientRect();
         const buttons = [...row.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
         const crosses = (a, b) => a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
         return {
@@ -405,7 +409,7 @@ try {
       if (shots) await page.screenshot({ path: join(shots, `issue-cloud-${mode}-${width}.png`) });
       failed += report(`cloud, ${mode}, ${width}px`, {
         "the cloud project is offered under its organization": offered === 1,
-        "the start row says the session goes to a new worktree of a cloud workspace, and its button sits beside that": /of a cloud workspace/.test(startRow.text) && !startRow.worktreeSwitch && startRow.buttons >= 1 && !startRow.overWhere && startRow.inside && !startRow.scrolls,
+        "the start row says the session goes to a new worktree of a cloud workspace, and its button sits beside that": /· cloud workspace/.test(startRow.text) && !startRow.worktreeSwitch && startRow.buttons >= 1 && !startRow.overWhere && startRow.inside && !startRow.scrolls,
         "the cloud pipeline fits the pane, says its workspace is asleep and that a person merges": !cloudLayout.scrolls && cloudLayout.inside && !cloudLayout.overlaps && /asleep/.test(cloudLayout.asleep ?? "") && cloudLayout.personMerges,
         "there is no switch to merge by itself, and Merge is offered": cloudLayout.switches === 0 && (await panel.getByRole("button", { name: "Merge", exact: true }).count()) === 1,
       }, { startRow, cloudLayout });

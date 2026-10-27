@@ -145,6 +145,8 @@ export interface Project {
   issuePipeline?: IssuePipelineSettings | null;
   /** Agents may comment on issues and move their status without asking. Absent is off. */
   agentIssueUpdates?: boolean;
+  /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
+  branchLabels?: Record<string, string>;
 }
 
 export interface ProjectPatch {
@@ -156,6 +158,8 @@ export interface ProjectPatch {
   archived?: boolean;
   issuePipeline?: IssuePipelineSettings;
   agentIssueUpdates?: boolean;
+  /** Set one branch's label; null or blank clears it. */
+  branchLabel?: { branch: string; label: string | null };
 }
 
 /** One checkout of a project: the root or any worktree, whoever made it. */

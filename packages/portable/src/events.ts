@@ -112,7 +112,7 @@ export type Delta =
   | { delta: "input_delta"; block: BlockRef; partialJson: string }
   | { delta: "block_stop"; block: BlockRef };
 
-export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "disconnected" | "permission_expired" | "failed";
+export type RecoveryKind = "capacity" | "usage_limit" | "tool" | "timeout" | "delivery_unconfirmed" | "disconnected" | "permission_expired" | "signed_out" | "failed";
 
 export type Payload =
   | { type: "recovery"; kind: RecoveryKind | null }

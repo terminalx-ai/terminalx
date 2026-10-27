@@ -8,11 +8,14 @@ export const RECOVERY_MESSAGES: Record<RecoveryKind, string> = {
   delivery_unconfirmed: "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
   disconnected: "The connection was lost. The process outcome is unknown.",
   permission_expired: "The permission request expired. Check the terminal for a new request or stop the session.",
+  signed_out: "The agent is signed out, or its sign-in expired. Sign in again, then retry.",
   failed: "The agent encountered an error. Review the conversation before continuing.",
 };
 
 /** Never echo arbitrary IPC/provider errors in recovery controls. */
 export function classifyRecovery(message: string): RecoveryKind {
+  // The agents' own sign-in wording only, as `recovery.rs` reads it: another service's 401 is that tool's failure.
+  if (/run \/login|authentication_failed|oauth token has expired|run codex login|agent is signed out/i.test(message)) return "signed_out";
   if (/usage.?limit|hit your|limit reached|quota/i.test(message)) return "usage_limit";
   if (/capacity|overloaded|rate.?limit|too many requests|429|529/i.test(message)) return "capacity";
   if (/timeout|timed out|no progress/i.test(message)) return "timeout";

@@ -2874,7 +2874,9 @@ impl SessionManager {
                 None => unset.push(name),
             }
         }
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}", launch.command, config.args), &unset);
+        // The Local VM's driver, while the reader has it on (`local_vm.rs`).
+        let computer = crate::local_vm::launch_args(&tab.harness, config.args.contains("--append-system-prompt"));
+        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}", launch.command, config.args, computer), &unset);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };

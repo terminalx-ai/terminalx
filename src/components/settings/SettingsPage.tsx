@@ -2,8 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { ArrowLeft, Check, CircleAlert, ExternalLink, Loader2, RefreshCw, X } from "@/icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { checkForUpdate, installUpdate, useUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/button";
 import { Segmented, SettingRow, Switch } from "@/components/ui/controls";
 import { AgentMark } from "@/components/AgentMark";
@@ -228,6 +227,11 @@ function GeneralTab() {
         label="Fold tool calls"
         description="Once an agent starts answering, the tool calls it made collapse under one line. Off keeps every call expanded."
         control={<Switch checked={prefs.foldToolCalls} onCheckedChange={(v) => setPrefs({ foldToolCalls: v })} />}
+      />
+      <SettingRow
+        label="Show files changed"
+        description="Under each finished turn, the files the agent changed with the lines it added and removed. Click a file to open it."
+        control={<Switch aria-label="Show files changed" checked={prefs.turnChanges} onCheckedChange={(v) => setPrefs({ turnChanges: v })} />}
       />
       <SettingRow
         label="Autocorrect"
@@ -683,43 +687,14 @@ function IntegrationsTab() {
   );
 }
 
-type UpdateState = { kind: "idle" } | { kind: "checking" } | { kind: "none" } | { kind: "available"; update: Update } | { kind: "installing"; pct: number } | { kind: "error"; message: string };
-
 function AboutTab() {
   const prefs = usePrefs();
   const [version, setVersion] = useState("");
-  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+  const { state } = useUpdate();
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion("dev"));
   }, []);
-
-  const checkNow = async () => {
-    setState({ kind: "checking" });
-    try {
-      const u = await check({ headers: { "X-Raccoon-Channel": prefs.updateChannel } });
-      setState(u ? { kind: "available", update: u } : { kind: "none" });
-    } catch (e) {
-      setState({ kind: "error", message: errorMessage(e) });
-    }
-  };
-
-  const install = async (u: Update) => {
-    setState({ kind: "installing", pct: 0 });
-    try {
-      let total = 0;
-      let got = 0;
-      await u.downloadAndInstall((ev) => {
-        if (ev.event === "Started") total = ev.data.contentLength ?? 0;
-        else if (ev.event === "Progress") {
-          got += ev.data.chunkLength;
-          if (total) setState({ kind: "installing", pct: Math.round((got / total) * 100) });
-        }
-      });
-      await relaunch();
-    } catch (e) {
-      setState({ kind: "error", message: errorMessage(e) });
-    }
-  };
+  const checkNow = () => void checkForUpdate();
 
   return (
     <div className="flex flex-col gap-4 text-sm">
@@ -755,7 +730,7 @@ function AboutTab() {
         }
       />
       <div className="flex items-center gap-2">
-        <Button size="sm" variant="outline" onClick={() => void checkNow()} disabled={state.kind === "checking" || state.kind === "installing"}>
+        <Button size="sm" variant="outline" onClick={checkNow} disabled={state.kind === "checking" || state.kind === "installing"}>
           {state.kind === "checking" ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check for updates
         </Button>
         {state.kind === "none" && <span className="text-xs text-muted-foreground">You have the latest version.</span>}
@@ -763,7 +738,7 @@ function AboutTab() {
         {state.kind === "available" && (
           <>
             <span className="text-xs text-foreground">Version {state.update.version} is available.</span>
-            <Button size="sm" onClick={() => void install(state.update)}>
+            <Button size="sm" onClick={() => void installUpdate()}>
               Install and relaunch
             </Button>
           </>

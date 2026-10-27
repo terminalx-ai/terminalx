@@ -130,8 +130,9 @@ const type = (text: string) => fireEvent.change(screen.getByRole("textbox"), { t
 describe("new session in a cloud project", () => {
   it("says where it runs, keeps the worktree toggle on from the local preference, and runs no local command", () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
-    expect(screen.getByTestId("cloud-runs-in").textContent?.trim()).toBe("Runs in: Acme cloud");
+    expect(screen.getByTestId("cloud-runs-in").textContent?.trim()).toBe("Acme cloud");
     expect(screen.getByText("acme/api", { selector: "span" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Session options" }));
     expect(screen.getByRole("switch", { name: "New worktree on the cloud workspace" }).getAttribute("aria-checked")).toBe("true");
     // An agent not installed here still runs there.
     expect(screen.queryByText(/isn't installed/)).toBeNull();
@@ -143,11 +144,11 @@ describe("new session in a cloud project", () => {
     flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(flow.startInWorkspace).toHaveBeenCalledTimes(1));
     // The reader last pinned Opus 5 for local work. The workspace's CLI may not have it, so the alias goes instead,
     // and the button claims no version for it.
-    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
     expect(flow.startInWorkspace).toHaveBeenCalledWith({ kind: "wake", node }, { agent: "claude", model: "opus", effort: null, mode: "bypassPermissions", prompt: "Fix the login redirect", useWorktree: true });
     expect(flow.prepareCloudCreate).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
@@ -166,18 +167,22 @@ describe("new session in a cloud project", () => {
     flow.planCloudStart.mockReturnValue({ kind: "reuse", node: { ...node, item: { workspace: { ...node.item.workspace, state: "ready" } } } });
     flow.startInWorkspace.mockResolvedValue("cloud:org-a:ws-1:s1");
     const view = render(<NewSessionView />);
-    const button = await screen.findByRole("button", { name: "Opus (latest · Opus 4.6)" });
+    const button = await screen.findByRole("button", { name: "Opus 4.6" });
     expect(modelConnection.targets).toHaveBeenLastCalledWith({ orgId: "org-a", workspaceId: "ws-1" });
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
+    const top = await screen.findByRole("menu");
+    // The models are one level in.
+    fireEvent.keyDown(within(top).getByRole("menuitem", { name: /^Model/ }), { key: "ArrowRight" });
+    const menu = (await screen.findAllByRole("menu")).at(-1)!;
     expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" })).toBeTruthy();
     expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5" })).toBeNull();
     fireEvent.keyDown(menu, { key: "Escape" });
+    fireEvent.keyDown(top, { key: "Escape" });
     act(() => runtime.emit({ state: "suspended" }));
     flow.planCloudStart.mockReturnValue({ kind: "wake", node });
     view.rerender(<NewSessionView />);
     expect(modelConnection.targets).toHaveBeenLastCalledWith(null);
-    expect(screen.getByRole("button", { name: "Opus (latest)" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Opus" })).toBeTruthy();
   });
 
   it("asks once for the cost, showing the quota, before creating a workspace", async () => {
@@ -186,13 +191,13 @@ describe("new session in a cloud project", () => {
     flow.confirmCloudCreate.mockResolvedValue({});
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Start the API");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     const card = await screen.findByTestId("cloud-create-confirm");
     expect(screen.getByTestId("cloud-create-quota").textContent).toBe("Acme has 1 of 2 cloud workspaces in use; this adds one.");
     expect(screen.getByTestId("cloud-create-price").textContent).toContain("an hour while it runs");
     expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
     // Start is off while the confirmation is open: one confirmation, one create.
-    expect(screen.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(true);
     fireEvent.click(screen.getByTestId("cloud-create-confirm-button"));
     await waitFor(() => expect(flow.confirmCloudCreate).toHaveBeenCalledWith(prepared));
     await waitFor(() => expect(card.isConnected).toBe(false));
@@ -205,7 +210,7 @@ describe("new session in a cloud project", () => {
     flow.prepareCloudCreate.mockRejectedValue(new CreateRefused("cloud_workspace_quota_exceeded"));
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("One more");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText(/at its cloud workspace limit/)).toBeTruthy();
     expect(flow.confirmCloudCreate).not.toHaveBeenCalled();
   });
@@ -229,7 +234,7 @@ describe("a start refused for lack of role (a demoted admin with the form still 
     }
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("echo:erin after demotion");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText("Only an organization owner or admin can start a new cloud session (your role changed).")).toBeTruthy();
     expect(screen.queryByText(/forbidden|could not be created|organization_admin_required/)).toBeNull();
     expect(refresh).toHaveBeenCalledExactlyOnceWith(true);
@@ -244,7 +249,7 @@ describe("a start refused for lack of role (a demoted admin with the form still 
     flow.startInWorkspace.mockRejectedValue({ code: "cloud_workspace_unreachable" });
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText("The cloud workspace did not come up in time. Try again.")).toBeTruthy();
     expect(refresh).not.toHaveBeenCalled();
     roles.registerAccountRoles(null);
@@ -258,7 +263,7 @@ describe("a start the workspace's runtime refused", () => {
     flow.startInWorkspace.mockRejectedValue(new WorkspaceRpcError("unavailable", "Claude Code is not installed in this workspace", "session.create"));
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText("Claude Code is not installed in this workspace")).toBeTruthy();
     expect(screen.queryByText(/could not be created|unavailable/)).toBeNull();
   });
@@ -274,7 +279,7 @@ describe("a start the workspace's runtime refused", () => {
     flow.startInWorkspace.mockRejectedValue(refusal);
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText("The workspace could not be created (unavailable).")).toBeTruthy();
   });
 
@@ -284,7 +289,7 @@ describe("a start the workspace's runtime refused", () => {
     flow.startInWorkspace.mockRejectedValue(new WorkspaceRpcError("unavailable", ` ${"x".repeat(400)} `, "session.create"));
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText("x".repeat(300))).toBeTruthy();
   });
 });
@@ -295,7 +300,7 @@ describe("the running limit (saas PRO-76)", () => {
     flow.startInWorkspace.mockRejectedValue({ code: "cloud_workspace_concurrency_exceeded", status: 409 });
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("Fix the login redirect");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText(/running as many cloud workspaces as its limit allows\. Stop one to start another\./)).toBeTruthy();
     expect(screen.getByTestId("running-limit-notice").textContent).toBe("org-a");
     expect(screen.queryByText(/outcome|may have created/i)).toBeNull();
@@ -307,7 +312,7 @@ describe("the running limit (saas PRO-76)", () => {
     flow.confirmCloudCreate.mockRejectedValue({ code: "cloud_workspace_concurrency_exceeded", status: 409, retryWithSameIdempotencyKey: false });
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("One more");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     fireEvent.click(await screen.findByTestId("cloud-create-confirm-button"));
     expect(await screen.findByText(/Stop one to start another\./)).toBeTruthy();
     expect(screen.getByTestId("running-limit-notice")).toBeTruthy();
@@ -319,7 +324,7 @@ describe("the running limit (saas PRO-76)", () => {
     flow.prepareCloudCreate.mockRejectedValue(new CreateRefused("cloud_provisioning_paused"));
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
     type("One more");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText(/paused new cloud workspaces/)).toBeTruthy();
     expect(screen.queryByTestId("running-limit-notice")).toBeNull();
   });
@@ -422,9 +427,9 @@ describe("the composer's pickers", () => {
   // hidden: an open modal menu hides the rest of the page from the accessibility tree.
   const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
 
-  it("project, agent, model and permissions each open on a real mouse click, and a second click closes it", async () => {
+  it("project, and agent with model and permissions, each open on a real mouse click, and a second click closes it", async () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
-    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Claude/, "Agent"], [/^Opus/, "Model"], [/^Bypass/, "Permissions"]] as const) {
+    for (const [name, label] of [[/acme\/api/, "Acme cloud"], [/^Opus/, "Agent"], [/^Opus/, "Model"], [/^Opus/, "Permissions"]] as const) {
       mouseClick(picker(name));
       const menu = await screen.findByRole("menu");
       expect(within(menu).getByText(label)).toBeTruthy();
@@ -436,7 +441,7 @@ describe("the composer's pickers", () => {
 
   it("each opens on an accessibility press (a click with no pointerdown)", async () => {
     render(<NewSessionView useWorktree onUseWorktreeChange={vi.fn()} />);
-    for (const name of [/^Claude/, /^Opus/, /^Bypass/]) {
+    for (const name of [/acme\/api/, /^Opus/]) {
       accessibilityPress(picker(name));
       await screen.findByRole("menu");
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
