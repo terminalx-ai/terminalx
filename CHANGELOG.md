@@ -9,6 +9,12 @@
   Explain when the account service has not reported support; shared activity
   still requires a supported backend. (#642)
 
+### Terminal
+
+- Cancel pending atlas warm-up when its final terminal owner is disposed, while
+  preserving warm-up for remaining shared owners. Native memory acceptance
+  remains unresolved. (#232)
+
 ### Chat
 
 - Clarify the CLI guide to keep simple issue filing and context checks in the
