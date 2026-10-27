@@ -107,7 +107,10 @@ mod tests {
         }
     }
     fn wait(actor: &Actor, condition: impl Fn(&View) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        wait_for(actor, Duration::from_secs(8), condition);
+    }
+    fn wait_for(actor: &Actor, timeout: Duration, condition: impl Fn(&View) -> bool) {
+        let deadline = Instant::now() + timeout;
         loop {
             if condition(&actor.view.lock().unwrap()) {
                 break;
@@ -482,7 +485,11 @@ else: sys.exit(99)
             actor
                 .launch_with(params(Action::DesktopVerify, "native-check"), selected)
                 .unwrap();
-            wait(&actor, |view| !view.busy);
+            // The no-save case deliberately consumes the production five-second
+            // save deadline, in addition to several owned Python helper launches.
+            // Allow scheduling headroom under the full workspace suite; this is
+            // only the test's watchdog, not the native proof's timeout or criteria.
+            wait_for(&actor, Duration::from_secs(30), |view| !view.busy);
             let receipt = actor.receipts().pop().unwrap().receipt;
             let document =
                 PathBuf::from(std::fs::read_to_string(home.path().join("checkfile")).unwrap());
