@@ -22,6 +22,8 @@ use zeroize::Zeroizing;
 use crate::desktop_links::DesktopLinks;
 use crate::keychain::{Keychain, SecretStore};
 
+pub(crate) mod organization_delete;
+
 pub const STATUS_EVENT: &str = "account_status";
 
 /// The server authorizes desktop cloud routes by membership in the path
@@ -310,6 +312,13 @@ struct SessionBody {
     capabilities: Capabilities,
 }
 
+#[derive(Deserialize)]
+struct SelectionBody {
+    cloud: CloudIdentity,
+    #[serde(default)]
+    organizations: Vec<Organization>,
+}
+
 /// The account status after [`AccountManager::refresh_roles`], and whether the
 /// server answered for it just now (false when throttled, signed out or unreachable).
 #[derive(Clone, Serialize)]
@@ -567,6 +576,11 @@ impl AccountManager {
                 }
                 (rotated, generation, changed, Some(REFRESH_NOT_SAVED))
             } else {
+                // Keep the capability snapshot/request/application in the same
+                // gate as explicit selection. Otherwise a delayed no-selection
+                // response after deletion can overwrite a newer selection.
+                // roles_refreshed is always acquired before refresh_gate.
+                let _selection_gate = self.refresh_gate.lock().unwrap();
                 if !roles_refresh_due(*refreshed, now, force) {
                     return false;
                 }
@@ -805,18 +819,21 @@ impl AccountManager {
     }
 
     fn select_organization(&self, organization_id: &str, context: &AccountContext) -> Result<()> {
-        #[derive(Deserialize)]
-        struct SelectionBody {
-            cloud: CloudIdentity,
-            #[serde(default)]
-            organizations: Vec<Organization>,
-        }
-        let body: SelectionBody = post_authenticated(
+        self.select_organization_with(organization_id, context, || post_authenticated(
             ACTIVE_ORGANIZATION_PATH,
             json!({ "orgId": organization_id }),
             Some(&context.access_token),
             None,
-        )?;
+        ))
+    }
+
+    fn select_organization_with(&self, organization_id: &str, context: &AccountContext,
+        request: impl FnOnce() -> Result<SelectionBody>) -> Result<()> {
+        // Deletion uses this same gate: a selection response fetched before a
+        // committed removal must not restore that organization's membership.
+        let _gate = self.refresh_gate.lock().unwrap();
+        if !self.is_current(context) { return Err(anyhow!("account context changed while selecting organization")); }
+        let body = request()?;
         if !selection_matches(organization_id, body.cloud.active_org_id.as_deref()) {
             return Err(anyhow!("account service selected a different organization"));
         }
@@ -839,6 +856,7 @@ impl AccountManager {
             }
             inner.set_session(Some(session));
         }
+        drop(_gate);
         self.store().map_err(StoreError::into_error).context("save selected organization")
     }
 
