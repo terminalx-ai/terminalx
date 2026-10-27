@@ -172,8 +172,7 @@ impl Host {
                         map.remove(&owned_key);
                     }
                     drop(map);
-                    let exit_callback_panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.exited(pid, code))).is_err();
-                    let receipt = finish_readers(pid, epoch, reaped, code, handles, exit_callback_panicked);
+                    let receipt = finish_readers(pid, epoch, reaped, code, handles, sink.as_ref());
                     *terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(receipt);
                 }
             })?;
@@ -295,10 +294,30 @@ fn start_reader(name: String, read: impl FnOnce() -> ReaderEnd + Send + 'static)
 }
 
 fn join_reader(handle: JoinHandle<ReaderEnd>) -> ReaderEnd {
-    handle.join().unwrap_or(ReaderEnd::Panicked)
+    #[cfg(test)]
+    lifecycle_tests::before_join();
+    match handle.join() {
+        Ok(end) => end,
+        Err(payload) => {
+            // Like the ordered journal's panic boundary, deliberately leak this
+            // exceptional payload: arbitrary Drop code can panic a second time,
+            // detaching the remaining readers before receipt publication.
+            std::mem::forget(payload);
+            ReaderEnd::Panicked
+        }
+    }
 }
 
-fn finish_readers(pid: u32, epoch: u64, leader_reaped: bool, code: Option<i32>, handles: Vec<JoinHandle<ReaderEnd>>, exit_callback_panicked: bool) -> TerminalReceipt {
+fn finish_readers(pid: u32, epoch: u64, leader_reaped: bool, code: Option<i32>, handles: Vec<JoinHandle<ReaderEnd>>, sink: &dyn Sink) -> TerminalReceipt {
+    let exit_callback_panicked = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.exited(pid, code))) {
+        Ok(()) => false,
+        Err(payload) => {
+            // Do not run an untrusted panic payload destructor before joins or
+            // publication. This exceptional leak is intentional, as above.
+            std::mem::forget(payload);
+            true
+        }
+    };
     let mut ends = handles.into_iter().map(join_reader);
     TerminalReceipt {
         pid, epoch, leader_reaped, code,
