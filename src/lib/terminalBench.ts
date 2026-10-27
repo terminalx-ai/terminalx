@@ -6,6 +6,7 @@ import { enterTerminalView } from "@/lib/tabViews";
 import { rendererOf } from "@/lib/terminalCounters";
 import { fitTerminal } from "@/lib/terminalFit";
 import { showWebgl } from "@/lib/terminalWebgl";
+import { startTerminalMemoryProbe, terminalMemorySnapshot, terminalCleanupComplete } from "@/lib/terminalMemory";
 import {
   adoptPane,
   agentPaneId,
@@ -38,6 +39,7 @@ interface Field {
 }
 
 export type BenchRequest =
+  | { scenario: "memoryInventory"; stop?: boolean }
   | (Field & { scenario: "drain"; command: string; timeoutMs?: number })
   | (Field & { scenario: "echo"; command: string; producers: number; producer: string; samples: number; intervalMs: number })
   | (Field & { scenario: "interrupt"; command: string; afterMs: number })
@@ -48,7 +50,7 @@ export type BenchRequest =
   | { scenario: "ui"; action: "terminalView"; sessionId: string; tabId: string }
   | { scenario: "ui"; action: "screen" | "reload" }
   | { scenario: "covered"; projectPath: string; stream: string; seconds: number }
-  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
+  | ({ scenario: "soak"; projectPath: string; fill: string } & ({ step: "open"; sessions: number; shellMemoryDiagnostic?: boolean } | { step: "tabs" | "switches"; count: number } | { step: "agents"; count: number; harness: string } | { step: "cleanup" }));
 
 const MARK = 7777;
 const ECHO = 7778;
@@ -362,6 +364,7 @@ async function interrupt(request: Extract<BenchRequest, { scenario: "interrupt" 
  */
 type Soak = Extract<BenchRequest, { scenario: "soak" }>;
 let soakSessions: string[] = [];
+let shellMemoryDiagnostic = false;
 /** Terminals the `tabs` step closed, and how many of them the garbage collector has taken back since. */
 const soakClosed = { tracked: 0, collected: 0 };
 const soakRegistry = new FinalizationRegistry<{ collected: number }>((step) => {
@@ -376,8 +379,18 @@ async function settle() {
 }
 
 async function soak(request: Soak) {
+  if (request.step === "open" && request.shellMemoryDiagnostic) {
+    if (request.sessions !== 4 || terminalCounters().instances !== 0 || soakSessions.length !== 0) {
+      throw new Error("shell memory diagnostic requires four sessions and a fresh empty terminal inventory");
+    }
+    startTerminalMemoryProbe();
+    shellMemoryDiagnostic = true;
+  } else if (shellMemoryDiagnostic && (request.step === "open" || request.step === "agents" || request.step === "switches" || (request.step === "tabs" && request.count !== 50))) {
+    throw new Error("shell memory diagnostic permits only 50 shells and cleanup");
+  }
   const stop = watchMainThread();
   let left;
+  let cleanupFailures: { deleteFailures: number; closeFailures: number } | undefined;
   let step: { tracked: number; collected: number } | undefined;
   switch (request.step) {
     case "open": {
@@ -442,17 +455,30 @@ async function soak(request: Soak) {
     case "cleanup": {
       // Deleting a session should take its terminals with it.
       const mine = () => getTerminalState().panes.filter((pane) => soakSessions.includes(pane.sessionId));
-      for (const id of soakSessions) await deleteSession(id).catch(() => undefined);
+      cleanupFailures = { deleteFailures: 0, closeFailures: 0 };
+      for (const id of soakSessions) await deleteSession(id).catch(() => { cleanupFailures!.deleteFailures++; });
       await sleep(1000);
       left = { panes: mine().length, counters: terminalCounters(), sessions: getSessionStore().sessions.filter((session) => soakSessions.includes(session.id)).length };
-      for (const pane of mine()) await closeTerminal(pane.id).catch(() => undefined);
+      for (const pane of mine()) await closeTerminal(pane.id).catch(() => { cleanupFailures!.closeFailures++; });
       selectSession(null);
-      soakSessions = [];
       break;
     }
   }
   await sleep(step ? 6000 : 1000);
-  return { scenario: request.scenario, step: request.step, stepClosed: step, page: page(), mainThread: stop(), counters: terminalCounters(), closed: { ...soakClosed }, leftAfterDelete: left };
+  let cleanupAfterFallback;
+  if (request.step === "cleanup") {
+    const observed = {
+      sessions: getSessionStore().sessions.filter((session) => soakSessions.includes(session.id)).length,
+      panes: getTerminalState().panes.filter((pane) => soakSessions.includes(pane.sessionId)).length,
+      // Diagnostic start required an empty instance inventory; any survivor is
+      // unresolved. This is app ownership, not liveness of disposed WeakRefs.
+      instances: terminalCounters().instances,
+      ...cleanupFailures!,
+    };
+    cleanupAfterFallback = { ...observed, complete: terminalCleanupComplete(observed) };
+    soakSessions = [];
+  }
+  return { scenario: request.scenario, step: request.step, stepClosed: step, page: page(), mainThread: stop(), counters: terminalCounters(), closed: { ...soakClosed }, leftAfterDelete: left, cleanupAfterFallback };
 }
 
 /**
@@ -636,6 +662,12 @@ export async function runTerminalBench(request: BenchRequest): Promise<unknown> 
   running = true;
   try {
     switch (request.scenario) {
+      case "memoryInventory": {
+        if (!shellMemoryDiagnostic) throw new Error("shell memory diagnostic is not active");
+        const snapshot = terminalMemorySnapshot(request.stop);
+        if (request.stop) shellMemoryDiagnostic = false;
+        return snapshot;
+      }
       case "drain":
         return await drain(request);
       case "echo":

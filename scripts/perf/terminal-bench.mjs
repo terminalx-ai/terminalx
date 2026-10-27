@@ -38,12 +38,16 @@ function parseArgs(argv) {
       }
       case "--interrupt-after": options.interruptAfterMs = Number(value()); break;
       case "--label": options.label = value(); break;
+      case "--shell-memory-diagnostic": options.shellMemoryDiagnostic = true; break;
       default: fail(`unknown option ${argv[i]}`);
     }
   }
   options.home = resolve((options.home ?? process.env.TERMINALX_HOME ?? fail("pass --home, the benchmark app's TERMINALX_HOME")).replace(/^~(?=\/|$)/, homedir()));
   options.work = resolve(options.work ?? join(options.home, "perf"));
   for (const scenario of options.scenarios) if (!SCENARIOS.includes(scenario)) fail(`unknown scenario ${scenario}; one of ${SCENARIOS.join(", ")}`);
+  if (options.shellMemoryDiagnostic && (options.scenarios.length !== 1 || options.scenarios[0] !== "soak" || !Number.isSafeInteger(options.pid) || options.pid <= 0 || !options.out || options.soak.sessions !== 4 || options.soak.tabs !== 50)) {
+    fail("--shell-memory-diagnostic requires --scenarios soak, exact --pid, --out and four sessions/50 shells; no agents or switches run");
+  }
   return options;
 }
 
@@ -96,7 +100,7 @@ function discards(home) {
 }
 
 /** Run one request in the app, reading the processes' memory before, while it runs and after. */
-async function run(options, pid, request, timeoutMs = 900_000) {
+async function run(options, pid, request, timeoutMs = options.shellMemoryDiagnostic ? 90_000 : 900_000) {
   const before = memory(pid);
   const discarded = discards(options.home);
   const peak = { ...before };
@@ -109,9 +113,33 @@ async function run(options, pid, request, timeoutMs = 900_000) {
     const answer = await control(options.home, "perf.terminal.poll", { requestId });
     if (!answer.done) continue;
     if (answer.result?.error) throw new Error(`${request.scenario}: ${answer.result.error}`);
+    let inventory;
+    if (options.shellMemoryDiagnostic) {
+      // A separate app job returns scalars only. WeakRef targets are no longer
+      // kept alive by enumeration when the fixed post-result wait completes.
+      const sample = await control(options.home, "perf.terminal.start", { scenario: "memoryInventory", stop: request.step === "cleanup" });
+      const inventoryDeadline = Date.now() + 10_000;
+      while (Date.now() < inventoryDeadline) {
+        await sleep(500);
+        const polled = await control(options.home, "perf.terminal.poll", { requestId: sample.requestId });
+        if (!polled.done) continue;
+        if (!polled.result || polled.result.error) throw new Error("memory inventory unavailable");
+        inventory = polled.result;
+        break;
+      }
+      if (!inventory) throw new Error("memory inventory deadline exceeded");
+    }
     // Let the window drop what it is going to drop before the "after" reading.
     await sleep(5000);
-    return { result: answer.result, memory: { before, peak, after: memory(pid) }, discarded: discarded === null ? null : discards(options.home) - discarded };
+    const endpoint = { utc: new Date().toISOString(), monotonicMs: performance.now() };
+    const after = memory(pid);
+    const endpointEnd = { utc: new Date().toISOString(), monotonicMs: performance.now() };
+    const expectedTracked = request.step === "open" ? 4 : 54;
+    const inventoryComplete = inventory && inventory.unavailable.length === 0 && inventory.counts.terminal?.tracked === expectedTracked;
+    const cleanupComplete = request.step !== "cleanup" || answer.result.cleanupAfterFallback?.complete === true;
+    return { result: answer.result, inventory,
+      ...(options.shellMemoryDiagnostic ? { attribution: !cleanupComplete ? "inconclusive-owned-cleanup" : inventoryComplete ? "pending-native-region-evidence" : "inconclusive-inventory", expectedTracked } : {}),
+      endpoint, endpointEnd, memory: { before, peak, after }, discarded: discarded === null ? null : discards(options.home) - discarded };
   }
   throw new Error(`${request.scenario}: no result in ${timeoutMs} ms`);
 }
@@ -228,23 +256,24 @@ if (options.pid && status.pid !== options.pid) fail(`the app under ${options.hom
 // Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
 status.agent = existsSync(join(options.home, "bin/claude"));
 console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}${status.agent ? "" : "; no stand-in agent CLI, so no agent tabs"}`);
-const files = writeWorkloads(options.work);
-await writeLog(files.log);
-const background = `sh "${files.agent}"`;
-const drainWorkloads = {
+const files = options.shellMemoryDiagnostic ? null : writeWorkloads(options.work);
+if (files) await writeLog(files.log);
+const background = files ? `sh "${files.agent}"` : "";
+const drainWorkloads = files ? {
   yes: { name: `yes | head -n ${YES_LINES}`, bytes: YES_LINES * 3, command: sh(`${START}; yes | head -n ${YES_LINES}; ${DONE}`) },
   cat: { name: "cat of a 50 MB log", bytes: LOG_BYTES, command: sh(`${START}; cat "${files.log}"; ${DONE}`) },
   tui: { name: `agent-style redraws, ${TUI_FRAMES} frames`, bytes: statSync(files.tui).size, command: sh(`${START}; cat "${files.tui}"; ${DONE}`) },
-};
+} : {};
 
 // The 50 MB log over and over: a producer that outruns the terminal. It ends by itself (2 GB) if a run is cut short.
-const flood = `i=0; while [ $i -lt 40 ]; do cat "${files.log}"; i=$((i+1)); done`;
+const flood = files ? `i=0; while [ $i -lt 40 ]; do cat "${files.log}"; i=$((i+1)); done` : "";
 
 const results = [];
 function saveReport(terminalsAfter = null, complete = false) {
   if (!options.out) return;
   writeFileSync(options.out, JSON.stringify({
     label: options.label ?? null, at: new Date().toISOString(), complete,
+    measurement: options.shellMemoryDiagnostic ? "diagnostic-not-acceptance" : "acceptance",
     app: { version: status.appVersion, pid: status.pid },
     host: { platform: process.platform, release: release(), arch: process.arch, cpus: cpus().length, memoryBytes: totalmem(), loadBefore, loadAfter: loadavg() },
     terminalsAfter, results,
@@ -331,10 +360,12 @@ for (const scenario of options.scenarios) {
     const project = soakProject();
     // Each terminal fills its scrollback, then waits: the most a terminal holds.
     const soak = { scenario: "soak", projectPath: project, fill: sh("seq 1 20000; exec cat") };
-    await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions });
+    await record(`${options.soak.sessions} sessions open (baseline)`, null, { ...soak, step: "open", sessions: options.soak.sessions, ...(options.shellMemoryDiagnostic ? { shellMemoryDiagnostic: true } : {}) });
     await record(`${options.soak.tabs} tabs opened and closed`, null, { ...soak, step: "tabs", count: options.soak.tabs });
-    if (status.agent) await record(`${options.soak.agents} agent tabs opened and closed`, null, { ...soak, step: "agents", count: options.soak.agents, harness: "claude" });
-    await record(`${options.soak.switches} session switches`, null, { ...soak, step: "switches", count: options.soak.switches });
+    if (!options.shellMemoryDiagnostic) {
+      if (status.agent) await record(`${options.soak.agents} agent tabs opened and closed`, null, { ...soak, step: "agents", count: options.soak.agents, harness: "claude" });
+      await record(`${options.soak.switches} session switches`, null, { ...soak, step: "switches", count: options.soak.switches });
+    }
     await record("sessions deleted, terminals closed", null, { ...soak, step: "cleanup" });
     continue;
   }

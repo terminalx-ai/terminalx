@@ -5,6 +5,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { pty, type PaneAgent, type ShellPane } from "@/lib/api";
 import { dataRate, isOnScreen, rendererOf, webglContexts, type DataRate } from "@/lib/terminalCounters";
 import { queuedLocalOutputBytes } from "@/lib/terminalFeed";
+import { recordTerminalMemory } from "@/lib/terminalMemory";
 
 /**
  * Terminal panes per session, and the live xterm of each one that has been
@@ -133,6 +134,7 @@ export function getInstance(id: string, create: () => TerminalInstance, host?: H
     // Replay must use the grid the PTY printed into, before a view refits it.
     if (size) inst.term.resize(size.cols, size.rows);
     instances.set(id, inst);
+    recordTerminalMemory(inst.term);
   }
   // Map order is the last use order, not the order terminals were created in.
   instances.delete(id);
@@ -205,6 +207,7 @@ export function disposeInstance(id: string) {
   if (!paneExists) sizes.delete(id);
   if (inst) {
     if (inst.restorable && paneExists) sizes.set(id, { cols: inst.term.cols, rows: inst.term.rows });
+    recordTerminalMemory(inst.term, true);
     inst.release?.();
     inst.term.dispose();
     for (const listener of disposals) listener(inst);
