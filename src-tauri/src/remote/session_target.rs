@@ -24,12 +24,16 @@ pub(crate) fn owns_project(root: &Path, project: &str) -> bool {
 pub(crate) fn resolve(root: &Path, target: Option<&RepositoryTarget>) -> Result<PathBuf, RpcError> {
     let Some(target) = target else { return Ok(root.to_path_buf()) };
     let refused = || RpcError::new("repository_checkout_unavailable", "The selected repository checkout is missing or does not match. Finish repository setup before starting a session.");
-    let relative = Path::new(&target.directory);
-    if target.directory.is_empty() || relative.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
+    let advertised = Path::new(&target.directory);
+    if target.directory.is_empty() || advertised.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir | Component::RootDir)) {
         return Err(refused());
     }
-    let path = root.join(relative).canonicalize().map_err(|_| refused())?;
-    if !path.starts_with(root) || !path.join(".git").exists() {
+    let candidate = if advertised.is_absolute() { advertised.to_path_buf() } else { root.join(advertised) };
+    let path = candidate.canonicalize().map_err(|_| refused())?;
+    if !path.starts_with(root) {
+        return Err(RpcError::new("repository_checkout_scope_unsupported", "This checkout is outside the runtime workspace scope. Environment session routing for this layout is not supported."));
+    }
+    if !path.join(".git").exists() {
         return Err(refused());
     }
     let expected = target.identity.strip_prefix("github.com/").ok_or_else(refused)?;
@@ -64,9 +68,18 @@ mod tests {
         let root = root.canonicalize().unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
-        for directory in ["../outside", "linked", "/tmp", ""] {
+        for directory in ["../outside", ""] {
             let target = RepositoryTarget { identity: "github.com/acme/api".into(), directory: directory.into() };
             assert_eq!(resolve(&root, Some(&target)).unwrap_err().code, "repository_checkout_unavailable");
+        }
+        let target = RepositoryTarget { identity: "github.com/acme/api".into(), directory: outside.to_string_lossy().into_owned() };
+        assert_eq!(resolve(&root, Some(&target)).unwrap_err().code, "repository_checkout_scope_unsupported");
+        #[cfg(unix)]
+        {
+            for directory in ["linked".to_string(), root.join("linked").to_string_lossy().into_owned()] {
+                let target = RepositoryTarget { identity: "github.com/acme/api".into(), directory };
+                assert_eq!(resolve(&root, Some(&target)).unwrap_err().code, "repository_checkout_scope_unsupported");
+            }
         }
         assert_eq!(resolve(&root, None).unwrap(), root);
         assert!(!owns_project(&root, outside.to_str().unwrap()));

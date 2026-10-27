@@ -128,6 +128,19 @@ export function titleOf(prompt: string): string {
 
 const WAKE_WITHIN_MS = 5 * 60 * 1000;
 
+// SaaS standard root and the older persisted-runtime layout. This is only a
+// pre-wake compatibility filter: the runtime must enforce its own configured root.
+const SESSION_CHECKOUT_ROOTS = ["/var/lib/terminalx/workspace", "/srv/terminalx/state/workspace"];
+
+function checkCheckoutLayout(directory: string): void {
+  const parts = directory.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.includes("..")) throw new Error("cloud_repository_checkout_unavailable");
+  if (!directory.startsWith("/")) return;
+  const normalized = "/" + parts.join("/");
+  if (!SESSION_CHECKOUT_ROOTS.some((root) => normalized === root || normalized.startsWith(root + "/")))
+    throw new Error("cloud_repository_checkout_scope_unsupported: Environment checkout paths outside the standard workspace scope are not supported for new sessions.");
+}
+
 function worktreeRefused(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error ?? "");
   return /not a git|git repository|worktree/i.test(text);
@@ -151,6 +164,7 @@ export async function startInWorkspace(
   options: { select?: boolean; wakeIfStopped?: boolean | (() => Promise<boolean>); onIssue?: (outcome: CloudIssueOutcome) => void } = {},
 ): Promise<string> {
   if (plan.repository && !plan.repository.directory) throw new Error("cloud_repository_checkout_unavailable");
+  if (plan.repository?.directory) checkCheckoutLayout(plan.repository.directory);
   bootCloudSessions();
   const { orgId, id: workspaceId } = plan.node.item.workspace;
   const target = { orgId, workspaceId };

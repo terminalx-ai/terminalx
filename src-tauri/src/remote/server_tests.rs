@@ -1673,7 +1673,7 @@ fn selected_repository_sessions_preserve_blank_root_and_use_the_child_checkout()
     let created = f.rpc.session_create(json!({"agent":"codex","useWorktree":true,"title":"Selected child","repository":target})).unwrap();
     let entry = index::get(created["sessionId"].as_str().unwrap()).unwrap();
     assert_eq!(entry.project_path, child.to_string_lossy());
-    assert_eq!(crate::git::head_commit(Path::new(&entry.cwd)), Some(child_head));
+    assert_eq!(crate::git::head_commit(Path::new(&entry.cwd)), Some(child_head.clone()));
     assert!(Path::new(&entry.cwd).join("README.md").is_file());
     assert_eq!(crate::git::head_commit(&f.root), Some(root_head.clone()));
     assert!(crate::git::remote_url(&f.root).is_none());
@@ -1683,10 +1683,20 @@ fn selected_repository_sessions_preserve_blank_root_and_use_the_child_checkout()
     let ops = crate::cloud_agents::ManagerOps { manager, root: f.root.to_string_lossy().into_owned() };
     assert!(crate::cloud_agents::AgentOps::session(&ops, &entry.id).is_some());
     assert!(f.rpc.git.repositories().0.contains(&"demo-repository".to_string()));
+    let absolute = f.rpc.session_create(json!({
+        "agent":"codex","useWorktree":true,"title":"Absolute selected child",
+        "repository":{"identity":"github.com/acme/demo-repository","directory":child.join(".")}
+    })).unwrap();
+    let absolute_entry = index::get(absolute["sessionId"].as_str().unwrap()).unwrap();
+    assert_eq!(absolute_entry.project_path, child.to_string_lossy());
+    assert_eq!(crate::git::head_commit(Path::new(&absolute_entry.cwd)), Some(child_head));
+    assert!(Path::new(&absolute_entry.cwd).join("README.md").is_file());
+    assert!(f.rpc.workspace_sessions().unwrap().iter().any(|session| session.id == absolute_entry.id));
     let before = index::load().unwrap().len();
     for repository in [
         json!({"identity":"github.com/acme/demo-repository","directory":"missing"}),
         json!({"identity":"github.com/acme/wrong","directory":"demo-repository"}),
+        json!({"identity":"github.com/acme/wrong","directory":child}),
         json!({"identity":"github.com/acme/demo-repository","directory":"."}),
         json!({"identity":"github.com/acme/demo-repository","directory":"../outside"}),
     ] {

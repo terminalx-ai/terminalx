@@ -178,13 +178,28 @@ In a cloud tab's terminal view Escape is typed into the agent's screen with
 
 `session-repository/1` adds `repository: { identity, directory }` to
 `session.create`. The desktop carries the selected `github.com/owner/name`
-identity and its advertised workspace-relative `targetDirectory`; it refuses
+identity and its advertised `targetDirectory` (relative for ordinary clones,
+potentially absolute for Environment images); it refuses
 missing metadata or an older runtime instead of silently starting at the root.
 The runtime verifies confinement, a committed checkout and matching origin
 before writing settings or creating a session/worktree. A missing or mismatched
 checkout returns `repository_checkout_unavailable`; it does not clone, fetch,
 reset or initialize a blank repository. The existing manager authority and
 idempotency checks still apply.
+
+Absolute checkout paths are canonicalized against the runtime's configured
+workspace root; the same origin, top-level and Git common-directory checks apply.
+The caller's absolute path is never a scope grant. The desktop permits the SaaS
+standard `/var/lib/terminalx/workspace` layout and the older
+`/srv/terminalx/state/workspace` layout only as a pre-wake compatibility filter;
+the runtime still enforces its actual configured root.
+The current catalog has no authoritative external checkout-scope grant.
+Environment layouts such as `/home/repos/Acme/App` are therefore explicitly
+unsupported by this session route: the desktop refuses before connection/wake
+with `cloud_repository_checkout_scope_unsupported`, not a claim that setup is
+missing. Runtime canonical escape returns `repository_checkout_scope_unsupported`.
+Supporting external Environment roots requires authoritative configured scope
+and matching visibility rules; it cannot be enabled by trusting a caller path.
 
 Repository sessions use that checkout as their project, including worktrees and
 pipelines. Workspace-wide session/agent/pipeline visibility includes confined

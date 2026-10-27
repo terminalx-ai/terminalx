@@ -205,6 +205,26 @@ describe("a member's new session only uses a workspace they manage (PRO-73)", ()
 });
 
 describe("new session in a cloud project", () => {
+  it.each(["/var/lib/terminalx/workspace/Acme/App", "/srv/terminalx/state/workspace/Acme/App"])("carries the selected absolute in-scope catalog checkout %s", async (targetDirectory) => {
+    const repository = { identity: "github.com/acme/app", fullName: "Acme/App", cloneUrl: "https://github.com/Acme/App.git", ref: "main", targetDirectory, primary: true };
+    await place([item("image-checkout", { repositories: [repository] })]);
+    await flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/app")) as never, request);
+    expect(runtimes.get("image-checkout")!.created[0]).toMatchObject({ repository: { identity: "github.com/acme/app", directory: targetDirectory } });
+  });
+
+  it.each(["/home/repos/Acme/App", "/var/lib/terminalx/workspace-other/Acme/App"])("refuses unsupported advertised Environment scope %s before waking", async (targetDirectory) => {
+    const repository = { identity: "github.com/acme/app", fullName: "Acme/App", cloneUrl: "https://github.com/Acme/App.git", ref: null, targetDirectory, primary: true };
+    await place([item("image-outside", { state: "suspended", repositories: [repository] })]);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/app")) as never, request)).rejects.toThrow("cloud_repository_checkout_scope_unsupported");
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
+  it("does not accept an unselected advertised absolute checkout", async () => {
+    await place([item("unselected", { repositories: [{ ...api, fullName: null, targetDirectory: "/var/lib/terminalx/workspace/api" }] })]);
+    await expect(flow.startInWorkspace(flow.planCloudStart(project("github.com/acme/api")) as never, request)).rejects.toThrow("cloud_repository_checkout_unavailable");
+    expect(mocks.workspaceConnection).not.toHaveBeenCalled();
+  });
+
   it("refuses an old runtime instead of letting it ignore the selected checkout", async () => {
     await place([item("old-runtime", { repositories: [api] })]);
     const runtime = fakeRuntime("old-runtime", { ...connected, capabilities: ["session/1", "session/2"] });
