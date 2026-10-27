@@ -19,8 +19,9 @@
 //! - `symlink`: links are never followed or copied. That includes every
 //!   file reached through a linked folder: Git lists what its index names,
 //!   whatever the working tree has turned into since;
-//! - `unsupported`: sockets, devices, nested repositories, and names a
-//!   desktop could not hold (a backslash);
+//! - `unsupported`: sockets, devices, directory entries (including a nested
+//!   checkout's directory in its parent's listing), and names a desktop could
+//!   not hold (a backslash). Discovered checkouts have their files listed separately;
 //! - `too_large`: over the largest file `fs.read` serves.
 //!
 //! The answer is paged to fit a relay frame. A page after the first names
