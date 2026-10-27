@@ -99,7 +99,7 @@ describe("new session attachments", () => {
   it("sends an image picked from the attach button with the first prompt", async () => {
     openDialog.mockResolvedValue(["/tmp/shot.png"]);
     const { onCreated } = renderView();
-    const start = screen.getByRole("button", { name: "Start" });
+    const start = screen.getByRole("button", { name: "Create" });
     expect(start.hasAttribute("disabled")).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
@@ -144,10 +144,10 @@ describe("folder projects", () => {
   it("starts in the folder despite a saved worktree preference", async () => {
     project.kind = "folder";
     render(<NewSessionView />);
-    expect(screen.getByText("Folder · no Git")).toBeTruthy();
+    expect(screen.getByText("No Git")).toBeTruthy();
     expect(screen.queryByRole("switch")).toBeNull();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "Inspect this folder" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_session", expect.objectContaining({ req: expect.objectContaining({
       projectPath: project.path, useWorktree: false, worktreeName: null, cwd: null,
     }) })));
@@ -166,15 +166,15 @@ describe("folder projects", () => {
     await waitFor(() => expect(sessions.startSessionIn).toHaveBeenCalledWith("/tmp/empty-folder", null));
   });
 
-  it("keeps the worktree switch and name preview for Git projects", async () => {
+  it("starts Git projects on a new branch, with the branch picker, and previews its name", async () => {
     invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "preview_workspace_name") return "quiet-fox";
       if (cmd === "work_status") return { isRepo: true, branch: "main", defaultBranch: "main" };
     });
     render(<NewSessionView />);
-    expect(screen.getByRole("switch", { name: /worktree/i }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("button", { name: "Branch" }).textContent).toContain("New branch");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_workspace_name", expect.anything()));
-    expect(screen.queryByText("Folder · no Git")).toBeNull();
+    expect(screen.queryByText("No Git")).toBeNull();
   });
 });
 
@@ -184,8 +184,8 @@ describe("starting a quick chat", () => {
     store.selectedProject = null;
     const onCreated = vi.fn();
     render(<NewSessionView quick compact onCreated={onCreated} />);
-    const prompt = screen.getByPlaceholderText("Ask a question or describe a task.");
-    const start = screen.getByRole("button", { name: "Start" });
+    const prompt = screen.getByPlaceholderText("Ask anything");
+    const start = screen.getByRole("button", { name: "Ask" });
     expect(start.hasAttribute("disabled")).toBe(true);
     // Nothing about projects or worktrees is offered.
     expect(screen.queryByText("Choose project")).toBeNull();
@@ -200,8 +200,8 @@ describe("starting a quick chat", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith("quick-1", "quick-tab", "What is a monad?\nIn one paragraph.", []));
     expect(createQuickChat).toHaveBeenCalledWith({ title: "What is a monad?", cwd: null, tab: { harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions" } });
     expect(selectSession).toHaveBeenCalledWith("quick-1");
-    // Only local transcription preferences were read; no project or git commands.
-    expect(invoke.mock.calls.map(([command]) => command)).toEqual(["transcription_personalization_load"]);
+    // No project session was made, and no git was read.
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([]);
   });
 
   it("can be pointed at a folder first, which is passed as the working directory and not added as a project", async () => {
@@ -214,8 +214,8 @@ describe("starting a quick chat", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Working directory" }).textContent).toContain("notes"));
     expect(openDialog).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
 
-    fireEvent.change(screen.getByPlaceholderText("Ask a question or describe a task."), { target: { value: "Summarise these" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.change(screen.getByPlaceholderText("Ask anything"), { target: { value: "Summarise these" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() => expect(createQuickChat).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/Users/me/notes" })));
     expect(addProject).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalledWith("create_session", expect.anything());
@@ -225,9 +225,9 @@ describe("starting a quick chat", () => {
     createQuickChat.mockRejectedValue(new Error("Not a directory: /nope"));
     const onCreated = vi.fn();
     render(<NewSessionView quick onCreated={onCreated} />);
-    const prompt = screen.getByPlaceholderText("Ask a question or describe a task.") as HTMLTextAreaElement;
+    const prompt = screen.getByPlaceholderText("Ask anything") as HTMLTextAreaElement;
     fireEvent.change(prompt, { target: { value: "hello" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     expect(await screen.findByText("Not a directory: /nope")).toBeTruthy();
     expect(prompt.value).toBe("hello");
     expect(onCreated).not.toHaveBeenCalled();
@@ -272,11 +272,13 @@ it("launches a non-issue branch with project automation defaults and the handoff
   });
   const onCreated = vi.fn();
   render(<NewSessionView onCreated={onCreated} />);
+  fireEvent.click(screen.getByRole("button", { name: "Session options" }));
   expect(screen.getByRole("switch", { name: "Merge when green" }).getAttribute("aria-checked")).toBe("true");
   expect(screen.getByRole("switch", { name: "Resolve conflicts automatically" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.keyDown(screen.getByRole("switch", { name: "Merge when green" }), { key: "Escape" });
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "Improve the parser" } });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(false));
-  fireEvent.click(screen.getByRole("button", { name: "Start" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Create" }).hasAttribute("disabled")).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("issue_pipeline_start", { sessionId: "session-1", tabId: "tab-1", autoMerge: true }));
   expect(invoke).toHaveBeenCalledWith("issue_pipeline_set_resolve_conflicts", { id: "p1", value: true });
   expect(onCreated).toHaveBeenCalledWith("session-1", "tab-1", "Improve the parser\n\nHANDOFF BRIEF", []);

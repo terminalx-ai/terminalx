@@ -1,6 +1,18 @@
 # Private #643 fixture continuity overlay — source checkpoint, UNEXECUTED
 
-Base439 source3d73b0a40d29d5c55f22fdf89bd3de775d4bdc53; previous deliberately
+Current-main integration: 5a1c872376e7232692387b5dbc18c4238d6332e7 plus the
+accepted ecc09bba fixture. The original439 base below is historical lineage,
+not the current product baseline. The fixed private bundle/root suffix remains
+an isolation identifier; it is not an artifact source claim. Rebuild both owner
+and desktop from the integrated commit and current locks. Preserve main's
+noVNC dependency and patched xterm package; old installed dependencies are not
+proof of this lock. The newly added product Local VM is a Linux container and
+is unrelated to the existing CUA macOS acceptance guest: leave it disabled and
+never start its runtime. The packaged frontend now schedules update checks;
+the private build config must provide an empty updater endpoint list to prevent
+outbound update checks. No build or runtime validation has occurred.
+
+Historical base439 source3d73b0a40d29d5c55f22fdf89bd3de775d4bdc53; previous deliberately
 partial overlay49ec49fd. This child implements a fixed local fixture boundary
 and discriminator. No compiler, tests, app or guest were run. Baseline439
 checks are not overlay credit. Independent review and a separately bound

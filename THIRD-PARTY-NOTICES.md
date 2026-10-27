@@ -24,7 +24,6 @@ Settings → Transcription and linked to its Hugging Face model card.
 - [Coding-agent marks](#coding-agent-marks)
 - [Material Icon Theme (MIT, two notices)](#material-icon-theme-mit-two-notices)
 - [transcribe.cpp (MIT)](#transcribecpp-mit)
-- [Silero detector protocol (MIT)](#silero-detector-protocol-mit)
 - [ggml (MIT)](#ggml-mit)
 - [Rust crates](#rust-crates)
 - [npm packages](#npm-packages)
@@ -235,47 +234,12 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 The on-device speech-recognition engine, linked in through the
 `transcribe-cpp` and `transcribe-cpp-sys` crates. `transcribe-cpp-sys`
 vendors and compiles the C/C++ sources, so the compiled code ships inside
-the Raccoon binary. The optional dictation detector also adapts the Silero graph
-from transcribe.cpp v0.4.1 (`4d7c1ccefd39e5a9ea36cca5f8fefc6dcc14b99b`),
-using the unchanged recognition runtime's public GGML API. Its source and notice
-are in `src-tauri/src/transcription/native-detector/`.
+the Raccoon binary.
 
 ```
 MIT License
 
 Copyright (c) 2026 The transcribe.cpp authors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
----
-
-## Silero detector protocol (MIT)
-
-The optional local dictation detector implements the Silero v6.2 frame/context
-protocol. Detector weights are downloaded separately, with their license shown
-in Settings; no Python or ONNX runtime is shipped.
-
-```
-MIT License
-
-Copyright (c) 2020-present Silero Team
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

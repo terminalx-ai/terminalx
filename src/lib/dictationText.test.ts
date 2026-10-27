@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, formattedSince, rawSpokenText, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
+import { anchorAt, applyFinal, applyPartial, draftWithSpeech, EMPTY_BUFFER, joinSpoken, revises, spokenSince, type DictationAnchor, type DictationBuffer } from "@/lib/dictationText";
 
 /** A recogniser event, as the store hands it over. */
 type Event = { partial: string; at?: number; segment?: number } | { final: string; segment?: number };
@@ -408,65 +408,4 @@ describe("the stream observed from Apple", () => {
       expect(heard.startsWith("Draft: I need a settings page")).toBe(true);
     }
   });
-});
-
-
-describe("raw/formatted edit ownership", () => {
-  it("owns the transformed command while leaving its new suffix", () => {
-    const raw = "camel case user name end case please save changes";
-    const formatted = "userName please save changes";
-    expect(formattedSince("camel case user name", raw, formatted)).toEqual({
-      taken: "camel case user name end case", formattedTaken: "userName", spoken: "please save changes",
-    });
-  });
-
-  it("keeps multiword expansions atomic at an owned raw boundary", () => {
-    expect(formattedSince("insert the prepared status", "insert the prepared status now please save changes",
-      "Ready for review please save changes").spoken).toBe("please save changes");
-  });
-
-  it("does not consume a newly spoken formatting command after the owned prefix", () => {
-    expect(formattedSince("please review", "please review camel case user name end case", "please review userName").spoken).toBe("userName");
-  });
-
-  it("retains raw settled utterances when the next segment stands alone", () => {
-    const partial = applyPartial(EMPTY_BUFFER, "userName", { raw: "camel case user name end case", segment: 0 });
-    const next = applyPartial(partial, "please save changes", { raw: "please save changes", segment: 1 });
-    const final = applyFinal(next, "please save changes", { raw: "please save changes", segment: 1 });
-    expect(rawSpokenText(final)).toBe("camel case user name end case please save changes");
-    expect(final.committed).toBe("userName please save changes");
-  });
-});
-
-
-it("retains paired part identity through revisions, segment changes and finalization", () => {
-  const first = applyPartial(EMPTY_BUFFER, "camel case user name", { raw: "camel case user name", segment: 0 });
-  const revised = applyPartial(first, "userName", { raw: "camel case user name end case", segment: 0 });
-  const next = applyPartial(revised, "account_id", { raw: "snake case account id end case", segment: 1 });
-  const final = applyFinal(next, "account_id", { raw: "snake case account id end case", segment: 1 });
-  expect(first.parts?.[0].id).toBe(revised.parts?.[0].id);
-  expect(next.parts).toEqual([
-    { id: 0, raw: "camel case user name end case", text: "userName" },
-    { id: 1, raw: "snake case account id end case", text: "account_id" },
-  ]);
-  expect(final.parts).toEqual(next.parts);
-  // Updating a revision must not mutate the snapshot captured by an edit.
-  expect(first.parts).toEqual([{ id: 0, raw: "camel case user name", text: "camel case user name" }]);
-});
-
-
-it("retains identities initialized at recording start before raw metadata exists", () => {
-  const first = applyPartial({ ...EMPTY_BUFFER, parts: [] }, "please save", { segment: 0 });
-  expect(first.raw).toBeUndefined();
-  expect(first.rawCommitted).toBeUndefined();
-  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
-  const revised = applyPartial(first, "please save changes", { raw: "please save changes", segment: 0 });
-  expect(revised.parts).toEqual([{ id: 0, raw: "please save changes", text: "please save changes" }]);
-  expect(first.parts).toEqual([{ id: 0, raw: "please save", text: "please save" }]);
-  const settled = applyFinal(first, "please save", { segment: 0 });
-  const fresh = applyPartial(settled, "account_id", { raw: "snake case account id end case", segment: 1 });
-  expect(fresh.parts).toEqual([
-    { id: 0, raw: "please save", text: "please save" },
-    { id: 1, raw: "snake case account id end case", text: "account_id" },
-  ]);
 });

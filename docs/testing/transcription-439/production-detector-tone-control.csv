@@ -1,7 +1,0 @@
-condition,repetition,baselineRaw,secondRaw,baselineFinal,secondFinal,sameRecognitionOutput,baselineNoiseStatus,secondNoiseStatus,baselineNoiseUs,secondNoiseUs,resultSha256
-off-off,1,Beeeeeeeee可 tai,BEEP,Beeeeeeeee可 tai,BEEP,False,disabled,disabled,0,0,4207a692cd37c73ddee7333e14d05427396262185630ec10cf96e0ad832ff75c
-off-on,1,believe it,Tu-u-u-u,believe it,,False,disabled,noSpeech,0,21534,df8839f3bea5dcfb94c25ba2f445cc8666dc0894bf6fe36bf02c9629eabf22da
-off-off,2,quê,n I,quê,n I,False,disabled,disabled,0,0,e3a9a6336b28711f741380f86c39078d6a80f5b44ff40096ad621731b7c454a6
-off-on,2,Yeah.,O-O-O-O-O-O-O-O-O-O-M,Yeah.,,False,disabled,noSpeech,0,15616,3b533f1fa87edc820db6a8fed1bfcb41d0f9861b3f5600b0fc5af3bd5b757d8f
-off-off,3,retreatingjeong it's hope,bb,retreatingjeong it's hope,bb,False,disabled,disabled,0,0,c2fe7c5d692aa4ff59e08b3def07b57a24e282b7a6ce832302ce71521dd5fb2e
-off-on,3,"album,",Hooo,"album,",,False,disabled,noSpeech,0,14053,cce16e0532a7232590ac0f693affb8d647b017fbab24ee02a82b096e138ea438

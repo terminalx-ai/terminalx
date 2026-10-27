@@ -10,8 +10,6 @@ import { cn } from "@/lib/cn";
 import { errorMessage, transcription, type DownloadProgress, type TranscriptionModel, type TranscriptionPreferences } from "@/lib/api";
 import { refreshDictationEngine } from "@/lib/dictation";
 
-import { TranscriptionPersonalization } from "./TranscriptionPersonalization";
-
 const APPLE = "apple";
 
 function mb(bytes: number): string {
@@ -218,7 +216,6 @@ export function TranscriptionTab() {
           }
         />
       </div>
-      <TranscriptionPersonalization />
     </div>
   );
 }

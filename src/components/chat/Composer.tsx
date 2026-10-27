@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/menu";
 import { AgentMark } from "@/components/AgentMark";
 import { cn } from "@/lib/cn";
-import { useDictationContext } from "@/lib/dictationContext";
 import { usePromptTextProps } from "@/lib/autocorrect";
 import { useShortcutKeycaps } from "@/lib/hotkeys";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -293,8 +292,7 @@ export function Composer({
     };
   }, [commandSource]);
 
-  const dictationContext = useDictationContext(tab.id, cwd, remote, draft, caret);
-  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref, dictationContext);
+  const dictation = useDictationInto(tab.id, draft, onDraftChange, ref);
   useDictationShortcuts(dictation, !!autoFocus);
   const keysOf = useShortcutKeycaps();
 
@@ -402,11 +400,8 @@ export function Composer({
     const operation = beginComposerSend(sendScope, tab.id);
     if (!operation) return;
     const completeHistory = recall.captureSend();
-    const learnOnSuccess = dictation.prepareSend(text);
     try {
       await onSend(text, attach.images);
-      // Learning belongs to this accepted send even if a newer draft is visible.
-      learnOnSuccess();
       // Both ownership checks precede destructive history/draft cleanup. A
       // remounted view or a newer browse must never be consumed by this send.
       if (operation.ownsDraft()) {
@@ -422,7 +417,7 @@ export function Composer({
       return;
     }
     finishComposerSend(sendScope, operation);
-  }, [draft, attachments, attach, disabled, onSend, onDraftChange, recall.captureSend, sendScope, tab.id, dictation.prepareSend]);
+  }, [draft, attachments, attach, disabled, onSend, onDraftChange, recall.captureSend, sendScope, tab.id]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (pickerOpen && items.length) {

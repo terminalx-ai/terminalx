@@ -125,26 +125,6 @@ pub const MODELS: &[ModelSpec] = &[
     },
 ];
 
-/// Auxiliary detector, deliberately excluded from the recognizer chooser.
-pub const DETECTOR: ModelSpec = ModelSpec {
-    id: "silero-vad-v6.2",
-    name: "Silero speech detector",
-    description: "Optional local-model noise guard. Detection can make mistakes; test quiet speech before relying on it.",
-    repo: "handy-computer/silero-vad-v6.2-gguf",
-    revision: "a9b2d61c20ae4ddf3644edb34969e8185a485448",
-    filename: "silero-vad-v6.2-F32.gguf",
-    size_bytes: 1_241_056,
-    sha256: "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
-    languages: "Speech detection",
-    license: "MIT",
-    license_url: "https://github.com/snakers4/silero-vad/blob/5cd7945676eb32225748052e2e6a0580e4686a08/LICENSE",
-    speed: 0, accuracy: 0, recommended: false,
-};
-
-pub fn downloadable(id: &str) -> Option<&'static ModelSpec> {
-    if id == DETECTOR.id { Some(&DETECTOR) } else { find(id) }
-}
-
 pub fn find(id: &str) -> Option<&'static ModelSpec> {
     MODELS.iter().find(|m| m.id == id)
 }
@@ -152,17 +132,6 @@ pub fn find(id: &str) -> Option<&'static ModelSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn detector_is_downloadable_but_never_a_recognizer() {
-        assert!(find(DETECTOR.id).is_none());
-        assert_eq!(downloadable(DETECTOR.id).unwrap().sha256, DETECTOR.sha256);
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(DETECTOR.sha256, terminalx_dictation_detector::MODEL_SHA256);
-            assert_eq!(DETECTOR.size_bytes as usize, terminalx_dictation_detector::MODEL_SIZE);
-        }
-    }
 
     #[test]
     fn ids_are_unique_and_urls_are_pinned() {

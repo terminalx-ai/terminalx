@@ -100,6 +100,7 @@ mod keychain;
 mod landed;
 mod local_sharing;
 pub mod local_runtime;
+mod local_vm;
 #[cfg(all(terminalx_recovery_acceptance, debug_assertions, feature = "desktop", target_os = "macos"))]
 mod recovery_acceptance;
 mod memory_baseline;
@@ -636,6 +637,12 @@ pub fn run() {
             commands::list_workspaces,
             commands::preview_workspace_name,
             commands::rename_workspace,
+            commands::rename_branch,
+            commands::local_vm_status,
+            commands::local_vm_start,
+            commands::local_vm_stop,
+            commands::local_vm_reset,
+            commands::local_vm_start_runtime,
             commands::adopt_agent_title,
             commands::project_overview,
             commands::copy_text,
@@ -696,13 +703,6 @@ pub fn run() {
             commands::linear_teams,
             commands::github_repo,
             commands::github_identity,
-            transcription::commands::transcription_personalization_load,
-            transcription::commands::transcription_detector,
-            transcription::commands::transcription_personalization_save,
-            transcription::commands::transcription_personalization_reset,
-            transcription::commands::transcription_personalization_export,
-            transcription::commands::transcription_project_terms,
-            transcription::commands::transcription_learn,
             commands::transcription_models,
             commands::transcription_download,
             commands::transcription_cancel_download,

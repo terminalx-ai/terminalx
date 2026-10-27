@@ -382,7 +382,7 @@ describe("a local session's row of tabs under the title bar", () => {
 
   it("still says so beside the tabs when the base may be out of date", () => {
     show({ worktreeBase: { commit: "123456789abcdef", fetched: false, warning: "Fetch timed out. This worktree may be out of date." } });
-    expect(screen.getByRole("status").textContent).toBe("Base may be out of date");
+    expect(screen.getAllByRole("status").map((el) => el.textContent)).toContain("Base may be out of date");
   });
 
   it("leaves the tabs to the sidebar alone, with the + among the title bar's actions, when the row is turned off", () => {

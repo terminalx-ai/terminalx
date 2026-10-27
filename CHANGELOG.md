@@ -2,42 +2,16 @@
 
 ## Unreleased
 
-### Offline dictation
+### Terminal
 
-- Add opt-in local transcription context, scoped dictionary spellings,
-  replacements and snippets, conservative cleanup and learned corrections.
-  Settings → Transcription includes import/export, sensitive-tab exclusions,
-  language hints and a microphone test showing raw/final text and bias terms.
-  Whisper and Apple receive vocabulary hints; other models use deterministic
-  replacements. Apple refuses network fallback when on-device recognition is
-  unavailable. Dictation event logs retain lengths rather than spoken text.
-  Add an explicit-audio evaluation harness and recording protocol; recognition
-  improvement requires real-audio evidence. Add warmed paired/matrix scoring,
-  raw versus final scores, observed-correction evaluation and context timing.
-  Synthetic file-recognition results are kept separate from microphone acceptance.
-  Record isolated guest settings validation and public-runtime Whisper telemetry,
-  including quiet-speech failures that rule out a no-speech-only filter.
-  Retain a reproducible independent detector experiment and its negative controls;
-  its observed speech loss prevents adopting it as an automatic filter.
-  Compare strict CPU/Metal decoding with pinned fixtures; both reproduce the
-  noise failures, ruling out a backend switch as a remedy for those cases.
-  Add a pinned independent Whisper comparison using identical reference weights
-  to distinguish app-specific behavior from upstream recognition limitations.
-  Retain full-precision comparison failures and paired detector normalization
-  evidence with public speech controls; no experimental runtime is shipped.
-  Validate a static public-GGML detector prototype against multilingual speech
-  and environmental controls, preserving runtime-upgrade incompatibilities and
-  failed prototype evidence instead of changing existing recognition output.
-  Add an opt-in local-model noise guard using the verified native detector,
-  explicit auxiliary-model download/delete controls and detector diagnostics.
-  Detection preserves original recognition audio, keeps text on model errors,
-  and supports cancellation; Apple retains its platform speech detection.
-  Reject symlink and nonregular detector cache entries without blocking capture.
-  Learn a single word correction even when surrounding capitalization or terminal
-  punctuation also changes; case/punctuation-only edits still teach nothing. (#439)
+- Cancel pending atlas warm-up when its final terminal owner is disposed, while
+  preserving warm-up for remaining shared owners. Native memory acceptance
+  remains unresolved. (#232)
 
 ### Chat
 
+- Clarify the CLI guide to keep simple issue filing and context checks in the
+  current conversation, with separate sessions reserved for authorized work. (#634)
 - Show sending progress immediately and prevent repeat submissions while a message
   is pending. Preserve newer drafts and recalled text, and keep pending sends and
   errors visible across tab remounts and cloud reconnects. (#637)
