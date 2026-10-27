@@ -3601,6 +3601,7 @@ mod command_tests {
             title: None,
             use_worktree: true,
             on_main: false,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -3638,6 +3639,7 @@ mod command_tests {
             title: Some("First".into()),
             use_worktree: true,
             on_main: false,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: Some("old-workspace".into()),
             issue: None,
@@ -3656,6 +3658,7 @@ mod command_tests {
             title: Some("Second".into()),
             use_worktree: false,
             on_main: false,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -3685,6 +3688,54 @@ mod command_tests {
     }
 
     #[test]
+    fn renames_a_branch_in_place_and_carries_its_sessions_and_label() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["config", "user.email", "t@example.com"]);
+        git(&project, &["config", "user.name", "T"]);
+        std::fs::write(project.join("README.md"), "project\n").unwrap();
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "-q", "-m", "initial"]);
+
+        let session = create_session_entry(NewSession {
+            project_path: project.to_string_lossy().into_owned(),
+            title: Some("First".into()),
+            use_worktree: true,
+            on_main: false,
+            checkout_branch: None,
+            base_ref: None,
+            worktree_name: Some("calm-ember".into()),
+            issue: None,
+            automation: None,
+            cwd: None,
+            tab: Some(NewTab { harness: "codex".into(), model: String::new(), effort: None, permission_mode: None }),
+        })
+        .unwrap();
+        let attached = crate::store::projects::add(project.to_str().unwrap()).unwrap();
+        let from = session.branch.clone().unwrap();
+        assert_ne!(from, "main");
+        crate::store::projects::update(
+            &attached.path,
+            crate::store::projects::ProjectPatch { branch_label: Some(crate::store::projects::BranchLabel { branch: from.clone(), label: Some("Pricing research".into()) }), ..Default::default() },
+        )
+        .unwrap();
+
+        assert!(crate::session_ops::rename_branch_entries(&attached.path, &from, "not a branch").is_err());
+        assert!(crate::session_ops::rename_branch_entries(&attached.path, &from, "main").is_err());
+        let renamed = crate::session_ops::rename_branch_entries(&attached.path, &from, "pricing-research").unwrap();
+        assert_eq!(renamed.branch, "pricing-research");
+        assert_eq!(renamed.sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [session.id.as_str()]);
+        assert_eq!(renamed.project.branch_labels.get("pricing-research").map(String::as_str), Some("Pricing research"));
+        // The worktree stays where it was, now on the renamed branch.
+        assert_eq!(renamed.sessions[0].cwd, session.cwd);
+        assert_eq!(git(Path::new(&session.cwd), &["branch", "--show-current"]).trim(), "pricing-research");
+        assert_eq!(crate::store::index::load().unwrap()[0].branch.as_deref(), Some("pricing-research"));
+    }
+
+    #[test]
     fn deleting_a_workspace_removes_its_sessions_transcripts_and_attachments() {
         let _home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
@@ -3704,6 +3755,7 @@ mod command_tests {
             title: Some("Attached session".into()),
             use_worktree: true,
             on_main: false,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -3728,6 +3780,7 @@ mod command_tests {
             title: Some("Companion session".into()),
             use_worktree: true,
             on_main: false,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -3741,6 +3794,7 @@ mod command_tests {
             title: Some("Session on main".into()),
             use_worktree: false,
             on_main: true,
+            checkout_branch: None,
             base_ref: None,
             worktree_name: None,
             issue: None,
@@ -4245,6 +4299,52 @@ pub async fn rename_workspace(app: AppHandle, project_path: String, path: String
     })
     .await
     .map_err(err)?
+}
+
+/// Rename a branch where it is checked out, its worktree staying put.
+#[tauri::command]
+pub async fn rename_branch(app: AppHandle, project_path: String, from: String, to: String) -> CmdResult<crate::session_ops::BranchRename> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let renamed = crate::session_ops::rename_branch_entries(&project_path, &from, &to).map_err(err)?;
+        crate::session_ops::notify_workspace_settled(&app, &project_path, &renamed.sessions);
+        Ok(renamed)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// The Local VM (`local_vm.rs`): where it stands, and the reader's controls.
+/// Each runs the container runtime's CLI, so off the async runtime.
+async fn local_vm<F>(call: F) -> CmdResult<crate::local_vm::VmStatus>
+where
+    F: FnOnce() -> anyhow::Result<crate::local_vm::VmStatus> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(call).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+pub async fn local_vm_status() -> CmdResult<crate::local_vm::VmStatus> {
+    local_vm(|| Ok(crate::local_vm::status())).await
+}
+
+#[tauri::command]
+pub async fn local_vm_start() -> CmdResult<crate::local_vm::VmStatus> {
+    local_vm(crate::local_vm::start).await
+}
+
+#[tauri::command]
+pub async fn local_vm_stop() -> CmdResult<crate::local_vm::VmStatus> {
+    local_vm(crate::local_vm::stop).await
+}
+
+#[tauri::command]
+pub async fn local_vm_reset() -> CmdResult<crate::local_vm::VmStatus> {
+    local_vm(crate::local_vm::reset).await
+}
+
+#[tauri::command]
+pub async fn local_vm_start_runtime() -> CmdResult<crate::local_vm::VmStatus> {
+    local_vm(crate::local_vm::start_runtime).await
 }
 
 /// What deleting a workspace would cost: the git state of its tree plus how

@@ -1,5 +1,6 @@
 //! Attached projects: Git checkouts and ordinary folders the reader has opened.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,6 +46,10 @@ pub struct Project {
     /// by default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub agent_issue_updates: bool,
+    /// What the reader calls a branch in the sidebar, by branch name. A
+    /// branch with none goes by its own name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branch_labels: BTreeMap<String, String>,
 }
 
 /// The kinds of change a project marks as always needing a person to merge.
@@ -164,6 +169,17 @@ pub struct ProjectPatch {
     pub issue_pipeline: Option<IssuePipelineSettings>,
     #[serde(default)]
     pub agent_issue_updates: Option<bool>,
+    #[serde(default)]
+    pub branch_label: Option<BranchLabel>,
+}
+
+/// One branch's sidebar label; none, or a blank one, clears it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchLabel {
+    pub branch: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 fn double_option<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Option<String>>, D::Error> {
@@ -198,6 +214,26 @@ pub fn update(path: &str, patch: ProjectPatch) -> Result<Project> {
     }
     if let Some(v) = patch.agent_issue_updates {
         p.agent_issue_updates = v;
+    }
+    if let Some(BranchLabel { branch, label }) = patch.branch_label {
+        match label.map(|label| label.trim().to_string()).filter(|label| !label.is_empty() && *label != branch) {
+            Some(label) => p.branch_labels.insert(branch, label),
+            None => p.branch_labels.remove(&branch),
+        };
+    }
+    let out = p.clone();
+    save(&f)?;
+    Ok(out)
+}
+
+/// A branch renamed in git keeps its sidebar label under its new name.
+pub fn move_branch_label(path: &str, from: &str, to: &str) -> Result<Project> {
+    let mut f = load()?;
+    let p = f.projects.iter_mut().find(|p| p.path == path).with_context(|| format!("project {path} is not attached"))?;
+    if let Some(label) = p.branch_labels.remove(from) {
+        if label != to {
+            p.branch_labels.insert(to.to_string(), label);
+        }
     }
     let out = p.clone();
     save(&f)?;
@@ -279,7 +315,7 @@ pub fn add(path: &str) -> Result<Project> {
         save(&f)?;
         return Ok(out);
     }
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(now), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
     f.projects.push(p.clone());
     f.last_selected = Some(path);
     save(&f)?;
@@ -307,7 +343,7 @@ fn ensure_as(path: &str, kind: Option<ProjectKind>) -> Result<Project> {
         return Ok(existing.clone());
     }
     let kind = kind.unwrap_or(if crate::git::is_repo(Path::new(&path)) { ProjectKind::Git } else { ProjectKind::Folder });
-    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false };
+    let p = Project { kind, name: project_name(&path), path: path.clone(), last_opened: Some(chrono::Utc::now().to_rfc3339()), color: None, mascot: None, logo: None, pinned: false, archived: false, issue_pipeline: None, agent_issue_updates: false, branch_labels: BTreeMap::new() };
     f.projects.push(p.clone());
     save(&f)?;
     Ok(p)
@@ -407,6 +443,24 @@ mod tests {
         assert!(issue_pipeline_settings("/not/attached").unwrap_err().to_string().contains("no longer attached"));
         std::fs::write(crate::store::root().unwrap().join("projects.json"), "{broken").unwrap();
         assert!(issue_pipeline_settings(&project.path).is_err());
+    }
+
+    #[test]
+    fn a_branch_keeps_its_label_until_cleared_and_through_a_rename() {
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let project = add(dir.path().to_str().unwrap()).unwrap();
+        let label = |branch: &str, label: Option<&str>| ProjectPatch { branch_label: Some(BranchLabel { branch: branch.into(), label: label.map(Into::into) }), ..Default::default() };
+        let labelled = update(&project.path, label("dc/calm-ember", Some("  Pricing research "))).unwrap();
+        assert_eq!(labelled.branch_labels.get("dc/calm-ember").map(String::as_str), Some("Pricing research"));
+        // Another patch leaves it alone.
+        assert_eq!(update(&project.path, ProjectPatch { pinned: Some(true), ..Default::default() }).unwrap().branch_labels.len(), 1);
+        let moved = move_branch_label(&project.path, "dc/calm-ember", "dc/pricing").unwrap();
+        assert_eq!(moved.branch_labels.into_iter().collect::<Vec<_>>(), [("dc/pricing".to_string(), "Pricing research".to_string())]);
+        // A blank label, or the branch's own name, is no label.
+        assert!(update(&project.path, label("dc/pricing", Some(" "))).unwrap().branch_labels.is_empty());
+        assert!(update(&project.path, label("dc/pricing", Some("dc/pricing"))).unwrap().branch_labels.is_empty());
+        assert!(!serde_json::to_string(&project).unwrap().contains("branchLabels"));
     }
 
     #[test]

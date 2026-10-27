@@ -22,6 +22,7 @@ import { ContinuationDialog } from "./ContinuationDialog";
 import { TabView } from "./TabView";
 import { TabActions } from "./TabStrip";
 import { tabNodeId, tabPanelId } from "@/lib/sessionTabs";
+import { branchSessionsAsTabs } from "@/lib/tabLayouts";
 import { activateLatestTerminal, selectSessionTab, useTerminals, type SelectedSessionTab } from "@/lib/terminal";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { BrowserView } from "@/components/browser/BrowserView";
@@ -108,6 +109,8 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       statusKey={session.tabs.map((item) => item.status).join(",")}
       settleSessionId={workspace ? session.id : undefined}
       workspace={workspace}
+      terminals
+      computer
     />
   );
 }
@@ -467,15 +470,24 @@ export function SessionView({
   const shownKind = useRef(selectedKind);
   shownKind.current = selectedKind;
   const openedOn = useRef<string | null>(null);
+  // Another session in the same checkout with an agent: its tabs share this row, so there is something to show already.
+  const siblingWithAgents = branchSessionsAsTabs(prefs) ? store.sessions.find((other) => other.id !== session.id && other.cwd === session.cwd && !other.archived && other.tabs.length > 0) : undefined;
+  const siblingAgents = !!siblingWithAgents;
+  // An empty session beside one with agents shows nothing of its own: open the one with the agents, whose tab is then selected.
+  useEffect(() => {
+    // Not when it has terminals or pages of its own, or one of its tabs was picked: those are what it shows.
+    const ownTabs = shellPanes.length > 0 || browserPages.length > 0 || !!terminals.selected[session.id];
+    if (local && !compact && !session.tabs.length && siblingWithAgents && !ownTabs) selectSession(siblingWithAgents.id);
+  }, [local, compact, session.id, session.tabs.length, siblingWithAgents?.id, shellPanes.length, browserPages.length]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const opening = openedOn.current !== session.id;
     openedOn.current = session.id;
-    if (!local || session.tabs.length || shownKind.current === "browser" || shownKind.current === "terminal") return;
+    if (!local || session.tabs.length || siblingAgents || shownKind.current === "browser" || shownKind.current === "terminal") return;
     if (!opening && (!compact || shownKind.current)) return;
     // A compact window has no panel to open.
     if (!compact && !getPrefs().panelOpen) setPrefs({ panelOpen: true });
     void activateLatestTerminal(session.id, session.cwd).catch((e) => console.error("terminal open failed", e));
-  }, [local, compact, session.id, session.cwd, session.tabs.length]);
+  }, [local, compact, session.id, session.cwd, session.tabs.length, siblingAgents]);
 
   // PRO-30 presence: what this person looks at in a shared workspace.
   const presenceKey = cloud?.collab.live ? cloud.collab.key : null;
@@ -892,6 +904,8 @@ export function SessionView({
             rootName={quick ? quickChatPlace(session) : (project?.name ?? "project")}
             settleSessionId={workspace ? session.id : undefined}
             workspace={workspace}
+            terminals
+            computer
           />
         ))}
       {cloud ? (

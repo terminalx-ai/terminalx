@@ -851,6 +851,7 @@ fn start_run(
                 base_ref: automation.base_ref.clone(),
                 worktree_name,
                 on_main: false,
+                checkout_branch: None,
                 issue,
                 automation: Some(index::AutomationRef {
                     id: automation.id.clone(),
