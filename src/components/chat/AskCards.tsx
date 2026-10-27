@@ -88,7 +88,8 @@ export function PermissionCard({
   aside?: ReactNode;
 }) {
   const detail = showDetail ? askDetail(ask) : null;
-  const directory = showDetail ? field(ask.input, "workdir", "cwd") : null;
+  const workdir = showDetail ? field(ask.input, "workdir", "cwd") : null;
+  const directory = showDetail ? workdir ?? ask.cwd : null;
   const reason = showDetail ? field(ask.input, "justification", "description") ?? ask.description : null;
   const blocked = !!blockedReason;
   const ref = useRef<HTMLDivElement>(null);
@@ -129,7 +130,7 @@ export function PermissionCard({
       {detail && (
         <pre className="mt-2 max-h-60 max-w-full overflow-auto whitespace-pre-wrap rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground [overflow-wrap:anywhere]" data-testid="permission-detail"><code>{detail}</code></pre>
       )}
-      {directory && <p className="mt-2 break-words text-xs text-muted-foreground">Working directory: <code>{directory}</code></p>}
+      {directory && <p className="mt-2 break-words text-xs text-muted-foreground">{workdir ? "Working directory" : "Session directory"}: <code>{directory}</code></p>}
       {reason && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-muted-foreground">{reason}</p>}
     </AskShell>
   );

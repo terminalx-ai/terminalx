@@ -65,6 +65,18 @@ impl Desktop {
 
     pub fn attachment(&self) -> Result<AttachmentIdentity> { self.events.attachment() }
 
+    /// PTY transport is shared by this window's panes, not by every session
+    /// or every window. A healthy event publisher does not prove it is live.
+    pub fn window_connection(&self, window: &str) -> Result<()> {
+        self.attachment()?;
+        if let Some(bridge) = self.windows.lock().unwrap().get(window) {
+            bridge.attachment().map_err(|_| anyhow::anyhow!(
+                "Live terminal output in window {window} is disconnected. Agents and terminal commands may still be running."
+            ))?;
+        }
+        Ok(())
+    }
+
     pub fn sessions(&self) -> Result<Sessions> {
         self.attachment()?;
         Ok(Sessions::new(self.client.clone()))

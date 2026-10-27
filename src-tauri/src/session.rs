@@ -4306,9 +4306,15 @@ impl SessionManager {
                     request_id: request_id.clone(),
                     tool_use_id: String::new(),
                     title: Some(claude::mapper::tool_title(&tool_name, &input)),
-                    // Codex explains itself in the tool input when it wants an
-                    // escalation; Claude says nothing here.
-                    description: input["description"].as_str().map(String::from),
+                    // PreToolUse can reduce a Codex shell call to just Bash +
+                    // command. Explain our gate when no agent reason survived;
+                    // never invent a justification or change the tool input.
+                    description: ["justification", "description"].iter()
+                        .find_map(|field| input[*field].as_str().filter(|s| !s.trim().is_empty()))
+                        .map(String::from)
+                        .or_else(|| (kind == CliKind::Codex && gate == "PreToolUse" && codex::asks_every_tool(&p.mode))
+                            .then(|| "Approval is required because this session is set to Ask every time.".into())),
+                    cwd: frame.payload["cwd"].as_str().filter(|s| !s.trim().is_empty()).map(String::from),
                     options: claude::mapper::build_options(&suggestions),
                     tool_name: tool_name.clone(),
                     input: input.clone(),

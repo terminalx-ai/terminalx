@@ -77,8 +77,8 @@ beforeEach(() => {
   mocks.app = {
     ready: true, session: { user: { email: "a@b.c" } }, hosts: [paired], availableHosts: [], installationState: "ready", activeHost: paired,
     connectionStage: "connected", connectionAttempt: 0, sessions: [], logs: [], loadingMachines: false, loadingSessions: false, error: null,
-    connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => undefined),
-    renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => undefined), forgetHost: vi.fn(async () => undefined),
+    connection: { restart: vi.fn() }, clearError: vi.fn(), refreshMachines: vi.fn(), refreshSessions: vi.fn(), connectHost: vi.fn(async () => true),
+    renameHost: vi.fn(async () => undefined), reconnectHost: vi.fn(async () => true), forgetHost: vi.fn(async () => undefined),
   };
   container = document.createElement("div");
   document.body.append(container);
@@ -196,4 +196,14 @@ it("keeps the options button out of the row that connects, and gives the row an 
   expect(mocks.app.connectHost).toHaveBeenCalledTimes(1);
   await act(async () => row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
   expect(menuOpen()).toBe(true);
+});
+
+it.each([false, true])("does not open sessions when selection fails (signed in: %s)", async (signedIn) => {
+  if (!signedIn) mocks.app.session = null;
+  mocks.app.connectHost.mockResolvedValue(false);
+  await show(<MachinesScreen />);
+  const row = [...container.querySelectorAll("button")].find((node) => node.dataset.actions === "options")!;
+  await act(async () => row.click());
+  expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
+  expect(mocks.dismissTo).not.toHaveBeenCalled();
 });

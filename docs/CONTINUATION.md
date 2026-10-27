@@ -73,7 +73,14 @@ for the provider transcript to echo the submitted prompt. A created tab or a
 locally rendered user message is not delivery confirmation. A readiness or
 write failure is returned; an echo timeout is reported as uncertain delivery.
 The dialog prevents duplicate clicks, retries launch failures in the same tab,
-and leaves the prompt in the destination composer after a delivery failure.
+and shows “Confirming delivery…” while awaiting the provider echo. Before sending,
+it clears its prepared composer draft so the pending message does not also appear
+as unsent text. On delivery failure it restores the submitted prompt only if the
+reader has not edited the composer since the handoff seeded it; newer edits, including an
+explicitly cleared draft, are preserved. Pipeline instructions added during launch
+do not prevent the original prepared draft from clearing. Draft revisions track
+ownership across pipeline preparation, startup, archiving and launch retries,
+including edits that return to identical text.
 Users can inspect the chat/terminal before retrying an uncertain delivery.
 
 ## Verification

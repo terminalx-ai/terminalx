@@ -27,7 +27,7 @@ impl Hook {
             .env("RACCOON_HOOK_TOKEN", launch["RACCOON_HOOK_TOKEN"].as_str().unwrap())
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().unwrap();
-        child.stdin.take().unwrap().write_all(br#"{"tool_name":"Bash","tool_input":{"command":"pwd"}}"#).unwrap();
+        child.stdin.take().unwrap().write_all(br#"{"cwd":"/workspace/app","tool_name":"Bash","tool_input":{"command":"pwd","description":"Inspect the current directory"}}"#).unwrap();
         Self(child)
     }
 
@@ -109,6 +109,10 @@ fn owner_permission_decisions_still_require_an_answer() {
             (!pending["permissions"].as_array().unwrap().is_empty()).then_some(pending)
         });
         assert_eq!(pending["permissions"][0]["input"]["command"], "pwd");
+        let events = serve.events(launch["RACCOON_TAB_ID"].as_str().unwrap());
+        let request = events.iter().find(|event| event["payload"]["requestId"] == pending["permissions"][0]["requestId"]).unwrap();
+        assert_eq!(request["payload"]["cwd"], "/workspace/app", "context survives the real hook process and owner socket");
+        assert_eq!(request["payload"]["description"], "Inspect the current directory");
         serve.control(action, json!({"request":pending["permissions"][0]["requestId"]}));
         assert_eq!(hook.reply()["hookSpecificOutput"]["decision"]["behavior"], expected);
     }

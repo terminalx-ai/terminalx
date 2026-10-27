@@ -998,10 +998,22 @@ mod tests {
         assert!(!socket_dir.exists());
     }
 
+    fn socket_fixture_dir() -> tempfile::TempDir {
+        // CI's standard TMPDIR can exceed sun_path once the fixture is nested.
+        // Isolated runs must supply their owned short root; never fall back from it.
+        let root = std::env::var_os("TERMINALX_TEST_SOCKET_ROOT")
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
+        assert!(root.is_absolute(), "socket fixture root must be absolute");
+        let dir = tempfile::tempdir_in(root).unwrap();
+        let socket = dir.path().join("terminalx-computer-use-xxxxxxxx/provider.sock");
+        assert!(socket.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
+            "socket fixture root is too long: {}", socket.display());
+        dir
+    }
+
     #[test]
     fn the_sweep_removes_dead_socket_dirs_and_keeps_live_and_fresh_ones() {
-        // Under /tmp so the live socket's path fits in sun_path.
-        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let base = socket_fixture_dir();
         let dead = base.path().join("terminalx-computer-use-dead0001");
         std::fs::create_dir(&dead).unwrap();
         std::fs::write(dead.join("provider.sock"), b"").unwrap();
@@ -1159,10 +1171,10 @@ PY
     #[test]
     #[cfg(target_os = "macos")]
     fn a_helper_whose_code_is_refused_never_runs_and_leaves_nothing_behind() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let script = fake_helper(dir.path());
         let ran = dir.path().join("ran");
-        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let base = socket_fixture_dir();
         let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = checked.clone();
         let marker = ran.clone();
@@ -1187,9 +1199,9 @@ PY
     #[test]
     #[cfg(target_os = "macos")]
     fn an_accepted_helper_is_checked_by_pid_and_again_on_its_socket() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let script = fake_helper(dir.path());
-        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let base = socket_fixture_dir();
         let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = checked.clone();
         let check: CodeCheck = std::sync::Arc::new(move |peer| {
@@ -1211,7 +1223,7 @@ PY
     #[cfg(target_os = "macos")]
     fn a_socket_held_by_another_process_than_the_helper_is_refused() {
         // The "helper" hands the socket to a process of its own and waits.
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("forwarding-helper.sh");
         std::fs::write(
             &script,
@@ -1220,7 +1232,7 @@ PY
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let base = tempfile::tempdir_in("/tmp").unwrap();
+        let base = socket_fixture_dir();
         let error = start_session_in(&script, base.path(), &accept_all()).err().unwrap();
         assert_eq!(error.code, "provider_incompatible");
         assert!(error.message.contains("not by the helper just started"), "{}", error.message);
@@ -1229,7 +1241,7 @@ PY
 
     #[test]
     fn every_start_resolves_the_helper_again_so_a_restart_is_checked_too() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let script = fake_helper(dir.path());
         let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = starts.clone();
