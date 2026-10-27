@@ -2,8 +2,7 @@
 //!
 //! Reads answer at once. A write changes shared state on GitHub or Linear
 //! and may notify other people, so every write is put to the person first,
-//! in the same native question the cloud requests use
-//! (`cloud_control_question`): its default button refuses, it expires, and
+//! in a bounded review in the main window: its default button refuses, it expires, and
 //! computer use is paused while it is on screen. The app cannot tell an
 //! agent's request from the person's own (they share the control token), so
 //! it never tries. A project may let comments and status moves on its own
@@ -17,16 +16,23 @@ use serde_json::Value;
 use crate::cloud_control::Answer;
 use crate::control::ControlError;
 
-/// What the person is asked, in a native dialog.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the person reviews before an issue write.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Question {
+    pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub project: String,
+    pub target: String,
+    pub summary: String,
+    pub description: Option<String>,
     pub title: String,
     pub message: String,
     /// The one button that agrees.
     pub agree: String,
 }
 
-/// Shows a [`Question`] and waits for the answer. Only the desktop app has one.
+/// Presents a [`Question`] and waits for the answer. Only the desktop app has one.
 pub type Ask = Arc<dyn Fn(Question) -> Answer + Send + Sync>;
 
 /// Where the CLI says it ran. It is the caller's own claim: anything that
@@ -118,7 +124,7 @@ impl Write {
 /// The longest comment, title or description the question shows; it is
 /// shown in full or the write is refused.
 const SHOWN_CHARS: usize = 4000;
-/// And the most lines, so the question still fits on the screen.
+/// Keep the existing review size limit even though the details now scroll.
 const SHOWN_LINES: usize = 40;
 
 /// A character that changes how the text around it reads without showing
@@ -172,6 +178,7 @@ pub struct Subject<'a> {
     pub routine_allowed: bool,
     /// The session the request says it comes from. Claimed, so only shown.
     pub session_title: Option<&'a str>,
+    pub session_id: Option<&'a str>,
 }
 
 /// Whether the project's switch may apply to an issue: only a GitHub issue
@@ -189,7 +196,22 @@ pub fn question(write: &Write, subject: &Subject) -> Question {
         Some(title) => format!("A terminalx command in {project}, which says it comes from the session \u{201c}{}\u{201d},", one_line(title, 80)),
         None => format!("A terminalx command in {project}"),
     };
+    let description = match write {
+        Write::Comment { body } | Write::Create { body: Some(body), .. } => Some(visible(body, true)),
+        _ => None,
+    };
+    let summary = match write {
+        Write::Create { title, .. } => Write::Create { title: title.clone(), body: None }.describe(subject.issue),
+        Write::Comment { .. } => format!("Post comment on {}", subject.issue),
+        _ => write.describe(subject.issue),
+    };
     Question {
+        session_id: subject.session_id.map(str::to_string),
+        session_title: subject.session_title.map(|s| one_line(s, 80)),
+        project,
+        target: visible(subject.issue, false),
+        summary,
+        description,
         title: format!("{provider} issue request"),
         message: format!("{who} asks to {}\n\nThis acts on {provider}, where other people can see it and may be notified. If you did not ask an agent for this, refuse.", write.describe(subject.issue)),
         agree: write.agree().to_string(),
@@ -574,7 +596,7 @@ mod tests {
     use std::sync::Mutex;
 
     fn subject(allows: bool) -> Subject<'static> {
-        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", routine_allowed: allows, session_title: Some("Fix login") }
+        Subject { issue: "PRO-42 (Fix the login)", provider: "linear", project_name: "raccoon", routine_allowed: allows, session_id: Some("session-1"), session_title: Some("Fix login") }
     }
 
     /// An `Ask` that records each question and answers `answer`.
@@ -862,7 +884,7 @@ mod tests {
     fn run_as_agent(fake: &Fake, command: &str, params: Value, id: Option<&str>, answer: fn() -> Answer, allows: bool) -> (Result<Value, ControlError>, Vec<Question>) {
         let (ask, asked) = asking(answer);
         let gate = |write: &Write, issue: &str, repo: Option<&str>| {
-            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", routine_allowed: allows && in_project(repo, Some("acme/api")), session_title: Some("Fix login") };
+            let subject = Subject { issue, provider: if fake.provider == Provider::Linear { "linear" } else { "github" }, project_name: "raccoon", routine_allowed: allows && in_project(repo, Some("acme/api")), session_id: Some("session-1"), session_title: Some("Fix login") };
             authorize(write, &subject, Some(&ask))
         };
         let result = run(command, &params, id, fake, &gate);
@@ -1064,7 +1086,7 @@ mod tests {
         }
         // The person running this check is the one who agrees.
         let (ask, _) = asking(|| Answer::Accepted);
-        let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, provider: "", project_name: "", routine_allowed: false, session_title: None }, Some(&ask));
+        let gate = |write: &Write, issue: &str, _: Option<&str>| authorize(write, &Subject { issue, provider: "", project_name: "", routine_allowed: false, session_title: None, session_id: None }, Some(&ask));
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         for (provider, id) in [(Provider::Github, "527"), (Provider::Linear, "PRO-101")] {
             let backend = Live(crate::issue_ops::Target::resolve(&repo, provider).unwrap());

@@ -1,7 +1,7 @@
 import { preparePipelineLaunch, preparePipelineContinuation } from "@/lib/pipelineLaunch";
 import { agent, api, errorMessage } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
-import { getDraft, setDraft } from "@/lib/drafts";
+import { getDraftRevision, setDraft } from "@/lib/drafts";
 import { addTab, archiveSession, selectSession, upsertSession } from "@/lib/sessions";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
 import type { TabEntry } from "@/types/session";
@@ -78,16 +78,33 @@ async function ensureAvailable(harness: string) {
   if (!providers.some((p) => p.id === harness && p.available)) throw new Error("The selected provider is no longer available on this host.");
 }
 
-async function deliver(launched: Launched, prompt: string): Promise<ContinuationResult> {
+// A retry retains the same Launched object. Weak ownership survives launch failures
+// without a listener to dispose or a tab-id registry that retains abandoned launches.
+const seededDrafts = new WeakMap<Launched, number>();
+
+function seedDraft(launched: Launched, prompt: string) {
+  seededDrafts.set(launched, setDraft(launched.tab.id, prompt));
+}
+
+async function deliver(launched: Launched, prompt: string, onDelivering?: () => void): Promise<ContinuationResult> {
+  // Remove only our prepared draft before send can publish a user message.
+  // The actual prompt may include pipeline instructions added after creation.
+  const seedRevision = seededDrafts.get(launched);
+  seededDrafts.delete(launched);
+  const ownsDraft = seedRevision !== undefined && getDraftRevision(launched.tab.id) === seedRevision;
+  const removedRevision = ownsDraft ? setDraft(launched.tab.id, "") : undefined;
   try {
+    onDelivering?.();
     const out = await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
     for (const event of out.events) applyEvent(event);
-    // Delivery can finish after the dialog is dismissed and the reader has
-    // started a new draft in the destination.
-    if (getDraft(launched.tab.id) === prompt) setDraft(launched.tab.id, "");
     return { stage: "delivered", launched };
   } catch (e) {
-    return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. The prepared prompt is in its composer. ${errorMessage(e)}` };
+    const edited = removedRevision === undefined || getDraftRevision(launched.tab.id) !== removedRevision;
+    const recovery = edited
+      ? "Your composer edits have been preserved."
+      : "The prepared prompt is in its composer.";
+    if (!edited) setDraft(launched.tab.id, prompt);
+    return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. ${recovery} ${errorMessage(e)}` };
   }
 }
 
@@ -96,7 +113,7 @@ async function deliver(launched: Launched, prompt: string): Promise<Continuation
  * for the reader to check/retry. */
 export async function launchContinuation(
   context: ContinuationContext, settings: LaunchSettings, prompt: string,
-  onCreated: (launched: Launched) => void, existing?: Launched,
+  onCreated: (launched: Launched) => void, existing?: Launched, onDelivering?: () => void,
 ): Promise<ContinuationResult> {
   let launched = existing;
   try {
@@ -104,7 +121,7 @@ export async function launchContinuation(
     if (!launched) {
       const tab = await addTab(context.sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
       launched = { sessionId: context.sessionId, tab };
-      setDraft(tab.id, prompt);
+      seedDraft(launched, prompt);
       onCreated(launched);
     }
     prompt = await preparePipelineContinuation(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
@@ -112,7 +129,7 @@ export async function launchContinuation(
   } catch (e) {
     return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
   }
-  return deliver(launched, prompt);
+  return deliver(launched, prompt, onDelivering);
 }
 
 /** Where a chat moving into a project starts again: in place, or in a new worktree. */
@@ -137,6 +154,7 @@ export async function moveChatToProject(
   prompt: string,
   onCreated: (launched: Launched) => void,
   existing?: Launched,
+  onDelivering?: () => void,
 ): Promise<ContinuationResult> {
   let launched = existing;
   try {
@@ -148,7 +166,7 @@ export async function moveChatToProject(
       const tab = session.tabs[0];
       if (!tab) throw new Error("The new session has no agent conversation.");
       launched = { sessionId: session.id, tab };
-      setDraft(tab.id, prompt);
+      seedDraft(launched, prompt);
       onCreated(launched);
     }
     prompt = await preparePipelineLaunch(launched.sessionId, launched.tab.id, prompt, settings.pipeline);
@@ -163,7 +181,7 @@ export async function moveChatToProject(
   } catch (e) {
     unarchived = `The chat could not be archived, so it is still in the list: ${errorMessage(e)}`;
   }
-  const result = await deliver(launched, prompt);
+  const result = await deliver(launched, prompt, onDelivering);
   if (!unarchived) return result;
   return result.stage === "delivered"
     ? { stage: "archive", launched, error: `The new session started and has the chat's context. ${unarchived}` }
