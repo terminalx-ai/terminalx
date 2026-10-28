@@ -1627,7 +1627,7 @@ fn seed_session(project: &Path, title: &str, cwd: Option<&Path>) -> SessionEntry
         issue: None,
         automation: None,
         cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
-        tab: Some(crate::session_ops::NewTab { harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
+        tab: Some(crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: "opus".into(), effort: None, permission_mode: None }),
     })
     .unwrap()
 }

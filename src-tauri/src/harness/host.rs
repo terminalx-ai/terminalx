@@ -40,6 +40,7 @@ pub struct TerminalReceipt {
     pub stdout: ReaderEnd,
     pub stderr: ReaderEnd,
     pub exit_callback_panicked: bool,
+    pub drain_callback_panicked: bool,
 }
 
 impl LiveChild {
@@ -56,6 +57,32 @@ impl LiveChild {
         stdin.flush()?;
         Ok(())
     }
+    /// Experimental owned-stdio writer only. Never wait for pipe capacity
+    /// while the caller holds final-admission/runtime authority. ChildStdin is
+    /// unbuffered; the caller owns framing, partial writes and their deadline.
+    #[cfg(unix)]
+    pub(crate) fn try_write_stdin(&self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
+        let stdin = guard.as_ref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child stdin closed"))?;
+        let fd = stdin.as_raw_fd();
+        // Only this child's dedicated writer uses stdin. Existing PTY/ACP
+        // paths keep their original blocking write_line behavior.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags == -1 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let written = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+            if written < 0 { Err(std::io::Error::last_os_error()) } else { Ok(written as usize) }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn try_write_stdin(&self, _bytes: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "experimental stdio requires nonblocking Unix pipes"))
+    }
+
     pub fn close_stdin(&self) {
         let mut guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
         guard.take();
@@ -67,6 +94,9 @@ pub trait Sink: Send + Sync + 'static {
     fn stdout_line(&self, line: String);
     fn stderr_line(&self, line: String);
     fn exited(&self, pid: u32, code: Option<i32>);
+    /// All owned readers have joined. Existing sinks retain their exit behavior.
+    fn drained(&self, _receipt: &TerminalReceipt) {}
+    fn stdout_closed(&self, _end: ReaderEnd) {}
 }
 
 type ChildMap = Arc<Mutex<HashMap<String, Arc<LiveChild>>>>;
@@ -138,7 +168,9 @@ impl Host {
             let live = Arc::new(LiveChild { pid, epoch, stdin: Mutex::new(Some(stdin)), terminal: terminal.clone() });
             let out_sink = sink.clone();
             start.readers.push(start_reader(format!("stdout-{key}"), move || {
-                read_stdout(stdout, |line| out_sink.stdout_line(line))
+                let end = read_stdout(stdout, |line| out_sink.stdout_line(line));
+                out_sink.stdout_closed(end);
+                end
             })?);
             let err_sink = sink.clone();
             start.readers.push(start_reader(format!("stderr-{key}"), move || {
@@ -319,11 +351,18 @@ fn finish_readers(pid: u32, epoch: u64, leader_reaped: bool, code: Option<i32>, 
         }
     };
     let mut ends = handles.into_iter().map(join_reader);
-    TerminalReceipt {
+    let mut receipt = TerminalReceipt {
         pid, epoch, leader_reaped, code,
         stdout: ends.next().unwrap(), stderr: ends.next().unwrap(),
         exit_callback_panicked,
+        drain_callback_panicked: false,
+    };
+    // This callback cannot prevent the physical terminal receipt being retained.
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink.drained(&receipt))) {
+        std::mem::forget(payload);
+        receipt.drain_callback_panicked = true;
     }
+    receipt
 }
 
 fn read_stdout(reader: impl std::io::Read, mut emit: impl FnMut(String)) -> ReaderEnd {

@@ -48,13 +48,13 @@ Usage:
   terminalx projects list [--json]
   terminalx sessions list [--project PROJECT|--quick] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --prompt TEXT
-      [--title TEXT] [--name NAME]
+      [--title TEXT] [--name NAME] [--experimental-codex-stdio]
       [--worktree|--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --project PROJECT --agent AGENT --issue ISSUE [--prompt TEXT]
       [--provider github|linear] [--auto-merge|--no-auto-merge] [--no-pipeline]
       [--title TEXT] [--name NAME] [--on-main] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx sessions create --quick --agent AGENT --prompt TEXT
-      [--title TEXT] [--cwd DIRECTORY] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
+      [--title TEXT] [--cwd DIRECTORY] [--experimental-codex-stdio] [--model MODEL] [--effort EFFORT] [--mode MODE] [--json]
   terminalx floating show|hide|toggle [--session SESSION] [--json]
   terminalx sessions show SESSION [--json]
   terminalx share create SESSION [--read-only] [--people EMAIL,EMAIL]
@@ -564,6 +564,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             for refused in ["--project", "--name"] {
                 if tokens.option(refused)?.is_some() {
                     return Err(invalid(format!("{refused} does not apply to --quick: a quick chat has no project and no worktree.")));
@@ -574,9 +575,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     return Err(invalid(format!("{refused} does not apply to --quick: a quick chat has no project and no worktree.")));
                 }
             }
-            rpc(
-                "sessions.create",
-                json!({
+            let mut params = json!({
                     "quick": true,
                     "agent": agent,
                     "prompt": prompt,
@@ -585,9 +584,9 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                     "model": model.unwrap_or_default(),
                     "effort": effort,
                     "mode": mode,
-                }),
-                tokens,
-            )
+                });
+            if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
+            rpc("sessions.create", params, tokens)
         }
         "create" => {
             let project = tokens.required_option("--project")?;
@@ -611,6 +610,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let model = tokens.option("--model")?;
             let effort = tokens.option("--effort")?;
             let mode = tokens.option("--mode")?;
+            let experimental_codex_stdio = tokens.flag("--experimental-codex-stdio")?;
             let worktree = tokens.flag("--worktree")?;
             let on_main = tokens.flag("--on-main")?;
             if worktree && on_main {
@@ -631,6 +631,7 @@ fn parse_sessions(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 "effort": effort,
                 "mode": mode,
             });
+            if experimental_codex_stdio { params["experimentalCodexStdio"] = json!(true); }
             // Only an issue start carries these, so every other request is
             // word for word what it was.
             if let Some(issue) = issue {
@@ -1124,6 +1125,20 @@ mod tests {
         match parse(&args(values)).unwrap().action {
             Action::Rpc { command, params, timeout } => (command, params, timeout),
             other => panic!("expected rpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn experimental_codex_transport_requires_an_explicit_creation_flag() {
+        for destination in [vec!["--quick"], vec!["--project", "project"]] {
+            let mut command = vec!["sessions", "create"];
+            command.extend(destination);
+            command.extend(["--agent", "codex", "--prompt", "hello"]);
+            let (_, ordinary, _) = rpc_of(&command);
+            assert!(ordinary.get("experimentalCodexStdio").is_none());
+            command.push("--experimental-codex-stdio");
+            let (_, experimental, _) = rpc_of(&command);
+            assert_eq!(experimental["experimentalCodexStdio"], json!(true));
         }
     }
 

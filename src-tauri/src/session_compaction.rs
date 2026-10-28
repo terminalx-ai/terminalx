@@ -10,14 +10,19 @@ pub(super) struct Admission {
     degraded: bool,
 }
 #[derive(Clone)]
+pub(super) enum Identity {
+    Pty { tail: Arc<tui::Tail>, launch: u64 },
+    Stdio { launch: Arc<()>, epoch: u64 },
+}
+#[derive(Clone)]
 struct Owner {
-    tail: Arc<tui::Tail>,
-    launch: u64,
+    identity: Identity,
     connection: u64,
 }
 
 /// Only a current runtime/launch can mint this token. No provider contract is
 /// inferred from the existence of a token or from a schema's item_started.
+#[derive(Clone)]
 pub(crate) struct Token {
     runtime: std::sync::Weak<Mutex<TabRuntime>>,
     scope: CompactionScope,
@@ -33,7 +38,12 @@ pub(crate) enum Publication { Committed(AgentEvent), Uncertain(AgentEvent) }
 
 fn current(rt: &TabRuntime, scope: &CompactionScope, owner: &Owner) -> bool {
     if scope.session_id != rt.session_id || scope.tab_id != rt.tab_id || scope.provider != rt.harness { return false; }
-    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == owner.launch && Arc::ptr_eq(&cli.tail, &owner.tail)) { return false; }
+    let matches = match (&rt.engine, &owner.identity) {
+        (Engine::Cli(cli), Identity::Pty { tail, launch }) => cli.generation == *launch && Arc::ptr_eq(&cli.tail, tail),
+        (Engine::CodexStdio(engine), Identity::Stdio { launch, epoch }) => Arc::ptr_eq(&engine.launch, launch) && rt.child.as_ref().is_some_and(|c| c.epoch == *epoch),
+        _ => false,
+    };
+    if !matches { return false; }
     index::get(&rt.session_id).ok().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| {
         tab.follow.conversation == scope.conversation_id && tab.provider_session_id.as_deref() == Some(scope.thread_id.as_str())
     })).unwrap_or(false)
@@ -70,22 +80,26 @@ impl SessionManager {
     pub(crate) fn bind_compaction(&self, scope: CompactionScope, tail: Arc<tui::Tail>, launch: u64) -> Result<Token> {
         let runtime = self.runtime(&scope.session_id, &scope.tab_id)?;
         let mut rt = runtime.lock().unwrap();
-        let mut owner = Owner { tail, launch, connection: 0 };
-        anyhow::ensure!(current(&rt, &scope, &owner), "compaction owner is no longer current");
+        self.bind_compaction_locked(&mut rt, scope, Identity::Pty { tail, launch })
+    }
+
+    pub(super) fn bind_compaction_locked(&self, rt: &mut TabRuntime, scope: CompactionScope, identity: Identity) -> Result<Token> {
+        let mut owner = Owner { identity, connection: 0 };
+        anyhow::ensure!(current(rt, &scope, &owner), "compaction owner is no longer current");
         anyhow::ensure!(!rt.compaction.degraded, "compaction publication is uncertain");
         if let Some(old) = rt.compaction.owners.remove(&scope) {
             let evidence = CompactionEvidence { scope: scope.clone(), observation: CompactionObservation::ContinuityLost { generation: old.connection, reason: CompactionLoss::Restarted } };
-            anyhow::ensure!(matches!(self.commit_compaction(&mut rt, evidence, false)?, Publication::Committed(_)), "compaction replacement append uncertain");
+            anyhow::ensure!(matches!(self.commit_compaction(rt, evidence, false)?, Publication::Committed(_)), "compaction replacement append uncertain");
         }
         // Reconcile an earlier backend's open connections before a new binding.
         let mut history = store::read_lines(&rt.log_path)?;
-        self.reconcile_compactions(&mut rt, &mut history)?;
+        self.reconcile_compactions(rt, &mut history)?;
         anyhow::ensure!(!rt.compaction.degraded, "compaction reconciliation uncertain");
         owner.connection = rt.seq.checked_add(1).context("compaction sequence exhausted")?;
         let evidence = CompactionEvidence { scope: scope.clone(), observation: CompactionObservation::ConnectionOpened { generation: owner.connection } };
-        anyhow::ensure!(matches!(self.commit_compaction(&mut rt, evidence, false)?, Publication::Committed(_)), "compaction binding append uncertain");
+        anyhow::ensure!(matches!(self.commit_compaction(rt, evidence, false)?, Publication::Committed(_)), "compaction binding append uncertain");
         rt.compaction.owners.insert(scope.clone(), owner.clone());
-        Ok(Token { runtime: Arc::downgrade(&runtime), scope, owner })
+        Ok(Token { runtime: rt.me.clone(), scope, owner })
     }
 
     /// Called only for evidence authenticated by a supported current producer.
@@ -95,17 +109,24 @@ impl SessionManager {
         let runtime = self.runtime(&token.scope.session_id, &token.scope.tab_id)?;
         anyhow::ensure!(token.runtime.upgrade().is_some_and(|old| Arc::ptr_eq(&old, &runtime)), "stale compaction runtime");
         let mut rt = runtime.lock().unwrap();
+        self.publish_compaction_locked(&mut rt, token, observation, confirmed_start)
+    }
+
+    pub(super) fn publish_compaction_locked(&self, rt: &mut TabRuntime, token: &Token, observation: CompactionObservation, confirmed_start: bool) -> Result<Publication> {
+        anyhow::ensure!(rt.me.ptr_eq(&token.runtime), "stale compaction runtime");
         let lost = matches!(observation, CompactionObservation::ContinuityLost { .. });
         // A departing owner may retire only its own still-bound connection,
         // even after the engine has already removed its physical launch.
-        anyhow::ensure!(lost || current(&rt, &token.scope, &token.owner), "stale compaction launch/scope");
+        anyhow::ensure!(lost || current(rt, &token.scope, &token.owner), "stale compaction launch/scope");
         anyhow::ensure!(!rt.compaction.degraded, "compaction publication is uncertain; do not retry provider input");
         anyhow::ensure!(rt.compaction.owners.get(&token.scope).is_some_and(|owner| owner.connection == token.owner.connection), "stale compaction connection");
         anyhow::ensure!(!matches!(observation, CompactionObservation::ConnectionOpened { .. }), "binding owns connection admission");
         anyhow::ensure!(generation(&observation).is_none_or(|g| g == token.owner.connection), "wrong compaction generation");
         anyhow::ensure!(!matches!(observation, CompactionObservation::ItemStarted { .. }) || confirmed_start, "start is not confirmed after provider gates");
-        let result = self.commit_compaction(&mut rt, CompactionEvidence { scope: token.scope.clone(), observation }, confirmed_start)?;
-        if lost { rt.compaction.owners.remove(&token.scope); }
+        let result = self.commit_compaction(rt, CompactionEvidence { scope: token.scope.clone(), observation }, confirmed_start)?;
+        // Buffered completion remains admissible after leader exit until the
+        // exact owner's readers drain. Replacement still fences the old token.
+        if lost && !matches!(token.owner.identity, Identity::Stdio { .. }) { rt.compaction.owners.remove(&token.scope); }
         Ok(result)
     }
 

@@ -89,7 +89,7 @@ impl Fixture {
     }
 
     fn session(&self, project: &Path, cwd: &Path, status: TabStatus) -> SessionEntry {
-        let tab = TabEntry {
+        let tab = TabEntry { transport: Default::default(),
             id: uuid::Uuid::now_v7().to_string(),
             harness: "claude".into(),
             title: None,

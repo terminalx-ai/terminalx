@@ -156,12 +156,27 @@ pub struct Follow {
     pub history: Vec<PastConversation>,
 }
 
+/// Persisted at creation. Missing metadata always means the existing PTY path.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentTransport {
+    #[default]
+    Pty,
+    ExperimentalCodexStdio,
+}
+
+impl AgentTransport {
+    pub fn is_default(&self) -> bool { *self == Self::Pty }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TabEntry {
     pub id: String,
     /// Harness name, kept verbatim so an entry written by a newer build survives.
     pub harness: String,
+    #[serde(default, skip_serializing_if = "AgentTransport::is_default")]
+    pub transport: AgentTransport,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -1086,6 +1101,27 @@ mod tests {
     }
 
     #[test]
+    fn transport_is_opt_in_and_survives_persistence_without_migrating_legacy_tabs() {
+        let _home = crate::store::temp_home();
+        let session: SessionEntry = serde_json::from_value(serde_json::json!({
+            "id":"transport", "projectPath":"/p", "cwd":"/p", "title":"transport", "created":"x", "modified":"x",
+            "tabs":[
+                {"id":"legacy", "harness":"codex", "created":"x", "providerSessionId":"existing-thread"},
+                {"id":"experimental", "harness":"codex", "created":"x", "transport":"experimentalCodexStdio"}
+            ]
+        })).unwrap();
+        save(&[session]).unwrap();
+        let loaded = load().unwrap();
+        assert_eq!(loaded[0].tabs[0].transport, AgentTransport::Pty);
+        assert_eq!(loaded[0].tabs[0].provider_session_id.as_deref(), Some("existing-thread"));
+        assert_eq!(loaded[0].tabs[1].transport, AgentTransport::ExperimentalCodexStdio);
+        let legacy = serde_json::to_value(&loaded[0].tabs[0]).unwrap();
+        assert!(legacy.get("transport").is_none());
+        let experimental = serde_json::to_value(&loaded[0].tabs[1]).unwrap();
+        assert_eq!(experimental["transport"], "experimentalCodexStdio");
+    }
+
+    #[test]
     fn tabs_without_a_permission_mode_use_the_product_default() {
         let tab: TabEntry = serde_json::from_value(serde_json::json!({
             "id": "t1",
@@ -1237,7 +1273,7 @@ mod tests {
         session.worktree_name = Some("feature-one".into());
         session.branch = Some("raccoon/feature-one".into());
         session.base_ref = Some("base-sha".into());
-        session.tabs.push(TabEntry {
+        session.tabs.push(TabEntry { transport: Default::default(),
             id: "tab-one".into(),
             harness: "codex".into(),
             title: None,

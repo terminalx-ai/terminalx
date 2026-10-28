@@ -108,7 +108,7 @@ fn a_shared_session_takes_no_new_bypass_tab_and_an_unshared_one_still_does() {
         "tabs": [{ "id": TAB, "harness": "claude", "permissionMode": "default", "created": index::now() }]
     })).unwrap();
     index::save(&[entry]).unwrap();
-    let tab = |mode: &str| crate::session_ops::NewTab { harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
+    let tab = |mode: &str| crate::session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: Some(mode.into()) };
     rig.manager.sharing.lock().unwrap().sessions.insert(SESSION.into(),
         crate::local_sharing::Share::new("host".into(), "".into(), String::new()));
     assert!(rig.manager.add_tab(SESSION, &tab("bypassPermissions")).is_err());
@@ -178,7 +178,7 @@ impl Rig {
             seq: 0,
             source_timestamp: None,
             message_times: HashMap::new(),
-            compaction: compaction::Admission::default(),
+            compaction: compaction::Admission::default(), stdio_compaction: None, stdio_starting: false, stdio_writer: None,
             status: TabStatus::Idle,
             child: None,
             child_pid: None,
