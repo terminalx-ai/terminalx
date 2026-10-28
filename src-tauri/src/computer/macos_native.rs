@@ -1222,19 +1222,24 @@ PY
     #[test]
     #[cfg(target_os = "macos")]
     fn a_socket_held_by_another_process_than_the_helper_is_refused() {
-        // The "helper" hands the socket to a process of its own and waits.
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("forwarding-helper.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\n/usr/bin/python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(5)' \"$2\" &\nsleep 5\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Bind in this test process while the helper is still suspended. The
+        // socket has a real, different peer PID before connection is attempted;
+        // Python startup and a five-second helper lifetime cannot race it.
         let base = socket_fixture_dir();
-        let error = start_session_in(&script, base.path(), &accept_all()).err().unwrap();
-        assert_eq!(error.code, "provider_incompatible");
+        let root = base.path().to_path_buf();
+        let listener = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let held = listener.clone();
+        let check: CodeCheck = std::sync::Arc::new(move |peer| {
+            assert!(matches!(peer, Peer::Pid(_)), "a mismatched socket must be refused before its code check");
+            let mut entries = std::fs::read_dir(&root).unwrap();
+            let socket = entries.next().unwrap().unwrap().path().join("provider.sock");
+            assert!(entries.next().is_none());
+            *held.lock().unwrap() = Some(std::os::unix::net::UnixListener::bind(socket).unwrap());
+            Ok(())
+        });
+        let error = start_session_in(Path::new("/usr/bin/true"), base.path(), &check).err().unwrap();
+        assert!(listener.lock().unwrap().is_some());
+        assert_eq!(error.code, "provider_incompatible", "{}", error.message);
         assert!(error.message.contains("not by the helper just started"), "{}", error.message);
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
     }
