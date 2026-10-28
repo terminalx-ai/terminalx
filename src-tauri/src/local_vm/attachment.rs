@@ -124,6 +124,9 @@ fn check_using(journal: &Journal, target: &Target, rpc: &mut Rpc<'_>) -> Result<
             .as_str()
             .context("Guest runtime digest missing")?,
     )?;
+    if let super::transport::Transport::MacosPersonalized { binding } = &env.transport {
+        if response["runtimeSha256"] != binding.runtime_sha256 { bail!("Attached guest runtime differs from personalized transport"); }
+    }
     Ok(
         json!({"target":target,"available":true,"runtimeSha256":response["runtimeSha256"],
         "detail":"Guest desktop route is available. Tool permissions and application attestation are checked by the guest; live acceptance is separate."}),
@@ -258,6 +261,7 @@ impl<'a> Adapter<'a> {
             bail!("Attachment ID already has retained history; inspect it before reopening");
         }
         let mut record = json!({"binding":binding,"target":target,"sandbox":env.sandbox,"runtimeSha256":checked["runtimeSha256"],"status":"acquiring","calls":{},"createdAt":journal::now()});
+        if env.transport.is_personalized() { record["transportBinding"] = json!(env.transport); }
         retain(root, &binding, &record)?;
         journal::atomic_private_write(
             &guard.marker,
@@ -285,6 +289,10 @@ impl<'a> Adapter<'a> {
         let env = environment(self.journal, &self.binding.target())?;
         if self.record["sandbox"] != env.sandbox {
             bail!("Selected VM transport changed");
+        }
+        if (env.transport.is_personalized() || !self.record["transportBinding"].is_null())
+            && self.record["transportBinding"] != json!(env.transport) {
+            bail!("Retained attachment account/key/runtime binding changed; ownership remains fenced");
         }
         Ok(env)
     }

@@ -126,6 +126,92 @@ print(json.dumps({'ok':True,'result':result}))
 }
 
 #[test]
+fn serving_enrollment_requires_original_account_artifact_and_exclusive_ownership() {
+    let f = Fixture::new();
+    let key = "installed-serving";
+    f.prepare(key);
+    let installed = f.deliver(key);
+    assert_eq!(installed["status"], "installed");
+    f.journal
+        .transaction(|s| {
+            s.enabled = true;
+            Ok(())
+        })
+        .unwrap();
+    let observed = json!({"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"platform":"linux",
+        "runtimeSha256":installed["intent"]["runtimeSha256"],"taskMode":"shellFiles","manualControl":false,
+        "identity":{"environmentId":f.binding.environment_id,"generation":f.binding.generation,"protocol":1,"account":f.binding.account}});
+    for field in ["generation", "runtimeSha256", "identity", "manualControl"] {
+        let mut changed = observed.clone();
+        changed[field] = if field == "manualControl" {
+            json!(true)
+        } else {
+            json!("changed")
+        };
+        assert!(
+            enroll_serving_using(&f.root(), &f.journal, key, |_| Ok(changed)).is_err(),
+            "{field}"
+        );
+    }
+    assert!(f.journal.read().unwrap().environments.is_empty());
+    let attached = Guard::attach(&f.root(), &f.binding.target, &f.journal).unwrap();
+    assert!(enroll_serving_using(&f.root(), &f.journal, key, |_| panic!(
+        "routed while desktop owned"
+    ))
+    .is_err());
+    attached.completed().unwrap();
+    let complete = enroll_serving_using(&f.root(), &f.journal, key, |env| {
+        assert_eq!(env.transport.container(), Some(f.binding.target.clone()));
+        Ok(observed.clone())
+    })
+    .unwrap();
+    assert_eq!(complete["enrollment"]["status"], "verified");
+    assert_eq!(complete["ready"], false);
+    assert_eq!(
+        complete["enrollment"]["environment"]["id"],
+        f.binding.environment_id
+    );
+    // Model loss of the final local receipt after durable journal enrollment.
+    journal::atomic_private_write(
+        &linux_profile::directory(&f.root(), key)
+            .unwrap()
+            .join("receipt.json"),
+        &serde_json::to_vec(&installed).unwrap(),
+    )
+    .unwrap();
+    let reopened = Journal::open_existing(&f.root()).unwrap();
+    enroll_serving_using(&f.root(), &reopened, key, |_| Ok(observed.clone())).unwrap();
+    assert_eq!(reopened.read().unwrap().environments.len(), 1);
+    let env = reopened.read().unwrap().environments[&f.binding.environment_id].clone();
+    let task = reopened
+        .submit_selected(
+            "selected",
+            journal::TaskInput {
+                parent_session_id: journal::new_id(),
+                parent_tab_id: journal::new_id(),
+                parent_message_id: "selected".into(),
+                environment_id: env.id.clone(),
+                prompt: "fixture".into(),
+                harness: "codex".into(),
+                model: "gpt-6-astra".into(),
+                effort: None,
+                permission_mode: "manual".into(),
+                files: vec![],
+                desktop: false,
+            },
+            Some(&env.transport.target(&env.id, &env.generation)),
+        )
+        .unwrap();
+    assert!(enroll_serving_using(&f.root(), &reopened, key, |_| panic!(
+        "routed while task owned"
+    ))
+    .is_err());
+    assert_eq!(reopened.read().unwrap().tasks[&task.target.task_id], task);
+    // The public compiled-catalog boundary remains unavailable to fixtures.
+    assert!(linux_profile::trusted_record(&f.root(), key).is_err());
+}
+
+#[test]
 fn real_guest_installer_retains_lost_reply_and_reconciles_original_receipt_without_reinstall() {
     let fixture = Fixture::new();
     let prepared = fixture.prepare("once");

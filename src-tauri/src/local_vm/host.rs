@@ -77,6 +77,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 // container binding as a Cua selector. Linux lifecycle setup
                 // remains explicit until its prepared profile is installed.
                 env.transport.require_macos()?;
+                if env.transport.is_personalized() { super::macos_transport::require_available()?; }
             }
         }
     }
@@ -368,6 +369,7 @@ fn recovery_receipt(task: &Task, response: &Value) -> Result<Task> {
     let recovered: Task =
         serde_json::from_value(response.clone()).context("Invalid guest recovery receipt")?;
     if recovered.computer != task.computer
+        || recovered.transport_binding != task.transport_binding
         || recovered.target != task.target
         || recovered.input != task.input
         || recovered.idempotency_key != task.idempotency_key
@@ -476,6 +478,7 @@ fn manual_control_receipt(
     record_manual_control(journal, env, response)
 }
 pub fn guest_rpc(env: &Environment, method: &str, params: Value) -> Result<Value> {
+    if env.transport.is_personalized() { return super::macos_transport::rpc(env, method, params, BUDGET); }
     if env.transport.container().is_some() { return super::transport::linux_rpc(env, method, params, BUDGET); }
     journal::validate_sandbox(&env.sandbox)?;
     let info = inspect_sandbox(&env.sandbox)?;
@@ -489,7 +492,8 @@ pub(super) fn guest_rpc_ready(
     info: &Value,
     budget: Duration,
 ) -> Result<Value> {
-    env.transport.require_macos()?;
+    if env.transport.is_personalized() { return super::macos_transport::rpc(env, method, params, budget); }
+    env.transport.require_legacy()?;
     validate_macos_vm(info)?;
     if info["id"] != env.sandbox {
         bail!("Cua returned a different VM identity; no guest request was sent");
@@ -844,6 +848,8 @@ pub(crate) fn install_current_guest(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
+    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
+    env.transport.require_legacy()?;
     let info = inspect_sandbox(&env.sandbox)?;
     validate_macos_vm(&info)?;
     if info["id"] != env.sandbox
@@ -857,6 +863,8 @@ pub(crate) fn check_setup_vm(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
+    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
+    env.transport.require_legacy()?;
     // Existing compatible signed app is preserved in place, retaining its
     // designated requirement and user-granted permissions. Never replace or
     // stop a daemon as a side effect of setup inspection/preparation.
@@ -938,6 +946,8 @@ pub(crate) fn prepare_guest_driver(env: &Environment) -> Result<()> {
 }
 
 pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result<()> {
+    if env.transport.is_personalized() { return super::macos_transport::require_available(); }
+    env.transport.require_legacy()?;
     if harness != "codex" {
         bail!("This prepared profile supports automatic Codex setup; existing other provider installations are preserved");
     }
@@ -999,6 +1009,8 @@ pub(crate) fn prepare_guest_provider(env: &Environment, harness: &str) -> Result
 }
 
 fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
+    if env.transport.is_personalized() { return super::macos_transport::install(env, runtime); }
+    env.transport.require_legacy()?;
     compatible()?;
     if !runtime.is_absolute() || !runtime.is_file() {
         bail!("The bundled macOS arm64 guest runtime is unavailable");
@@ -1141,7 +1153,7 @@ fn install_guest(env: &Environment, runtime: &Path) -> Result<()> {
         b"",
         BUDGET,
     )?;
-    let plist = super::supervisor::guest_plist(env);
+    let plist = super::supervisor::guest_plist(env)?;
     let plist_path = staging.join(format!("{}.plist", env.id));
     journal::atomic_private_write(&plist_path, plist.as_bytes())?;
     cua(

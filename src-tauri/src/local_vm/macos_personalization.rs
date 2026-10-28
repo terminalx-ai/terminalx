@@ -27,7 +27,7 @@ pub struct Target {
     pub macos_major: u32,
 }
 impl Target {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         journal::validate_id(&self.environment_id)?;
         journal::validate_id(&self.generation)?;
         super::transport::validate_runtime_sha(&self.vm_fingerprint)?;
@@ -234,8 +234,8 @@ pub fn reconcile_account_using(
     retain(&dir, &record)?;
     Ok(record)
 }
-fn host_key(receipt: &TrustReceipt) -> Result<()> {
-    let parts: Vec<_> = receipt.host_key.split(' ').collect();
+pub(super) fn public_key(key: &str) -> Result<String> {
+    let parts: Vec<_> = key.split(' ').collect();
     if parts.len() != 2 || parts[0] != "ssh-ed25519" {
         bail!("Pinned Ed25519 host key required");
     }
@@ -249,7 +249,10 @@ fn host_key(receipt: &TrustReceipt) -> Result<()> {
     }
     use sha2::{Digest, Sha256};
     let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(&bytes)));
-    if receipt.host_key_fingerprint != fingerprint {
+    Ok(fingerprint)
+}
+fn host_key(receipt: &TrustReceipt) -> Result<()> {
+    if receipt.host_key_fingerprint != public_key(&receipt.host_key)? {
         bail!("Bootstrap host-key fingerprint mismatch");
     }
     super::transport::validate_runtime_sha(&receipt.bootstrap_observation_digest)
@@ -276,6 +279,43 @@ pub struct SshPlan {
     pub known_hosts: String,
     pub request: Vec<u8>,
 }
+pub(super) struct Retained {
+    pub plan: AccountPlan,
+    pub account: AccountReceipt,
+    pub trust: TrustReceipt,
+}
+pub(super) fn retained(root: &Path, key: &str, target: &Target) -> Result<Retained> {
+    target.validate()?;
+    let dir = directory(root, key)?;
+    super::macos_keys::check_directory(&root.join("macos-personalization"))?;
+    super::macos_keys::check_directory(&dir)?;
+    let record: Value = serde_json::from_slice(&super::macos_keys::private_read(
+        &dir.join("record.json"),
+        64 * 1024,
+    )?)?;
+    if record["inputDigest"] != journal::digest(&serde_json::to_vec(&record["intent"])?)
+        || record["status"] != "trustObserved"
+        || record["intent"]["target"] != json!(target)
+    {
+        bail!("Verified bootstrap binding is unavailable or replaced");
+    }
+    let plan: AccountPlan = serde_json::from_value(record["intent"]["account"].clone())?;
+    let account: AccountReceipt = serde_json::from_value(record["accountReceipt"].clone())?;
+    confirm_account(target, &plan, &account)?;
+    let trust: TrustReceipt = serde_json::from_value(record["trustReceipt"].clone())?;
+    host_key(&trust)?;
+    if trust.target != *target
+        || trust.account_receipt_digest
+            != journal::digest(&serde_json::to_vec(&record["accountReceipt"])?)
+    {
+        bail!("Transport trust receipt changed");
+    }
+    Ok(Retained {
+        plan,
+        account,
+        trust,
+    })
+}
 /// Builds, but never executes, the proposed account-bound transport. Private
 /// key creation and VM-bound trust capture are separate unimplemented gates.
 pub fn ssh_plan(
@@ -292,25 +332,15 @@ pub fn ssh_plan(
     if !current_ip.is_private() || current_ip.is_loopback() || method.is_empty() {
         bail!("Exact VM endpoint and guest RPC method required");
     }
-    let record = read(&directory(root, key)?)?;
-    if record["status"] != "trustObserved" || record["intent"]["target"] != json!(current_target) {
-        bail!("Verified bootstrap binding is unavailable or replaced");
-    }
-    let account: AccountPlan = serde_json::from_value(record["intent"]["account"].clone())?;
-    account.validate()?;
-    let observed: AccountReceipt = serde_json::from_value(record["accountReceipt"].clone())?;
-    confirm_account(current_target, &account, &observed)?;
-    let trust: TrustReceipt = serde_json::from_value(record["trustReceipt"].clone())?;
-    host_key(&trust)?;
-    if trust.target != *current_target
-        || trust.account_receipt_digest
-            != journal::digest(&serde_json::to_vec(&record["accountReceipt"])?)
-    {
-        bail!("Transport trust receipt changed");
-    }
+    let Retained {
+        plan: account,
+        account: observed,
+        trust,
+    } = retained(root, key, current_target)?;
     let identity = root
         .join("macos-personalization-keys")
-        .join(&account.ssh_key_reference);
+        .join(&account.ssh_key_reference)
+        .join("private_key");
     let known = directory(root, key)?.join("known_hosts");
     for path in [&identity, &known] {
         if !path.is_absolute()

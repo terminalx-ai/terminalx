@@ -46,7 +46,7 @@ pub(super) fn enroll(journal: &super::journal::Journal, params: Value) -> Result
     serde_json::to_value(env).map_err(Into::into)
 }
 
-fn validate_description(env: &Environment, description: &Value) -> Result<()> {
+pub(super) fn validate_description(env: &Environment, description: &Value) -> Result<()> {
     let Transport::LinuxContainer { runtime_sha256, .. } = &env.transport else { bail!("Linux binding required"); };
     if description["environmentId"] != env.id || description["generation"] != env.generation
         || description["protocol"] != super::journal::PROTOCOL || description["platform"] != "linux"
@@ -60,21 +60,25 @@ fn validate_description(env: &Environment, description: &Value) -> Result<()> {
 pub enum Transport {
     #[default]
     MacosLume,
+    MacosPersonalized { binding: Box<super::macos_transport::Binding> },
     LinuxContainer { runtime: Runtime, id: String, #[serde(rename = "runtimeSha256")] runtime_sha256: String },
 }
 
 impl Transport {
-    pub fn is_macos(&self) -> bool { matches!(self, Self::MacosLume) }
-    pub fn installation(&self) -> &'static str {
-        match self {
-            Self::MacosLume => super::host::GUEST_HOME,
-            Self::LinuxContainer { .. } => LINUX_INSTALL,
-        }
+    pub fn is_legacy_macos(&self) -> bool { matches!(self, Self::MacosLume) }
+    pub fn is_macos(&self) -> bool { matches!(self, Self::MacosLume | Self::MacosPersonalized { .. }) }
+    pub fn is_personalized(&self) -> bool { matches!(self, Self::MacosPersonalized { .. }) }
+    pub fn installation(&self) -> Result<String> {
+        Ok(match self {
+            Self::MacosLume => super::host::GUEST_HOME.into(),
+            Self::MacosPersonalized { binding } => binding.account.installation()?.to_string_lossy().into_owned(),
+            Self::LinuxContainer { .. } => LINUX_INSTALL.into(),
+        })
     }
 
     pub fn target(&self, environment_id: &str, generation: &str) -> Target {
         match self {
-            Self::MacosLume => Target::MacosGuest {
+            Self::MacosLume | Self::MacosPersonalized { .. } => Target::MacosGuest {
                 environment_id: environment_id.into(), generation: generation.into(),
             },
             Self::LinuxContainer { runtime, id, .. } => Target::LinuxGuest {
@@ -86,15 +90,19 @@ impl Transport {
 
     pub fn container(&self) -> Option<Target> {
         match self {
-            Self::MacosLume => None,
+            Self::MacosLume | Self::MacosPersonalized { .. } => None,
             Self::LinuxContainer { runtime, id, .. } => Some(Target::LinuxContainer { runtime: *runtime, id: id.clone() }),
         }
     }
 
     pub fn require_macos(&self) -> Result<()> {
-        if *self != Self::MacosLume {
+        if !self.is_macos() {
             bail!("This operation requires a macOS Lume environment; no operation was routed");
         }
+        Ok(())
+    }
+    pub fn require_legacy(&self) -> Result<()> {
+        if !self.is_legacy_macos() { bail!("This legacy operation cannot use a personalized or Linux transport"); }
         Ok(())
     }
 }

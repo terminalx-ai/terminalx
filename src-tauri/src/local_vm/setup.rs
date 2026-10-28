@@ -34,8 +34,7 @@ pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
     validate_harness(harness)?;
     validate_key(key)?;
     if env.transport.container().is_some() { return super::linux_setup::initial(env, harness, key); }
-    Ok(
-        json!({"protocol":PROTOCOL,"environmentId":env.id,"generation":env.generation,
+    let mut report = json!({"protocol":PROTOCOL,"environmentId":env.id,"generation":env.generation,
         "harness":harness,"idempotencyKey":key,"status":"queued","lastCheckedAt":null,
         "detail":"Preparing the disclosed tool/runtime profile; permissions and account consent remain yours",
         "steps":[
@@ -47,8 +46,14 @@ pub fn initial(env: &Environment, harness: &str, key: &str) -> Result<Value> {
             {"id":"accessibility","label":"Allow guest Accessibility","state":"pending"},
             {"id":"screenRecording","label":"Allow guest Screen Recording","state":"pending"},
             {"id":"provider","label":"Connect your guest provider account","state":"pending"},
-            {"id":"desktop","label":"Verify a usable guest desktop","state":"pending"}]}),
-    )
+            {"id":"desktop","label":"Verify a usable guest desktop","state":"pending"}]});
+    if env.transport.is_personalized() {
+        super::macos_transport::binding(env)?;
+        report["transportBinding"] = json!(env.transport);
+        report["status"] = json!("needsAttention");
+        report["detail"] = json!("Personalized macOS setup is unavailable until secure account provisioning and VM identity verification are supported. No setup action was started.");
+    }
+    Ok(report)
 }
 
 fn validate_harness(harness: &str) -> Result<()> {
@@ -70,13 +75,25 @@ pub fn validate_request(harness: &str, key: &str) -> Result<()> {
 fn env(journal: &Journal, params: &Value) -> Result<Environment> {
     let id = host::field(params, "environmentId")?;
     let generation = host::field(params, "generation")?;
-    journal
+    let found = journal
         .read()?
         .environments
         .get(id)
         .filter(|e| e.generation == generation && e.deleted_at.is_none())
         .cloned()
-        .context("Environment/generation changed; no setup operation was routed")
+        .context("Environment/generation changed; no setup operation was routed")?;
+    check_transport(&found)?;
+    Ok(found)
+}
+
+fn check_transport(env: &Environment) -> Result<()> {
+    if let Some(report) = &env.setup {
+        if (env.transport.is_personalized() || !report["transportBinding"].is_null())
+            && report["transportBinding"] != json!(env.transport) {
+            bail!("Setup account/key/runtime binding changed; retain the original history");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -137,7 +154,7 @@ pub fn set_step(
         let env = state
             .environments
             .get_mut(&target.id)
-            .filter(|e| e.generation == target.generation && e.deleted_at.is_none())
+            .filter(|e| e.generation == target.generation && e.transport == target.transport && e.deleted_at.is_none())
             .context("Setup timeline changed")?;
         let setup = env.setup.as_mut().context("Setup request missing")?;
         let step = setup["steps"]
@@ -160,6 +177,13 @@ pub fn set_step(
 }
 
 pub(super) fn check_binding(env: &Environment, harness: &str, value: &Value) -> Result<()> {
+    check_transport(env)?;
+    if let super::transport::Transport::MacosPersonalized { binding } = &env.transport {
+        if value["runtime"]["identity"]["macosAccount"] != json!(binding.account)
+            || value["runtime"]["executableSha256"] != binding.runtime_sha256 {
+            bail!("Setup receipt differs from personalized account/runtime binding");
+        }
+    }
     if value["protocol"] != 1
         || value["environmentId"] != env.id
         || value["generation"] != env.generation
@@ -195,6 +219,7 @@ fn runtime_mismatch(readiness: &Value) -> bool {
 // Queueing retains intent only. The existing installer checks fresh guest
 // task/history quiescence again before replacing or reloading its service.
 fn runtime_update_available(env: &Environment, report: &Value) -> bool {
+    if env.transport.is_personalized() { return false; }
     let read = &report["readiness"];
     report["protocol"] == PROTOCOL
         && report["environmentId"] == env.id
@@ -312,6 +337,11 @@ struct ActionRequest {
     login_id: Option<String>,
 }
 pub fn action(journal: &Journal, params: Value) -> Result<Value> {
+    // A known unavailable profile is a refusal before intent, not an uncertain
+    // delivered action that would falsely strand a provider/desktop workflow.
+    if env(journal, &params)?.transport.is_personalized() {
+        super::macos_transport::require_available()?;
+    }
     action_using(journal, params, |env, params| {
         host::guest_rpc(env, "environment.setupAction", params)
     })
@@ -341,7 +371,7 @@ fn action_using(
     let digest = journal::digest(&serde_json::to_vec(&params)?);
     let prior=journal.transaction(|state| {
         let unfinished=state.tasks.values().any(|t|t.target.environment_id==current.id && !t.status.terminal());
-        let env=state.environments.get_mut(&current.id).filter(|e|e.generation==current.generation && e.deleted_at.is_none()).context("Setup timeline changed")?;
+        let env=state.environments.get_mut(&current.id).filter(|e|e.generation==current.generation && e.transport==current.transport && e.deleted_at.is_none()).context("Setup timeline changed")?;
         let blocked=env.manual_control || unfinished;
         let creation_blocked=super::creation::blocked(env);
         let report=env.setup.as_mut().context("Confirm guest setup before requesting an action")?;
@@ -386,7 +416,7 @@ fn action_using(
         let report = state
             .environments
             .get_mut(&current.id)
-            .filter(|e| e.generation == current.generation && e.deleted_at.is_none())
+            .filter(|e| e.generation == current.generation && e.transport == current.transport && e.deleted_at.is_none())
             .and_then(|e| e.setup.as_mut())
             .context("Setup timeline changed")?;
         report["operations"][&request.idempotency_key]["receipt"] = receipt.clone();
@@ -491,6 +521,10 @@ pub fn auth(journal: &Journal, params: Value) -> Result<Value> {
 /// Called only by the admitted owner controller. Installer steps are recorded
 /// before effects; the supervisor's startup reconciliation never requeues them.
 pub fn advance(journal: &Journal, target: &Environment) -> Result<()> {
+    if target.transport.is_personalized() {
+        check_transport(target)?;
+        return super::macos_transport::require_available();
+    }
     if target.transport.container().is_some() {
         // An attachment is an independent workflow, not a failed setup effect.
         let Ok(_admission) = journal.desktop_admission(target) else { return Ok(()); };
@@ -685,7 +719,7 @@ fn refresh_actions(journal: &Journal, target: &Environment) -> Result<()> {
             let report = state
                 .environments
                 .get_mut(&current.id)
-                .filter(|e| e.generation == current.generation && e.deleted_at.is_none())
+                .filter(|e| e.generation == current.generation && e.transport == current.transport && e.deleted_at.is_none())
                 .and_then(|e| e.setup.as_mut())
                 .context("Setup timeline changed")?;
             let op = &mut report["operations"][&key];

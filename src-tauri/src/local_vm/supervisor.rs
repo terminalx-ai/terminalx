@@ -37,11 +37,15 @@ fn plist(label: &str, args: &[String], environment: &[(&str, String)], log: &str
         .collect::<String>();
     format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array>{arguments}</array><key>EnvironmentVariables</key><dict>{variables}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>",xml(label),xml(log),xml(log))
 }
-pub fn guest_plist(env: &Environment) -> String {
-    plist("com.terminalx.local-guest",&[format!("{}/bin/terminalx-serve",host::GUEST_HOME),"--data-dir".into(),format!("{}/runtime",host::GUEST_HOME)],&[
+pub fn guest_plist(env: &Environment) -> Result<String> {
+    env.transport.require_macos()?;
+    if env.transport.is_personalized() { super::macos_transport::binding(env)?; }
+    let install = env.transport.installation()?;
+    let home = Path::new(&install).parent().context("Guest account home missing")?.to_string_lossy();
+    Ok(plist("com.terminalx.local-guest",&[format!("{install}/bin/terminalx-serve"),"--data-dir".into(),format!("{install}/runtime")],&[
         ("TERMINALX_LOCAL_DESKTOP","0".into()),("TERMINALX_LOCAL_VM_ENVIRONMENT_ID",env.id.clone()),("TERMINALX_LOCAL_VM_GENERATION",env.generation.clone()),
-        ("PATH","/Users/lume/.terminalx-local/bin:/Users/lume/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
-    ],&format!("{}/runtime/guest.log",host::GUEST_HOME))
+        ("PATH",format!("{install}/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")),
+    ],&format!("{install}/runtime/guest.log")))
 }
 
 /// Called only after the selected guest's worker/setup quiescence is verified.
@@ -552,6 +556,7 @@ fn advance(journal: &Journal, env: &Environment, task: &Task, stopped: &AtomicBo
     };
     let guest: Task = serde_json::from_value(result).context("Guest task protocol mismatch")?;
     if guest.computer != task.computer
+        || guest.transport_binding != task.transport_binding
         || guest.target != task.target
         || guest.input != task.input
         || guest.idempotency_key != task.idempotency_key
@@ -927,7 +932,7 @@ mod tests {
             manual_control: false,
             setup: None,
         };
-        let text = guest_plist(&env);
+        let text = guest_plist(&env).unwrap();
         assert!(text.contains("KeepAlive"));
         assert!(text.contains("TERMINALX_LOCAL_VM_GENERATION"));
         assert!(!text.contains(".raccoon"));

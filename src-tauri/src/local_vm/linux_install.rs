@@ -187,6 +187,96 @@ fn deliver(root: &Path, journal: &Journal, key: &str) -> Result<Value> {
         invoke(&binding.target, &header("receipt", key, intent)?, None)
     })
 }
+
+/// Verify a currently serving owner after installation. This never starts an
+/// owner or provider and does not infer readiness from installed files.
+fn enroll_serving_using(
+    root: &Path,
+    journal: &Journal,
+    key: &str,
+    describe: impl FnOnce(&journal::Environment) -> Result<Value>,
+) -> Result<Value> {
+    let mut record = linux_profile::inspect(root, key)?;
+    let binding: InstallBinding = serde_json::from_value(record["intent"]["binding"].clone())?;
+    linux_profile::validate_binding(&binding)?;
+    let account = binding
+        .account
+        .as_ref()
+        .context("Installed dedicated account binding missing")?;
+    account.validate()?;
+    let _guard = Guard::acquire(root, &binding.target)?;
+    if record["status"] != "installed"
+        || record["inputDigest"] != journal::digest(&serde_json::to_vec(&record["intent"])?)
+    {
+        bail!("Original completed installation receipt required before serving-runtime enrollment");
+    }
+    linux_profile::validate_receipt(key, &record, &record["receipt"])?;
+    let Target::LinuxContainer { runtime, id } = &binding.target else {
+        bail!("Exact Linux container required");
+    };
+    let target = Target::LinuxGuest {
+        runtime: *runtime,
+        id: id.clone(),
+        environment_id: binding.environment_id.clone(),
+        generation: binding.generation.clone(),
+    };
+    let sha = record["intent"]["runtimeSha256"]
+        .as_str()
+        .context("Installed runtime digest missing")?;
+    let env = journal::Environment {
+        transport: super::transport::Transport::LinuxContainer {
+            runtime: *runtime,
+            id: id.clone(),
+            runtime_sha256: sha.into(),
+        },
+        id: binding.environment_id.clone(),
+        generation: binding.generation.clone(),
+        name: "Linux guest".into(),
+        sandbox: format!("container:{}:{id}", runtime.name()),
+        created_at: journal::now(),
+        deleted_at: None,
+        keep_awake: false,
+        owned: false,
+        provision: None,
+        manual_control: false,
+        setup: None,
+    };
+    let state = journal.read()?;
+    if !state.enabled
+        || state
+            .tasks
+            .values()
+            .any(|task| task.target.environment_id == env.id && !task.status.terminal())
+        || state.environments.get(&env.id).is_some_and(|current| {
+            current.deleted_at.is_some()
+                || current.generation != env.generation
+                || current.transport != env.transport
+                || current.manual_control
+                || super::setup::busy(current)
+        })
+    {
+        bail!("Serving enrollment is disabled or conflicts with retained guest work/identity");
+    }
+    let observed = describe(&env)?;
+    super::transport::validate_description(&env, &observed)?;
+    if observed["identity"]["environmentId"] != env.id
+        || observed["identity"]["generation"] != env.generation
+        || observed["identity"]["protocol"] != journal::PROTOCOL
+        || observed["identity"]["account"] != json!(account)
+        || observed["manualControl"] != false
+    {
+        bail!("Serving guest account/identity differs from the original installed runtime");
+    }
+    let enrolled = journal.enroll_container(&env.name, &target, sha)?;
+    record["enrollment"] = json!({"status":"verified","environment":enrolled,"description":observed,"checkedAt":journal::now(),"ready":false});
+    record["ready"] = json!(false);
+    record["detail"]=json!("Installed runtime is serving with the original account/artifact binding. Guest provider authorization and task readiness remain separate.");
+    journal::atomic_private_write(
+        &linux_profile::directory(root, key)?.join("receipt.json"),
+        &serde_json::to_vec(&record)?,
+    )?;
+    Ok(record)
+}
 pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
     let target: Target = serde_json::from_value(params["target"].clone())?;
     container(&target)?;
@@ -227,6 +317,11 @@ pub(crate) fn request(method: &str, params: Value) -> Result<Value> {
         ),
     )?;
     match method {
+        "computer.enrollInstalledLinuxRuntime" => {
+            enroll_serving_using(&root, &journal, key, |env| {
+                super::transport::linux_rpc(env, "describe", json!({}), Duration::from_secs(45))
+            })
+        }
         "computer.deliverLinuxRuntime" => deliver(&root, &journal, key),
         "computer.reconcileLinuxRuntime" => {
             linux_profile::reconcile_prepared(&root, key, true, |binding, intent| {

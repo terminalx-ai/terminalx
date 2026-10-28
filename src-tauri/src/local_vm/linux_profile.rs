@@ -241,7 +241,7 @@ pub(super) fn directory(root: &Path, key: &str) -> Result<std::path::PathBuf> {
         .join("linux-runtime-preparation")
         .join(journal::digest(key.as_bytes())))
 }
-fn validate_binding(binding: &InstallBinding) -> Result<()> {
+pub(super) fn validate_binding(binding: &InstallBinding) -> Result<()> {
     if !matches!(binding.target, Target::LinuxContainer { .. }) {
         bail!("Linux installer requires an exact container target");
     }
@@ -377,7 +377,7 @@ pub(super) fn execute_prepared(
     }
     Ok(record)
 }
-fn finish(root: &Path, key: &str, record: &mut Value, observed: &Value) -> Result<()> {
+pub(super) fn validate_receipt(key: &str, record: &Value, observed: &Value) -> Result<()> {
     let intent = &record["intent"];
     let receipt = &observed["receipt"];
     let request = journal::digest(key.as_bytes());
@@ -397,6 +397,10 @@ fn finish(root: &Path, key: &str, record: &mut Value, observed: &Value) -> Resul
     {
         bail!("Fresh original installer completion/account/identity receipt is unconfirmed");
     }
+    Ok(())
+}
+fn finish(root: &Path, key: &str, record: &mut Value, observed: &Value) -> Result<()> {
+    validate_receipt(key, record, observed)?;
     let mut next = record.clone();
     next["status"] = json!("installed");
     next["receipt"] = observed.clone();

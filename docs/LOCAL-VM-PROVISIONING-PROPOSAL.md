@@ -67,8 +67,11 @@ both the short-lived RPC helper and running owner refuse a missing or changed
 binding. An incomplete installation cannot fall back to ordinary host mode.
 Legacy identities retain their original serialized shape and dedicated lume
 account path. No personalized identity has been installed or activated.
-VNC screen transitions, out-of-band host-key capture and the host-side account-bound
-transport still need source integration. Fresh macOS26 acceptance must test these against an
+The host now has a separate `macosPersonalized` transport variant and a bounded
+OpenSSH executor tested with fake executables. Production dispatch refuses before
+reading key material or contacting a VM: the authoritative VM endpoint observer,
+VNC screen transitions and out-of-band host-key capture remain unwired.
+Fresh macOS26 acceptance must test these against an
 actual supported restore image before enabling Create.
 
 ## Account-bound transport
@@ -98,16 +101,32 @@ Cua route. The host's read-only version check reports **OpenSSH_10.2p1 / LibreSS
   timeout as refusal/unknown outcome, with no fallback to legacy credentials,
   another VM, host shell, or host desktop.
 
-These are supported SSH configuration concepts. The source request planner now
-covers identity, arguments and bounded RPC bytes, while connection execution,
-credential-reference resolution and the initial trust ceremony remain unwired.
+These are supported SSH configuration concepts. The source executor now resolves
+only a private per-guest reference, verifies its retained file digest/inode and
+derived public key, pins the original known-hosts contents, clears inherited
+environment, and sends one bounded RPC. Fake executable tests cover lost replies,
+retained task polling, changed parent/VM/account/runtime/key/receipt rejection and
+absence of fallback. No real SSH connection or key utility was executed.
 [OpenSSH configuration reference](https://man.openbsd.org/ssh_config).
 
-Remaining host integration points: extend `local_vm/transport.rs` with a separate
-typed account-bound variant; use the retained personalized home in its host task
-workspace paths, installer and supervisor; connect the personalization ledger to
-`creation.rs`/`setup.rs` only after authenticated bootstrap/trust exists. Guest-side
-home/account checks are source-wired, but this host route is not. The account lookup
+The private key lifecycle retains intent before an internal producer supplies new
+material; it has no import-from-path API or production generator. Synthetic
+fixture bytes exercise private storage, terminal receipt recovery and retirement.
+An interrupted generation with no terminal receipt remains fenced. Neither a
+new request nor a missing record replaces that reference. The source verifies
+private/public pairing using the fixed OpenSSH `ssh-keygen -y -f` contract; tests
+substitute a fake verifier, so they do not establish cryptographic acceptance.
+[OpenSSH key utility reference](https://man.openbsd.org/ssh-keygen).
+
+Personalized task records and attachment histories now retain the full transport
+binding. Setup reports reject changed bindings; task workspace paths and guest
+LaunchAgent/installer plans use the retained account home. Runtime delivery itself
+still needs the authenticated bootstrap installer and durable guest receipt: the
+plan does not install or activate anything, and legacy Cua installer/provider/Driver
+paths explicitly refuse personalized environments. Production inventory advertises
+no usable capability for this gated profile. Connect the VM endpoint observer,
+real new-key producer and authenticated trust ceremony before enabling any route.
+The account lookup
 uses the supported caller-buffer `getpwuid_r` interface and copies only name,
 UID/GID and home; it does not read password fields.
 [Apple account lookup reference](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getpwuid.3.html).
@@ -157,8 +176,13 @@ implemented and fixture-tested. Remaining delivery work:
    Linux OpenSSL sysroot; no package or build container was installed.
 2. Populate the trusted production catalog only after native artifact evidence.
    The container installer, account binding and guided receipt reconciliation are
-   now source-wired. Guest runtime activation/supervision, final serving-artifact
-   enrollment and live task/account acceptance remain separate delivery work.
+   now source-wired. Serving-artifact enrollment is also source-wired: an explicit
+   confirmed request rechecks the original completed installer receipt, exact
+   running runtime digest and dedicated account identity under desktop/task
+   exclusion. Interrupted local enrollment can recover the same environment
+   without reinstalling or starting an owner. It records enrolled, not Ready.
+   Guest runtime activation/supervision, its guided UI continuation and live
+   task/account acceptance remain separate delivery work.
 3. Validate the Linux Driver/tool contract and integrate task desktop support
    through the guest workflow lease before advertising full guest-task parity.
 4. Implement the macOS26 personalized first-account bootstrap and authenticated

@@ -105,6 +105,8 @@ pub struct Task {
     /// Exact transport as selected at submission, retained after replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<crate::computer_targets::Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_binding: Option<super::transport::Transport>,
     pub target: TaskTarget,
     pub input: TaskInput,
     pub idempotency_key: String,
@@ -130,7 +132,7 @@ pub struct Task {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Environment {
-    #[serde(default, skip_serializing_if = "super::transport::Transport::is_macos")]
+    #[serde(default, skip_serializing_if = "super::transport::Transport::is_legacy_macos")]
     pub transport: super::transport::Transport,
     pub id: String,
     pub name: String,
@@ -361,10 +363,11 @@ impl Journal {
                 .context("Local environment unavailable; no host fallback")?;
             selected.context("An exact environment selection is required for a new task; check retained history before retrying an older submission")?.guest(&env.id, &env.generation)?;
             match env.transport {
-                super::transport::Transport::MacosLume if !input.desktop => bail!("macOS tasks require the desktop workflow route"),
+                super::transport::Transport::MacosLume | super::transport::Transport::MacosPersonalized { .. } if !input.desktop => bail!("macOS tasks require the desktop workflow route"),
                 super::transport::Transport::LinuxContainer { .. } if input.desktop => bail!("Linux task desktop support is not prepared; use the separate attached desktop route"),
                 _ => {},
             }
+            if env.transport.is_personalized() { super::macos_transport::binding(env)?; }
             let computer = env.transport.target(&env.id, &env.generation);
             if selected != Some(&computer) { bail!("Selected task transport changed; no fallback"); }
             if super::setup::busy(env) {
@@ -380,9 +383,10 @@ impl Journal {
                 // Keep the original macOS wire record compatible with the
                 // already-installed protocol-1 guest. Linux is always explicit.
                 computer: env.transport.container().map(|_| computer),
+                transport_binding: env.transport.is_personalized().then(|| env.transport.clone()),
                 guest_cwd: format!(
                     "{}/workspaces/{}",
-                    env.transport.installation(), target.workspace_id
+                    env.transport.installation()?, target.workspace_id
                 ),
                 target,
                 input,
@@ -497,6 +501,10 @@ pub fn bound<'a>(state: &'a mut State, target: &TaskTarget) -> Result<&'a mut Ta
     let retained = task.computer.clone().unwrap_or_else(|| super::transport::Transport::MacosLume.target(&target.environment_id, &target.generation));
     if retained != env.transport.target(&env.id, &env.generation) {
         bail!("Task transport changed; retained history is read-only and no operation was routed");
+    }
+    if task.transport_binding.as_ref().is_some_and(|binding| binding != &env.transport)
+        || env.transport.is_personalized() && task.transport_binding.as_ref() != Some(&env.transport) {
+        bail!("Task account/key/runtime transport changed; retained history is read-only");
     }
     Ok(task)
 }

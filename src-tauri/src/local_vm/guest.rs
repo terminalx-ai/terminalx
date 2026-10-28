@@ -735,7 +735,7 @@ impl Guest {
         let identity = &state.identity;
         Ok(
             json!({"available":available,"reason":if !desktop && !cfg!(target_os = "linux") {Some("Guest desktop MCP binding is unavailable")} else if !available {Some("Install and authenticate a supported guest harness")} else {None},
-            "protocol":PROTOCOL,"runtimeSha256":self.runtime_sha256,"platform":std::env::consts::OS,"environmentId":identity.environment_id,
+            "protocol":PROTOCOL,"identity":identity,"runtimeSha256":self.runtime_sha256,"platform":std::env::consts::OS,"environmentId":identity.environment_id,
             "generation":identity.generation,"capabilities":capabilities,"harnesses":harnesses,
             "desktopAvailable":desktop,"taskMode":if cfg!(target_os = "linux") {"shellFiles"} else {"desktop"},"manualControl":state.manual_lease.is_some(),
             "credentials":"Guest-installed provider/repository credentials only; no host credentials are copied"}),
@@ -749,6 +749,9 @@ impl Guest {
             .context("Explicit files array is required")?;
         let mut state = self.state.lock().unwrap();
         validate_task(&state.identity, &self.base, &task, &files)?;
+        if let Some(super::transport::Transport::MacosPersonalized { binding }) = &task.transport_binding {
+            check_runtime(Some(&binding.runtime_sha256), &self.runtime_sha256)?;
+        }
         if state.canceled_targets.contains_key(&task.target.task_id) {
             bail!("This task target was canceled before start; delayed starts are refused");
         }
@@ -763,6 +766,7 @@ impl Guest {
                 || r.task.target.task_id == task.target.task_id
         }) {
             if prior.task.target != task.target
+                || prior.task.transport_binding != task.transport_binding
                 || prior.task.idempotency_key != task.idempotency_key
                 || prior.task.input_digest != task.input_digest
             {
@@ -2206,6 +2210,13 @@ fn page(task: &Task, after: u64) -> Result<Task> {
 }
 
 fn validate_task(identity: &Identity, base: &Path, task: &Task, files: &[FileInput]) -> Result<()> {
+    match (&identity.macos_account, &task.transport_binding) {
+        (Some(account), Some(super::transport::Transport::MacosPersonalized { binding }))
+            if &binding.account == account && binding.target.environment_id == identity.environment_id
+                && binding.target.generation == identity.generation => {},
+        (None, None) => {},
+        _ => bail!("Task personalized account/transport differs from guest identity"),
+    }
     for id in [
         &task.target.environment_id,
         &task.target.workspace_id,

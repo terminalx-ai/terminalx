@@ -78,8 +78,8 @@ pub fn inventory() -> Result<Inventory> {
         for env in state.environments.values().filter(|env| env.deleted_at.is_none()) {
             entries.push(Entry {
                 target: env.transport.target(&env.id, &env.generation),
-                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: if env.transport.is_macos() {vec![Capability::GuestTask,Capability::AttachedDesktop]} else {vec![Capability::GuestTask]},
-                state: if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
+                name: format!("{} · {}", if env.transport.container().is_some() { "Linux tasks" } else { "macOS" }, env.name), capabilities: if env.transport.is_personalized() {vec![]} else if env.transport.is_macos() {vec![Capability::GuestTask,Capability::AttachedDesktop]} else {vec![Capability::GuestTask]},
+                state: if env.transport.is_personalized() { "bootstrapUnavailable" } else if state.enabled { "requiresCapabilityCheck" } else { "disabled" }.into(),
             });
         }
     }
@@ -139,7 +139,7 @@ struct SelectionRequest { session_id: String, tab_id: String, conversation: Opti
 pub fn request(manager: &crate::session::SessionManager, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     use serde_json::to_value;
     match method {
-        "computer.linuxInstaller" | "computer.prepareLinuxRuntime" | "computer.deliverLinuxRuntime" | "computer.reconcileLinuxRuntime" => crate::local_vm::linux_install::request(method,params),
+        "computer.linuxInstaller" | "computer.prepareLinuxRuntime" | "computer.deliverLinuxRuntime" | "computer.reconcileLinuxRuntime" | "computer.enrollInstalledLinuxRuntime" => crate::local_vm::linux_install::request(method,params),
         "computer.inventory" => to_value(inventory()?).map_err(Into::into),
         "computer.checkAttachment" => {
             let target:Target=serde_json::from_value(params["target"].clone())?;
