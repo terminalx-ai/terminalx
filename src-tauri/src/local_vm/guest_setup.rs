@@ -95,6 +95,7 @@ mod tests {
         State {
             identity: Identity {
                 account: None,
+            macos_account: None,
                 environment_id: params.environment_id.clone(),
                 generation: params.generation.clone(),
                 protocol: 1,
@@ -986,7 +987,7 @@ impl Paths {
             .parent()
             .context("Pinned guest home missing")?
             .to_path_buf();
-        if Some(home.as_path()) != Path::new(super::INSTALL).parent() {
+        if Some(home.as_path()) != super::installation()?.parent() {
             bail!("Pinned guest home required");
         }
         let codex = super::readiness::codex_program(&home);

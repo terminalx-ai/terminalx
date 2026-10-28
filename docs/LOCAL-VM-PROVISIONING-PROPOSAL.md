@@ -57,8 +57,18 @@ private keys, open SSH, or enable a transport/profile.
 These boundaries have disposable journal/plan fixtures. They are not an
 implemented first-account executor or a trust ceremony: receipts can be supplied
 only by a future VM-bound backend, and no production control route exposes the
-fixture seam. VNC screen transitions, out-of-band host-key capture and guest
-runtime home/account parameterization still need source integration. Fresh macOS26 acceptance must test these against an
+fixture seam. Guest-side account/home parameterization is now integrated into
+runtime identity, RPC admission, provider MCP paths, desktop identity and setup
+readiness. A new identity carries the personalized name, UID/GID and home
+device/inode. The OS account database, rather than an inherited HOME override,
+selects that installation; current process/account/home checks reject replacement.
+The SSH request includes that full expected account and the runtime digest, and
+both the short-lived RPC helper and running owner refuse a missing or changed
+binding. An incomplete installation cannot fall back to ordinary host mode.
+Legacy identities retain their original serialized shape and dedicated lume
+account path. No personalized identity has been installed or activated.
+VNC screen transitions, out-of-band host-key capture and the host-side account-bound
+transport still need source integration. Fresh macOS26 acceptance must test these against an
 actual supported restore image before enabling Create.
 
 ## Account-bound transport
@@ -93,11 +103,15 @@ covers identity, arguments and bounded RPC bytes, while connection execution,
 credential-reference resolution and the initial trust ceremony remain unwired.
 [OpenSSH configuration reference](https://man.openbsd.org/ssh_config).
 
-Source integration points: extend `local_vm/transport.rs` with a separate typed
-account-bound variant; remove fixed guest-home assumptions only for that variant
-in `guest.rs`, `desktop.rs`, `guest_setup.rs`, `guest_readiness.rs` and installers;
-add a durable personalization journal to `creation.rs`/`setup.rs`. Keep the old
-variant unchanged until its existing tasks and receipts are retained. Account
+Remaining host integration points: extend `local_vm/transport.rs` with a separate
+typed account-bound variant; use the retained personalized home in its host task
+workspace paths, installer and supervisor; connect the personalization ledger to
+`creation.rs`/`setup.rs` only after authenticated bootstrap/trust exists. Guest-side
+home/account checks are source-wired, but this host route is not. The account lookup
+uses the supported caller-buffer `getpwuid_r` interface and copies only name,
+UID/GID and home; it does not read password fields.
+[Apple account lookup reference](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getpwuid.3.html).
+Keep the legacy host route and existing tasks/receipts unchanged. Account
 personalization is never a retrofit of either current live VM.
 
 ## Why no silent dependency replacement

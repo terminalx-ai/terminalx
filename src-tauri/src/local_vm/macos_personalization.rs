@@ -48,17 +48,7 @@ pub struct AccountPlan {
 }
 impl AccountPlan {
     fn validate(&self) -> Result<()> {
-        let name = &self.short_name;
-        if name.len() < 2
-            || name.len() > 32
-            || !name.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            || matches!(name.as_str(), "root" | "lume" | "daemon" | "nobody")
-        {
-            bail!("A personalized account name is required");
-        }
+        super::macos_account::validate_name(&self.short_name)?;
         journal::validate_id(&self.password_reference)?;
         journal::validate_id(&self.ssh_key_reference)?;
         if self.password_reference == self.ssh_key_reference {
@@ -74,9 +64,7 @@ impl AccountPlan {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AccountReceipt {
     pub target: Target,
-    pub short_name: String,
-    pub uid: u32,
-    pub home: String,
+    pub account: super::macos_account::Account,
     pub bootstrap_observation_digest: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -215,10 +203,10 @@ fn confirm_account(target: &Target, account: &AccountPlan, receipt: &AccountRece
     target.validate()?;
     account.validate()?;
     super::transport::validate_runtime_sha(&receipt.bootstrap_observation_digest)?;
+    receipt.account.validate()?;
     if receipt.target != *target
-        || receipt.short_name != account.short_name
-        || receipt.uid < 501
-        || receipt.home != account.home()
+        || receipt.account.short_name != account.short_name
+        || receipt.account.home != account.home()
     {
         bail!("VM-bound account observation differs from the planned identity");
     }
@@ -398,7 +386,7 @@ pub fn ssh_plan(
     object.insert("environmentId".into(), json!(current_target.environment_id));
     object.insert("generation".into(), json!(current_target.generation));
     let request = serde_json::to_vec(
-        &json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha}),
+        &json!({"method":method,"params":params,"expectedRuntimeSha256":runtime_sha,"expectedMacosAccount":observed.account}),
     )?;
     if request.len() > super::guest::MAX_RPC_BYTES {
         bail!("Guest request exceeds its bound");
@@ -432,9 +420,14 @@ mod tests {
     fn observation(target: &Target, account: &AccountPlan) -> AccountReceipt {
         AccountReceipt {
             target: target.clone(),
-            short_name: account.short_name.clone(),
-            uid: 501,
-            home: account.home(),
+            account: super::super::macos_account::Account {
+                short_name: account.short_name.clone(),
+                uid: 501,
+                gid: 20,
+                home: account.home(),
+                home_device: 1,
+                home_inode: 42,
+            },
             bootstrap_observation_digest: "c".repeat(64),
         }
     }
@@ -542,6 +535,11 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<Value>(&plan.request).unwrap()["params"]["generation"],
             target.generation
+        );
+        let rpc: super::super::guest::Request = serde_json::from_slice(&plan.request).unwrap();
+        assert_eq!(
+            rpc.expected_macos_account,
+            Some(observation(&target, &account).account)
         );
         assert!(plan.args.last().unwrap().starts_with("/Users/personal/"));
         assert!(!plan

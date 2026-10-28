@@ -48,12 +48,8 @@ fn identity(target: Option<&TaskTarget>) -> Result<()> {
     if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
         bail!("Guest desktop requires macOS arm64");
     }
-    let home = dirs::home_dir().context("Guest home unavailable")?;
-    if home.to_str() != Some("/Users/lume") {
-        bail!("This tool only runs in the dedicated macOS guest account");
-    }
-    let value: Value =
-        serde_json::from_slice(&std::fs::read(home.join(".terminalx-local/identity.json"))?)?;
+    let (_, installed) = super::guest::installed_identity()?;
+    let value = serde_json::to_value(installed)?;
     if let Some(target) = target {
         if value.get("environmentId").and_then(Value::as_str) != Some(&target.environment_id)
             || value.get("generation").and_then(Value::as_str) != Some(&target.generation)
@@ -113,7 +109,8 @@ pub fn run_cli() -> Option<i32> {
         }
         let target: TaskTarget =
             serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(&args[3])?)?;
-        std::env::set_var("TERMINALX_HOME", "/Users/lume/.terminalx-local/runtime");
+        let (base, _) = super::guest::installed_identity()?;
+        std::env::set_var("TERMINALX_HOME", base.join("runtime"));
         serve(&target)
     })();
     if let Err(error) = &result {
