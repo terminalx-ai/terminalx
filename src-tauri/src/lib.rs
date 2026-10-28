@@ -354,6 +354,7 @@ pub fn run() {
             commands::account_sign_out,
             commands::organization_create,
             commands::organization_select,
+            commands::organization_delete,
             commands::organization_members,
             commands::organization_members_in,
             commands::organization_member_invite,

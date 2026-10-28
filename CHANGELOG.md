@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Organizations
+
+- Let organization owners delete non-personal organizations, including test
+  organizations, with exact-name confirmation and guidance for remaining resources.
+  Refresh membership and clear a deleted default selection without choosing a replacement.
+
 ### Chat
 
 - Recognize completed Codex context compaction and preserve scoped compaction

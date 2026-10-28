@@ -347,6 +347,8 @@ export const api = {
     invoke<OrganizationSummary & { selected?: boolean }>("organization_create", { name, idempotencyKey }),
   organizationSelect: (organizationId: string, contextRevision: string) =>
     invoke<AccountStatus>("organization_select", { organizationId, contextRevision }),
+  organizationDelete: (organizationId: string, contextRevision: string, confirmationName: string) =>
+    invoke<{ status: AccountStatus; fresh: boolean }>("organization_delete", { organizationId, contextRevision, confirmationName }),
 
   // provider-aware Cloud Workspaces; authentication and Organization scope
   // are resolved natively, so account tokens never cross this boundary.

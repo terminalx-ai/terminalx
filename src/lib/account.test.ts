@@ -447,6 +447,65 @@ describe("who owns the local mirrors on this computer (PRO-25)", () => {
   });
 });
 
+describe("committed organization deletion", () => {
+  const listing = (orgs: string[], active = "org-a", account = "owner-account") => ({
+    ...signedIn(true, active), multiOrg: true,
+    context: { scope: `scope-${active}`, revision: `scope-${active}:1`, account },
+    organizations: orgs.map((id) => ({ id, name: id, role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } })),
+  });
+  const confirmation = { organizationId: "org-a", contextRevision: "scope-org-a:1", confirmationName: "org-a" };
+
+  it("uses the account membership cleanup, keeps other organizations and leaves the deleted default unselected even if refresh was unavailable", async () => {
+    vi.resetModules();
+    let current = listing(["org-a", "org-b"]);
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "account_refresh_roles") return { status: current, fresh: true };
+      if (command === "organization_delete") {
+        current = listing(["org-b"], "");
+        return { status: current, fresh: false };
+      }
+      if (command === "cloud_mirror_list") return [];
+      if (command.startsWith("cloud_mirror_")) return 0;
+      return current;
+    });
+    const account = await import("./account");
+    await account.bootAccount();
+    await account.refreshAccountRoles(true);
+    Object.values(mocks.teardown).forEach((fn) => fn.mockClear());
+    await account.deleteOrganization(confirmation);
+    expect(mocks.invoke).toHaveBeenCalledWith("organization_delete", confirmation);
+    expect(account.getAccount().status.organizations?.map((org) => org.id)).toEqual(["org-b"]);
+    expect(account.getAccount().status.identity?.organizationId).toBe("");
+    expect(account.getAccount().status.lastError).toContain("Organization deleted");
+    expect(mocks.teardown.closeCloudConnectionsIn).toHaveBeenCalledWith("org-a");
+    expect(mocks.teardown.closeCloudConnectionsIn).not.toHaveBeenCalledWith("org-b");
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "organization_select")).toBe(false);
+  });
+
+  it("does not apply a late successful deletion to a replacement account", async () => {
+    vi.resetModules();
+    const before = listing(["org-a", "org-b"]);
+    let finish!: (value: { status: typeof before; fresh: boolean }) => void;
+    const pending = new Promise<{ status: typeof before; fresh: boolean }>((resolve) => { finish = resolve; });
+    mocks.invoke.mockReset().mockImplementation(async (command: string) => {
+      if (command === "account_refresh_roles") return { status: before, fresh: true };
+      if (command === "organization_delete") return pending;
+      if (command === "cloud_mirror_list") return [];
+      if (command.startsWith("cloud_mirror_")) return 0;
+      return before;
+    });
+    const account = await import("./account");
+    await account.bootAccount(); await account.refreshAccountRoles(true);
+    const sent = account.deleteOrganization(confirmation);
+    const rejected = expect(sent).rejects.toEqual({ code: "account_context_changed_after_send" });
+    mocks.listeners.get("account_status")?.({ payload: listing(["org-a"], "org-a", "replacement-account") });
+    finish({ status: listing(["org-b"], ""), fresh: true });
+    await rejected;
+    expect(account.getAccount().status.context?.account).toBe("replacement-account");
+    expect(account.getAccount().status.organizations?.map((org) => org.id)).toEqual(["org-a"]);
+  });
+});
+
 it("forwards capability-only native account announcements without inventing support", async () => {
   const account = await import("./account");
   await account.bootAccount();
