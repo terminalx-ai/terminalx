@@ -19,7 +19,8 @@ impl SessionManager {
         Ok(())
     }
     pub(super) fn send_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry,
-        tab: &TabEntry, prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>) -> Result<SendOutcome> {
+        prompt: PromptText, images: Vec<ImageRef>, wire_images: Vec<(String, String)>) -> Result<SendOutcome> {
+        let tab = entry.tab(&rt.tab_id).context("tab not found")?;
         ensure_local(&prompt)?;
         anyhow::ensure!(!prompt.agent.trim_start().starts_with('/') || prompt.agent.trim() == "/compact", "Only /compact is supported in experimental Codex stdio");
         anyhow::ensure!(prompt.agent.trim() != "/compact" || images.is_empty(), "Compaction does not accept images");

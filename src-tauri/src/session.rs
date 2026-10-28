@@ -1712,7 +1712,7 @@ impl SessionManager {
 
         if codex_stdio::selected(&tab) {
             anyhow::ensure!(receipt.is_none(), "Experimental Codex does not support continuation delivery");
-            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, &tab, prompt, refs, wire_images);
+            return self.send_codex_stdio(&mut rt, &rt_arc, &entry, prompt, refs, wire_images);
         }
 
         if receipt.is_some() && (pty_first(&tab.harness).is_none() || rt.turn_open || !rt.pending.is_empty()) {
