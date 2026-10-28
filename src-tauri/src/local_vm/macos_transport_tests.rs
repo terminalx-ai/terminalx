@@ -7,16 +7,19 @@ use super::*;
 use base64::Engine as _;
 use std::os::unix::fs::PermissionsExt;
 
-struct Fixture {
-    root: tempfile::TempDir,
-    journal: Journal,
-    env: Environment,
-    ssh: PathBuf,
-    keygen: PathBuf,
-    public: String,
+pub(crate) struct Fixture {
+    pub(crate) root: tempfile::TempDir,
+    pub(crate) journal: Journal,
+    pub(crate) env: Environment,
+    pub(crate) ssh: PathBuf,
+    pub(crate) keygen: PathBuf,
+    pub(crate) public: String,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        Self::build(true)
+    }
+    pub(crate) fn build(prepare: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let journal = Journal::open(root.path()).unwrap();
         let mut env = journal
@@ -137,19 +140,21 @@ print((p/'reply.json').read_text())
             keygen,
             public,
         };
-        fixture.prepare();
+        if prepare {
+            fixture.prepare();
+        }
         fixture
     }
-    fn pinned(&self) -> &Binding {
+    pub(crate) fn pinned(&self) -> &Binding {
         binding(&self.env).unwrap()
     }
-    fn programs(&self) -> Programs<'_> {
+    pub(in crate::local_vm) fn programs(&self) -> Programs<'_> {
         Programs {
             ssh: &self.ssh,
             keygen: &self.keygen,
         }
     }
-    fn endpoint(&self) -> Endpoint {
+    pub(in crate::local_vm) fn endpoint(&self) -> Endpoint {
         Endpoint {
             target: self.pinned().target.clone(),
             sandbox: self.env.sandbox.clone(),
@@ -157,7 +162,7 @@ print((p/'reply.json').read_text())
             running: true,
         }
     }
-    fn prepare(&self) -> Value {
+    pub(crate) fn prepare(&self) -> Value {
         macos_keys::prepare_using(self.root.path(), self.pinned(), &self.keygen, || {
             Ok(macos_keys::GeneratedKey {
                 private: zeroize::Zeroizing::new(
@@ -450,9 +455,9 @@ fn personalized_setup_installer_supervisor_and_desktop_preserve_binding_and_gate
     assert!(rpc(&f.env, "describe", json!({}), Duration::from_secs(1)).is_err());
     assert!(super::super::host::guest_rpc(&f.env, "describe", json!({})).is_err());
     assert!(install(&f.env, Path::new("/must-not-read-credential-or-runtime")).is_err());
-    let before=f.journal.read().unwrap();
+    let before = f.journal.read().unwrap();
     assert!(super::super::setup::action(&f.journal,json!({"environmentId":f.env.id,"generation":f.env.generation,"action":"provider.codexAccount.verify","idempotencyKey":"not-dispatched","confirm":true})).is_err());
-    assert_eq!(json!(f.journal.read().unwrap()),json!(before));
+    assert_eq!(json!(f.journal.read().unwrap()), json!(before));
     let lease = super::super::attachment::Binding {
         environment_id: f.env.id.clone(),
         generation: f.env.generation.clone(),
@@ -500,4 +505,115 @@ fn personalized_setup_installer_supervisor_and_desktop_preserve_binding_and_gate
     assert!(super::super::supervisor::guest_plist(&legacy)
         .unwrap()
         .contains("/Users/lume/.terminalx-local"));
+}
+
+fn producer_fixture(f: &Fixture) -> PathBuf {
+    let path = f.root.path().join("fake-key-producer");
+    script(
+        &path,
+        r#"#!/usr/bin/python3
+import os,sys,pathlib
+root=pathlib.Path(__file__).parent;a=sys.argv[1:]
+assert not any(k in os.environ for k in ['SSH_AUTH_SOCK','SSH_ASKPASS','OPENAI_API_KEY','TERMINALX_NEXT_TOKEN'])
+if a[:2]==['-y','-f']:
+ assert pathlib.Path(a[2]).read_bytes()==b'synthetic fixture material, never a real key'
+ print((root/'public-key').read_text());sys.exit(0)
+assert a[:8]==['-q','-t','ed25519','-N','','-C','terminalx-local-vm','-f'] and len(a)==9
+with (root/'generation-count').open('a') as out:out.write('once\n')
+p=pathlib.Path(a[8]);p.write_bytes(b'synthetic fixture material, never a real key')
+if (root/'partial-output').exists():sys.exit(71)
+p.with_name(p.name+'.pub').write_text((root/'public-key').read_text()+' terminalx-local-vm\n')
+"#,
+    );
+    path
+}
+#[test]
+fn actual_key_producer_keeps_one_original_reference_and_recovers_lost_host_reply() {
+    let f = Fixture::build(false);
+    let program = producer_fixture(&f);
+    assert!(
+        macos_keys::produce_using(f.root.path(), f.pinned(), &program, false, || bail!(
+            "lost host reply"
+        ))
+        .is_err()
+    );
+    let original = f
+        .root
+        .path()
+        .join("macos-personalization-keys")
+        .join(&f.pinned().key_reference);
+    let unknown = macos_keys::produce_using(f.root.path(), f.pinned(), &program, false, || {
+        panic!("replayed utility")
+    })
+    .unwrap();
+    assert_eq!(unknown["state"], "outcomeUnknown");
+    let recovered = macos_keys::produce_using(f.root.path(), f.pinned(), &program, true, || {
+        panic!("replayed utility")
+    })
+    .unwrap();
+    assert_eq!(recovered["state"], "ready");
+    assert_eq!(recovered["receipt"]["publicKey"], f.public);
+    macos_keys::resolve(f.root.path(), f.pinned(), &program, Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join("generation-count")).unwrap(),
+        "once\n"
+    );
+    macos_keys::retire(f.root.path(), f.pinned()).unwrap();
+    assert_eq!(
+        macos_keys::produce_using(f.root.path(), f.pinned(), &program, true, || panic!(
+            "retired replacement"
+        ))
+        .unwrap()["state"],
+        "retired"
+    );
+    assert!(
+        macos_keys::resolve(f.root.path(), f.pinned(), &program, Duration::from_secs(2)).is_err()
+    );
+    assert!(original.join("producer-receipt.json").exists());
+    assert!(macos_keys::produce(f.root.path(), f.pinned(), false).is_err()); // no real utility
+}
+#[test]
+fn partial_changed_or_nonprivate_generated_output_is_never_replaced() {
+    for mode in ["partial", "changed", "permissions", "binding"] {
+        let f = Fixture::build(false);
+        let program = producer_fixture(&f);
+        if mode == "partial" {
+            std::fs::write(f.root.path().join("partial-output"), b"fixture").unwrap();
+        }
+        assert!(
+            macos_keys::produce_using(f.root.path(), f.pinned(), &program, false, || bail!(
+                "lost reply"
+            ))
+            .is_err()
+        );
+        let path = f
+            .root
+            .path()
+            .join("macos-personalization-keys")
+            .join(&f.pinned().key_reference)
+            .join("private_key");
+        let mut binding = f.pinned().clone();
+        match mode {
+            "changed" => std::fs::write(&path, b"changed synthetic bytes").unwrap(),
+            "permissions" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "binding" => binding.target.generation = journal::new_id(),
+            _ => {}
+        }
+        assert!(
+            macos_keys::produce_using(f.root.path(), &binding, &program, true, || panic!(
+                "replacement"
+            ))
+            .is_err()
+        );
+        macos_keys::produce_using(f.root.path(), f.pinned(), &program, false, || {
+            panic!("repeated generation")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(f.root.path().join("generation-count")).unwrap(),
+            "once\n"
+        );
+    }
 }

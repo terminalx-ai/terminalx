@@ -234,6 +234,11 @@ pub fn prepare(tool: &Tool) -> Result<PathBuf> {
     Ok(target)
 }
 
+pub(super) fn retained_archive(tool:&Tool)->Result<Vec<u8>> {
+    let dir=base(tool)?;validate_install(tool,&dir)?;
+    let bytes=fs::read(dir.join("terminalx-archive.tar.gz"))?;verify_download(tool,&bytes)?;Ok(bytes)
+}
+
 fn verify_download(tool: &Tool, bytes: &[u8]) -> Result<()> {
     if bytes.len() as u64 != tool.bytes || journal::digest(bytes) != tool.sha256 {
         bail!(

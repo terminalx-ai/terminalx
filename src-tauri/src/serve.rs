@@ -158,6 +158,10 @@ pub fn main() -> i32 {
     if args.first().map(String::as_str) == Some("local-vm-rpc") {
         return crate::local_vm::guest::run_rpc_cli(&args[1..]);
     }
+    #[cfg(unix)]
+    if args.first().map(String::as_str) == Some("local-vm-bootstrap") {
+        return crate::local_vm::macos_delivery::run_cli(&args[1..]);
+    }
     // So is Git's credential helper and the `gh` shim (`cloud_github`).
     if args.first().map(String::as_str) == Some(crate::cloud_github::SUBCOMMAND) {
         return crate::cloud_github::run_cli(&args[1..]);

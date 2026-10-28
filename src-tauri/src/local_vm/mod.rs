@@ -26,3 +26,6 @@ mod macos_keys;
 
 pub(crate) mod linux_activation;
 mod macos_endpoint;
+pub(crate) mod macos_delivery;
+pub(crate) mod macos_provision;
+mod macos_tools;

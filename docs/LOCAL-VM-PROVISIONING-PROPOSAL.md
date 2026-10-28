@@ -5,6 +5,53 @@ or running owner changed. The current fresh-macOS capability remains unavailable
 The working two-action model is an implementation assumption communicated to the
 user, not an explicit answer to every product preference question.
 
+## Source implementation update — 2026-10-28
+
+The current source has a fixed OpenSSH per-guest key producer, original producer
+receipt recovery, an authenticated SSH loader upload, a native guest runtime
+installer, and a pinned Driver/Codex archive installer. Tests use synthetic key
+bytes, fake executables and disposable guest directories. Production entrypoints
+remain gated. The account-bound transport requires independently authenticated
+account/host-key evidence before it can generate or use this reference; the
+producer does not establish that initial trust or install an SSH public key.
+
+Runtime and tool delivery retain separate intents and terminal receipts. Lost
+replies reconcile the original stage without another upload, extraction or
+installation. The runtime LaunchAgent is staged outside the active LaunchAgents
+folder. Driver/provider files are installed without starting them or requesting
+permissions/login. Existing guest tools and runtime ownership block bootstrap.
+Installed files and completed receipts never mean Ready.
+
+The ordinary pinned Lume `create --ipsw <verified-cache-path> --no-display` and
+`run --display none --detach` adapters now execute from durable operation records.
+Their source captures the newly created VM/config pin and refuses changed pins or
+unknown create/run replay. A run acknowledgement is not authentication, account
+completion or Ready. Production restore selection remains unavailable until an
+actual verified macOS26 manifest is supplied through the trusted source catalog.
+
+### Concrete first-account/trust limitation
+
+Pinned Lume **0.6.1** does not expose a public personalized Setup Assistant,
+public-key installation, or authenticated account/host-key receipt command. Its
+`setup` command is the excluded offline fixed-account/security patcher. The
+internal recovery VNC helper shells out to an additional `vncdotool` installation,
+documents shifted-text/chord limitations, and notes a stall in the internal
+native VNC client. These are not a supported durable account/trust-capture API.
+No fake Setup Assistant command or endpoint/screenshot-derived authentication
+proof has been introduced. A TerminalX-owned background console adapter with
+verified macOS26 screen transitions and authenticated readback remains required.
+The OS/account/security consent steps must remain human-only where required.
+
+Primary pinned source:
+[Setup command](https://github.com/trycua/cua/blob/3350f504014c85416009a90fcb339fe556ce02fc/libs/lume/src/Commands/Setup.swift),
+[internal VNC helper](https://github.com/trycua/cua/blob/3350f504014c85416009a90fcb339fe556ce02fc/libs/lume/src/Utils/VNCDriver.swift),
+[VNC client](https://github.com/trycua/cua/blob/3350f504014c85416009a90fcb339fe556ce02fc/libs/lume/src/VNC/VNCClient.swift).
+No installed dependency/profile has changed, and no real key utility, SSH, Setup
+Assistant, viewer, VM or account operation was used for this source verification.
+Fresh Create remains unavailable. The earlier design/history below describes the
+integration rationale; the implementation status in this section supersedes its
+older statements that the producer/delivery/endpoint adapters are unwired.
+
 ## Proposed macOS26 path
 
 Retain Lume **0.6.1**, release source **3350f504014c85416009a90fcb339fe556ce02fc**,

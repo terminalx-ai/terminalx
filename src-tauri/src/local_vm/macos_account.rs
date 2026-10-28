@@ -50,6 +50,12 @@ impl Account {
         Ok(Path::new(&self.home).join(".terminalx-local"))
     }
 
+    pub(super) fn check_current_home(&self) -> Result<()> {
+        self.validate()?;
+        if !cfg!(all(target_os = "macos", target_arch = "aarch64")) { bail!("Personalized bootstrap requires macOS arm64") }
+        self.check_observed(&current_user()?, &Home::from(std::fs::symlink_metadata(&self.home)?), &self.installation()?)
+    }
+
     pub(super) fn check_current(&self, base: &Path) -> Result<()> {
         self.validate()?;
         if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {

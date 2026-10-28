@@ -1,6 +1,6 @@
 //! Private per-guest key lifecycle. No import-from-path API, host key discovery,
-//! agent lookup or production generator exists. The future bootstrap backend
-//! supplies freshly generated material through the internal producer boundary.
+//! agent lookup occurs. The fixed OpenSSH producer remains behind the
+//! authenticated bootstrap gate and is tested only with synthetic utilities.
 use super::{
     journal,
     macos_transport::{self, Binding},
@@ -199,4 +199,153 @@ pub(super) fn retire(root: &Path, binding: &Binding) -> Result<()> {
     let mut record = read(&path, binding)?;
     record["state"] = json!("retired");
     retain(&path, &record)
+}
+
+/// Fixed OpenSSH producer. Production remains gated before any real utility or
+/// credential access; no caller can supply a utility path through a control RPC.
+pub(super) fn produce(root: &Path, binding: &Binding, recover: bool) -> Result<Value> {
+    macos_transport::require_available()?;
+    produce_using(
+        root,
+        binding,
+        Path::new("/usr/bin/ssh-keygen"),
+        recover,
+        || Ok(()),
+    )
+}
+
+/// A complete producer receipt, not mere key-file existence, recovers a lost
+/// host reply. Unknown/partial generation is never repeated or replaced.
+pub(super) fn produce_using(
+    root: &Path,
+    binding: &Binding,
+    utility: &Path,
+    recover: bool,
+    after_receipt: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    binding.check_retained(root)?;
+    check_directory(root)?;
+    let parent = root.join("macos-personalization-keys");
+    if !parent.try_exists()? {
+        std::fs::DirBuilder::new().mode(0o700).create(&parent)?;
+    }
+    check_directory(&parent)?;
+    let path = directory(root, binding)?;
+    let existed = path.try_exists()?;
+    if !existed {
+        if recover {
+            bail!("Original producer reference missing")
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    }
+    let _guard = lock(&path)?;
+    let mut record = if existed {
+        read(&path, binding)?
+    } else {
+        let value = json!({"binding":binding,"inputDigest":journal::digest(&serde_json::to_vec(binding)?),"state":"outcomeUnknown","producer":"openssh-ed25519-v1"});
+        retain(&path, &value)?;
+        value
+    };
+    if existed && (!recover || record["state"] != "outcomeUnknown") {
+        return Ok(record);
+    }
+    if record["producer"] != "openssh-ed25519-v1" {
+        bail!("Original operation was not this key producer")
+    }
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(!existed)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path.join("producer.lock"))?;
+    let metadata = lease.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        bail!("Unsafe original key producer lease")
+    }
+    // SAFETY: lease owns the fd throughout this call and the child's lifetime.
+    if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("Original key producer is still owned; no recovery or replacement")
+    }
+    if !existed {
+        let mut command = macos_transport::isolated(utility, &path);
+        command
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "terminalx-local-vm",
+                "-f",
+            ])
+            .arg(path.join("private_key"));
+        use std::os::unix::process::CommandExt;
+        let fd = lease.as_raw_fd();
+        // SAFETY: only async-signal-safe libc calls in the post-fork child. The
+        // inherited lock fences recovery even if the author/owner exits first.
+        unsafe {
+            command.pre_exec(move || {
+                libc::umask(0o077);
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        super::process::run(&mut command, b"", Duration::from_secs(30))?;
+        let receipt = produced_pair(&path, utility)?;
+        write_new(
+            &path.join("producer-receipt.json"),
+            &serde_json::to_vec(
+                &json!({"binding":binding,"exit":"originalChildSuccess","receipt":receipt}),
+            )?,
+        )?;
+        after_receipt()?;
+    }
+    let proof: Value = serde_json::from_slice(&private_read(
+        &path.join("producer-receipt.json"),
+        32 * 1024,
+    )?)?;
+    if proof["binding"] != json!(binding)
+        || proof["exit"] != "originalChildSuccess"
+        || proof["receipt"] != produced_pair(&path, utility)?
+    {
+        bail!("Original producer output/receipt changed; reference stays fenced")
+    }
+    record["receipt"] = proof["receipt"].clone();
+    record["state"] = json!("ready");
+    record["recoveredOriginalProducer"] = json!(recover);
+    retain(&path, &record)?;
+    Ok(record)
+}
+fn produced_pair(path: &Path, utility: &Path) -> Result<Value> {
+    let private = path.join("private_key");
+    let bytes = zeroize::Zeroizing::new(private_read(&private, 16 * 1024)?);
+    if bytes.is_empty() || path.join("private_key-cert.pub").try_exists()? {
+        bail!("Empty or certificate-bearing producer output")
+    }
+    let public_bytes = private_read(&path.join("private_key.pub"), 4096)?;
+    let parts = std::str::from_utf8(&public_bytes)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if parts.len() != 3 || parts[2] != "terminalx-local-vm" {
+        bail!("Unexpected generated public key/comment")
+    }
+    let public = format!("{} {}", parts[0], parts[1]);
+    super::macos_personalization::public_key(&public)?;
+    if derive(utility, &private, Duration::from_secs(15))? != public {
+        bail!("Generated pair differs")
+    }
+    let metadata = std::fs::symlink_metadata(&private)?;
+    Ok(
+        json!({"publicKey":public,"privateSha256":journal::digest(&bytes),"device":metadata.dev(),"inode":metadata.ino()}),
+    )
 }

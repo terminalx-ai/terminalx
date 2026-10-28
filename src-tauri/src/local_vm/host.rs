@@ -68,7 +68,8 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
         bail!("Enable Local Cua in Settings → Environments first");
     }
     let _attachment_admission = if matches!(method,"environment.start"|"environment.stop"|"environment.delete"|"environment.install"|"environment.awake"|"environment.desktop"|"environment.releaseDesktop"|"environment.reconcileProvision") {
-        let current=environment(&journal,&params)?;journal.desktop_admission(&current)?
+        let current=environment(&journal,&params)?;
+        if method=="environment.install" && current.transport.is_personalized() {None} else {journal.desktop_admission(&current)?}
     } else { None };
     if method.starts_with("environment.") && !matches!(method, "environment.setup" | "environment.setupReadiness" | "environment.setupAction" | "environment.setupAuth") {
         if let Some(id) = params.get("environmentId").and_then(Value::as_str) {
@@ -77,7 +78,7 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 // container binding as a Cua selector. Linux lifecycle setup
                 // remains explicit until its prepared profile is installed.
                 env.transport.require_macos()?;
-                if env.transport.is_personalized() { super::macos_transport::require_available()?; }
+                if env.transport.is_personalized() && method!="environment.bootstrapDeliveryStatus" { super::macos_transport::require_available()?; }
             }
         }
     }
@@ -161,7 +162,24 @@ pub fn request(method: &str, params: Value) -> Result<Value> {
                 json!({"status":vm.get("state").or(vm.get("status")),"stages":env.provision.as_ref().and_then(|p|p.get("stages")).cloned().unwrap_or(json!([])),"vm":safe_vm(&vm),"runtime":runtime.as_ref().ok(),"deletion":deletion,"detail":runtime.err().map(|e|crate::remote::protocol::redact(&format!("{e:#}")))}),
             )
         }
+        "environment.createPersonalized" | "environment.runPersonalizedProvision" => {
+            confirm(&params)?;super::macos_provision::request(method,&params)
+        }
         "environment.reconcileProvision" => super::provisioning::reconcile(&journal, params),
+        "environment.bootstrapDeliveryStatus" => {
+            let env=environment(&journal,&params)?;
+            super::macos_delivery::status(&root()?,&env)
+        }
+        "environment.reconcileBootstrap" => {
+            confirm(&params)?;
+            let env=environment(&journal,&params)?;
+            super::macos_delivery::reconcile(&env,field(&params,"inputDigest")?)
+        }
+        "environment.prepareGuestKey" | "environment.reconcileGuestKey" => {
+            confirm(&params)?;
+            let env=environment(&journal,&params)?;
+            super::macos_keys::produce(&root()?,super::macos_transport::binding(&env)?,method=="environment.reconcileGuestKey")
+        }
         "environment.install" => {
             let env = environment(&journal, &params)?;
             install_guest(&env, Path::new(field(&params, "runtimePath")?))?;

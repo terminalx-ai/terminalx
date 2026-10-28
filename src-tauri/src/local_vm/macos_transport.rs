@@ -100,7 +100,7 @@ pub fn rpc(env: &Environment, method: &str, params: Value, budget: Duration) -> 
 }
 
 fn observed_endpoint(env: &Environment) -> Result<Endpoint> {
-    super::macos_endpoint::observe(&super::host::root()?,env)
+    super::macos_endpoint::observe(&super::host::root()?, env)
 }
 
 /// One delivery, no retry. Callers retain their task/setup/attachment intent
@@ -136,6 +136,51 @@ pub(super) fn rpc_using(
         method,
         params,
     )?;
+    let (mut command, _keys) = command_using(
+        root,
+        env,
+        endpoint,
+        programs,
+        plan.args.last().context("Remote command missing")?,
+        budget,
+    )?;
+    // A separate, fresh check catches changed journal/parent inputs before the
+    // effect. The guest also checks the full account/runtime/env/generation.
+    let request: Value = serde_json::from_slice(&plan.request)?;
+    validate_route(root, journal, env, method, &request["params"])?;
+    let response = super::transport::decode(&process::run(&mut command, &plan.request, budget)?)?;
+    validate_route(root, journal, env, method, &request["params"])?;
+    validate_response(journal, env, method, &request["params"], &response)?;
+    Ok(response)
+}
+
+pub(super) fn command_using(
+    root: &Path,
+    env: &Environment,
+    endpoint: &Endpoint,
+    programs: &Programs<'_>,
+    remote: &str,
+    budget: Duration,
+) -> Result<(std::process::Command, std::fs::File)> {
+    let pinned = binding(env)?;
+    pinned.check_retained(root)?;
+    if endpoint.target != pinned.target
+        || endpoint.sandbox != env.sandbox
+        || !endpoint.running
+        || !endpoint.ip.is_private()
+        || endpoint.ip.is_loopback()
+    {
+        bail!("Original VM endpoint missing or replaced")
+    }
+    let mut plan = macos_personalization::ssh_plan(
+        root,
+        &pinned.bootstrap_id,
+        &pinned.target,
+        endpoint.ip,
+        &pinned.runtime_sha256,
+        "bootstrap",
+        json!({}),
+    )?;
     let _keys = super::macos_keys::resolve(root, pinned, programs.keygen, budget)?;
     let directory = root
         .join("macos-personalization")
@@ -149,16 +194,10 @@ pub(super) fn rpc_using(
     } else {
         super::macos_keys::write_new(&known, plan.known_hosts.as_bytes())?;
     }
-    // A separate, fresh check catches changed journal/parent inputs before the
-    // effect. The guest also checks the full account/runtime/env/generation.
-    let request: Value = serde_json::from_slice(&plan.request)?;
-    validate_route(root, journal, env, method, &request["params"])?;
+    *plan.args.last_mut().context("SSH remote command missing")? = remote.into();
     let mut command = isolated(programs.ssh, &directory);
     command.args(&plan.args);
-    let response = super::transport::decode(&process::run(&mut command, &plan.request, budget)?)?;
-    validate_route(root, journal, env, method, &request["params"])?;
-    validate_response(journal, env, method, &request["params"], &response)?;
-    Ok(response)
+    Ok((command, _keys))
 }
 
 pub(super) fn isolated(program: &Path, home: &Path) -> std::process::Command {
@@ -305,8 +344,8 @@ fn validate_response(
     Ok(())
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct InstallPlan {
     pub identity: Value,
     pub runtime_sha256: String,
@@ -330,13 +369,20 @@ pub(super) fn install_plan(env: &Environment, runtime_sha256: &str) -> Result<In
     })
 }
 
-pub(super) fn install(env: &Environment, _runtime: &Path) -> Result<()> {
-    let pinned = binding(env)?;
-    let _plan = install_plan(env, &pinned.runtime_sha256)?;
-    require_available()?;
-    bail!("Personalized runtime delivery requires the authenticated bootstrap installer receipt; legacy Cua installation is not used")
+pub(super) fn install(env: &Environment, runtime: &Path) -> Result<()> {
+    let mut result = super::macos_delivery::deliver(env, runtime, "upload")?;
+    if result["status"] == "loaderVerified" {
+        result = super::macos_delivery::deliver(env, runtime, "install")?;
+    }
+    if result["status"] == "installed" {
+        result = super::macos_delivery::deliver(env, runtime, "toolsInstall")?;
+    }
+    if result["status"] == "complete" {
+        return Ok(());
+    }
+    bail!("Original bootstrap delivery is not complete; reconcile its retained receipt")
 }
 
 #[cfg(test)]
 #[path = "macos_transport_tests.rs"]
-mod tests;
+pub(crate) mod tests;

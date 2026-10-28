@@ -229,8 +229,7 @@ fn observe_using(
     })
 }
 /// Future provisioning must retain this binding before account/trust capture.
-/// No control RPC, caller-supplied pin or production provisioner invokes it yet.
-#[allow(dead_code)]
+/// Only the pinned restore adapter creates this pin; production remains gated.
 pub(super) fn retain(
     root: &Path,
     bootstrap_id: &str,
@@ -278,6 +277,43 @@ pub(super) fn retain(
     file.write_all(&bytes)?;
     file.sync_all()?;
     File::open(directory)?.sync_all()?;
+    Ok(())
+}
+/// Called only after the original pinned restore process has reported success.
+/// Capture records VM/config identity, not account authentication or readiness.
+pub(super) fn capture_created(
+    root: &Path,
+    key: &str,
+    environment_id: &str,
+    generation: &str,
+    restore_sha: &str,
+    storage: &Path,
+    name: &str,
+) -> Result<Target> {
+    let target = Target {
+        environment_id: environment_id.into(),
+        generation: generation.into(),
+        restore_sha256: restore_sha.into(),
+        macos_major: 26,
+        vm_fingerprint: fingerprint(&snapshot(storage, name)?)?,
+    };
+    retain(root, key, &target, &format!("local:{name}"), storage, name)?;
+    Ok(target)
+}
+pub(super) fn verify_retained_pin(root: &Path, key: &str, target: &Target) -> Result<()> {
+    journal::validate_id(key)?;
+    target.validate()?;
+    let path = root.join("macos-endpoints").join(format!("{key}.json"));
+    metadata(path.parent().context("Pin parent missing")?, true)?;
+    metadata(&path, false)?;
+    let pin: Pin = serde_json::from_slice(&read(&path, 96 * 1024)?)?;
+    if pin.version != 1
+        || &pin.target != target
+        || fingerprint(&pin.snapshot)? != target.vm_fingerprint
+        || snapshot(&pin.storage, &pin.name)? != pin.snapshot
+    {
+        bail!("Original VM/config pin changed")
+    }
     Ok(())
 }
 pub(super) fn observe(root: &Path, env: &Environment) -> Result<Endpoint> {
