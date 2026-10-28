@@ -189,6 +189,7 @@ impl WorkClaims {
         let mut linker = Linker::default();
         let mut seen = u64::MAX;
         let mut account = None;
+        let mut capability = false;
         let mut dirty_since: Option<Instant> = None;
         let mut linked: Option<(Instant, u64)> = None;
         loop {
@@ -201,11 +202,13 @@ impl WorkClaims {
                 std::mem::take(&mut state.nudged)
             };
             let revision = index::revision();
-            // A sign-in, or another account, is published to at once.
+            // Account and capability transitions schedule a fresh publication.
             let signed_in = self.account.current_account_key();
-            if nudged || revision != seen || signed_in != account {
+            let offered = self.account.has_capability(CAPABILITY);
+            if nudged || revision != seen || signed_in != account || offered != capability {
                 seen = revision;
                 account = signed_in;
+                capability = offered;
                 dirty_since.get_or_insert_with(Instant::now);
             }
             let settled = dirty_since.is_some_and(|since| since.elapsed() >= DEBOUNCE);
@@ -292,6 +295,7 @@ impl WorkClaims {
             return true;
         };
         if !self.account.has_capability(CAPABILITY) {
+            self.state.lock().unwrap().sent = None;
             return true;
         }
         let Some(device_id) = self.device_id() else { return true };

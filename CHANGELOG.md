@@ -8,8 +8,18 @@
   organizations, with exact-name confirmation and guidance for remaining resources.
   Refresh membership and clear a deleted default selection without choosing a replacement.
 
+### Issue work status
+
+- Refresh shared issue work when the account service changes its supported
+  capabilities, and republish actual linked sessions after support returns.
+  Explain when the account service has not reported support; shared activity
+  still requires a supported backend. (#642)
+
 ### Cloud workspaces
 
+- Treat enabled cloud control as consent for routine cloud workspace starts,
+  resumes and session launches without repeated native confirmations. Preserve
+  destructive confirmations and security checks. (#658)
 - Route new sessions to the selected, verified repository checkout and keep child
   checkout sessions visible. Require the runtime's `session-repository/1`
   capability; refuse unavailable or mismatched checkouts instead of using the

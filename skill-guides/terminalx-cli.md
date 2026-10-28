@@ -360,9 +360,12 @@ command; an app that does not know one answers `unsupported`.
 **The person decides whether the command line may touch the cloud.** These commands run with the
 signed-in person's account, and any agent in a local session can run them. They are all refused
 with `cloud_control_disabled` until the person turns on "Let agents in local sessions control
-cloud workspaces" in Settings (`cloud status` then says `enabled: false`). With it on, each
-command that starts billed compute or stops a workspace is still confirmed by the person in a
-native dialog first. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
+cloud workspaces" in Settings (`cloud status` then says `enabled: false`). Turning it on
+authorizes routine compute within the person's existing organization and workspace permissions:
+session launches, resume, send-wake and new workspace creation can incur billing without another
+native confirmation. The switch does not grant a new role or repository access.
+Stopping a workspace still requires `--yes` and the person's native confirmation. Enabling the
+switch also requires native confirmation. Only its agree button agrees: Refuse, Close, dismissing it, or no answer within 40
 seconds all answer `declined`, and answering an expired dialog later does nothing. One question
 is shown at a time. After a refusal or an unanswered question the app does not ask again for a
 while (a minute, growing to fifteen): the command answers `declined` at once. While a dialog is
@@ -381,9 +384,9 @@ scripting; or any program when TerminalX itself has been granted Accessibility. 
 prevent the last two from inside. The person's switch and their
 answer are the control, not a security boundary against software already running as them.
 
-`send` to a workspace the app is not connected to reads the workspace list again first. If the
-workspace has stopped, is stopping, or the list cannot be read, the person is asked, because the
-message would start it.
+`send` can resume a stopped workspace under the enabled switch. When supported, the server first
+receives the message with wake disabled; a stopped response is followed by the same message with
+wake allowed. Older servers use a fresh workspace list. Neither path adds a routine compute dialog.
 
 The switch is kept in a file in the app's home (`cloud-control.json`), not in the window. That
 protects it from an agent that uses the app; it does not protect it from a process that already
@@ -423,7 +426,9 @@ session has no tab there, or its first prompt failed to start one (the message s
   it answers `spend_confirmation_required` unless `--confirm-spend` is passed, which creates a
   new machine and returns its `workspace` key and `operationId`; the first session appears in
   `sessions list` once the machine has started it. Pass the same `--idempotency-key` when
-  retrying a create.
+  retrying a create. `--wake` and `--confirm-spend` remain explicit command scope for compatibility:
+  they allow waking an existing workspace or allocating a new one, respectively. They do not
+  request another native dialog when cloud control is enabled.
 - `sessions create --issue` starts a session from one of the cloud project's GitHub or Linear
   issues, read first with the person's own `gh` or Linear key, in a worktree of the project's
   workspace (with `--wake` for a stopped one; never a new machine: it answers

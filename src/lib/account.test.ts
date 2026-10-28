@@ -505,3 +505,15 @@ describe("committed organization deletion", () => {
     expect(account.getAccount().status.organizations?.map((org) => org.id)).toEqual(["org-a"]);
   });
 });
+
+it("forwards capability-only native account announcements without inventing support", async () => {
+  const account = await import("./account");
+  await account.bootAccount();
+  const before = account.getAccount().status;
+  mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: false } });
+  expect(account.getAccount().status.workClaims).toBe(false);
+  mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: true } });
+  expect(account.getAccount().status.workClaims).toBe(true);
+  mocks.listeners.get("account_status")!({ payload: { ...before, workClaims: false } });
+  expect(account.getAccount().status.workClaims).toBe(false);
+});
