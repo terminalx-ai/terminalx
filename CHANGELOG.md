@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Cloud workspaces
+
+- Treat enabled cloud control as consent for routine cloud workspace starts,
+  resumes and session launches without repeated native confirmations. Preserve
+  destructive confirmations and security checks. (#658)
+
 ## 0.2.21
 
 ### Sessions and workspace
