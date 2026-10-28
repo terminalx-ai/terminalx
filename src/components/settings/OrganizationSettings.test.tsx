@@ -5,6 +5,7 @@ import type { AccountStatus, AgentLogin, OrganizationSummary } from "@/lib/api";
 const mocks = vi.hoisted(() => ({
   status: null as unknown as AccountStatus,
   refreshAccount: vi.fn(async () => {}),
+  deleteOrganization: vi.fn(async () => {}),
   stored: {} as Record<string, AgentLogin[]>,
   api: {
     cloudAgentLogins: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => {},
   useAccount: () => ({ ready: true, busy: false, status: mocks.status }),
   refreshAccount: mocks.refreshAccount,
+  deleteOrganization: mocks.deleteOrganization,
 }));
 vi.mock("@/lib/api", () => ({ api: mocks.api, workStatus: mocks.workStatus, errorMessage: (error: unknown) => String((error as { message?: string })?.message ?? error) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), save: vi.fn() }));
@@ -275,5 +277,26 @@ describe("Settings → Organizations opens each organization's page (PRO-107)", 
     openAgentLogins(null);
     render(<OrganizationsTab />);
     expect((await screen.findByTestId("organization-settings")).dataset.organization).toBe("a");
+  });
+});
+
+describe("owner deletion wiring", () => {
+  it("deletes an inactive owned test organization by its own id without selecting it", async () => {
+    const onBack = vi.fn();
+    render(<OrganizationSettings organization={{ ...beta, role: "owner" }} onBack={onBack} />);
+    await screen.findAllByTestId("agent-login");
+    fireEvent.click(screen.getByRole("button", { name: "Delete organization…" }));
+    fireEvent.change(screen.getByLabelText("Organization name to delete"), { target: { value: "Beta" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete Beta permanently" }));
+    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    expect(mocks.deleteOrganization).toHaveBeenCalledWith({ organizationId: "b", contextRevision: "rev-1", confirmationName: "Beta" });
+    expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+  });
+  it("protects personal organizations without hiding unrelated settings", async () => {
+    render(<OrganizationSettings organization={{ ...acme, isPersonal: true }} onBack={vi.fn()} />);
+    await screen.findAllByTestId("agent-login");
+    expect(screen.getByText("Personal/default organizations cannot be deleted.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Delete organization…" })).toBeNull();
+    expect(screen.getByTestId("section-teardown")).toBeTruthy();
   });
 });

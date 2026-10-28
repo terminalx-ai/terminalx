@@ -12,6 +12,8 @@ import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
 import { ToolCallRow, ToolGroupRow } from "./ToolCallRow";
 import { usePrefs } from "@/lib/prefs";
+import { turnFileChanges } from "@/lib/turnChanges";
+import { TurnChanges } from "./TurnChanges";
 
 /**
  * One exchange: the prompt, the work under it, the answer. Once the agent has
@@ -45,6 +47,7 @@ export const TurnBlock = memo(function TurnBlock({
   const streamText = stream.filter((s) => s.kind === "text" && s.text);
   const streamThinking = stream.filter((s) => s.kind === "thinking" && s.text && !s.done);
   const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
+  const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
 
   return (
     <div className="transcript-turn" data-turn={turn.key}>
@@ -107,6 +110,8 @@ export const TurnBlock = memo(function TurnBlock({
           <div className="whitespace-pre-wrap select-text"><LinkedText text={turn.finalText} context={linkContext} /></div>
         </div>
       )}
+
+      {changes.length > 0 && <TurnChanges changes={changes} cwd={cwd} linkContext={linkContext} />}
 
       {turn.completed && (
         <div className="mb-6 flex items-center gap-1.5 px-1.5 text-xs text-faint">
@@ -244,7 +249,7 @@ function ReaderMessage({
     <div className={cn(className, "flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
       <div
         className={cn(
-          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed shadow-card hairline",
+          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed",
           layout === "chat" ? "max-w-[85%]" : "w-full",
         )}
       >
@@ -278,10 +283,16 @@ function ReaderMessage({
  */
 function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: "compaction" }>; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useState(false);
+  // The existing Chat indicator owns animation; do not add a second spinner.
+  if (item.lifecycle?.state === "item_started") return null;
+  const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
+  const status = item.lifecycle?.state === "stopped"
+    ? `Compaction stopped: turn ${item.lifecycle.stoppedBy === "interrupted" ? "interrupted" : "failed"}`
+    : item.lifecycle?.state === "unknown" ? (item.uncertain ? "Compaction status unknown: could not save status" : "Compaction status unknown") : "Context compacted";
   const label = (
     <>
-      Context compacted{item.preTokens ? ` from ${Math.round(item.preTokens / 1000)}k` : ""}
-      {item.postTokens ? ` to ${Math.round(item.postTokens / 1000)}k tokens` : ""}
+      {status}{item.preTokens != null ? ` from ${count(item.preTokens)}` : ""}
+      {item.postTokens != null ? ` to ${count(item.postTokens)} tokens` : ""}
     </>
   );
   if (!item.summary) {

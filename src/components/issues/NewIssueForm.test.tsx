@@ -29,6 +29,7 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/session/SessionAgentControls", () => ({ SessionAgentControls: () => null }));
+vi.mock("@/components/session/AgentMenu", () => ({ AgentMenu: () => null }));
 vi.mock("@/lib/useSessionAgent", () => ({ useSessionAgent: () => ({ harness: sessionStore.harnesses[0], modelId: null, effort: null }) }));
 vi.mock("@/lib/issuePipeline", async (original) => ({
   ...(await original<typeof import("@/lib/issuePipeline")>()),

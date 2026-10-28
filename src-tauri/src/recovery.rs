@@ -7,11 +7,16 @@ use serde::{Deserialize, Serialize};
 /// `Tool` is no longer raised (#400): a failed tool is a row in the transcript,
 /// not a state of the session. It stays for the logs that recorded it and for
 /// the text a failed tool's result is replaced with.
-pub enum RecoveryKind { Capacity, UsageLimit, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, Failed }
+pub enum RecoveryKind { Capacity, UsageLimit, Tool, Timeout, DeliveryUnconfirmed, Disconnected, PermissionExpired, SignedOut, Failed }
 
 impl RecoveryKind {
     pub fn classify(message: &str) -> Self {
         let text = message.to_ascii_lowercase();
+        // The agent's own sign-in lapsed: nothing works again until the user
+        // signs in, so retrying first only fails the same way.
+        if ["run /login", "authentication_failed", "oauth token has expired", "run codex login", "agent is signed out"].iter().any(|s| text.contains(s)) {
+            Self::SignedOut
+        } else
         // The user's own plan ran out, not the provider: retrying before the
         // reset fails the same way.
         if ["usage limit", "usage_limit", "hit your", "limit reached", "quota"].iter().any(|s| text.contains(s)) {
@@ -33,6 +38,7 @@ impl RecoveryKind {
             Self::DeliveryUnconfirmed => "Prompt delivery could not be confirmed. Check the terminal: if your message is still in the agent's input, press Enter there to send it. To resend instead, stop the session, then press Up in the composer to recall your message.",
             Self::Disconnected => "The connection was lost. The process outcome is unknown.",
             Self::PermissionExpired => "The permission request expired. Check the terminal for a new request or stop the session.",
+            Self::SignedOut => "The agent is signed out, or its sign-in expired. Sign in again, then retry.",
             Self::Failed => "The agent encountered an error. Review the conversation before continuing.",
         }
     }
@@ -300,6 +306,24 @@ mod lifecycle_tests {
         // The same words from a provider that only gives text still land on the right kind.
         assert_eq!(RecoveryKind::classify("You've hit your weekly limit · resets Oct 11"), RecoveryKind::UsageLimit);
         assert_eq!(RecoveryKind::classify("rate limit exceeded, retry later"), RecoveryKind::Capacity);
+    }
+    #[test]
+    fn a_lapsed_sign_in_is_its_own_kind_and_keeps_no_provider_text() {
+        let mut payloads = Vec::new();
+        crate::harness::claude::transcript::decode_line(r#"{"type":"assistant","isApiErrorMessage":true,"error":"authentication_failed","message":{"content":[{"type":"text","text":"Login expired · Please run /login"}]}}"#, &Default::default(), &mut payloads);
+        assert_eq!(failure(&payloads[0]), Some(RecoveryKind::SignedOut));
+        sanitize(&mut payloads[0]);
+        assert!(!serde_json::to_string(&payloads[0]).unwrap().contains("Please run"));
+        for text in ["Invalid API key · Please run /login", "Not logged in · Please run /login", "Your access token could not be refreshed. Please run codex login", "API Error: 401 OAuth token has expired"] {
+            assert_eq!(RecoveryKind::classify(text), RecoveryKind::SignedOut, "{text}");
+        }
+        // Another service's 401 is that tool's failure, not the agent's sign-in.
+        for text in ["GitHub API 401 Unauthorized", "POST /login failed with status 401", "error: 401 from the MCP server", "token expired for the deploy hook", "gh: not logged in to github.com", "Invalid API key for Linear"] {
+            assert_ne!(RecoveryKind::classify(text), RecoveryKind::SignedOut, "{text}");
+        }
+        // Its own text, read back (a sanitized log, the sidebar), is the same kind.
+        assert_eq!(RecoveryKind::classify(RecoveryKind::SignedOut.message()), RecoveryKind::SignedOut);
+        assert_eq!(serde_json::to_value(RecoveryKind::SignedOut).unwrap(), "signed_out");
     }
     #[test]
     fn provider_capacity_records_reach_recovery() {

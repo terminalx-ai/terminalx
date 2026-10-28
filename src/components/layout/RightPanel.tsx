@@ -10,6 +10,8 @@ import { ChangesPanel } from "@/components/changes/ChangesPanel";
 import { RepoPanel, type RepoView } from "@/components/changes/RepoPanel";
 import { PrPanel } from "@/components/changes/PrPanel";
 import { FileTree } from "@/components/files/FileTree";
+import { TerminalDock } from "@/components/terminal/TerminalDock";
+import { ComputerPanel } from "@/components/computer/ComputerPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api } from "@/lib/api";
 import type { GitSource } from "@/lib/gitSource";
@@ -25,6 +27,7 @@ const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
   { id: "pr", label: "PR", shortcut: "panel.pullRequests" },
   { id: "files", label: "Files", shortcut: "panel.files" },
   { id: "ports", label: "Ports" },
+  { id: "computer", label: "Computer" },
 ];
 
 /**
@@ -54,6 +57,8 @@ export function RightPanel({
   repositories,
   readOnlyReason,
   ports,
+  terminals = false,
+  computer = false,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -84,6 +89,10 @@ export function RightPanel({
   readOnlyReason?: string | null;
   /** A cloud workspace's Ports tab (PRO-28), drawn only while it is the tab shown; absent for anyone who may not use previews. */
   ports?: () => ReactNode;
+  /** A local session's panel: shells in its folder, docked below the tabs. */
+  terminals?: boolean;
+  /** A local session's panel: the Computer tab, a desktop to watch and that agents can use. */
+  computer?: boolean;
 }) {
   const prefs = usePrefs();
   // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
@@ -104,7 +113,9 @@ export function RightPanel({
   const [repoView, setRepoView] = useState<RepoView>("uncommitted");
   const [refreshTick, setRefreshTick] = useState(0);
   const [status, setStatus] = useState<WorkStatus | null>(null);
-  const tab: PanelTab = selectedTab === "ports" ? (ports ? "ports" : isGit ? "changes" : "files") : isGit ? selectedTab : "files";
+  const fallback: PanelTab = isGit ? "changes" : "files";
+  const tab: PanelTab =
+    selectedTab === "ports" ? (ports ? "ports" : fallback) : selectedTab === "computer" ? (computer ? "computer" : fallback) : isGit ? selectedTab : "files";
   const dragging = useRef<{ x: number; w: number } | null>(null);
 
   useEffect(() => {
@@ -161,7 +172,7 @@ export function RightPanel({
         className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-ring/30"
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 px-2">
-        {TABS.filter((t) => (t.id === "ports" ? !!ports : isGit || t.id === "files")).map((t) => (
+        {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : isGit || t.id === "files")).map((t) => (
           <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
             <button
               type="button"
@@ -268,6 +279,8 @@ export function RightPanel({
             {ports()}
           </div>
         )}
+        {/* Only while shown: it holds a live connection to the desktop. */}
+        {computer && tab === "computer" && <ComputerPanel active />}
         <div className={cn("h-full", tab !== "files" && "hidden")}>
           <FileTree
             key={refreshTick}
@@ -282,6 +295,7 @@ export function RightPanel({
           />
         </div>
       </div>
+      {terminals && sessionId && <TerminalDock sessionId={sessionId} cwd={cwd} />}
     </aside>
   );
 }

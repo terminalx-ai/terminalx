@@ -191,7 +191,7 @@ describe("the Issues view for a cloud project", () => {
     // No worktree switch and no merge switch: the issue gets a worktree, and a person merges.
     expect(screen.queryByRole("switch", { name: "Start issue in a new worktree" })).toBeNull();
     expect(screen.queryByRole("switch", { name: "Merge automatically when the review is addressed" })).toBeNull();
-    expect(screen.getByTestId("issue-start-row").textContent).toContain("433-carry-issue-sessions-on of a cloud workspace");
+    expect(screen.getByTestId("issue-start-row").textContent).toContain("433-carry-issue-sessions-on· cloud workspace");
     expect(screen.getByTestId("issue-cloud-pipeline").textContent).toContain("you merge it here");
 
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));

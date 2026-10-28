@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { copyText } from "@/lib/clipboard";
 
 export type ShareRole = "viewer" | "driver";
 export interface SharePerson {
@@ -105,6 +106,13 @@ export async function createShare(sessionId: string, settings: ShareSettings, di
 }
 export async function changeShare(sessionId: string, action: string, params: Record<string, unknown> = {}) {
   apply(sessionId, await invoke<ShareState>("session_share_change", { sessionId, action, params }));
+}
+/** Copy the session's live share link; with none, open Share to make one, since a link is never made without asking. */
+export async function copyShareLink(sessionId: string) {
+  await refreshShare(sessionId);
+  const link = states.get(sessionId)?.links?.find((candidate) => !candidate.revoked && candidate.settings.expiresAt > Date.now());
+  if (link) await copyText(link.url);
+  else openSessionShare(sessionId);
 }
 export function defaultShareSettings(): ShareSettings {
   return {

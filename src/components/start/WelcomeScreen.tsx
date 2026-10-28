@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyView } from "./EmptyView";
 import { openLocalProject } from "@/lib/projectStart";
 import { errorMessage } from "@/lib/api";
-import { selectSession, useSessionStore } from "@/lib/sessions";
+import { openNewSession, useSessionStore } from "@/lib/sessions";
 import { keycaps, shortcutAction, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 
 const SHORTCUTS: ShortcutId[] = ["app.newSession", "app.commandPalette", "app.toggleSidebar", "app.quickChat"];
@@ -24,7 +24,7 @@ export function WelcomeScreen() {
     <EmptyView branded guidance={store.sessions.length ? "Select a session from the sidebar to begin." : "Add a project to begin."}>
       <div className="mx-auto mt-8 flex max-w-sm flex-col justify-center gap-3 @sm:flex-row">
         <Button variant="secondary" disabled={busy} onClick={() => void addProject()}><FolderOpen aria-hidden /> Add Project</Button>
-        <Button variant="accent" onClick={() => selectSession(null)}><Plus aria-hidden /> New session</Button>
+        <Button variant="accent" onClick={() => openNewSession()}><Plus aria-hidden /> New session</Button>
       </div>
       {error && <p role="alert" className="mt-3 text-center text-sm text-destructive">{error}</p>}
       <dl aria-label="Keyboard shortcuts" className="mx-auto mt-8 grid max-w-sm grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3 text-xs text-muted-foreground">

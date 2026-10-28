@@ -27,6 +27,9 @@ export interface Prefs {
    */
   branchSessions: "tabs" | "sidebar";
   panelWidth: number;
+  /** The right panel's terminal dock: shown below the panel's tabs, and its height. */
+  panelTerminalOpen: boolean;
+  panelTerminalHeight: number;
   editorPaneWidth: number;
   updateChannel: "stable" | "beta";
   sounds: boolean;
@@ -34,6 +37,8 @@ export interface Prefs {
   fontScale: "sm" | "md" | "lg";
   transcriptLayout: "wide" | "chat";
   foldToolCalls: boolean;
+  /** Under each finished turn, a chip per file it changed with the lines added and removed. */
+  turnChanges: boolean;
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -121,6 +126,8 @@ const DEFAULTS: Prefs = {
   tabStrip: true,
   branchSessions: "tabs",
   panelWidth: 400,
+  panelTerminalOpen: false,
+  panelTerminalHeight: 260,
   editorPaneWidth: 520,
   updateChannel: "stable",
   sounds: true,
@@ -128,6 +135,7 @@ const DEFAULTS: Prefs = {
   fontScale: "md",
   transcriptLayout: "wide",
   foldToolCalls: true,
+  turnChanges: true,
   autocorrect: false,
   lastProject: null,
   lastAgent: "claude",

@@ -219,7 +219,7 @@ pub struct ManagerOps {
 
 impl ManagerOps {
     fn entries(&self) -> Vec<index::SessionEntry> {
-        index::load().unwrap_or_default().into_iter().filter(|entry| entry.project_path == self.root).collect()
+        index::load().unwrap_or_default().into_iter().filter(|entry| crate::remote::session_target::owns_project(Path::new(&self.root), &entry.project_path)).collect()
     }
 }
 
@@ -288,7 +288,7 @@ impl AgentOps for ManagerOps {
     }
 
     fn session(&self, session_id: &str) -> Option<SessionSummary> {
-        let entry = index::get(session_id).ok().filter(|entry| entry.project_path == self.root)?;
+        let entry = index::get(session_id).ok().filter(|entry| crate::remote::session_target::owns_project(Path::new(&self.root), &entry.project_path))?;
         Some(SessionSummary { title: entry.title, branch: entry.branch })
     }
 
@@ -891,7 +891,7 @@ pub fn interrupted_tabs(root: &str) -> Vec<(String, String)> {
     index::load()
         .unwrap_or_default()
         .into_iter()
-        .filter(|entry| entry.project_path == root)
+        .filter(|entry| crate::remote::session_target::owns_project(Path::new(root), &entry.project_path))
         .flat_map(|entry| {
             let session_id = entry.id.clone();
             entry

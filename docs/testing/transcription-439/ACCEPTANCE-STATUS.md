@@ -55,3 +55,35 @@ are user context, not independently captured audio/device/timing. Failed human
 ON/quiet trials, the strict Small tone mismatch, five empty Nemotron quiet
 recognitions and environmental false positives remain evidence. Detector speech
 retention never means accurate or nonempty transcription.
+
+## Later source/evidence reconciliation (main d9b5a901 integration)
+
+The baseline and publication checkpoint above describe the earlier scope-split
+audit; they are historical, not the current branch or validation state.
+The author subsequently reached clean3d73b0a4/tree055eeddde250aeb6bddb2cc5760f8f5745620f08.
+Its exact-head local four checks were accepted: TypeScript pass reused only under
+unchanged source/config/tool hashes, full Vitest3,572 tests/297 files, warnings-denied
+Clippy, and Cargo2,341 aggregate passes/20 ignored. The earlier pairing startup
+failure and missing-private-Git setup failure remain preserved. Pairing passed
+in that full run; the historical failure's cause was not established.
+
+The accepted F1/R1/R1b/R1c raw/formatted deletion ownership, F2 privacy gating,
+F3 immutable send receipt and common-finalizer regressions have automated evidence
+at that historical head. The older table's missing-snippet-regression observation
+does not describe the later test source. Automated evidence does not supply the
+missing native/human accuracy, successful-send learning/removal, partial deletion
+or start/stop latency acceptance.
+
+A signed isolated candidate was subsequently assembled from3d73b0a4:
+the TerminalX Dictation439 Integrated app under /tmp/tx439-presence-3d73b0a4,
+using only its isolated launch.sh. It and older candidates/stores remain historical
+and untouched. Their identities do not change when source is integrated.
+
+This source integration adopts exact main
+d9b5a9010f19dfb1d15703359cf2ffc5d9ed8619, preserving Offline dictation under
+Unreleased. No checks or candidate rebuild were performed for the combined
+source; exact-head four checks and independent source review are pending.
+Historical passing runs are not combined-head passes. All existing human,
+guest-consent, learning/removal/deletion, latency and publication gates remain;
+silence alone is deferred to #631, not passed. Adverse observations remain
+unchanged. No native or microphone acceptance is inferred from main's changes.
