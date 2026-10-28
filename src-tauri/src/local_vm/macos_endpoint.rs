@@ -231,24 +231,42 @@ fn observe_using(
 /// Future provisioning must retain this binding before account/trust capture.
 /// No control RPC, caller-supplied pin or production provisioner invokes it yet.
 #[allow(dead_code)]
-pub(super) fn retain(root: &Path, env: &Environment, storage: &Path, name: &str) -> Result<()> {
-    let binding = macos_transport::binding(env)?;
+pub(super) fn retain(
+    root: &Path,
+    bootstrap_id: &str,
+    target: &Target,
+    sandbox: &str,
+    storage: &Path,
+    name: &str,
+) -> Result<()> {
+    journal::validate_id(bootstrap_id)?;
+    journal::validate_sandbox(sandbox)?;
+    target.validate()?;
     let snapshot = snapshot(storage, name)?;
-    if fingerprint(&snapshot)? != binding.target.vm_fingerprint {
+    if fingerprint(&snapshot)? != target.vm_fingerprint {
         bail!("Provisioned VM fingerprint differs")
     }
     let pin = Pin {
         version: 1,
-        target: binding.target.clone(),
-        sandbox: env.sandbox.clone(),
+        target: target.clone(),
+        sandbox: sandbox.into(),
         storage: storage.into(),
         name: name.into(),
         snapshot,
     };
     let directory = root.join("macos-endpoints");
     journal::private_directory(&directory)?;
-    let path = directory.join(format!("{}.json", binding.bootstrap_id));
+    let path = directory.join(format!("{bootstrap_id}.json"));
     let bytes = serde_json::to_vec(&pin)?;
+    // A complete original receipt is idempotent; interrupted/changed bytes
+    // remain fenced. Never overwrite a pin or infer completion from its name.
+    if path.try_exists()? {
+        metadata(&path, false)?;
+        if read(&path, 96 * 1024)? != bytes {
+            bail!("Retained provisioning pin is changed or incomplete")
+        }
+        return Ok(());
+    }
     // First write only. No replacement/rebinding of a retained provisioning pin.
     use std::io::Write;
     let mut file = OpenOptions::new()
@@ -415,6 +433,59 @@ mod tests {
             100
         )
         .is_err());
+    }
+    #[test]
+    fn provisioning_pin_precedes_account_binding_and_reopens_without_rebinding() {
+        let (_dir, pin, _lock) = fixture();
+        let root = pin.storage.join("host-ledger");
+        let bootstrap_id = journal::new_id();
+        retain(
+            &root,
+            &bootstrap_id,
+            &pin.target,
+            &pin.sandbox,
+            &pin.storage,
+            &pin.name,
+        )
+        .unwrap();
+        let path = root
+            .join("macos-endpoints")
+            .join(format!("{bootstrap_id}.json"));
+        let original = read(&path, 96 * 1024).unwrap();
+        let inode = metadata(&path, false).unwrap();
+        retain(
+            &root,
+            &bootstrap_id,
+            &pin.target,
+            &pin.sandbox,
+            &pin.storage,
+            &pin.name,
+        )
+        .unwrap();
+        assert_eq!(metadata(&path, false).unwrap(), inode);
+        let mut changed = pin.target.clone();
+        changed.restore_sha256 = "b".repeat(64);
+        assert!(retain(
+            &root,
+            &bootstrap_id,
+            &changed,
+            &pin.sandbox,
+            &pin.storage,
+            &pin.name
+        )
+        .is_err());
+        assert_eq!(read(&path, 96 * 1024).unwrap(), original);
+        std::fs::write(&path, b"partial original receipt").unwrap();
+        assert!(retain(
+            &root,
+            &bootstrap_id,
+            &pin.target,
+            &pin.sandbox,
+            &pin.storage,
+            &pin.name
+        )
+        .is_err());
+        assert_eq!(read(&path, 96 * 1024).unwrap(), b"partial original receipt");
     }
     #[test]
     fn malformed_ambiguous_and_unsafe_dhcp_entries_never_fall_back() {
