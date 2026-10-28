@@ -4,6 +4,10 @@
 
 ### Terminal
 
+- Add opt-in raw native endpoint capture for the shell-memory diagnostic; retain
+  process identity checks and tool failures without claiming memory acceptance. (#232)
+
+
 - Cancel pending atlas warm-up when its final terminal owner is disposed, while
   preserving warm-up for remaining shared owners. Native memory acceptance
   remains unresolved. (#232)
@@ -1574,6 +1578,10 @@ safer, and the mobile companion can open cloud workspaces.
 
 ### Terminals
 
+- Add opt-in raw native endpoint capture for the shell-memory diagnostic; retain
+  process identity checks and tool failures without claiming memory acceptance. (#232)
+
+
 - Terminal output travels over a raw channel per pane with flow control,
   memory is bounded, input stays responsive, and terminal and chat views
   recover after the app is suspended. (#248, #352, #370, #371)
@@ -1615,6 +1623,10 @@ Terminals are released when their tabs and sessions go away, a slow Keychain
 call can no longer freeze the app, and small cloud UI findings are fixed.
 
 ### Terminals
+
+- Add opt-in raw native endpoint capture for the shell-memory diagnostic; retain
+  process identity checks and tool failures without claiming memory acceptance. (#232)
+
 
 - Closing an agent tab drops its terminal pane and scrollback instead of
   holding them until the session is deleted. A tab removed from the CLI or

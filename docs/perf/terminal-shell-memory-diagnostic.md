@@ -139,3 +139,56 @@ unbounded tool time or incomplete cleanup is inconclusive. Zone totals and their
 component regions must not be added together. No attribution category may be subtracted
 from the unchanged<=10% acceptance endpoint. A later uninstrumented faithful4/50/20/200
 run remains a separate acceptance gate after any demonstrated repair.
+
+## Raw endpoint capture implementation (not yet executed)
+
+`--native-region-binding /absolute/private/ownership.json` is now an optional
+**diagnostic-only** binding. It cannot be used without `--shell-memory-diagnostic`.
+The file names the separately qualified private app PID/start and fixed WebContent
+PID/start/command records:
+
+```json
+{
+  "appPid": 12345,
+  "appStart": "Wed Oct 28 12:00:00 2026",
+  "webContent": [
+    { "pid": 12346, "started": "Wed Oct 28 12:00:01 2026", "command": "/verified/path/com.apple.WebKit.WebContent" }
+  ]
+}
+```
+
+These are illustrative identifiers, not an actual ownership receipt. Do not infer
+responsibility from the process name or copy an old manifest. A separately owned
+capability run must qualify the target-specific responsibility ABI, permissions,
+raw schemas and engine identity first. The existing driver's responsibility API is
+private; this addition does not turn it into a public supported API. There is no
+sudo, launchctl or private-kernel fallback. Installed host launchctl documentation
+says procinfo requires root; it is not an unprivileged ownership alternative.
+
+The module writes a new `<out>.native-regions/{open,tabs,cleanup}` directory,
+refusing phase reuse. It preserves exact commands, timing, exit/signal/errors,
+stdout/stderr, footprint JSON, vmmap summary, and before/after identity fences.
+Footprint byte units, matching single PID and clean tool warnings/errors are
+required. Raw capture completion is **not attribution**, and the original
+`pending-native-region-evidence` classification remains until evidence is analyzed.
+A capture failure leaves its partial record and stops the driver. The existing
+owned-app runner must still clean up a failed driver/app.
+
+Each direct tool has a12s timeout with direct-child SIGKILL/reaping via Node,
+32MiB stdout/stderr bounds and a45s cooperative endpoint deadline. Footprint's
+separate JSON-file limit is checked **after tool exit**, not an enforced write-time
+quota. Kernel blocking, descendant behavior, outer300s cleanup and total disk
+budget remain the existing runner's separate gates, not a claimed universal hard
+bound of this module. Review these limitations against actual capability results
+before execution. A second-resolution ps start fence is not an atomic PID handle.
+
+One-shot vm_stat and vm.swapusage outputs are retained without inventing a pressure
+percentage or interpreting undocumented values. The installed host vm_stat manual
+identifies accumulated swapins/swapouts as compressed-page counts and reports page
+size. This is source evidence; guest units/output still need qualification. No
+memory_pressure command runs. Missing pressure/engine/region evidence prevents
+causal acceptance even if raw capture succeeds.
+
+The new parser regression source uses fields from the retained native JSC capture
+and matched invalid controls; it does not emulate native permission or ownership.
+No new native measurement or parser test has executed with this implementation.

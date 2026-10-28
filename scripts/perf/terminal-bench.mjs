@@ -16,6 +16,7 @@ import { cpus, homedir, loadavg, release, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { captureNativeEndpoint } from "./terminal-native-capture.mjs";
 
 const SCENARIOS = ["yes", "cat", "tui", "echo", "interrupt", "soak", "churn", "covered", "background"];
 import { LOG_BYTES, TUI_FRAMES, YES_LINES, writeLog, writeWorkloads } from "./terminal-workloads.mjs";
@@ -38,6 +39,7 @@ function parseArgs(argv) {
       }
       case "--interrupt-after": options.interruptAfterMs = Number(value()); break;
       case "--label": options.label = value(); break;
+      case "--native-region-binding": options.nativeRegionBinding = value(); break;
       case "--shell-memory-diagnostic": options.shellMemoryDiagnostic = true; break;
       default: fail(`unknown option ${argv[i]}`);
     }
@@ -48,6 +50,7 @@ function parseArgs(argv) {
   if (options.shellMemoryDiagnostic && (options.scenarios.length !== 1 || options.scenarios[0] !== "soak" || !Number.isSafeInteger(options.pid) || options.pid <= 0 || !options.out || options.soak.sessions !== 4 || options.soak.tabs !== 50)) {
     fail("--shell-memory-diagnostic requires --scenarios soak, exact --pid, --out and four sessions/50 shells; no agents or switches run");
   }
+  if (options.nativeRegionBinding && !options.shellMemoryDiagnostic) fail("--native-region-binding requires --shell-memory-diagnostic");
   return options;
 }
 
@@ -134,10 +137,12 @@ async function run(options, pid, request, timeoutMs = options.shellMemoryDiagnos
     const endpoint = { utc: new Date().toISOString(), monotonicMs: performance.now() };
     const after = memory(pid);
     const endpointEnd = { utc: new Date().toISOString(), monotonicMs: performance.now() };
+    const nativeRegions = options.nativeRegionBinding
+      ? captureNativeEndpoint(options.nativeRegionRoot, options.nativeBinding, request.step) : undefined;
     const expectedTracked = request.step === "open" ? 4 : 54;
     const inventoryComplete = inventory && inventory.unavailable.length === 0 && inventory.counts.terminal?.tracked === expectedTracked;
     const cleanupComplete = request.step !== "cleanup" || answer.result.cleanupAfterFallback?.complete === true;
-    return { result: answer.result, inventory,
+    return { result: answer.result, inventory, nativeRegions,
       ...(options.shellMemoryDiagnostic ? { attribution: !cleanupComplete ? "inconclusive-owned-cleanup" : inventoryComplete ? "pending-native-region-evidence" : "inconclusive-inventory", expectedTracked } : {}),
       endpoint, endpointEnd, memory: { before, peak, after }, discarded: discarded === null ? null : discards(options.home) - discarded };
   }
@@ -256,6 +261,12 @@ if (options.pid && status.pid !== options.pid) fail(`the app under ${options.hom
 // Agent tabs are only opened against the stand-in CLI that bench-app.sh puts on the app's path, never a real one.
 status.agent = existsSync(join(options.home, "bin/claude"));
 console.error(`terminal-bench: app ${status.appVersion} pid ${status.pid}, workloads in ${options.work}${status.agent ? "" : "; no stand-in agent CLI, so no agent tabs"}`);
+if (options.nativeRegionBinding) {
+  options.nativeBinding = JSON.parse(readFileSync(resolve(options.nativeRegionBinding), "utf8"));
+  if (options.nativeBinding.appPid !== status.pid) fail("native binding is not this private app");
+  options.nativeRegionRoot = resolve(options.out + ".native-regions");
+  mkdirSync(options.nativeRegionRoot, { mode: 0o700 });
+}
 const files = options.shellMemoryDiagnostic ? null : writeWorkloads(options.work);
 if (files) await writeLog(files.log);
 const background = files ? `sh "${files.agent}"` : "";
