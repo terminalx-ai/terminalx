@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { LinuxRuntimeInstaller } from "./LinuxRuntimeInstaller";
 import { LocalVmSetup } from "@/components/localVm/LocalVmSetup";
 import { reconcileLocalVmState, useLocalVmState } from "@/components/localVm/useLocalVmState";
 import { errorMessage } from "@/lib/api";
@@ -47,7 +48,8 @@ export function LinuxComputerSetup({ target }: { target: Extract<ComputerTarget,
     </div> : null}
     {environment ? <LocalVmSetup key={`${environment.id}:${environment.generation}`} environment={environment}
       disabled={busy || state?.enabled !== true} hasActiveTasks={Object.values(state?.tasks ?? {}).some((task) => task.target.environmentId === environment.id && !taskFinished(task.status))}
-      run={run} /> : <p>{state ? matches.length > 1 ? "Several retained runtime bindings match this container. Resolve their identity before setup." : "No verified task runtime profile is enrolled for this exact container. This build has no verified Linux runtime installer yet. Desktop attachment remains available; task setup cannot be completed until a matching Linux artifact and dedicated guest account are prepared." : "Reading retained Linux runtime bindings…"}</p>}
+      run={run} /> : <p>{state ? matches.length > 1 ? "Several retained runtime bindings match this container. Resolve their identity before setup." : "No verified task runtime profile is enrolled for this exact container. A verified native Linux profile is required before installation. Desktop attachment remains available; task setup cannot be completed until a matching Linux artifact and dedicated guest account are prepared." : "Reading retained Linux runtime bindings…"}</p>}
+    {state && !environment && matches.length === 0 ? <LinuxRuntimeInstaller key={computerKey(container)} target={container} enabled={state.enabled === true} /> : null}
     {failure || error ? <p role="alert">{failure || error}</p> : null}
   </section>;
 }

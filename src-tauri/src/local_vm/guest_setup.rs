@@ -94,6 +94,7 @@ mod tests {
     fn state(params: &Params) -> State {
         State {
             identity: Identity {
+                account: None,
                 environment_id: params.environment_id.clone(),
                 generation: params.generation.clone(),
                 protocol: 1,

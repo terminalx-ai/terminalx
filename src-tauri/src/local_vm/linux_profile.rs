@@ -1,7 +1,7 @@
 //! Trusted Linux artifact preparation and installer receipt lifecycle.
 //! The compiled catalog is intentionally empty until native build evidence is
-//! reviewed. No download, guest process, account, service or enrollment occurs
-//! here. A future container installer supplies the bounded executor separately.
+//! reviewed. Host staging never executes an artifact. The container adapter
+//! delivers only catalog-verified bytes and reconciles durable guest receipts.
 use super::journal::{self, Journal};
 use crate::computer_targets::{Capability, Target};
 use anyhow::{bail, Context, Result};
@@ -41,8 +41,8 @@ pub struct VerifiedArtifact {
 
 pub fn capability() -> Value {
     let catalog: Catalog = serde_json::from_str(CATALOG).expect("compiled Linux profile catalog");
-    json!({"protocol":1,"available":false,"profiles":catalog.profiles.iter().map(|p|json!({"id":p.id,"architecture":p.architecture,"sourceCommit":p.source_commit})).collect::<Vec<_>>(),
-        "reason":"No verified Linux artifact and installed container executor are available in this build. Runtime preparation is separate from guest account authorization and desktop readiness."})
+    json!({"protocol":1,"available":!catalog.profiles.is_empty(),"profiles":catalog.profiles.iter().map(|p|json!({"id":p.id,"architecture":p.architecture,"sourceCommit":p.source_commit})).collect::<Vec<_>>(),
+        "reason":"No verified native Linux artifact is available in this build. Runtime preparation is separate from guest account authorization and desktop readiness."})
 }
 pub fn verify(
     profile_id: &str,
@@ -51,10 +51,10 @@ pub fn verify(
 ) -> Result<VerifiedArtifact> {
     verify_using(CATALOG, profile_id, path, architecture)
 }
-fn read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+pub(super) fn read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     if !file.metadata()?.is_file() {
         bail!("A regular artifact/receipt file is required");
@@ -116,6 +116,113 @@ fn verify_using(
     Ok(VerifiedArtifact { profile, bytes })
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Account {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: String,
+    pub home_device: u64,
+    pub home_inode: u64,
+    pub architecture: Architecture,
+}
+impl Account {
+    pub(super) fn check_current(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        self.validate()?;
+        if !cfg!(target_os = "linux") {
+            bail!("Linux account binding cannot be used by a host/macOS runtime");
+        }
+        let passwd = std::fs::read_to_string("/etc/passwd")?;
+        let fields: Vec<_> = passwd
+            .lines()
+            .find(|line| line.starts_with("cua:"))
+            .context("Dedicated account is unavailable")?
+            .split(':')
+            .collect();
+        if fields.len() != 7
+            || fields[2].parse::<u32>()? != self.uid
+            || fields[3].parse::<u32>()? != self.gid
+            || fields[5] != self.home
+        {
+            bail!("Dedicated account identity changed");
+        }
+        let metadata = std::fs::symlink_metadata(&self.home)?;
+        // SAFETY: identity accessors take no pointers or memory preconditions.
+        if unsafe {
+            libc::getuid() != self.uid
+                || libc::geteuid() != self.uid
+                || libc::getgid() != self.gid
+                || libc::getegid() != self.gid
+        } || !metadata.is_dir()
+            || metadata.uid() != self.uid
+            || metadata.mode() & 0o022 != 0
+            || metadata.dev() != self.home_device
+            || metadata.ino() != self.home_inode
+        {
+            bail!("Dedicated account/home binding changed");
+        }
+        Ok(())
+    }
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.name != "cua"
+            || self.home != "/home/cua"
+            || self.uid == 0
+            || self.gid == 0
+            || self.home_inode == 0
+        {
+            bail!("Dedicated nonroot Linux account identity is required");
+        }
+        Ok(())
+    }
+}
+/// The path comes from the compiled digest, never a UI-selected executable.
+pub(super) fn cached(
+    root: &Path,
+    id: &str,
+    architecture: Architecture,
+) -> Result<VerifiedArtifact> {
+    let catalog: Catalog = serde_json::from_str(CATALOG)?;
+    let profile = catalog
+        .profiles
+        .iter()
+        .find(|p| p.id == id)
+        .context("No verified native Linux profile is available")?;
+    verify(
+        id,
+        &root.join("linux-artifacts").join(&profile.sha256),
+        architecture,
+    )
+}
+pub(super) fn trusted_record(root: &Path, key: &str) -> Result<Value> {
+    let record = inspect(root, key)?;
+    let binding: InstallBinding = serde_json::from_value(record["intent"]["binding"].clone())?;
+    validate_binding(&binding)?;
+    binding
+        .account
+        .as_ref()
+        .context("Legacy staging has no dedicated account binding")?
+        .validate()?;
+    let artifact = verify(
+        record["intent"]["profileId"]
+            .as_str()
+            .context("Profile ID missing")?,
+        &directory(root, key)?.join("runtime.elf"),
+        binding.architecture,
+    )?;
+    let expected = intent(&binding, &artifact);
+    if record["intent"] != expected
+        || record["inputDigest"] != journal::digest(&serde_json::to_vec(&expected)?)
+    {
+        bail!("Retained artifact provenance or binding changed");
+    }
+    Ok(record)
+}
+fn intent(binding: &InstallBinding, artifact: &VerifiedArtifact) -> Value {
+    json!({"binding":binding,"profileId":artifact.profile.id,"sourceCommit":artifact.profile.source_commit,
+        "runtimeSha256":artifact.profile.sha256,"protocol":artifact.profile.protocol,"bytes":artifact.profile.bytes})
+}
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct InstallBinding {
@@ -123,8 +230,10 @@ pub struct InstallBinding {
     pub environment_id: String,
     pub generation: String,
     pub architecture: Architecture,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
 }
-fn directory(root: &Path, key: &str) -> Result<std::path::PathBuf> {
+pub(super) fn directory(root: &Path, key: &str) -> Result<std::path::PathBuf> {
     if key.is_empty() || key.len() > 200 {
         bail!("Bounded installation request identity is required");
     }
@@ -137,6 +246,12 @@ fn validate_binding(binding: &InstallBinding) -> Result<()> {
         bail!("Linux installer requires an exact container target");
     }
     binding.target.require(Capability::AttachedDesktop)?;
+    if let Some(account) = &binding.account {
+        account.validate()?;
+        if account.architecture != binding.architecture {
+            bail!("Account architecture changed");
+        }
+    }
     journal::validate_id(&binding.environment_id)?;
     journal::validate_id(&binding.generation)
 }
@@ -153,8 +268,7 @@ pub fn prepare(
     }
     let dir = directory(root, key)?;
     let receipt = dir.join("receipt.json");
-    let intent = json!({"binding":binding,"profileId":artifact.profile.id,"sourceCommit":artifact.profile.source_commit,
-        "runtimeSha256":artifact.profile.sha256,"protocol":artifact.profile.protocol,"bytes":artifact.profile.bytes});
+    let intent = intent(binding, artifact);
     let digest = journal::digest(&serde_json::to_vec(&intent)?);
     // Reuse the target admission lock: replacement must not race desktop/task work.
     let _guard = super::admission::Guard::acquire(root, &binding.target)?;
@@ -173,7 +287,7 @@ pub fn prepare(
         }
     }
     journal::private_directory(&dir)?;
-    let prepared = json!({"intent":intent,"inputDigest":digest,"status":"staging","ready":false});
+    let prepared = json!({"requestKey":key,"intent":intent,"inputDigest":digest,"status":"staging","ready":false});
     journal::atomic_private_write(&receipt, &serde_json::to_vec(&prepared)?)?;
     journal::atomic_private_write(&dir.join("runtime.elf"), &artifact.bytes)?;
     let mut prepared = prepared;
@@ -190,9 +304,9 @@ pub fn inspect(root: &Path, key: &str) -> Result<Value> {
 }
 
 /// TerminalX-owned executor seam, not an invented Docker/Podman install API.
-/// A production executor is not wired. It must independently verify the live
-/// container/account, install private bytes, and return a bound runtime receipt.
-pub fn execute_prepared(
+/// The production adapter verifies the catalog before using this seam. It
+/// reads the original terminal receipt under the guest installer lock.
+pub(super) fn execute_prepared(
     root: &Path,
     journal: &Journal,
     key: &str,
@@ -244,30 +358,110 @@ pub fn execute_prepared(
     journal::atomic_private_write(
         &guard.marker,
         &serde_json::to_vec(
-            &json!({"kind":"linuxRuntimeInstall","target":binding.target,"binding":binding,"requestDigest":journal::digest(key.as_bytes()),"status":"awaitingInstallReceipt"}),
+            &json!({"kind":"linuxRuntimeInstall","target":binding.target,"binding":binding,"requestDigest":journal::digest(key.as_bytes()),"inputDigest":record["inputDigest"],"status":"awaitingInstallReceipt"}),
         )?,
     )?;
-    if let Ok(receipt) = executor(&binding, &binary, &record["intent"]) {
-        if receipt["binding"] == json!(binding)
-            && receipt["runtimeSha256"] == record["intent"]["runtimeSha256"]
-            && receipt["protocol"] == journal::PROTOCOL
-            && receipt["runtimeBound"] == true
-        {
-            record["status"] = json!("runtimeBound");
-            record["receipt"] = receipt;
+    match executor(&binding, &binary, &record["intent"]) {
+        Ok(receipt) => {
+            if finish(root, key, &mut record, &receipt).is_ok() {
+                guard.completed()?;
+            }
+        }
+        Err(error) => {
+            record["detail"] = json!(error.to_string());
             journal::atomic_private_write(
                 &dir.join("receipt.json"),
                 &serde_json::to_vec(&record)?,
             )?;
-            guard.completed()?;
         }
     }
-    Ok(record) // Runtime binding alone never establishes task/account readiness.
+    Ok(record)
+}
+fn finish(root: &Path, key: &str, record: &mut Value, observed: &Value) -> Result<()> {
+    let intent = &record["intent"];
+    let receipt = &observed["receipt"];
+    let request = journal::digest(key.as_bytes());
+    let binding = &intent["binding"];
+    if receipt["version"] != 1
+        || receipt["status"] != "installed"
+        || receipt["intent"] != *intent
+        || receipt["requestDigest"] != request
+        || receipt["inputDigest"] != record["inputDigest"]
+        || observed["account"] != binding["account"]
+        || observed["runtimeSha256"] != intent["runtimeSha256"]
+        || observed["protocol"] != journal::PROTOCOL
+        || observed["identity"]
+            != json!({"environmentId":binding["environmentId"],"generation":binding["generation"],"protocol":journal::PROTOCOL,"account":binding["account"]})
+        || observed["exitProof"]
+            != json!({"kind":"terminalReceiptUnderExclusiveLock","requestDigest":request,"inputDigest":record["inputDigest"]})
+    {
+        bail!("Fresh original installer completion/account/identity receipt is unconfirmed");
+    }
+    let mut next = record.clone();
+    next["status"] = json!("installed");
+    next["receipt"] = observed.clone();
+    next["ready"] = json!(false);
+    next["detail"]=json!("Runtime files installed and installer completion confirmed. Runtime activation, guest Codex authorization and task readiness are separate.");
+    journal::atomic_private_write(
+        &directory(root, key)?.join("receipt.json"),
+        &serde_json::to_vec(&next)?,
+    )?;
+    *record = next;
+    Ok(())
+}
+pub(super) fn reconcile_prepared(
+    root: &Path,
+    key: &str,
+    confirm: bool,
+    observe: impl FnOnce(&InstallBinding, &Value) -> Result<Value>,
+) -> Result<Value> {
+    if !confirm {
+        bail!("Confirm recovery of the displayed original installation");
+    }
+    let mut record = inspect(root, key)?;
+    let binding: InstallBinding = serde_json::from_value(record["intent"]["binding"].clone())?;
+    validate_binding(&binding)?;
+    let guard = super::admission::Guard::lock(root, &binding.target)?;
+    if !guard.marker.try_exists()? {
+        if record["status"] == "installed" {
+            return Ok(record);
+        }
+        bail!("Original installer reservation is unavailable");
+    }
+    let marker: Value = serde_json::from_slice(&super::admission::read_marker(&guard.marker)?)?;
+    if marker["kind"] != "linuxRuntimeInstall"
+        || marker["binding"] != json!(binding)
+        || marker["requestDigest"] != journal::digest(key.as_bytes())
+        || marker["inputDigest"] != record["inputDigest"]
+    {
+        bail!("Original installer reservation changed");
+    }
+    let observed = observe(&binding, &record["intent"])?;
+    finish(root, key, &mut record, &observed)?;
+    guard.completed()?;
+    Ok(record)
+}
+
+#[cfg(test)]
+pub(super) fn fixture(
+    catalog: &str,
+    path: &Path,
+    architecture: Architecture,
+) -> Result<VerifiedArtifact> {
+    verify_using(catalog, "fixture", path, architecture)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub(super) fn completion(key: &str, intent: &Value) -> Value {
+        let request = journal::digest(key.as_bytes());
+        let input = journal::digest(&serde_json::to_vec(intent).unwrap());
+        json!({"receipt":{"version":1,"status":"installed","intent":intent,"requestDigest":request,"inputDigest":input},
+            "account":intent["binding"]["account"],"runtimeSha256":intent["runtimeSha256"],"protocol":1,
+            "identity":{"environmentId":intent["binding"]["environmentId"],"generation":intent["binding"]["generation"],"protocol":1,"account":intent["binding"]["account"]},
+            "exitProof":{"kind":"terminalReceiptUnderExclusiveLock","requestDigest":request,"inputDigest":input}})
+    }
     fn artifact(dir: &Path, architecture: Architecture) -> (String, std::path::PathBuf) {
         let mut bytes = vec![0_u8; 64];
         bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
@@ -292,6 +486,15 @@ mod tests {
             environment_id: journal::new_id(),
             generation: journal::new_id(),
             architecture: Architecture::Arm64,
+            account: Some(Account {
+                name: "cua".into(),
+                uid: 1000,
+                gid: 1000,
+                home: "/home/cua".into(),
+                home_device: 1,
+                home_inode: 2,
+                architecture: Architecture::Arm64,
+            }),
         }
     }
     #[test]
@@ -377,8 +580,11 @@ mod tests {
         };
         binding.environment_id = journal::new_id();
         prepare(dir.path(), "completed", &binding, &artifact).unwrap();
-        let complete=execute_prepared(dir.path(),&journal,"completed",|actual,_,intent|Ok(json!({"binding":actual,"runtimeSha256":intent["runtimeSha256"],"protocol":1,"runtimeBound":true}))).unwrap();
-        assert_eq!(complete["status"], "runtimeBound");
+        let complete = execute_prepared(dir.path(), &journal, "completed", |_, _, intent| {
+            Ok(completion("completed", intent))
+        })
+        .unwrap();
+        assert_eq!(complete["status"], "installed");
         assert_eq!(complete["ready"], false);
         let mut binding = binding.clone();
         binding.target = Target::LinuxContainer {

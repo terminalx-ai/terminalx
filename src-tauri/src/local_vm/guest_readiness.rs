@@ -970,6 +970,7 @@ mod tests {
             return;
         };
         let identity = Identity {
+            account: None,
             environment_id: super::super::super::journal::new_id(),
             generation: super::super::super::journal::new_id(),
             protocol: 1,
@@ -1064,6 +1065,7 @@ mod tests {
     #[test]
     fn readiness_binds_full_runtime_identity_and_observation_cannot_release_manual_control() {
         let identity = Identity {
+            account: None,
             environment_id: "env-1".into(),
             generation: "gen-1".into(),
             protocol: 1,

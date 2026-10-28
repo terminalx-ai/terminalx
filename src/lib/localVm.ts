@@ -4,7 +4,23 @@ import type { ComputerContext, ComputerInventory, ComputerSelection, ComputerTar
 import type { LocalVmStatus } from "@/lib/api";
 import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
+export interface LinuxInstallRecord {
+  requestKey: string; inputDigest: string; status: "staging" | "prepared" | "outcomeUnknown" | "installed"; ready: false; detail?: string;
+  intent: { profileId: string; sourceCommit: string; runtimeSha256: string; binding: {
+    target: ComputerTarget; environmentId: string; generation: string; architecture: "x64" | "arm64";
+    account?: { name: string; uid: number; gid: number; home: string; homeDevice: number; homeInode: number; architecture: "x64" | "arm64" };
+  } };
+}
+export interface LinuxInstallerView {
+  target: ComputerTarget; available: boolean; reason: string;
+  profiles: { id: string; architecture: "x64" | "arm64"; sourceCommit: string }[];
+  operations: LinuxInstallRecord[];
+}
 interface Requests {
+  "computer.linuxInstaller": { params: { target: ComputerTarget }; result: LinuxInstallerView };
+  "computer.prepareLinuxRuntime": { params: { target: ComputerTarget; profileId: string; idempotencyKey: string; confirm: true }; result: LinuxInstallRecord };
+  "computer.deliverLinuxRuntime": { params: { target: ComputerTarget; idempotencyKey: string; inputDigest: string; confirm: true }; result: LinuxInstallRecord };
+  "computer.reconcileLinuxRuntime": { params: { target: ComputerTarget; idempotencyKey: string; inputDigest: string; confirm: true }; result: LinuxInstallRecord };
   "computer.checkAttachment": { params: ComputerContext & { target: ComputerTarget }; result: { target: ComputerTarget; available: boolean; detail: string } };
   "computer.attachment": { params: { target: ComputerTarget }; result: AttachmentReport };
   "computer.reconcileAttachment": { params: { target: ComputerTarget; markerDigest?: string; binding?: AttachmentBinding; confirm: true }; result: AttachmentReport };

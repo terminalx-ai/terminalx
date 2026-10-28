@@ -41,9 +41,24 @@ are **TerminalX-owned proposed contracts**, not claims about upstream APIs:
 | Runtime enrollment | Verify the selected account UID/home, environment/generation, protocol and executable digest before installing/starting the guest runtime. Keep provisioning separate from provider authorization. |
 | Consent/readiness | Preserve explicit OS-required and provider consent. Continue automatically after a verified receipt. Boot, screenshot, account creation and SSH connection are separate stages and none alone establishes Ready. |
 
-This design keeps routine work in the background. The first-account executor,
-VNC screen transitions and out-of-band host-key capture still need implementation
-and disposable fixtures. Fresh macOS26 acceptance must test these against an
+The source now contains an unactivated personalization ledger and SSH request
+planner. Account creation intent binds environment/generation, VM fingerprint,
+macOS26 restore digest, personalized account name and opaque secret references.
+An interrupted effect retains its original identity. A fresh request key cannot
+bypass that VM's retained plan, and missing history refuses continuation.
+Reconciliation accepts an
+account observation through a separate internal executor seam and never reruns
+creation. The SSH plan binds the observed account/host key to that receipt and
+refuses replaced VM identity. It supplies explicit account and isolated
+configuration, pinning the Ed25519 host key without inherited SSH agent/password
+or forwarding behavior. It builds bytes/arguments only; it does not read/create
+private keys, open SSH, or enable a transport/profile.
+
+These boundaries have disposable journal/plan fixtures. They are not an
+implemented first-account executor or a trust ceremony: receipts can be supplied
+only by a future VM-bound backend, and no production control route exposes the
+fixture seam. VNC screen transitions, out-of-band host-key capture and guest
+runtime home/account parameterization still need source integration. Fresh macOS26 acceptance must test these against an
 actual supported restore image before enabling Create.
 
 ## Account-bound transport
@@ -73,8 +88,9 @@ Cua route. The host's read-only version check reports **OpenSSH_10.2p1 / LibreSS
   timeout as refusal/unknown outcome, with no fallback to legacy credentials,
   another VM, host shell, or host desktop.
 
-These are supported SSH configuration concepts, but the TerminalX adapter and its
-initial trust ceremony still need implementation and review.
+These are supported SSH configuration concepts. The source request planner now
+covers identity, arguments and bounded RPC bytes, while connection execution,
+credential-reference resolution and the initial trust ceremony remain unwired.
 [OpenSSH configuration reference](https://man.openbsd.org/ssh_config).
 
 Source integration points: extend `local_vm/transport.rs` with a separate typed
@@ -125,9 +141,10 @@ implemented and fixture-tested. Remaining delivery work:
 1. Produce and verify native Linux runtime artifacts for the exact source and
    architecture. The cross-target check is blocked in `openssl-sys` by the absent
    Linux OpenSSL sysroot; no package or build container was installed.
-2. Wire a supported container installer to the prepared-artifact receipt
-   boundary, verify the dedicated account and runtime binding, and support
-   interrupted installer reconciliation. The trusted production catalog is empty.
+2. Populate the trusted production catalog only after native artifact evidence.
+   The container installer, account binding and guided receipt reconciliation are
+   now source-wired. Guest runtime activation/supervision, final serving-artifact
+   enrollment and live task/account acceptance remain separate delivery work.
 3. Validate the Linux Driver/tool contract and integrate task desktop support
    through the guest workflow lease before advertising full guest-task parity.
 4. Implement the macOS26 personalized first-account bootstrap and authenticated
@@ -180,10 +197,39 @@ The executor seam records intent and reserves the exact container before deliver
 Unknown delivery is retained across reopen and is never replayed; desktop exit
 reconciliation cannot clear an installation reservation. Only an exact bound
 runtime receipt clears a completed install reservation, and runtime binding alone
-keeps readiness false. Disposable fixture executors exercise this lifecycle; no
-production container installer is wired, no download/install was performed, and
-no runtime artifact is supplied by an arbitrary caller digest. The UI continues to
-report that a verified Linux installer is unavailable.
+keeps readiness false. The production source route is now wired to the compiled catalog, a digest-named
+private artifact cache and an exact-ID Docker/Podman adapter. Public requests
+cannot inject an artifact path, catalog, account observation or completion proof.
+The empty catalog rejects production preparation/delivery before any guest
+contact; fixture catalogs are test-only. No download or live installation was
+performed, and native Linux build proof is still missing.
+
+The adapter requires the existing nonroot cua account, exact UID/GID/home device
+and inode, correct architecture, and an owned running container without mounts,
+privileged mode or a shared host PID namespace. A bounded Python standard-library
+installer runs under that account through supported exec flags. Python 3 must
+already be present; this route never installs packages, creates an account or
+starts a runtime owner. It validates the artifact again, journals intent before
+writing a new private installation, and refuses all existing installation/history
+replacement. The runtime identity retains the account binding and checks it when
+loaded; legacy identities remain compatible.
+
+A stable guest lock inode covers all installation mutations. After a terminal
+receipt is persisted, a separate read obtains that original exclusive lock and
+verifies the same request/intent, account, installed identity and artifact bytes.
+This proves completion of the original mutation lifetime, without using a PID or
+timeout. A lost exec reply is recovered only by this receipt operation. An
+interrupted nonterminal guest receipt remains fenced; no reinstall, rollback or
+desktop-exit shortcut is offered. All receipts are retained. The guided UI shows
+exact account/environment/generation, requires explicit delivery/reconciliation
+confirmation and states that installed files do not establish owner activation,
+provider authorization or task readiness.
+
+Fixtures execute the shipped installer script against temporary guest directories
+through a fake Docker/Podman command boundary. They cover lost replies, exclusive
+lock contention, unknown guest intent, artifact/account/target changes, competing
+workflow admission and production rejection of fixture artifacts. Neither live
+VM/container nor credentials were touched.
 
 ## Ownership reconciliation and macOS attachment source boundary
 

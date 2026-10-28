@@ -90,6 +90,8 @@ pub struct Identity {
     pub environment_id: String,
     pub generation: String,
     pub protocol: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<super::linux_profile::Account>,
 }
 
 impl Identity {
@@ -104,6 +106,7 @@ impl Identity {
             bail!("Guest identity must be an owner-only regular file owned by this user");
         }
         let identity: Self = serde_json::from_slice(&read_bounded(&path, 4096)?)?;
+        if let Some(account)=&identity.account { account.check_current()?; }
         validate_id(&identity.environment_id)?;
         validate_id(&identity.generation)?;
         if identity.protocol != PROTOCOL {
@@ -2627,6 +2630,7 @@ mod tests {
         let host = Journal::open(&root.join("host-journal")).unwrap();
         let env = host.enroll("Test guest", "local:test-guest").unwrap();
         let identity = Identity {
+            account: None,
             environment_id: env.id.clone(),
             generation: env.generation.clone(),
             protocol: PROTOCOL,
