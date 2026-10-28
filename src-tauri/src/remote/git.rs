@@ -357,15 +357,12 @@ impl WorkspaceGit {
 
     // ---- repositories ----------------------------------------------------
 
-    /// Workspace-relative repository directories, sorted; the root alone when
-    /// it is one. Symlinks, hidden and build directories are not searched.
+    /// Workspace-relative repository directories, including nested checkouts
+    /// beside an older blank root. Symlinks, hidden and build directories are skipped.
     pub fn repositories(&self) -> (Vec<String>, bool) {
         // The root itself, or a directory inside a checkout (a package of a
         // monorepo as the target directory, development runtimes).
-        if self.root.join(".git").exists() || crate::git::is_repo(&self.root) {
-            return (vec![".".into()], false);
-        }
-        let mut found = Vec::new();
+        let mut found = if self.root.join(".git").exists() || crate::git::is_repo(&self.root) { vec![".".into()] } else { Vec::new() };
         let mut truncated = false;
         let mut frontier = vec![(self.root.clone(), 0usize)];
         while let Some((dir, depth)) = frontier.pop() {
@@ -898,7 +895,7 @@ impl WorkspaceGit {
         // workspace's journal or pipeline evidence through this connection.
         // Match WorkspaceRpc::workspace_sessions exactly: a checkout location
         // does not grant visibility into its owning project.
-        if entry.project_path != self.root.to_string_lossy() {
+        if !super::session_target::owns_project(&self.root, &entry.project_path) {
             return Err(RpcError::not_found("session is not in this workspace"));
         }
         let associations = crate::pr_associations::for_session(session, vec![])

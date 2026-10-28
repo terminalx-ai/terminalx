@@ -536,10 +536,11 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     // Denial must happen before recovery creates/reads the association registry.
     let registry = crate::store::root().unwrap().join("session-pr-associations.json");
     assert!(!registry.exists());
-    for id in ["foreign-checkout", "nested"] {
+    for id in ["foreign-checkout", "outside"] {
         assert_eq!(f.code("git.prAssociations", json!({"sessionId":id})), "not_found");
         assert!(!registry.exists());
     }
+    assert!(f.call("git.prAssociations", json!({"sessionId":"nested"})).is_ok());
     let journal = crate::store::log_path("author", "tab").unwrap();
     for (seq, payload) in [
         json!({"type":"tool_call_started", "callId":"create", "name":"Bash", "toolType":"shell", "input":{"command":"gh pr create --body-file - <<'EOF'\nUse `code`.\nEOF"}}),
