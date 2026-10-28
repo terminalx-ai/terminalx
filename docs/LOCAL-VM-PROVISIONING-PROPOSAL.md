@@ -5,6 +5,15 @@ or running owner changed. The current fresh-macOS capability remains unavailable
 The working two-action model is an implementation assumption communicated to the
 user, not an explicit answer to every product preference question.
 
+The follow-up [console/trust integration decision](LOCAL-VM-CONSOLE-TRUST-PROPOSAL.md)
+specifies the exact owned-console and VirtioFS receipt contract. It also records
+a newly verified dependency issue: a VNC-enabled pinned Lume run independently
+tries fixed-account SSH. The existing ordinary run adapter must remain gated
+until a separately reviewed bootstrap profile suppresses that behavior. Existing
+noVNC1.7.0 can be reused; no viewer dependency upgrade is proposed. Apple's live
+metadata feed currently supplies no macOS26 virtual-Mac candidate, and no restore
+image/catalog entry has been acquired.
+
 ## Source implementation update — 2026-10-28
 
 The current source has a fixed OpenSSH per-guest key producer, original producer
