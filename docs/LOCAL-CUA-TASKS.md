@@ -22,10 +22,41 @@ feature's durable task and artifact contract. Its source and fixture tests
 also do not establish fresh macOS onboarding or host-lock/sleep acceptance.
 
 The integrated branch keeps the Linux implementation in `container_vm.rs` and
-the macOS task implementation in `local_vm/`; public commands are unchanged.
+the macOS task implementation in `local_vm/`.
 A validated macOS guest worker receives only its bound guest desktop adapter,
 never an additional container adapter. The Linux viewer is an existing UI
 foundation to evaluate for later shared desktop work; PRO-117 remains queued.
+
+## Shared environment selection
+
+The shared inventory lists existing TerminalX Linux containers for both Docker
+and Podman and retained macOS Lume enrollments. Each entry declares supported
+routes; inventory membership and a running container are not readiness proof.
+The existing Computer and selected-task pickers use the same identity model:
+Linux runtime plus full immutable container ID, or macOS environment ID plus
+generation. No selection implicitly migrates an agent, shell or project files.
+
+A Linux desktop attachment is explicitly saved for one tab and conversation.
+It can change only while that agent is stopped. Agent MCP launch, CLI tools and
+the selected viewer address the exact container ID; replacement, missing,
+stopped and incompatible targets fail without falling back to another runtime,
+OS or host desktop. Starting a container no longer attaches it globally to new
+host agents. `terminalx vm inventory --json` reports identities; `vm tools`,
+`vm call` and `vm screenshot` now require `--target TARGET_JSON`. Existing MCP
+connections remain bound to their original ID. Changing a picker does not
+change a live agent's MCP configuration.
+
+macOS selected-task requests include the selected generation in the capability
+check and durable pending submission. The journal checks it atomically before
+reserving a new task. A lost acknowledgment can recover the original receipt
+after a generation change, but cannot create a task on the replacement. Legacy
+pending requests without a target can recover an existing receipt only. Linux
+guest-task execution and attached macOS desktop tools remain unsupported;
+their options cannot invoke the incompatible route. This extends the existing
+routes without deciding the pending unified execution-mode question.
+
+These source and fixture changes do not establish live UI/reconnect or fresh
+onboarding acceptance and have not been activated in the held pilot runtime.
 
 ## Execution and retained identity
 

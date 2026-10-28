@@ -106,6 +106,7 @@ function PanelHost({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
       live={live}
       sessionId={session.id}
       mentionTabId={session.activeTab ?? session.tabs[0]?.id ?? null}
+      conversation={tab.conversation ?? null}
       statusKey={session.tabs.map((item) => item.status).join(",")}
       settleSessionId={workspace ? session.id : undefined}
       workspace={workspace}

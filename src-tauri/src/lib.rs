@@ -101,6 +101,7 @@ mod landed;
 mod local_sharing;
 pub mod local_runtime;
 mod container_vm;
+mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
 mod memory_baseline;

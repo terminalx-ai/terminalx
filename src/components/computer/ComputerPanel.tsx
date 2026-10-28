@@ -6,6 +6,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { api, errorMessage, type LocalVmStatus } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { VncView, type VncState } from "./VncView";
+import { ComputerSelection } from "./ComputerSelection";
+import type { ComputerContext, ComputerTarget } from "@/types/computer";
+import { computerKey } from "@/types/computer";
+import { localVmRequest } from "@/lib/localVm";
 
 type Place = "local" | "cloud";
 type Busy = "start" | "stop" | "reset" | "runtime" | null;
@@ -23,7 +27,7 @@ const BUSY_TEXT: Record<Exclude<Busy, null>, string> = {
  * VM runs in a container on this machine (`container_vm.rs`); a cloud VM is not
  * built yet.
  */
-export function ComputerPanel({ active }: { active: boolean }) {
+export function ComputerPanel({ active, context }: { active: boolean; context?: ComputerContext }) {
   const [place, setPlace] = useState<Place>("local");
   return (
     <div className="flex h-full flex-col" data-testid="panel-computer">
@@ -41,7 +45,7 @@ export function ComputerPanel({ active }: { active: boolean }) {
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1">{place === "local" ? <LocalVm active={active} /> : <CloudVm />}</div>
+      <div className="min-h-0 flex-1">{place === "local" ? context ? <ComputerSelection key={JSON.stringify(context)} context={context} active={active}>{(target) => <LocalVm key={target ? computerKey(target) : "manage"} active={active} target={target ?? undefined} />}</ComputerSelection> : <LocalVm active={active} /> : <CloudVm />}</div>
     </div>
   );
 }
@@ -77,7 +81,7 @@ function Message({ title, children, actions }: { title: string; children: ReactN
   );
 }
 
-function LocalVm({ active }: { active: boolean }) {
+function LocalVm({ active, target }: { active: boolean; target?: ComputerTarget }) {
   const [status, setStatus] = useState<LocalVmStatus | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,11 +91,13 @@ function LocalVm({ active }: { active: boolean }) {
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await api.localVm.status());
+      setStatus(await (target ? localVmRequest("computer.viewer", { target }) : api.localVm.status()));
+      if (target) setError(null);
     } catch (e) {
+      if (target) setStatus(null);
       setError(errorMessage(e));
     }
-  }, []);
+  }, [target]);
   // Read when the tab is shown; the runtime may have been started or stopped elsewhere.
   useEffect(() => {
     if (active) void refresh();
@@ -177,7 +183,7 @@ function LocalVm({ active }: { active: boolean }) {
   if (status.state !== "running" || !status.viewer) {
     return idle(
       <Message title="A Linux desktop for you and your agents" actions={<Button size="sm" onClick={() => void act("start", api.localVm.start)}>Start Local VM</Button>}>
-        Watch it here and take control when you need to. Agents use it to see and test your app.
+        Watch it here and take control when you need to. Select its desktop attachment separately for an agent tab.
       </Message>,
     );
   }
@@ -208,12 +214,12 @@ function LocalVm({ active }: { active: boolean }) {
       <div className="flex shrink-0 items-center gap-2 border-t border-hairline px-3 py-1.5 text-xs">
         <span className="size-1.5 shrink-0 rounded-full bg-success" aria-hidden />
         <span className="min-w-0 flex-1 truncate text-muted-foreground" title="Dev servers on this machine are at host.docker.internal:<port> inside the VM.">
-          {control ? "You have control" : "Agents can use it · host.docker.internal"}
+          {control ? "You have control" : "Linux desktop · host.docker.internal"}
         </span>
         <Button size="sm" variant={control ? "default" : "outline"} disabled={view !== "connected"} onClick={() => setControl((on) => !on)}>
           {control ? "Release" : "Take control"}
         </Button>
-        <DropdownMenu>
+        {!target && <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon-xs" aria-label="Local VM actions">
               <Ellipsis />
@@ -224,7 +230,7 @@ function LocalVm({ active }: { active: boolean }) {
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void act("reset", api.localVm.reset)}>Reset (start fresh)</DropdownMenuItem>
           </DropdownMenuContent>
-        </DropdownMenu>
+        </DropdownMenu>}
       </div>
     </div>
   );

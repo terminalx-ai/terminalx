@@ -18,6 +18,7 @@ vi.mock("./useLocalVmState", async () => {
   };
 });
 import { LocalVmTasks } from "./LocalVmTasks";
+import { computerKey } from "@/types/computer";
 import { submissionStorageKey } from "./submission";
 
 const mount = (conversation: string | null = null, parent = session, parentTab = tab) => {
@@ -32,6 +33,7 @@ beforeEach(() => {
   localStorage.clear(); mocks.invoke.mockReset(); mocks.reconcile.mockReset();
   mocks.state = { enabled: true, environments: { env: environment }, tasks: {} };
   mocks.invoke.mockImplementation(async (_command, { method, params }) => {
+    if (method === "computer.inventory") return { entries: [{ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, name: "macOS · Local guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] };
     if (method === "describe") return description;
     if (method === "task.submit") return task({ input: params.input, idempotencyKey: params.idempotencyKey });
     return null;
@@ -40,7 +42,8 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function selectTask() {
-  fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "env" } });
+  await screen.findByRole("option", { name: "macOS · Local guest" });
+  fireEvent.change(screen.getByLabelText("Environment"), { target: { value: computerKey({ kind: "macosGuest", environmentId: environment.id, generation: environment.generation }) } });
   expect((screen.getByRole("button", { name: "Submit selected task" }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Check guest capabilities" }));
   await screen.findByText("Guest reports support for these inherited task settings.");
@@ -48,12 +51,35 @@ async function selectTask() {
 }
 
 describe("selected local VM tasks", () => {
+  it("invalidates a checked generation after journal refresh without selecting its replacement", async () => {
+    const view = mount(); await selectTask();
+    expect(calls("describe")[0][1].params).toEqual({ environmentId: environment.id, generation: environment.generation });
+    mocks.state = { ...mocks.state!, environments: { env: { ...environment, generation: "replacement" } } };
+    view.rerender(<LocalVmTasks session={session} tab={tab} conversation={null} active readOnly={false} selectedPrompt="Only the selected composer task" />);
+    expect((screen.getByRole("button", { name: "Submit selected task" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(calls("task.submit")).toHaveLength(0);
+  });
+
+  it("retains a retry when an acknowledgment names another generation", async () => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (args.method === "task.submit") return task({ input: args.params.input, idempotencyKey: args.params.idempotencyKey, target: { ...task().target, generation: "replacement" } });
+      return normal(command, args);
+    });
+    mount(); await selectTask();
+    fireEvent.click(screen.getByRole("button", { name: "Submit selected task" }));
+    await screen.findByText(/acknowledgment did not match/);
+    const saved = JSON.parse(localStorage.getItem(submissionStorageKey(session.id, tab.id, null))!) as LocalVmSubmission;
+    expect(saved.target).toEqual({ kind: "macosGuest", environmentId: environment.id, generation: environment.generation });
+    expect(screen.getByRole("button", { name: "Retry same submission" })).toBeTruthy();
+  });
+
   it.each([true, false])("binds the retained manual hold to the task environment generation (matching=%s)", (matching) => {
     mocks.state = { enabled: false, environments: { env: { ...environment, generation: matching ? environment.generation : "replacement-generation", manualControl: true } }, tasks: { task: task({ status: "canceled" }) } };
     mount();
     expect(!!screen.queryByRole("button", { name: "Return control to queued tasks" })).toBe(matching);
     expect(!!screen.queryByRole("status", { name: "Manual desktop control" })).toBe(matching);
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([, args]) => args.method !== "computer.inventory")).toHaveLength(0);
   });
 
   it("shows disconnected supervisor detail without opening task details or inferring a task outcome", () => {
@@ -66,20 +92,21 @@ describe("selected local VM tasks", () => {
     expect(banner.closest("details")).toBeNull();
     expect(screen.getByRole("article", { name: "Local VM task task" }).textContent).toContain("Local VM · Running");
     expect(mocks.state.tasks.task.status).toBe("running");
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([, args]) => args.method !== "computer.inventory")).toHaveLength(0);
   });
 
   it.each(["absent", "connected", "disabled"])("does not show a disconnection banner when supervisor is %s", (condition) => {
     mocks.state = { enabled: condition !== "disabled", environments: {}, tasks: { task: task() }, ...(condition === "absent" ? {} : { supervisor: { connected: condition === "connected", lastSeenAt: null, detail: null } }) };
     render(<LocalVmTasks session={session} tab={tab} conversation={null} active readOnly={false} selectedPrompt="" />);
     expect(screen.queryByRole("status", { name: "Local environment supervisor disconnected" })).toBeNull();
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([, args]) => args.method !== "computer.inventory")).toHaveLength(0);
   });
 
   it.each([null, "high"])("preserves provider-default model intent and inherited effort %s in the actual submission", async (effort) => {
     const parentTab = { ...tab, model: "", effort };
     mocks.invoke.mockImplementation(async (_command, { method, params }) => {
-      if (method === "describe") return { ...description, harnesses: [{ ...description.harnesses[0], models: [{ id: "", efforts: ["high"] }] }] };
+      if (method === "computer.inventory") return { entries: [{ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, name: "macOS · Local guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] };
+    if (method === "describe") return { ...description, harnesses: [{ ...description.harnesses[0], models: [{ id: "", efforts: ["high"] }] }] };
       if (method === "task.submit") return task({ input: params.input, idempotencyKey: params.idempotencyKey });
       return null;
     });
@@ -103,7 +130,7 @@ describe("selected local VM tasks", () => {
     await waitFor(() => expect(calls("task.submit")).toHaveLength(1));
     const [command, { params }] = calls("task.submit")[0];
     expect(command).toBe("local_vm_request");
-    expect(params).toEqual({ idempotencyKey: expect.any(String), sourceRoot: session.cwd, input: {
+    expect(params).toEqual({ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, idempotencyKey: expect.any(String), sourceRoot: session.cwd, input: {
       parentSessionId: session.id, parentTabId: tab.id, parentMessageId: expect.stringMatching(/^local-vm::/), environmentId: "env", prompt: "Only the selected composer task",
       harness: "codex", model: "gpt-6", effort: "high", permissionMode: "bypassPermissions", files: [], desktop: true,
     } });
@@ -113,7 +140,8 @@ describe("selected local VM tasks", () => {
 
   it("retains the exact submission across a lost acknowledgment and reload, then retries it once", async () => {
     mocks.invoke.mockImplementation(async (_command, { method, params }) => {
-      if (method === "describe") return description;
+      if (method === "computer.inventory") return { entries: [{ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, name: "macOS · Local guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] };
+    if (method === "describe") return description;
       if (method === "task.submit") {
         if (calls("task.submit").length === 1) throw new Error("acknowledgment lost");
         return task({ input: params.input, idempotencyKey: params.idempotencyKey });
@@ -135,9 +163,10 @@ describe("selected local VM tasks", () => {
   });
 
   it("blocks submission when the guest reports unavailable or a different inherited model", async () => {
-    mocks.invoke.mockResolvedValue({ ...description, available: false, reason: "Desktop adapter unavailable" });
+    mocks.invoke.mockImplementation(async (_command, { method }) => method === "computer.inventory" ? { entries: [{ target: { kind: "macosGuest", environmentId: environment.id, generation: environment.generation }, name: "macOS · Local guest", capabilities: ["guestTask"], state: "requiresCapabilityCheck" }], notices: [] } : { ...description, available: false, reason: "Desktop adapter unavailable" });
     const view = mount();
-    fireEvent.change(screen.getByLabelText("Environment"), { target: { value: "env" } });
+    await screen.findByRole("option", { name: "macOS · Local guest" });
+  fireEvent.change(screen.getByLabelText("Environment"), { target: { value: computerKey({ kind: "macosGuest", environmentId: environment.id, generation: environment.generation }) } });
     fireEvent.click(screen.getByRole("button", { name: "Check guest capabilities" }));
     await screen.findByText("Desktop adapter unavailable");
     expect((screen.getByRole("button", { name: "Submit selected task" }) as HTMLButtonElement).disabled).toBe(true);

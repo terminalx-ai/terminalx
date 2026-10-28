@@ -239,7 +239,17 @@ impl Journal {
 
     /// Persist before starting any external operation. The same key after an
     /// acknowledgement is lost returns precisely the same immutable target.
+    #[cfg(test)]
     pub fn submit(&self, key: &str, input: TaskInput) -> Result<Task> {
+        // Internal callers have just acquired this journal identity. Public
+        // submissions must supply the identity observed by their picker.
+        let state = self.read()?;
+        let env = state.environments.get(&input.environment_id).context("Environment unavailable")?;
+        let target = crate::computer_targets::Target::MacosGuest { environment_id: env.id.clone(), generation: env.generation.clone() };
+        self.submit_selected(key, input, Some(&target))
+    }
+
+    pub fn submit_selected(&self, key: &str, input: TaskInput, selected: Option<&crate::computer_targets::Target>) -> Result<Task> {
         if key.is_empty()
             || key.len() > 200
             || input.prompt.trim().is_empty()
@@ -292,6 +302,7 @@ impl Journal {
                 if existing.input_digest != digest {
                     bail!("Idempotency key already names a different task input");
                 }
+                if let Some(selected) = selected { selected.guest(&existing.target.environment_id, &existing.target.generation)?; }
                 return Ok(existing.clone());
             }
             let env = state
@@ -299,6 +310,10 @@ impl Journal {
                 .get(&input.environment_id)
                 .filter(|env| env.deleted_at.is_none())
                 .context("Local environment unavailable; no host fallback")?;
+            selected.context("An exact environment selection is required for a new task; check retained history before retrying an older submission")?.guest(&env.id, &env.generation)?;
+            if super::setup::busy(env) {
+                bail!("Finish this environment's guided setup and desktop verification before submitting a task");
+            }
             let target = TaskTarget {
                 environment_id: env.id.clone(),
                 workspace_id: new_id(),
@@ -546,6 +561,33 @@ mod tests {
         let mut different = input;
         different.prompt.push('!');
         assert!(reopened.submit("click-1", different).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn selected_task_identity_survives_lost_ack_and_refuses_replacement_or_linux() {
+        use crate::computer_targets::{Runtime, Target};
+        let (dir, journal, input) = setup();
+        let env = journal.read().unwrap().environments[&input.environment_id].clone();
+        let selected = Target::MacosGuest { environment_id: env.id.clone(), generation: env.generation.clone() };
+        assert!(journal.submit_selected("missing", input.clone(), None).is_err());
+        let linux = Target::LinuxContainer { runtime: Runtime::Docker, id: "a".repeat(64) };
+        assert!(journal.submit_selected("linux", input.clone(), Some(&linux)).is_err());
+        assert!(journal.read().unwrap().tasks.is_empty());
+        let first = journal.submit_selected("selected", input.clone(), Some(&selected)).unwrap();
+        journal.transaction(|state| {
+            let env = state.environments.get_mut(&input.environment_id).unwrap();
+            env.generation = "replacement".into();
+            Ok(())
+        }).unwrap();
+        let reopened = Journal::open_existing(&dir).unwrap();
+        assert_eq!(reopened.submit_selected("selected", input.clone(), Some(&selected)).unwrap(), first);
+        // Legacy pending submissions may recover an existing receipt, never create a task.
+        assert_eq!(reopened.submit_selected("selected", input.clone(), None).unwrap(), first);
+        assert!(reopened.submit_selected("new", input.clone(), Some(&selected)).is_err());
+        let replacement = Target::MacosGuest { environment_id: env.id, generation: "replacement".into() };
+        assert!(reopened.submit_selected("selected", input, Some(&replacement)).is_err());
+        assert_eq!(reopened.read().unwrap().tasks.len(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

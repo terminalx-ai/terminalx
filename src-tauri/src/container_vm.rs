@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use crate::computer_targets::{Capability, Runtime, Target};
 
 pub const CONTAINER: &str = "terminalx-computer";
 /// Told to the window when the VM was started or stopped from outside it (`terminalx vm …`).
@@ -172,6 +173,46 @@ fn ours(runtime: &Path) -> Result<()> {
     Ok(())
 }
 
+fn inspect_identity(path: &Path, runtime: Runtime, selector: &str, timeout: Duration) -> Result<(Target, bool)> {
+    let output = run(path, &["inspect", "--format", "{{json .}}", selector], timeout)?;
+    let value: serde_json::Value = serde_json::from_str(&output).context("Unreadable container identity")?;
+    let id = value["Id"].as_str().context("Container ID is missing")?;
+    let running = value["State"]["Running"].as_bool().context("Container running state is missing")?;
+    if value["Config"]["Labels"][LABEL].as_str() != Some("1") {
+        bail!("Container is not owned by TerminalX");
+    }
+    let target = Target::LinuxContainer { runtime, id: id.into() };
+    target.require(Capability::AttachedDesktop)?;
+    Ok((target, running))
+}
+
+pub fn identity(path: &Path, runtime: Runtime) -> Result<(Target, bool)> {
+    inspect_identity(path, runtime, CONTAINER, Duration::from_secs(3))
+}
+
+fn validate_at(path: &Path, target: &Target, timeout: Duration) -> Result<()> {
+    target.require(Capability::AttachedDesktop)?;
+    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let (actual, running) = inspect_identity(path, *runtime, id, timeout).context("Selected container unavailable; no fallback")?;
+    if &actual != target || !running { bail!("Selected container changed or stopped; no fallback"); }
+    Ok(())
+}
+
+pub fn selected_runtime(target: &Target) -> Result<PathBuf> {
+    target.require(Capability::AttachedDesktop)?;
+    let Target::LinuxContainer { runtime, .. } = target else { unreachable!() };
+    let path = crate::binpath::resolve(runtime.name()).context("Selected container runtime is unavailable; no fallback")?;
+    validate_at(&path, target, Duration::from_secs(3))?;
+    Ok(path)
+}
+
+pub fn selected_status(target: &Target) -> Result<VmStatus> {
+    let path = selected_runtime(target)?;
+    let Target::LinuxContainer { runtime, id } = target else { unreachable!() };
+    let port = parse_port(&run(&path, &["port", id, "6901/tcp"], QUICK)?).context("Selected viewer has no loopback binding")?;
+    Ok(VmStatus { state: VmState::Running, runtime: Some(runtime.name().into()), colima: false, viewer: Some(Viewer { port, password: password()? }) })
+}
+
 /// `127.0.0.1:32768` (and `[::1]:32768`) to the port, loopback bindings only.
 pub fn parse_port(out: &str) -> Option<u16> {
     out.lines().find_map(|line| {
@@ -325,49 +366,43 @@ pub fn start_runtime() -> Result<VmStatus> {
     Ok(status())
 }
 
-/// The running VM's runtime, or why there is none to use.
-fn running() -> Result<PathBuf> {
-    let path = runtime().context("Docker or Podman is not installed")?;
-    if container_running(&path) != Some(true) {
-        bail!("the Local VM is not running; start it with `terminalx vm start`");
-    }
-    Ok(path)
-}
-
 /// One computer-use tool, run by the VM's driver: what an agent without the
 /// `computer` MCP server (started before the VM was) uses instead.
-pub fn call(tool: &str, arguments: &str) -> Result<String> {
+pub fn call(target: &Target, tool: &str, arguments: &str) -> Result<String> {
     if tool.is_empty() || !tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         bail!("unknown tool {tool:?}");
     }
     serde_json::from_str::<serde_json::Value>(arguments).context("the tool's arguments must be JSON")?;
-    let path = running()?;
-    run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", CONTAINER, "cua-driver", "call", tool, arguments], Duration::from_secs(120))
+    let path = selected_runtime(target)?;
+    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    run(&path, &["exec", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "call", tool, arguments], Duration::from_secs(120))
 }
 
 /// The driver's tools, or one tool's description and argument schema.
-pub fn tools(tool: Option<&str>) -> Result<String> {
-    let path = running()?;
+pub fn tools(target: &Target, tool: Option<&str>) -> Result<String> {
+    let path = selected_runtime(target)?;
+    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
     match tool {
         Some(tool) if !tool.is_empty() && tool.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
-            run(&path, &["exec", "-u", "cua", CONTAINER, "cua-driver", "describe", tool], QUICK)
+            run(&path, &["exec", "-u", "cua", id, "cua-driver", "describe", tool], QUICK)
         }
         Some(tool) => bail!("unknown tool {tool:?}"),
-        None => run(&path, &["exec", "-u", "cua", CONTAINER, "cua-driver", "list-tools"], QUICK),
+        None => run(&path, &["exec", "-u", "cua", id, "cua-driver", "list-tools"], QUICK),
     }
 }
 
 /// The VM's whole screen as a PNG on this machine, at `out` or in `~/.raccoon/computer/screens`.
-pub fn screenshot(out: Option<PathBuf>) -> Result<PathBuf> {
-    let path = running()?;
+pub fn screenshot(target: &Target, out: Option<PathBuf>) -> Result<PathBuf> {
+    let path = selected_runtime(target)?;
+    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
     let out = match out {
         // Absolute, so `docker cp` never reads it as `container:path` or `-` (stdout).
         Some(out) => std::path::absolute(&out).context("where to save the screenshot")?,
         None => crate::store::ensure_dir(crate::store::root()?.join("computer").join("screens"))?.join(format!("screen-{}.png", chrono::Utc::now().format("%Y%m%d-%H%M%S%3f"))),
     };
     let inside = "/tmp/terminalx-screen.png";
-    run(&path, &["exec", "-u", "cua", CONTAINER, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK).context("capture the screen")?;
-    run(&path, &["cp", &format!("{CONTAINER}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out")?;
+    run(&path, &["exec", "-u", "cua", id, "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-i", ":1", "-frames:v", "1", "-y", inside], QUICK).context("capture the screen")?;
+    run(&path, &["cp", &format!("{id}:{inside}"), &out.to_string_lossy()], QUICK).context("copy the screenshot out")?;
     Ok(out)
 }
 
@@ -375,25 +410,20 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. Use it whenever a task needs a VM, a desktop or a browser to check UI visually; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
+const AGENT_NOTE: &str = "A Linux desktop (the TerminalX Local VM) is available through the `computer` MCP tools: screenshots, clicks, typing, launching apps such as Firefox. The agent, shell and project files remain on the host; only desktop tools use this selected container. Use it for desktop or browser actions; never install or start another VM, desktop image, X server or VNC. Servers running on this machine are reached inside it at http://host.docker.internal:<port>, not localhost. The user may be watching it, or holding control of it. `terminalx skills get local-vm` has the details.";
 
 /// What a new agent session's command line gains while the VM is on: the VM's
-/// driver as an MCP server named `computer`, and a note saying how to reach
-/// this machine's dev servers from it. Empty while it is off.
-pub fn launch_args(harness: &str, appends_prompt: bool) -> String {
-    if !load().enabled {
-        return String::new();
-    }
-    let Some(path) = runtime() else { return String::new() };
-    // Asked on every agent launch: a runtime that hangs costs it seconds, not the usual wait.
-    if container_running_within(&path, Duration::from_secs(3)) != Some(true) {
-        return String::new();
-    }
-    agent_args(harness, &path.to_string_lossy(), appends_prompt)
+/// driver as an MCP server named `computer`. A stale selection fails launch;
+/// it must not silently start an agent with a different desktop.
+pub fn launch_selected(target: &Target, harness: &str, appends_prompt: bool) -> Result<String> {
+    if !matches!(harness, "claude" | "codex") { bail!("This agent does not support attached desktop tools"); }
+    let path = selected_runtime(target)?;
+    let Target::LinuxContainer { id, .. } = target else { unreachable!() };
+    Ok(agent_args(harness, &path.to_string_lossy(), id, appends_prompt))
 }
 
-pub fn agent_args(harness: &str, runtime: &str, appends_prompt: bool) -> String {
-    let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", CONTAINER, "cua-driver", "mcp"];
+pub fn agent_args(harness: &str, runtime: &str, id: &str, appends_prompt: bool) -> String {
+    let args = ["exec", "-i", "-u", "cua", "-e", "DISPLAY=:1", id, "cua-driver", "mcp"];
     match harness {
         "claude" => {
             let config = serde_json::json!({ "mcpServers": { "computer": { "command": runtime, "args": args } } });
@@ -442,16 +472,51 @@ mod tests {
 
     #[test]
     fn agents_get_the_driver_as_an_mcp_server_named_computer() {
-        let claude = agent_args("claude", "/opt/homebrew/bin/docker", false);
+        let claude = agent_args("claude", "/opt/homebrew/bin/docker", &"a".repeat(64), false);
         assert!(claude.starts_with(" --mcp-config '{\"mcpServers\":{\"computer\":{\"args\":[\"exec\",\"-i\""), "{claude}");
         assert!(claude.contains("\"command\":\"/opt/homebrew/bin/docker\""));
         assert!(claude.contains("--append-system-prompt") && claude.contains("host.docker.internal"));
         // A prompt the workspace already appends is not doubled.
-        assert!(!agent_args("claude", "docker", true).contains("--append-system-prompt"));
-        let codex = agent_args("codex", "/usr/local/bin/docker", false);
+        assert!(!agent_args("claude", "docker", &"a".repeat(64), true).contains("--append-system-prompt"));
+        let codex = agent_args("codex", "/usr/local/bin/docker", &"a".repeat(64), false);
         assert!(codex.starts_with(" -c 'mcp_servers.computer={"), "{codex}");
-        assert!(codex.contains("\"terminalx-computer\"") && codex.contains("\"cua-driver\""));
-        assert_eq!(agent_args("opencode", "docker", false), "");
+        assert!(codex.contains(&"a".repeat(64)) && codex.contains("\"cua-driver\""));
+        assert_eq!(agent_args("opencode", "docker", &"a".repeat(64), false), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_container_is_never_reached_by_a_saved_selection() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("docker-fixture");
+        let old = "a".repeat(64);
+        let replacement = "b".repeat(64);
+        let target = Target::LinuxContainer { runtime: Runtime::Docker, id: old.clone() };
+        let fixture = |id: &str, running: bool, label: &str| {
+            let value = serde_json::json!({"Id":id,"State":{"Running":running},"Config":{"Labels":{LABEL:label}}});
+            // The fixture refuses name-based resolution on the execution path.
+            let script = format!("#!/bin/sh\n[ \"$1\" = inspect ] && [ \"$4\" = {old} ] || exit 41\nprintf '%s\\n' '{}'\n", value);
+            std::fs::write(&executable, script).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        // Preserve the production three-second probe budget; allow scheduling
+        // headroom for this subprocess fixture in the parallel workspace suite.
+        fixture(&old, true, "1");
+        validate_at(&executable, &target, Duration::from_secs(30)).unwrap();
+        for harness in ["claude", "codex"] {
+            let command = agent_args(harness, executable.to_str().unwrap(), &old, false);
+            assert!(command.contains(&old));
+            assert!(!command.contains(CONTAINER));
+        }
+        fixture(&replacement, true, "1");
+        assert!(validate_at(&executable, &target, Duration::from_secs(30)).is_err());
+        fixture(&old, false, "1");
+        assert!(validate_at(&executable, &target, Duration::from_secs(30)).is_err());
+        fixture(&old, true, "0");
+        assert!(validate_at(&executable, &target, Duration::from_secs(30)).is_err());
+        std::fs::remove_file(&executable).unwrap();
+        assert!(validate_at(&executable, &target, Duration::from_secs(30)).is_err());
     }
 
     /// Against the machine's real Docker or Podman: `cargo test --lib container_vm -- --ignored`.
@@ -465,7 +530,9 @@ mod tests {
         let viewer = up.viewer.expect("viewer");
         assert_eq!(viewer.password.len(), 8);
         assert!(std::net::TcpStream::connect(("127.0.0.1", viewer.port)).is_ok());
-        assert!(launch_args("claude", false).contains("cua-driver"));
+        let docker = runtime().unwrap();
+        let (target, _) = identity(&docker, Runtime::Docker).unwrap();
+        assert!(launch_selected(&target, "claude", false).unwrap().contains("cua-driver"));
         // What an agent's CLI runs, spoken to as MCP.
         let docker = runtime().unwrap();
         let mut child = Command::new(&docker)
@@ -495,15 +562,15 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(answer.contains("\"width\":1280"), "{answer}");
-        assert!(call("get_screen_size", "{}").unwrap().contains("1280"));
-        assert!(tools(None).unwrap().contains("launch_app"));
-        assert!(tools(Some("launch_app")).unwrap().contains("urls"));
-        assert!(call("bad tool", "{}").is_err());
-        let shot = screenshot(Some(home.path().join("s.png"))).unwrap();
+        assert!(call(&target, "get_screen_size", "{}").unwrap().contains("1280"));
+        assert!(tools(&target, None).unwrap().contains("launch_app"));
+        assert!(tools(&target, Some("launch_app")).unwrap().contains("urls"));
+        assert!(call(&target, "bad tool", "{}").is_err());
+        let shot = screenshot(&target, Some(home.path().join("s.png"))).unwrap();
         assert!(std::fs::read(&shot).unwrap().starts_with(b"\x89PNG"));
         let down = stop().expect("stop");
         assert_eq!(down.state, VmState::Stopped);
-        assert_eq!(launch_args("claude", false), "");
+        assert!(launch_selected(&target, "claude", false).is_err());
         reset().expect("reset");
     }
 }

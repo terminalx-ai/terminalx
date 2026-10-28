@@ -433,6 +433,10 @@ impl ControlService {
             if !self.local_vm_available { return Err(ControlError::new("unsupported","This owner has no Local VM controller; no operation was sent.",None::<String>)); }
             let lifetime = self.local_lifetime.as_ref().ok_or_else(|| ControlError::new("unsupported", "Local VM requests require the persistent local owner.", None::<String>))?;
             let method = params["method"].as_str().ok_or_else(|| ControlError::invalid("method is required"))?;
+            if method.starts_with("computer.") {
+                let _admission = crate::local_vm::supervisor::admit(lifetime).map_err(ControlError::internal)?;
+                return crate::computer_targets::request(&self.manager, method, params["params"].clone()).map_err(ControlError::internal);
+            }
             if matches!(method, "environment.reconcileProvision" | "environment.delete" | "environment.create" | "environment.setup" | "environment.setupAction") {
                 let _admission = crate::local_vm::supervisor::admit_exclusive(lifetime).map_err(ControlError::internal)?;
                 return crate::local_vm::host::request(method, params["params"].clone()).map_err(ControlError::internal);
@@ -517,17 +521,21 @@ impl ControlService {
         // The Local VM (`container_vm.rs`): its runtime's CLI does the work, so any TerminalX process can.
         if let Some(action) = command.strip_prefix("vm.") {
             let vm_error = |error: anyhow::Error| ControlError::new("vm_failed", format!("{error:#}"), Some("See `terminalx skills get local-vm`.".to_string()));
+            let selected: Option<crate::computer_targets::Target> = if matches!(action, "call" | "tools" | "screenshot") {
+                Some(serde_json::from_value(params["target"].clone()).map_err(|_| ControlError::invalid("An exact --target from computer.inventory is required; no container was selected"))?)
+            } else { None };
             let result = match action {
+                "inventory" => crate::computer_targets::inventory().map(|inventory| json!(inventory)).map_err(vm_error),
                 "status" => Ok(json!(crate::container_vm::status())),
                 "start" => crate::container_vm::start().map(|status| json!(status)).map_err(vm_error),
                 "stop" => crate::container_vm::stop().map(|status| json!(status)).map_err(vm_error),
                 "call" => {
                     let tool = params["tool"].as_str().unwrap_or_default();
                     let arguments = params["arguments"].as_str().unwrap_or("{}");
-                    crate::container_vm::call(tool, arguments).map(|output| json!({"output": output})).map_err(vm_error)
+                    crate::container_vm::call(selected.as_ref().unwrap(), tool, arguments).map(|output| json!({"output": output})).map_err(vm_error)
                 }
-                "tools" => crate::container_vm::tools(params["tool"].as_str()).map(|output| json!({"output": output})).map_err(vm_error),
-                "screenshot" => crate::container_vm::screenshot(params["out"].as_str().map(std::path::PathBuf::from)).map(|path| json!({"path": path})).map_err(vm_error),
+                "tools" => crate::container_vm::tools(selected.as_ref().unwrap(), params["tool"].as_str()).map(|output| json!({"output": output})).map_err(vm_error),
+                "screenshot" => crate::container_vm::screenshot(selected.as_ref().unwrap(), params["out"].as_str().map(std::path::PathBuf::from)).map(|path| json!({"path": path})).map_err(vm_error),
                 other => Err(ControlError::new("invalid_arguments", format!("Unknown vm command {other}."), None::<String>)),
             };
             if matches!(action, "start" | "stop") {
@@ -1579,6 +1587,39 @@ mod tests {
             Arc::new(Default::default()), Arc::new(Default::default()), endpoint.clone(),
         );
         (ControlService::headless(sink.clone(), manager, endpoint, "test".into()), sink)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn computer_selection_routes_require_owner_exact_conversation_and_supported_target() {
+        let _home = crate::store::temp_home();
+        let (service, _sink) = headless_service();
+        let entry: SessionEntry = serde_json::from_value(json!({
+            "id":"selection-session", "projectPath":"/fixture", "cwd":"/fixture", "title":"Fixture", "created":"now", "modified":"now",
+            "tabs":[{"id":"selection-tab","harness":"codex","created":"now","unrelated":"preserved"}]
+        })).unwrap();
+        index::update(|entries| { entries.push(entry.clone()); Ok(()) }).unwrap();
+        let params = json!({"sessionId":entry.id,"tabId":"selection-tab","conversation":null,"target":null});
+        let select = |params: Value| json!({"method":"computer.select","params":params});
+        assert!(service.execute("local_vm.request",select(params.clone()),"test").is_err());
+        let life = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let _lease = life.command("runtime.attach",json!({"protocol":1})).unwrap();
+        let service = service.with_local_lifetime(life).with_vm_controller();
+        assert_eq!(service.execute("local_vm.request",select(params.clone()),"test").unwrap()["target"], Value::Null);
+        assert_eq!(index::get(&entry.id).unwrap().tabs[0].unknown["unrelated"], "preserved");
+        let mut stale = params.clone(); stale["conversation"] = json!("another-conversation");
+        assert!(service.execute("local_vm.request",select(stale),"test").is_err());
+        let mut incompatible = params.clone(); incompatible["target"] = json!({"kind":"macosGuest","environmentId":"guest","generation":"generation"});
+        assert!(service.execute("local_vm.request",select(incompatible),"test").is_err());
+        let mut missing = params.clone(); missing.as_object_mut().unwrap().remove("target");
+        assert!(service.execute("local_vm.request",select(missing),"test").is_err());
+        let read = json!({"method":"computer.selection","params":params});
+        assert_eq!(service.execute("local_vm.request",read,"test").unwrap()["version"], 1);
+        // Unbound legacy CLI calls and incompatible OS targets fail before probing Docker/Podman.
+        for command in ["vm.call", "vm.tools", "vm.screenshot"] {
+            assert!(service.execute(command,json!({}),"test").is_err());
+            assert!(service.execute(command,json!({"target":{"kind":"macosGuest","environmentId":"guest","generation":"g"}}),"test").is_err());
+        }
     }
 
     #[cfg(feature = "desktop")]

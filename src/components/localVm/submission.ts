@@ -19,6 +19,9 @@ export function loadSubmission(key: string, sessionId: string, tabId: string, co
     throw new Error("The saved VM submission cannot be read. Retain it and check the durable task history before submitting again.");
   }
   assertLocal(value.sourceRoot);
+  if (value.target && (value.target.kind !== "macosGuest" || value.target.environmentId !== input.environmentId || typeof value.target.generation !== "string" || !value.target.generation)) {
+    throw new Error("The saved VM selection is invalid. Retain it and check the durable task history before submitting again.");
+  }
   for (const file of input.files) {
     if (!file || typeof file.path !== "string" || !/^[a-f\d]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.bytes) || file.bytes < 0) throw new Error("The saved VM context manifest cannot be read.");
     const paths = contextPaths(file.path);

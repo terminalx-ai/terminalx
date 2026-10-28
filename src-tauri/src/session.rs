@@ -43,15 +43,15 @@ pub mod follow;
 fn computer_launch_config(
     mut config: crate::cloud_config::LaunchConfig,
     guest: crate::cloud_config::LaunchConfig,
-    host_args: impl FnOnce(bool) -> String,
-) -> crate::cloud_config::LaunchConfig {
+    host_args: impl FnOnce(bool) -> Result<String>,
+) -> Result<crate::cloud_config::LaunchConfig> {
     if guest.args.is_empty() {
-        config.args.push_str(&host_args(config.args.contains("--append-system-prompt")));
+        config.args.push_str(&host_args(config.args.contains("--append-system-prompt"))?);
     } else {
         config.env.extend(guest.env);
         config.args.push_str(&guest.args);
     }
-    config
+    Ok(config)
 }
 
 #[derive(Clone)]
@@ -1357,6 +1357,18 @@ impl SessionManager {
         })
     }
 
+    /// Serialize selection with agent launch. A live CLI keeps its original
+    /// MCP command until it exits; changing the picker must never reroute it.
+    pub fn select_computer(&self, session_id: &str, tab_id: &str, conversation: Option<String>, target: Option<crate::computer_targets::Target>) -> Result<crate::computer_targets::Selection> {
+        let runtime = self.runtime(session_id, tab_id)?;
+        let runtime = runtime.lock().unwrap();
+        if runtime.child.is_some() || matches!(&runtime.engine, Engine::Cli(cli) if self.terminals.is_running(&cli.pane_id)) {
+            bail!("Stop this tab's agent before changing its desktop attachment. Its current tools remain bound to the original computer.");
+        }
+        if let Some(target) = &target { crate::container_vm::selected_runtime(target)?; }
+        index::update_tab(session_id, tab_id, |tab| crate::computer_targets::save(tab, conversation, target))
+    }
+
     pub fn running_tabs(&self) -> Vec<RunningTab> {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         runtimes
@@ -1814,6 +1826,7 @@ impl SessionManager {
     }
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let tab = &self.launching(rt, tab);
         let plan = acp::spawn_plan(binary).ok_or_else(|| anyhow!("{binary} is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::Acp(acp::Acp::new(cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -1822,6 +1835,7 @@ impl SessionManager {
     }
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+        if crate::computer_targets::selected(tab)?.target.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
         let tab = &self.launching(rt, tab);
         let plan = opencode::spawn_plan().ok_or_else(|| anyhow!("OpenCode is not installed. Install it and log in, then try again."))?;
         rt.engine = Engine::OpenCode(opencode::OpenCode::new(plan.port, cwd, tab.provider_session_id.clone(), Some(tab.model.clone()).filter(|m| !m.is_empty()), &tab.permission_mode));
@@ -2884,8 +2898,8 @@ impl SessionManager {
         #[cfg(not(unix))]
         let guest = crate::cloud_config::LaunchConfig::default();
         let config = computer_launch_config(config, guest, |appends_prompt| {
-            crate::container_vm::launch_args(&tab.harness, appends_prompt)
-        });
+            crate::computer_targets::launch_args(tab, appends_prompt)
+        })?;
         env.extend(config.env);
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
@@ -4661,7 +4675,7 @@ mod tests {
         for args in [" --strict-mcp-config --mcp-config 'guest binding'", " -c 'mcp_servers={guest_computer={}}'"] {
             let cloud = LaunchConfig { env: vec![("CLOUD_SETTING".into(), "kept".into())], args: " --model configured".into() };
             let guest = LaunchConfig { env: vec![("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())], args: args.into() };
-            let merged = computer_launch_config(cloud, guest, |_| panic!("must not inspect or route the host container"));
+            let merged = computer_launch_config(cloud, guest, |_| panic!("must not inspect or route the host container")).unwrap();
             assert_eq!(merged.args, format!(" --model configured{args}"));
             assert_eq!(merged.env, [("CLOUD_SETTING".into(), "kept".into()), ("TERMINALX_LOCAL_VM_ENVIRONMENT_ID".into(), "bound".into())]);
         }
@@ -4672,8 +4686,8 @@ mod tests {
         use crate::cloud_config::LaunchConfig;
         let cloud = LaunchConfig { env: vec![], args: " --append-system-prompt 'workspace'".into() };
         let merged = computer_launch_config(cloud, LaunchConfig::default(), |appends_prompt| {
-            crate::container_vm::agent_args("claude", "docker", appends_prompt)
-        });
+            Ok(crate::container_vm::agent_args("claude", "docker", &"a".repeat(64), appends_prompt))
+        }).unwrap();
         assert!(merged.args.contains("cua-driver"));
         assert_eq!(merged.args.matches("--append-system-prompt").count(), 1);
         assert!(merged.args.starts_with(" --append-system-prompt 'workspace' --mcp-config "));

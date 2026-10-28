@@ -731,19 +731,13 @@ struct Submission {
     idempotency_key: String,
     input: TaskInput,
     source_root: String,
+    #[serde(default)]
+    target: Option<crate::computer_targets::Target>,
 }
 fn submit(journal: &Journal, params: Value) -> Result<Value> {
     let req: Submission = serde_json::from_value(params)?;
-    if journal
-        .read()?
-        .environments
-        .get(&req.input.environment_id)
-        .is_some_and(super::setup::busy)
-    {
-        bail!("Finish this environment's guided setup and desktop verification before submitting a task");
-    }
     let files = export_files(Path::new(&req.source_root), &req.input.files)?;
-    let task = journal.submit(&req.idempotency_key, req.input)?;
+    let task = journal.submit_selected(&req.idempotency_key, req.input, req.target.as_ref())?;
     // A recovered submission may supply these bytes again, but can never
     // change the approved hash or send a new prompt under the existing key.
     let path = root()?.join("inputs");

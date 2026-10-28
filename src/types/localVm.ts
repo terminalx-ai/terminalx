@@ -254,6 +254,8 @@ export interface LocalVmPatchResult {
 }
 
 export interface LocalVmSubmission {
+  /** Required for new tasks; absent only on retained pre-selection receipts. */
+  target?: import("./computer").ComputerTarget;
   idempotencyKey: string;
   input: LocalVmTaskInput;
   sourceRoot: string;

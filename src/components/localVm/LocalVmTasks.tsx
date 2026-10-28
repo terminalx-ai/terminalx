@@ -8,6 +8,8 @@ import { LocalVmTaskCard } from "./LocalVmTaskCard";
 import { localVmFieldClass } from "./fields";
 import { loadSubmission, submissionStorageKey } from "./submission";
 import { acknowledgeLocalVmTask, reconcileLocalVmState, useLocalVmState } from "./useLocalVmState";
+import { EnvironmentPicker, useComputerInventory } from "@/components/computer/EnvironmentPicker";
+import type { ComputerTarget } from "@/types/computer";
 
 /** Journal-backed cards stay with the originating tab and its exact conversation. */
 export function LocalVmTasks({ session, tab, conversation, active, readOnly, selectedPrompt }: {
@@ -50,17 +52,18 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
   const [pending, setPending] = useState(initialPending);
   const [prompt, setPrompt] = useState("");
   const [files, setFiles] = useState("");
-  const [environmentId, setEnvironmentId] = useState("");
+  const [selectedTarget, setSelectedTarget] = useState<ComputerTarget | null>(null);
+  const { inventory, error: inventoryError, refresh: refreshInventory } = useComputerInventory(!!state?.enabled && !pending);
   const [description, setDescription] = useState<{ environmentId: string; generation: string; value: LocalVmDescription } | null>(null);
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const lock = useRef(false);
   const environments = Object.values(state?.environments ?? {}).filter((environment) => !environment.deletedAt);
-  const environment = environments.find((candidate) => candidate.id === environmentId);
+  const environment = selectedTarget?.kind === "macosGuest" ? environments.find((candidate) => candidate.id === selectedTarget.environmentId && candidate.generation === selectedTarget.generation) : undefined;
   const currentDescription = environment && description?.environmentId === environment.id && description.generation === environment.generation ? description.value : null;
   const unavailable = submissionUnavailable(currentDescription, { harness: tab.harness, model: tab.model, effort: tab.effort ?? null, permissionMode: tab.permissionMode });
-  const acknowledged = pending ? Object.values(state?.tasks ?? {}).find((task) => task.idempotencyKey === pending.idempotencyKey && task.input.parentMessageId === pending.input.parentMessageId) : undefined;
+  const acknowledged = pending ? Object.values(state?.tasks ?? {}).find((task) => task.idempotencyKey === pending.idempotencyKey && task.input.parentMessageId === pending.input.parentMessageId && (!pending.target || (pending.target.kind === "macosGuest" && task.target.environmentId === pending.target.environmentId && task.target.generation === pending.target.generation))) : undefined;
 
   useEffect(() => {
     if (!acknowledged) return;
@@ -71,7 +74,7 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
   async function inspect() {
     if (!environment || checking) return;
     setChecking(true); setError(null); setDescription(null);
-    try { setDescription({ environmentId: environment.id, generation: environment.generation, value: await localVmRequest("describe", { environmentId: environment.id }) }); }
+    try { setDescription({ environmentId: environment.id, generation: environment.generation, value: await localVmRequest("describe", { environmentId: environment.id, generation: environment.generation }) }); }
     catch (error) { setError(errorMessage(error)); }
     finally { setChecking(false); }
   }
@@ -82,10 +85,11 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
     try {
       let submission = pending;
       if (!submission) {
-        if (!environment || unavailable || !prompt.trim()) throw new Error(unavailable || "Select an environment and an explicit task prompt.");
+        if (!environment || !selectedTarget || unavailable || !prompt.trim()) throw new Error(unavailable || "Select an environment and an explicit task prompt.");
         const manifest = await contextManifest(session.cwd, contextPaths(files));
         submission = {
           idempotencyKey: crypto.randomUUID(), sourceRoot: session.cwd,
+          target: selectedTarget,
           input: { parentSessionId: session.id, parentTabId: tab.id, parentMessageId: `${taskMessagePrefix(conversation)}${crypto.randomUUID()}`,
             environmentId: environment.id, prompt, harness: tab.harness, model: tab.model, effort: tab.effort ?? null,
             permissionMode: tab.permissionMode, files: manifest, desktop: true },
@@ -95,7 +99,7 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
         setPending(submission);
       }
       const task = await localVmRequest("task.submit", submission);
-      if (task.idempotencyKey !== submission.idempotencyKey || task.input.parentMessageId !== submission.input.parentMessageId || task.input.parentSessionId !== session.id || task.input.parentTabId !== tab.id) throw new Error("The task acknowledgment did not match this submission. Retain the retry key and refresh history.");
+      if (task.idempotencyKey !== submission.idempotencyKey || task.input.parentMessageId !== submission.input.parentMessageId || task.input.parentSessionId !== session.id || task.input.parentTabId !== tab.id || (submission.target && (submission.target.kind !== "macosGuest" || task.target.environmentId !== submission.target.environmentId || task.target.generation !== submission.target.generation))) throw new Error("The task acknowledgment did not match this submission. Retain the retry key and refresh history.");
       acknowledgeLocalVmTask(task);
       localStorage.removeItem(storageKey);
       setPending(null); setPrompt(""); setFiles("");
@@ -117,7 +121,10 @@ function TaskSubmission({ session, tab, conversation, selectedPrompt, state, ini
         <Button type="button" size="xs" variant="ghost" disabled={busy} onClick={() => void reconcileLocalVmState()}>Check retained history</Button>
       </> : <>
         <h4 className="font-medium">Run a selected task in a local VM</h4>
-        <label className="block space-y-1"><span>Environment</span><select className={localVmFieldClass} value={environmentId} disabled={busy || checking} onChange={(event) => { setEnvironmentId(event.target.value); setDescription(null); }} required><option value="">Select an enrolled environment</option>{environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <EnvironmentPicker entries={inventory?.entries ?? []} value={selectedTarget} capability="guestTask" disabled={busy || checking} onChange={(target) => { setSelectedTarget(target); setDescription(null); }} />
+        <Button type="button" size="xs" variant="ghost" disabled={busy || checking} onClick={() => void refreshInventory()}>Refresh environments</Button>
+        {inventoryError ? <p role="alert">Environment inventory unavailable: {inventoryError}</p> : null}
+        <p className="text-muted-foreground">macOS supports selected guest tasks. Linux currently supports attached desktop tools; guest task execution is unavailable. Selecting an environment here does not move this conversation's shell or files.</p>
         <Button type="button" size="xs" variant="outline" disabled={!environment || busy || checking} onClick={() => void inspect()}>{checking ? "Checking guest…" : "Check guest capabilities"}</Button>
         <p role="status" className={unavailable ? "text-warning" : "text-muted-foreground"}>{unavailable ?? "Guest reports support for these inherited task settings."}</p>
         <label className="block space-y-1"><span>Selected task prompt</span><textarea className={localVmFieldClass} value={prompt} disabled={busy} onChange={(event) => setPrompt(event.target.value)} rows={3} required /></label>

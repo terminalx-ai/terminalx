@@ -1,13 +1,19 @@
 import { fs, invoke } from "@/lib/api";
 import { assertLocal } from "@/types/target";
+import type { ComputerContext, ComputerInventory, ComputerSelection, ComputerTarget } from "@/types/computer";
+import type { LocalVmStatus } from "@/lib/api";
 import type { LocalVmArtifactContent, LocalVmCreateRequest, LocalVmDescription, LocalVmEnvironment, LocalVmEnvironmentInspection, LocalVmInputFile, LocalVmJson, LocalVmPatchResult, LocalVmProvisionProposal, LocalVmRecoveryRequest, LocalVmSetupActionRequest, LocalVmSetupAuth, LocalVmSetupHarness, LocalVmSetupReadiness, LocalVmSetupRequest, LocalVmState, LocalVmSubmission, LocalVmTakeoverResult, LocalVmTask, LocalVmTaskTarget } from "@/types/localVm";
 
 interface Requests {
+  "computer.inventory": { params: Record<string, never>; result: ComputerInventory };
+  "computer.selection": { params: ComputerContext; result: ComputerSelection };
+  "computer.select": { params: ComputerContext & { target: ComputerTarget | null }; result: ComputerSelection };
+  "computer.viewer": { params: { target: ComputerTarget }; result: LocalVmStatus };
   state: { params: Record<string, never>; result: LocalVmState };
   doctor: { params: Record<string, never>; result: LocalVmJson };
   configure: { params: { enabled: boolean }; result: LocalVmJson };
   enroll: { params: { name: string; sandbox: string }; result: LocalVmEnvironment };
-  describe: { params: { environmentId: string }; result: LocalVmDescription };
+  describe: { params: { environmentId: string; generation?: string }; result: LocalVmDescription };
   "environment.inspect": { params: { environmentId: string; generation?: string; purpose?: "deletion" | "provisionRecovery" }; result: LocalVmEnvironmentInspection };
   "environment.reconcileProvision": { params: Omit<LocalVmProvisionProposal, "observedAt"> & { disposition: "adoptExisting"; confirm: true }; result: LocalVmJson };
   "environment.create": { params: LocalVmCreateRequest; result: LocalVmEnvironment };

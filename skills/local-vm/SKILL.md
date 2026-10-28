@@ -38,4 +38,5 @@ terminalx skills get local-vm
 ```
 
 Read it first, then run the command you need. If your tools already include `computer` MCP tools
-(`mcp__computer__*`), those drive the same VM.
+(`mcp__computer__*`), those drive the exact Linux container attached to this conversation.
+A selected macOS guest uses the separate Local VM task route; it is not interchangeable with that MCP server.
